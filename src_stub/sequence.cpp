@@ -332,7 +332,7 @@ static bool land_entries(sequence_index_t const& index, std::span<std::size_t co
  */
 static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t queries, std::size_t count,
                                ranked_landing_t const& landing, std::size_t expansion_factor,
-                               usearch_sequence_traversal_stats_t* stats, usearch_predicate_t predicate,
+                               usearch_traversal_stats_t* stats, usearch_predicate_t predicate,
                                usearch_progress_t progress) {
     std::size_t const rows = index.entries.size();
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
@@ -587,6 +587,12 @@ void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
     *arguments->index = index;
 }
 
+void usearch_sequence_init_vram(usearch_sequence_init_vram_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+}
+
 void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
     if (through_executor<usearch_sequence_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
@@ -674,7 +680,7 @@ void usearch_sequence_describe(usearch_sequence_describe_t* arguments) {
 void usearch_sequence_insert(usearch_sequence_insert_t* arguments) {
     if (through_executor<usearch_sequence_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
-    usearch_sequence_traversal_stats_t* const stats = arguments->stats;
+    usearch_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
     usearch_sequence_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;

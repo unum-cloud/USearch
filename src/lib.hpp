@@ -129,10 +129,10 @@ inline bool propagate_error(status_t status, usearch_outcome_t* outcome, char co
                            message ? message : status_to_string(status));
 }
 
-/** Adds one fan-out's telemetry into the caller's stats, whichever modality's they are -
- *  accumulating, so chunked verbs report the whole call rather than the last chunk. */
-template <typename stats_type_, typename result_type_>
-inline void accumulate_stats(stats_type_* stats, result_type_ const& result) noexcept {
+/** Adds one fan-out's telemetry into the caller's stats - accumulating, so chunked verbs report the
+ *  whole call rather than the last chunk. */
+template <typename result_type_>
+inline void accumulate_stats(usearch_traversal_stats_t* stats, result_type_ const& result) noexcept {
     if (!stats) return;
     stats->visited_members += result.visited_members;
     stats->computed_distances += result.computed_distances;
@@ -145,8 +145,8 @@ concept carries_telemetry = requires(value_type_ const& value) { value.visited_m
 
 /** The one crossing for a fallible step: folds telemetry into @p stats when the payload carries
  *  any, finishes @p outcome only on failure, and answers whether @c .value is readable. */
-template <typename stats_type_, typename value_type_>
-inline bool crossed(expected<value_type_> const& result, stats_type_* stats, usearch_outcome_t* outcome,
+template <typename value_type_>
+inline bool crossed(expected<value_type_> const& result, usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,
                     char const* message = nullptr) noexcept {
     if constexpr (carries_telemetry<value_type_>) accumulate_stats(stats, result.value);
     return result || propagate_error(result.status, outcome, message);
@@ -504,6 +504,63 @@ constexpr fu::capabilities_t forkunion_capabilities_of() noexcept {
     return static_cast<fu::capabilities_t>((waits_k | atomics_k) & ~baseline_hints_k);
 }
 
+/** Whether the build compiled the unit of @p cpu_class, as CMake decided and told the dispatch
+ *  units through @c USEARCH_TARGET_<CLASS>; a ladder never picks a class without one. */
+constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
+    switch (cpu_class) {
+    case cpu_class_t::serial_k: return true;
+#if USEARCH_TARGET_INTEL_HASWELL
+    case cpu_class_t::intel_haswell_k: return true;
+#endif
+#if USEARCH_TARGET_INTEL_SIERRA
+    case cpu_class_t::intel_sierra_k: return true;
+#endif
+#if USEARCH_TARGET_INTEL_SKYLAKE
+    case cpu_class_t::intel_skylake_k: return true;
+#endif
+#if USEARCH_TARGET_INTEL_ICELAKE
+    case cpu_class_t::intel_icelake_k: return true;
+#endif
+#if USEARCH_TARGET_AMD_GENOA
+    case cpu_class_t::amd_genoa_k: return true;
+#endif
+#if USEARCH_TARGET_INTEL_SAPPHIRE
+    case cpu_class_t::intel_sapphire_k: return true;
+#endif
+#if USEARCH_TARGET_INTEL_GRANITE
+    case cpu_class_t::intel_granite_k: return true;
+#endif
+#if USEARCH_TARGET_INTEL_DIAMOND
+    case cpu_class_t::intel_diamond_k: return true;
+#endif
+#if USEARCH_TARGET_AWS_G2
+    case cpu_class_t::aws_g2_k: return true;
+#endif
+#if USEARCH_TARGET_APPLE_M2
+    case cpu_class_t::apple_m2_k: return true;
+#endif
+#if USEARCH_TARGET_APPLE_M4
+    case cpu_class_t::apple_m4_k: return true;
+#endif
+#if USEARCH_TARGET_AWS_G5
+    case cpu_class_t::aws_g5_k: return true;
+#endif
+#if USEARCH_TARGET_NVIDIA_VERA
+    case cpu_class_t::nvidia_vera_k: return true;
+#endif
+#if USEARCH_TARGET_ALIBABA_C930
+    case cpu_class_t::alibaba_c930_k: return true;
+#endif
+#if USEARCH_TARGET_WASM32_V128
+    case cpu_class_t::wasm32_v128_k: return true;
+#endif
+#if USEARCH_TARGET_WASM64_EXTENDED
+    case cpu_class_t::wasm64_extended_k: return true;
+#endif
+    default: return false;
+    }
+}
+
 /** Whether every compute bit one CPU class lowers onto is present in @p available. */
 inline bool numkong_admits(nk_capability_t available, cpu_class_t cpu_class) noexcept {
     nk_capability_t const wanted = numkong_capabilities_of(cpu_class);
@@ -570,29 +627,36 @@ inline constexpr bool variant_carries<alternative_type_, std::variant<alternativ
 
 /** Every argument structure that names an executor, so a deferred submission keeps its call by
  *  value; whatever the copy points to stays the caller's until final. */
-using deferred_arguments_t = std::variant<
-    usearch_dense_load_ram_t, usearch_dense_load_vram_t, usearch_dense_load_ram_buffer_t,
-    usearch_dense_load_vram_buffer_t, usearch_dense_view_nvme_t, usearch_dense_reserve_t, usearch_dense_clear_t,
-    usearch_dense_insert_t, usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_search_t,
-    usearch_dense_count_t, usearch_dense_get_t, usearch_dense_absorb_t, usearch_dense_cursor_next_t,
-    usearch_dense_search_stream_next_t, usearch_dense_save_t, usearch_dense_save_buffer_t,
-    usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,
-    usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t,
-    usearch_dense_sample_t, //
-    usearch_sequence_load_ram_t, usearch_sequence_view_nvme_t, usearch_sequence_reserve_t, usearch_sequence_clear_t,
-    usearch_sequence_insert_t, usearch_sequence_refine_t, usearch_sequence_search_t, usearch_sequence_count_t,
-    usearch_sequence_get_t, usearch_sequence_absorb_t, usearch_sequence_cursor_next_t, usearch_sequence_sample_t,
-    usearch_sequence_save_t, usearch_sequence_metadata_read_t, usearch_sequence_describe_t, //
-    usearch_shapes_load_ram_t, usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t, usearch_shapes_reserve_t,
-    usearch_shapes_clear_t, usearch_shapes_insert_t, usearch_shapes_refine_t, usearch_shapes_search_t,
-    usearch_shapes_count_t, usearch_shapes_get_t, usearch_shapes_absorb_t, usearch_shapes_cursor_next_t,
-    usearch_shapes_sample_t, usearch_shapes_save_t, usearch_shapes_metadata_read_t,
-    usearch_shapes_describe_t, //
-    usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t, usearch_geospatial_reserve_t,
-    usearch_geospatial_clear_t, usearch_geospatial_insert_t, usearch_geospatial_refine_t, usearch_geospatial_search_t,
-    usearch_geospatial_within_t, usearch_geospatial_count_t, usearch_geospatial_get_t, usearch_geospatial_absorb_t,
-    usearch_geospatial_cursor_next_t, usearch_geospatial_sample_t, usearch_geospatial_save_t,
-    usearch_geospatial_metadata_read_t, usearch_geospatial_describe_t>;
+using deferred_arguments_t = std::variant<                                                               //
+    usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
+    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
+    usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                              //
+    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t,                              //
+    usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t, //
+    usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t,                                  //
+    usearch_dense_search_stream_next_t, usearch_dense_cursor_next_t, usearch_dense_sample_t,             //
+    usearch_dense_save_t, usearch_dense_save_buffer_t,                                                   //
+    usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,       //
+    usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t,                            //
+    usearch_sequence_load_ram_t, usearch_sequence_view_nvme_t,                                           //
+    usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,                     //
+    usearch_sequence_refine_t, usearch_sequence_absorb_t,                                                //
+    usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,                         //
+    usearch_sequence_cursor_next_t, usearch_sequence_sample_t,                                           //
+    usearch_sequence_save_t, usearch_sequence_metadata_read_t, usearch_sequence_describe_t,              //
+    usearch_shapes_load_ram_t, usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t,                   //
+    usearch_shapes_reserve_t, usearch_shapes_clear_t, usearch_shapes_insert_t,                           //
+    usearch_shapes_refine_t, usearch_shapes_absorb_t,                                                    //
+    usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t,                               //
+    usearch_shapes_cursor_next_t, usearch_shapes_sample_t,                                               //
+    usearch_shapes_save_t, usearch_shapes_metadata_read_t, usearch_shapes_describe_t,                    //
+    usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t, usearch_geospatial_view_nvme_t,       //
+    usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t,               //
+    usearch_geospatial_refine_t, usearch_geospatial_absorb_t,                                            //
+    usearch_geospatial_search_t, usearch_geospatial_within_t,                                            //
+    usearch_geospatial_count_t, usearch_geospatial_get_t,                                                //
+    usearch_geospatial_cursor_next_t, usearch_geospatial_sample_t,                                       //
+    usearch_geospatial_save_t, usearch_geospatial_metadata_read_t, usearch_geospatial_describe_t>;
 
 /** Where one slot of a deferred table stands. */
 enum class deferred_stage_t : unsigned char {
@@ -988,6 +1052,7 @@ inline bool deferred_uses(deferred_call_t const& slot, void const* handle) noexc
                         static_cast<void const*>(arguments.executor) == handle;
             if constexpr (requires { arguments.index; }) used = used || names(arguments.index);
             if constexpr (requires { arguments.cursor; }) used = used || names(arguments.cursor);
+            if constexpr (requires { arguments.refinement; }) used = used || names(arguments.refinement);
             if constexpr (requires { arguments.stream; }) used = used || names(arguments.stream);
             if constexpr (requires { arguments.arena; }) used = used || names(arguments.arena);
             return used;

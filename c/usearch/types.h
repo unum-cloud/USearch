@@ -616,6 +616,37 @@ typedef enum usearch_traversal_t {
     usearch_traversal_scan_k = 1,
 } usearch_traversal_t;
 
+/** Traversal telemetry, shared by every verb that walks a graph in every modality - a pure output,
+ *  fully overwritten by the call it is passed to. Passing @c NULL skips reporting. */
+typedef struct usearch_traversal_stats_t {
+
+    /** Graph members visited while resolving the batch. */
+    size_t visited_members;
+
+    /** Distances computed while resolving the batch, diversity re-selections included. */
+    size_t computed_distances;
+
+    /** Starvation restarts - re-seedings after the frontier drained prematurely,
+     *  and a graph-connectivity health signal rather than a cost counter. */
+    size_t restarts;
+} usearch_traversal_stats_t;
+
+/** One reachability audit: the population it judged, and how much of it a search reaches. */
+typedef struct usearch_reachability_t {
+
+    /** Entries published when the audit started - the population it judges; entries inserted
+     *  while it ran are not counted, so compare @c reachable against this, never a later size. */
+    size_t audited;
+
+    /** Of those, the entries a search reaches from the landmarks; the rest no search finds until
+     *  a refinement re-links them. */
+    size_t reachable;
+
+    /** Levels the sweep took to converge - a diameter proxy; the deepest shard's on a sharded
+     *  handle. */
+    size_t sweeps;
+} usearch_reachability_t;
+
 /**
  *  @brief The host memory domains a RAM-resident index places its shards in - one shard per
  *      named NUMA node, so a dual-socket box names two and gets two graphs whose traversals

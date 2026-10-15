@@ -441,21 +441,6 @@ typedef struct usearch_shapes_clear_t {
 /** Erases all entries, keeping the reserved capacity and frozen geometry. */
 USEARCH_EXPORT void usearch_shapes_clear(usearch_shapes_clear_t* arguments);
 
-/** Traversal telemetry, shared by insertion and search - a pure output, fully overwritten by the
- *  call it is passed to. Passing @c NULL skips reporting. */
-typedef struct usearch_shapes_traversal_stats_t {
-
-    /** Graph members visited while resolving the batch. */
-    size_t visited_members;
-
-    /** Distances computed while resolving the batch, diversity re-selections included. */
-    size_t computed_distances;
-
-    /** Starvation restarts - re-seedings after the frontier drained prematurely,
-     *  and a graph-connectivity health signal rather than a cost counter. */
-    size_t restarts;
-} usearch_shapes_traversal_stats_t;
-
 /** The arguments of @c usearch_shapes_insert. */
 typedef struct usearch_shapes_insert_t {
 
@@ -487,7 +472,7 @@ typedef struct usearch_shapes_insert_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_shapes_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_shapes_insert_t;
 
 /**
@@ -533,7 +518,7 @@ typedef struct usearch_shapes_refine_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_shapes_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_shapes_refine_t;
 
 /**
@@ -595,7 +580,7 @@ typedef struct usearch_shapes_search_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_shapes_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_shapes_search_t;
 
 /**
@@ -862,7 +847,7 @@ typedef struct usearch_shapes_sample_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_shapes_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_shapes_sample_t;
 
 /**

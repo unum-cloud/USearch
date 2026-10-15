@@ -375,6 +375,22 @@ void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {
     *arguments->index = index;
 }
 
+void usearch_geospatial_view_nvme(usearch_geospatial_view_nvme_t* arguments) {
+    if (through_executor<usearch_geospatial_view_nvme>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    if (reject_terrain(arguments->terrain, outcome)) return;
+    mapped_file_t served = map_file(arguments->path, outcome);
+    if (!served) return;
+    // Serves the drives' checkpoint as the RAM view does, mirroring only the residency's refusals.
+    usearch_geospatial_index_handle_t* const index = open_checkpoint<usearch_geospatial_index_handle_t>(served.view(),
+                                                                                                        outcome);
+    if (!index) return;
+    index->served = std::move(served);
+    index->residency = usearch_residency_nvme_k;
+    *arguments->index = index;
+}
+
 void usearch_geospatial_free(usearch_geospatial_index_t handle) {
     wait_for_calls_using(handle);
     delete handle;
@@ -418,7 +434,7 @@ void usearch_geospatial_describe(usearch_geospatial_describe_t* arguments) {
 void usearch_geospatial_insert(usearch_geospatial_insert_t* arguments) {
     if (through_executor<usearch_geospatial_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
-    usearch_geospatial_traversal_stats_t* const stats = arguments->stats;
+    usearch_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;
@@ -471,7 +487,7 @@ void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
 void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
     if (through_executor<usearch_geospatial_search>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
-    usearch_geospatial_traversal_stats_t* const stats = arguments->stats;
+    usearch_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
     *arguments->matches = {};
     usearch_geospatial_index_handle_t& index = *arguments->index;
@@ -509,7 +525,7 @@ void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
 void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
     if (through_executor<usearch_geospatial_within>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
-    usearch_geospatial_traversal_stats_t* const stats = arguments->stats;
+    usearch_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
     *arguments->matches = {};
     if (arguments->written) *arguments->written = 0;
@@ -522,6 +538,9 @@ void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
     // the one place this verb parts with its ranked sibling.
     if (reject_if(!(tolerance.metres > 0), usearch_status_invalid_argument_k,
                   "A containment walk needs a positive radius in metres", outcome))
+        return;
+    if (reject_if(count && index.residency == usearch_residency_nvme_k, usearch_status_unsupported_k,
+                  "An NVMe view walks no radius yet", outcome))
         return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {arguments->queries},
                                                       outcome);
@@ -704,6 +723,9 @@ void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
     if (through_executor<usearch_geospatial_save>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_index_handle_t& index = *arguments->index;
+    if (reject_if(index.residency == usearch_residency_nvme_k, usearch_status_unsupported_k,
+                  "An NVMe view already is its checkpoint", outcome))
+        return;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
     std::optional<std::size_t> const length = serialized_bytes(rows);

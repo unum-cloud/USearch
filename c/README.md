@@ -384,7 +384,7 @@ The graph's `connectivity` is frozen when the index is created, while the `expan
 Higher expansion values buy recall at the cost of latency; zero derives a default from the connectivity.
 
 ```c
-usearch_dense_traversal_stats_t stats = {0};
+usearch_traversal_stats_t stats = {0};
 usearch_dense_search(&(usearch_dense_search_t) {.index = index,
                                                 .executor = executor,
                                                 .outcome = &outcome,
@@ -500,8 +500,8 @@ Cursors and streams keep no hold on the index either: every pull passes the inde
 
 `usearch_dense_refine` re-selects the neighbors of every stored entry against the finished graph, improving those chosen while the graph around them was incomplete.
 A cheap insertion pass followed by one refinement reaches a better graph in less total time than one expensive pass, so a wide `expansion_factor` belongs here rather than in `usearch_dense_insert`.
-Re-selection is idempotent and claims no identity, so a cancelled pass leaves the graph correct and merely less improved, reports no `usearch_status_cancelled_k`, and still re-links any entry no search would reach.
-That makes refining under a time budget converge across calls:
+Re-selection is idempotent and claims no identity, so a cancelled pass leaves the graph correct and merely less improved, still re-links any entry no search would reach, and answers `usearch_status_cancelled_k`.
+The index keeps nothing of a stopped pass, so a caller looping until the graph settles calls again:
 
 ```c
 size_t changed = 0;
@@ -518,10 +518,16 @@ Searches may run throughout on a RAM handle, while a VRAM handle rewrites neighb
 Insertions never overlap a refinement: one in flight refuses it with `usearch_status_contended_k`, one arriving meanwhile is refused the same way and lands nothing, and so on VRAM is a save, which holds the handle the same way for its own duration.
 Nothing waits, so a service schedules refinements between its insertion bursts and retries a refused call.
 
+A refinement that must continue where a cancel stopped is a handle the caller holds instead.
+`usearch_dense_refinement_init` opens it, optionally absorbing donors first, and the index refuses insertions and saves until it is finished.
+Each `usearch_dense_refinement_next` continues it on the executor it was opened with, holding that executor only for the call, and answers `usearch_status_cancelled_k` while more is left.
+It reports the running totals, the nodes re-selected so far, those whose neighbors changed, and the telemetry, so a caller stops calling once the changed share stops paying for another call.
+`usearch_dense_refinement_finish` re-links what a stopped pass leaves, reports, reopens the index and frees the handle.
+
 ### Absorbing & Splitting
 
 `usearch_dense_absorb` moves an array of donor handles into one index, one donor after another, keeping their graphs rather than re-inserting their rows.
-Donors are consumed and nulled as they go, and cancellation stops between donors, so the array itself says which handles the caller still owns and must free.
+Donors are consumed and nulled as they go, so the array itself says which handles the caller still owns and must free, and a cancel stops only the closing refinement, answering `usearch_status_cancelled_k`.
 Each donor's shards append to the index's as appended parts with their edges rebased, then a refinement of every shard that took one walks each of its rows across into the other part from landmarks drawn there and re-selects it, so a group costs one such refinement per donor, and its heal re-selects from the landmarks every row no earlier one links to.
 A donor must share the index's residency, scalar, class, metric and geometry, else the call answers `usearch_status_config_mismatch_k`, and an NVMe view answers `usearch_status_read_only_k`.
 An insertion in flight on the index or on the next donor refuses the call with `usearch_status_contended_k`, leaving that donor and the rest live, and an insertion into the index arriving meanwhile is refused the same way, while nothing may search a donor or start an insertion into it.
@@ -622,7 +628,7 @@ printf("%zu of %zu entries, %zu bytes, %zu dimensions, kernels: %s\n", descripti
 `usearch_dense_health` audits how much of the graph a search reaches, sweeping forward from as many landmarks as one search draws:
 
 ```c
-usearch_dense_reachability_t reachability = {0};
+usearch_reachability_t reachability = {0};
 usearch_dense_health(&(usearch_dense_health_t) {
     .index = index, .executor = executor, .outcome = &outcome, .reachability = &reachability});
 // `reachability.reachable` of `reachability.audited` entries are found by some search

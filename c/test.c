@@ -371,6 +371,12 @@ static usearch_continuation_t cancel_progress(size_t completed, size_t total, vo
     return usearch_cancel_k;
 }
 
+/** Records the first report, then stops the call there. */
+static usearch_continuation_t record_and_cancel(size_t completed, size_t total, void* state) {
+    record_progress(completed, total, state);
+    return usearch_cancel_k;
+}
+
 /** A batch the handler hears about in several steps still lands whole: every step is reported in
  *  order up to the whole batch, and every row is published. */
 void test_add_progress(void) {
@@ -419,9 +425,13 @@ void test_add_progress(void) {
 }
 
 /** The first of four indexes over the quarters of one dataset absorbs the rest: a handler
- *  cancelling at its first report keeps that donor absorbed and leaves the rest live, which a
- *  second call absorbs. Every donor slot is nulled as it is consumed, the handler hears each donor,
- *  the sizes add up, and every key resolves to one reachable row. */
+ *  cancelling the closing refine of a one-shot absorb still leaves both its donors consumed, the
+ *  call answering @c usearch_status_cancelled_k, and the last donor lands through a refinement
+ *  handle, whose pulls are each cancelled until the pass ends while the index refuses insertions,
+ *  every pull continuing the count where the last stopped and reporting running totals that only
+ *  grow, with no more nodes changed than visited. Every donor slot is nulled as it is consumed, the
+ *  sizes add up, the reported audit matches a health call, and every key resolves to one reachable
+ *  row. */
 void test_absorb(size_t const dimensions) {
     printf("Test: Absorb... %zu dimensions\n", dimensions);
 
@@ -457,31 +467,84 @@ void test_absorb(size_t const dimensions) {
     usearch_dense_absorb(&(usearch_dense_absorb_t) {.index = indexes[0],
                                                     .executor = executor,
                                                     .outcome = &outcome,
-                                                    .count = indexes_count - 1,
+                                                    .count = indexes_count - 2,
                                                     .donors = indexes + 1,
                                                     .progress = {cancel_progress}});
-    expect_eq(outcome.status, usearch_status_cancelled_k, "A cancelling handler must stop the absorb");
-    expect(indexes[1] == NULL && indexes[2] != NULL && indexes[3] != NULL,
-           "Only the donor absorbed before the cancel may be nulled");
+    expect_eq(outcome.status, usearch_status_cancelled_k, "A cancel must stop only the closing refine");
+    expect(indexes[1] == NULL && indexes[2] == NULL && indexes[3] != NULL,
+           "Every donor of the call must be consumed and nulled, and no other");
     usearch_dense_index_description_t description = {0};
     usearch_dense_describe(&(usearch_dense_describe_t) {.index = indexes[0],
                                                         .executor = executor,
                                                         .outcome = &outcome,
                                                         .description = &description});
     expect(!outcome.message, outcome.message);
-    expect_eq(description.size, 2 * rows_per_index, "The donor absorbed before the cancel must stay absorbed");
+    expect_eq(description.size, 3 * rows_per_index, "The donors must stay absorbed past the cancel");
 
-    progress_reports_t reports = {0, 0, 0, true};
-    usearch_dense_absorb(&(usearch_dense_absorb_t) {.index = indexes[0],
-                                                    .executor = executor,
-                                                    .outcome = &outcome,
-                                                    .count = indexes_count - 2,
-                                                    .donors = indexes + 2,
-                                                    .progress = {record_progress, &reports}});
+    usearch_dense_refinement_t refinement = NULL;
+    usearch_dense_refinement_init(&(usearch_dense_refinement_init_t) {.index = indexes[0],
+                                                                      .executor = executor,
+                                                                      .outcome = &outcome,
+                                                                      .refinement = &refinement,
+                                                                      .donors = indexes + 3,
+                                                                      .count = 1});
     expect(!outcome.message, outcome.message);
-    expect(indexes[2] == NULL && indexes[3] == NULL, "Every consumed donor slot must be nulled");
-    expect(reports.ascending && reports.calls == indexes_count - 2 && reports.completed == indexes_count - 2,
-           "The handler must hear each donor once absorbed");
+    expect(refinement && indexes[3] != NULL, "A donor lands at the first pull, not at the opening");
+    usearch_key_t const late_key = key_of(rows_count);
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = indexes[0],
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = 1,
+                                   .keys = {&late_key, sizeof(usearch_key_t)},
+                                   .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+    expect_eq(outcome.status, usearch_status_contended_k, "A refinement must hold its index closed");
+
+    // Every pull cancels at its first report, so the pass ends over several pulls, each reporting
+    // the running totals; the closing one may only heal, so its totals need not grow.
+    progress_reports_t reports = {0, 0, 0, true};
+    size_t visited = 0, changed = 0, pulls = 0;
+    usearch_traversal_stats_t stats = {0};
+    do {
+        size_t pulled_visited = 0, pulled_changed = 0;
+        usearch_traversal_stats_t pulled_stats = {0};
+        usearch_dense_refinement_next(&(usearch_dense_refinement_next_t) {.index = indexes[0],
+                                                                          .executor = executor,
+                                                                          .outcome = &outcome,
+                                                                          .refinement = refinement,
+                                                                          .progress = {record_and_cancel, &reports},
+                                                                          .visited = &pulled_visited,
+                                                                          .changed = &pulled_changed,
+                                                                          .stats = &pulled_stats});
+        bool const cancelled = outcome.status == usearch_status_cancelled_k;
+        expect(cancelled || !outcome.message, outcome.message);
+        expect(indexes[3] == NULL, "Every consumed donor slot must be nulled");
+        expect(pulled_changed <= pulled_visited, "No more nodes may change than were re-selected");
+        expect(pulled_visited >= visited + cancelled && pulled_changed >= changed &&
+                   pulled_stats.computed_distances >= stats.computed_distances + cancelled,
+               "The running totals must grow from pull to pull");
+        visited = pulled_visited, changed = pulled_changed, stats = pulled_stats;
+        ++pulls;
+        if (!cancelled) break;
+    } while (pulls != rows_count);
+    expect(pulls >= 2 && outcome.status == usearch_status_success_k, "The pass must end over several pulls");
+    expect(reports.calls > 0 && reports.total == rows_count, "The handler must hear the walks over every row");
+    expect(reports.ascending, "Every pull must count on from where the last stopped");
+
+    size_t finished_changed = 0;
+    usearch_reachability_t reported = {0};
+    usearch_traversal_stats_t finished_stats = {0};
+    usearch_dense_refinement_finish(&(usearch_dense_refinement_finish_t) {.index = indexes[0],
+                                                                          .executor = executor,
+                                                                          .outcome = &outcome,
+                                                                          .refinement = refinement,
+                                                                          .changed = &finished_changed,
+                                                                          .reachability = &reported,
+                                                                          .stats = &finished_stats});
+    expect(!outcome.message, outcome.message);
+    expect(finished_changed >= changed && finished_changed > 0 &&
+               finished_stats.computed_distances >= stats.computed_distances,
+           "The refinement must report at least the work its pulls reported");
 
     usearch_dense_describe(&(usearch_dense_describe_t) {.index = indexes[0],
                                                         .executor = executor,
@@ -499,13 +562,15 @@ void test_absorb(size_t const dimensions) {
         expect(!outcome.message, outcome.message);
         expect_eq(entries, 1, "Every key must resolve to one absorbed row");
     }
-    usearch_dense_reachability_t reachability = {0};
+    usearch_reachability_t reachability = {0};
     usearch_dense_health(&(usearch_dense_health_t) {.index = indexes[0],
                                                     .executor = executor,
                                                     .outcome = &outcome,
                                                     .reachability = &reachability});
     expect(!outcome.message, outcome.message);
     expect_eq(reachability.reachable, rows_count, "Every absorbed row must stay reachable");
+    expect(reported.audited == reachability.audited && reported.reachable == reachability.reachable,
+           "The closing audit must match a health call right after");
 
     free(keys);
     free(data);
@@ -1167,6 +1232,14 @@ void test_sequence_round_trip(void) {
                                                           .keys = {keys, sizeof(usearch_key_t)},
                                                           .sequences = {bytes, offsets, usearch_scalar_u8_k}});
     expect(!outcome.message, outcome.message);
+    size_t const falling_offsets[] = {0, 6, 3};
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 2,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .sequences = {bytes, falling_offsets, usearch_scalar_u8_k}});
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "Falling offsets are refused before any insert");
 
     char const path[] = "usearch-test-c-sequence.safegraphs";
     usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
@@ -1243,6 +1316,55 @@ void test_sequence_round_trip(void) {
         expect(!outcome.message, outcome.message);
         expect(viewed_matches.counts[0] == 1 && value_of(viewed_matches.keys[0]) == 0 && viewed_matches.scores[0] == 0,
                "A view from storage finds a stored query at itself");
+        usearch_sequence_key_stats_t stats = {0};
+        usearch_sequence_count(&(usearch_sequence_count_t) {.index = viewed,
+                                                            .executor = storage,
+                                                            .outcome = &outcome,
+                                                            .key = key_of(1),
+                                                            .key_stats = &stats});
+        expect(!outcome.message, outcome.message);
+        expect(stats.entries == 1 && stats.total_bytes == 7 && stats.largest_bytes == 7,
+               "A view from storage measures a key's entries");
+        usearch_tape_view_t viewed_got = {0};
+        size_t viewed_written = 0;
+        usearch_sequence_get(&(usearch_sequence_get_t) {.index = viewed,
+                                                        .executor = storage,
+                                                        .outcome = &outcome,
+                                                        .key = key_of(1),
+                                                        .sequences = &viewed_got,
+                                                        .written = &viewed_written,
+                                                        .arena = arena});
+        expect(!outcome.message, outcome.message);
+        expect(viewed_written == 1 && viewed_got.offsets[1] - viewed_got.offsets[0] == 7 &&
+                   memcmp((uint8_t const*)viewed_got.data + viewed_got.offsets[0], "sitting", 7) == 0,
+               "A view from storage hands the stored bytes back");
+        usearch_sequence_cursor_t cursor = NULL;
+        usearch_sequence_cursor_init(
+            &(usearch_sequence_cursor_init_t) {.cursor = &cursor, .index = viewed, .outcome = &outcome});
+        expect(!outcome.message, outcome.message);
+        size_t pulled[2] = {0};
+        for (size_t pull = 0; pull != 2; ++pull) {
+            usearch_keys_view_t cursor_keys = {0};
+            usearch_tape_view_t cursor_sequences = {0};
+            usearch_sequence_cursor_next(&(usearch_sequence_cursor_next_t) {.index = viewed,
+                                                                            .executor = storage,
+                                                                            .outcome = &outcome,
+                                                                            .cursor = cursor,
+                                                                            .keys = &cursor_keys,
+                                                                            .sequences = &cursor_sequences,
+                                                                            .written = &pulled[pull],
+                                                                            .arena = arena,
+                                                                            .wanted = 3});
+            expect(!outcome.message, outcome.message);
+            if (pull == 0)
+                expect(
+                    pulled[0] == 3 && value_of(((usearch_key_t const*)cursor_keys.data)[2]) == 2 &&
+                        cursor_sequences.offsets[2] - cursor_sequences.offsets[1] == 7 &&
+                        memcmp((uint8_t const*)cursor_sequences.data + cursor_sequences.offsets[1], "sitting", 7) == 0,
+                    "A cursor over storage reads rows in insertion order");
+        }
+        expect(pulled[1] == 1, "A cursor over storage stops at the last row");
+        usearch_sequence_cursor_free(cursor);
         usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = viewed,
                                                               .executor = storage,
                                                               .outcome = &outcome,
@@ -1262,6 +1384,93 @@ void test_sequence_round_trip(void) {
     usearch_arena_free(arena);
     usearch_executor_free(executor);
     printf("Test: Sequence Round Trip - PASSED\n");
+}
+
+/** A GPU sequence index takes byte and rune Levenshtein, inserts and describes its rows, and lands
+ *  a search's matches in its executor's device arena; alignments and the verbs it lacks refuse.
+ *  Skipped without a GPU. */
+void test_sequence_vram(void) {
+    usearch_outcome_t outcome = {0};
+    size_t devices_count = 0;
+    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome, .devices_count = &devices_count});
+    if (!devices_count) return;
+    printf("Test: Sequence VRAM\n");
+    int32_t const devices[1] = {0};
+    usearch_vram_options_t const vram = {.devices = devices, .devices_count = 1};
+
+    usearch_sequence_index_t refused = NULL;
+    usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &refused,
+                                                                .outcome = &outcome,
+                                                                .metric = usearch_sequence_metric_needleman_wunsch_k,
+                                                                .vram = vram});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "No alignment serves a GPU yet");
+    expect(refused == NULL, "A refused initialization returns no handle");
+    usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &refused,
+                                                                .outcome = &outcome,
+                                                                .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                                .values_per_key = 2,
+                                                                .vram = vram});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU sequence index bounds no key's entries");
+
+    usearch_sequence_index_t index = NULL;
+    usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &index,
+                                                                .outcome = &outcome,
+                                                                .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                                .vram = vram});
+    if (outcome.status == usearch_status_device_k) {
+        printf("Test: Sequence VRAM - SKIPPED: %s\n", outcome.message);
+        return;
+    }
+    expect(!outcome.message, outcome.message);
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_vram(
+        &(usearch_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = vram});
+    expect(!outcome.message, outcome.message);
+
+    char const bytes[] = "kittensittingmittenflask";
+    size_t const offsets[] = {0, 6, 13, 19, 24};
+    usearch_key_t const keys[] = {key_of(0), key_of(1), key_of(2), key_of(3)};
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 4,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_index_description_t description = {0};
+    usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect(description.size == 4 && description.metadata.metric == usearch_sequence_metric_levenshtein_bytes_k,
+           "A GPU index describes the rows it holds");
+
+    // The matches land in device memory, which plain C cannot read; the C++ VRAM suite checks them.
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_matches_view_t matches = {0};
+    usearch_sequence_search(&(usearch_sequence_search_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 4,
+                                                          .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                          .matches = &matches,
+                                                          .arena = arena,
+                                                          .wanted = 2});
+    expect(!outcome.message, outcome.message);
+    expect(matches.keys && matches.scores && matches.counts, "A GPU search lands its matches in the arena");
+
+    char const path[] = "usearch-test-c-sequence-vram.safegraphs";
+    usearch_sequence_save(&(usearch_sequence_save_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .path = {(uint8_t const*)path, sizeof(path) - 1}});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU sequence index saves no checkpoint yet");
+
+    usearch_arena_free(arena);
+    usearch_sequence_free(index);
+    usearch_executor_free(executor);
+    printf("Test: Sequence VRAM - PASSED\n");
 }
 
 /** Shapes round-trip the same way: a stored pose finds itself at zero, and `get` exports its points
@@ -1296,6 +1505,14 @@ void test_shapes_round_trip(void) {
                                                       .keys = {keys, sizeof(usearch_key_t)},
                                                       .shapes = {points, short_offsets, usearch_scalar_f32_k}});
     expect_eq(outcome.status, usearch_status_shape_mismatch_k, "A frozen point count refuses any other");
+    size_t const falling_offsets[] = {0, 4, 2};
+    usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .count = 2,
+                                                      .keys = {keys, sizeof(usearch_key_t)},
+                                                      .shapes = {points, falling_offsets, usearch_scalar_f32_k}});
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "Falling offsets are refused before any insert");
     usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = index,
                                                       .executor = executor,
                                                       .outcome = &outcome,
@@ -1379,6 +1596,57 @@ void test_shapes_round_trip(void) {
         expect(viewed_matches.counts[0] == 1 && value_of(viewed_matches.keys[0]) == 0 &&
                    fabs(viewed_matches.scores[0]) < 1e-5,
                "A view from storage finds a stored pose at zero");
+        usearch_shapes_key_stats_t stats = {0};
+        usearch_shapes_count(&(usearch_shapes_count_t) {.index = viewed,
+                                                        .executor = storage,
+                                                        .outcome = &outcome,
+                                                        .key = key_of(2),
+                                                        .key_stats = &stats});
+        expect(!outcome.message, outcome.message);
+        expect(stats.entries == 1 && stats.total_points == 4 && stats.largest_points == 4,
+               "A view from storage measures a key's entries");
+        usearch_tape_view_t viewed_got = {0};
+        size_t viewed_written = 0;
+        usearch_shapes_get(&(usearch_shapes_get_t) {.index = viewed,
+                                                    .executor = storage,
+                                                    .outcome = &outcome,
+                                                    .key = key_of(2),
+                                                    .shapes = &viewed_got,
+                                                    .written = &viewed_written,
+                                                    .arena = arena,
+                                                    .outputs_scalar = usearch_scalar_f32_k});
+        expect(!outcome.message, outcome.message);
+        expect(viewed_written == 1 && viewed_got.offsets[1] - viewed_got.offsets[0] == 4,
+               "A view from storage hands every point back");
+        float const* const viewed_points = (float const*)viewed_got.data + viewed_got.offsets[0] * 3;
+        for (size_t coordinate = 0; coordinate != 12; ++coordinate)
+            expect(fabsf(viewed_points[coordinate] - points[24 + coordinate]) < 1e-6f,
+                   "A view from storage hands the stored pose back");
+        usearch_shapes_cursor_t cursor = NULL;
+        usearch_shapes_cursor_init(
+            &(usearch_shapes_cursor_init_t) {.cursor = &cursor, .index = viewed, .outcome = &outcome});
+        expect(!outcome.message, outcome.message);
+        usearch_keys_view_t cursor_keys = {0};
+        usearch_tape_view_t cursor_shapes = {0};
+        size_t pulled = 0;
+        usearch_shapes_cursor_next(&(usearch_shapes_cursor_next_t) {.index = viewed,
+                                                                    .executor = storage,
+                                                                    .outcome = &outcome,
+                                                                    .cursor = cursor,
+                                                                    .keys = &cursor_keys,
+                                                                    .shapes = &cursor_shapes,
+                                                                    .written = &pulled,
+                                                                    .arena = arena,
+                                                                    .wanted = 8,
+                                                                    .outputs_scalar = usearch_scalar_f32_k});
+        expect(!outcome.message, outcome.message);
+        expect(
+            pulled == 3 && value_of(((usearch_key_t const*)cursor_keys.data)[2]) == 2 && cursor_shapes.offsets[3] == 12,
+            "A cursor over storage reads every pose in insertion order");
+        for (size_t coordinate = 0; coordinate != 36; ++coordinate)
+            expect(fabsf(((float const*)cursor_shapes.data)[coordinate] - points[coordinate]) < 1e-6f,
+                   "A cursor over storage hands every stored pose back");
+        usearch_shapes_cursor_free(cursor);
         usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = viewed,
                                                           .executor = storage,
                                                           .outcome = &outcome,
@@ -1605,12 +1873,217 @@ void test_geospatial_round_trip(void) {
                                                                   .description = &description});
     expect(!outcome.message, outcome.message);
     expect(description.size == 4 && description.metadata.connectivity == 12, "A loaded index describes the saved one");
+
+    // The same checkpoint served from storage judges every relation on the rows its walks read and
+    // answers reads as RAM does, refusing writes, containment walks and saves.
+    usearch_executor_t storage = NULL;
+    usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage, .outcome = &outcome, .threads = 1});
+    expect(!outcome.message, outcome.message);
+    usearch_geospatial_index_t viewed = NULL;
+    usearch_geospatial_view_nvme(&(usearch_geospatial_view_nvme_t) {.index = &viewed,
+                                                                    .executor = storage,
+                                                                    .outcome = &outcome,
+                                                                    .path = path_view,
+                                                                    .terrain = terrain});
+    if (outcome.status == usearch_status_unsupported_k)
+        printf("Test: Geospatial Round Trip - SKIPPED the NVMe view: %s\n", outcome.message);
+    else {
+        expect(!outcome.message, outcome.message);
+        usearch_matches_view_t matches = {0};
+        usearch_geospatial_search(&(usearch_geospatial_search_t) {.index = viewed,
+                                                                  .executor = storage,
+                                                                  .outcome = &outcome,
+                                                                  .count = 1,
+                                                                  .queries = observations,
+                                                                  .relation = usearch_geospatial_relation_near_k,
+                                                                  .tolerance = {.metres = 500},
+                                                                  .matches = &matches,
+                                                                  .arena = arena,
+                                                                  .wanted = 4});
+        expect(!outcome.message, outcome.message);
+        expect(matches.counts[0] == 3 && value_of(matches.keys[0]) == 0 && matches.scores[0] < 0.01 &&
+                   value_of(matches.keys[1]) == 2 && value_of(matches.keys[2]) == 1,
+               "A view from storage finds an observation at zero metres, and the radius drops Paris");
+        usearch_geospatial_search(&(usearch_geospatial_search_t) {.index = viewed,
+                                                                  .executor = storage,
+                                                                  .outcome = &outcome,
+                                                                  .count = 1,
+                                                                  .queries = observations,
+                                                                  .relation = usearch_geospatial_relation_visible_k,
+                                                                  .tolerance = {.metres = 500},
+                                                                  .matches = &matches,
+                                                                  .arena = arena,
+                                                                  .wanted = 4});
+        expect(!outcome.message, outcome.message);
+        expect(matches.counts[0] == 2 && value_of(matches.keys[0]) == 0 && value_of(matches.keys[1]) == 2,
+               "A view from storage hides the entry behind the ridge");
+
+        usearch_geospatial_key_stats_t stats = {0};
+        usearch_geospatial_count(&(usearch_geospatial_count_t) {.index = viewed,
+                                                                .executor = storage,
+                                                                .outcome = &outcome,
+                                                                .key = key_of(2),
+                                                                .key_stats = &stats});
+        expect(!outcome.message, outcome.message);
+        expect(stats.entries == 1, "A view from storage counts a key's entries");
+        usearch_geospatial_observation_t const* got = NULL;
+        size_t written = 0;
+        usearch_geospatial_get(&(usearch_geospatial_get_t) {.index = viewed,
+                                                            .executor = storage,
+                                                            .outcome = &outcome,
+                                                            .key = key_of(2),
+                                                            .observations = &got,
+                                                            .written = &written,
+                                                            .arena = arena});
+        expect(!outcome.message, outcome.message);
+        expect(written == 1 && fabs(got[0].latitude_degrees - 51.4995) < 1e-6 && fabs(got[0].altitude_metres) < 0.02,
+               "A view from storage hands the observation back");
+
+        usearch_geospatial_cursor_t cursor = NULL;
+        usearch_geospatial_cursor_init(
+            &(usearch_geospatial_cursor_init_t) {.cursor = &cursor, .index = viewed, .outcome = &outcome});
+        expect(!outcome.message, outcome.message);
+        usearch_keys_view_t cursor_keys = {0};
+        usearch_geospatial_observation_t const* cursor_observations = NULL;
+        size_t pulled = 0;
+        usearch_geospatial_cursor_next(&(usearch_geospatial_cursor_next_t) {.index = viewed,
+                                                                            .executor = storage,
+                                                                            .outcome = &outcome,
+                                                                            .cursor = cursor,
+                                                                            .keys = &cursor_keys,
+                                                                            .observations = &cursor_observations,
+                                                                            .written = &pulled,
+                                                                            .arena = arena,
+                                                                            .wanted = 8});
+        expect(!outcome.message, outcome.message);
+        expect(pulled == 4 && value_of(((usearch_key_t const*)cursor_keys.data)[3]) == 3 &&
+                   fabs(cursor_observations[3].latitude_degrees - 48.8566) < 1e-6,
+               "A cursor over storage reads every observation in insertion order");
+        usearch_geospatial_cursor_free(cursor);
+
+        usearch_geospatial_insert(&(usearch_geospatial_insert_t) {.index = viewed,
+                                                                  .executor = storage,
+                                                                  .outcome = &outcome,
+                                                                  .count = 1,
+                                                                  .keys = {keys, sizeof(usearch_key_t)},
+                                                                  .observations = observations});
+        expect_eq(outcome.status, usearch_status_read_only_k, "A view from storage refuses every mutation");
+        usearch_matches_tape_view_t balls = {0};
+        usearch_geospatial_within(&(usearch_geospatial_within_t) {.index = viewed,
+                                                                  .executor = storage,
+                                                                  .outcome = &outcome,
+                                                                  .count = 1,
+                                                                  .queries = observations,
+                                                                  .relation = usearch_geospatial_relation_near_k,
+                                                                  .tolerance = {.metres = 500},
+                                                                  .matches = &balls,
+                                                                  .arena = arena});
+        expect_eq(outcome.status, usearch_status_unsupported_k, "A view from storage walks no radius yet");
+        usearch_geospatial_save(&(
+            usearch_geospatial_save_t) {.index = viewed, .executor = storage, .outcome = &outcome, .path = path_view});
+        expect_eq(outcome.status, usearch_status_unsupported_k, "A view from storage already is its checkpoint");
+        usearch_geospatial_free(viewed);
+    }
+    usearch_executor_free(storage);
     remove(path);
 
     usearch_geospatial_free(index);
     usearch_arena_free(arena);
     usearch_executor_free(executor);
     printf("Test: Geospatial Round Trip - PASSED\n");
+}
+
+/** A GPU geospatial index refuses a terrain and lines of sight, inserts and describes its rows, and
+ *  finds every observation itself first, at zero metres, on host pages; the verbs it lacks refuse.
+ *  Skipped without a GPU. */
+void test_geospatial_vram(void) {
+    usearch_outcome_t outcome = {0};
+    size_t devices_count = 0;
+    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome, .devices_count = &devices_count});
+    if (!devices_count) return;
+    printf("Test: Geospatial VRAM\n");
+    int32_t const devices[1] = {0};
+    usearch_vram_options_t const vram = {.devices = devices, .devices_count = 1};
+
+    float const height = 0;
+    usearch_geospatial_terrain_t const terrain = {.rows = 1,
+                                                  .columns = 1,
+                                                  .row_step_degrees = 1,
+                                                  .column_step_degrees = 1,
+                                                  .heights = &height};
+    usearch_geospatial_index_t refused = NULL;
+    usearch_geospatial_init_vram(
+        &(usearch_geospatial_init_vram_t) {.index = &refused, .outcome = &outcome, .terrain = terrain, .vram = vram});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU geospatial index tests no lines of sight");
+    expect(refused == NULL, "A refused initialization returns no handle");
+
+    usearch_geospatial_index_t index = NULL;
+    usearch_geospatial_init_vram(
+        &(usearch_geospatial_init_vram_t) {.index = &index, .outcome = &outcome, .vram = vram});
+    if (outcome.status == usearch_status_device_k) {
+        printf("Test: Geospatial VRAM - SKIPPED: %s\n", outcome.message);
+        return;
+    }
+    expect(!outcome.message, outcome.message);
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_vram(
+        &(usearch_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = vram});
+    expect(!outcome.message, outcome.message);
+
+    usearch_geospatial_observation_t const observations[] = {
+        observed_at(51.5, -0.1, NAN), observed_at(51.501, -0.1, NAN), observed_at(51.5, -0.101, NAN),
+        observed_at(51.501, -0.101, NAN)};
+    usearch_key_t const keys[] = {key_of(0), key_of(1), key_of(2), key_of(3)};
+    usearch_geospatial_insert(&(usearch_geospatial_insert_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .count = 4,
+                                                              .keys = {keys, sizeof(usearch_key_t)},
+                                                              .observations = observations});
+    expect(!outcome.message, outcome.message);
+    usearch_geospatial_index_description_t description = {0};
+    usearch_geospatial_describe(&(usearch_geospatial_describe_t) {.index = index,
+                                                                  .executor = executor,
+                                                                  .outcome = &outcome,
+                                                                  .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect(description.size == 4 && description.metadata.connectivity == 16,
+           "A GPU index describes its rows, twelve neighbors rounded to a power of two");
+
+    usearch_arena_t const arena = create_arena(NULL);
+    usearch_matches_view_t matches = {0};
+    usearch_geospatial_search_t search = {.index = index,
+                                          .executor = executor,
+                                          .outcome = &outcome,
+                                          .count = 4,
+                                          .queries = observations,
+                                          .relation = usearch_geospatial_relation_near_k,
+                                          .matches = &matches,
+                                          .arena = arena,
+                                          .wanted = 2};
+    usearch_geospatial_search(&search);
+    expect(!outcome.message, outcome.message);
+    for (size_t row = 0; row != 4; ++row) {
+        expect_eq(matches.counts[row], 2, "Every observation finds itself and a neighbor");
+        expect(memcmp(&matches.keys[row * 2], &keys[row], sizeof(usearch_key_t)) == 0 &&
+                   matches.scores[row * 2] < 1e-3 && matches.scores[row * 2 + 1] > 60,
+               "An observation finds itself first, at zero metres");
+    }
+    search.relation = usearch_geospatial_relation_visible_k;
+    usearch_geospatial_search(&search);
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU geospatial index tests no lines of sight");
+
+    char const path[] = "usearch-test-c-geospatial-vram.safegraphs";
+    usearch_geospatial_save(&(usearch_geospatial_save_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .path = {(uint8_t const*)path, sizeof(path) - 1}});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU geospatial index saves no checkpoint yet");
+
+    usearch_arena_free(arena);
+    usearch_geospatial_free(index);
+    usearch_executor_free(executor);
+    printf("Test: Geospatial VRAM - PASSED\n");
 }
 
 /** A packed kind's row is as wide as its logical dimensions, so every product spans all of them -
@@ -1894,7 +2367,7 @@ void test_nvme_view(size_t const dimensions) {
     expect_eq(description.capacity, rows_count, "A view hosts exactly the rows it serves");
     expect_eq(description.metadata.dimensions, dimensions, "A view must serve the saved geometry");
 
-    usearch_dense_reachability_t reachability = {0};
+    usearch_reachability_t reachability = {0};
     usearch_dense_health(&(usearch_dense_health_t) {.index = view,
                                                     .executor = storage,
                                                     .outcome = &outcome,
@@ -2448,7 +2921,7 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
                                                     .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
     // Insertions may strand rows, so the reload is judged against the saved graph's own audit.
-    usearch_dense_reachability_t saved_reachability = {0};
+    usearch_reachability_t saved_reachability = {0};
     usearch_dense_health(&(usearch_dense_health_t) {.index = index,
                                                     .executor = executor,
                                                     .outcome = &outcome,
@@ -2480,7 +2953,7 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
                                                         .description = &description});
     expect(!outcome.message, outcome.message);
     expect_eq(description.size, collection_size, "The parts must load every saved row onto one device");
-    usearch_dense_reachability_t reachability = {0};
+    usearch_reachability_t reachability = {0};
     usearch_dense_health(&(usearch_dense_health_t) {.index = index,
                                                     .executor = executor,
                                                     .outcome = &outcome,
@@ -2518,6 +2991,86 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
     printf("Test: VRAM Parts Share a Device - PASSED\n");
 }
 
+/** An exact scan on the first GPU scores every row once per query and refuses a predicate as a walk
+ *  does where the vendor scans, and refuses with `usearch_status_unsupported_k` elsewhere. */
+void test_vram_scan(size_t const collection_size, size_t const dimensions) {
+    usearch_outcome_t outcome = {0};
+    usearch_gpu_device_t device = {0};
+    size_t devices_count = 0;
+    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome,
+                                                  .devices = &device,
+                                                  .devices_capacity = 1,
+                                                  .devices_count = &devices_count});
+    if (!devices_count) return;
+    printf("Test: VRAM Scan... %zu vectors, %zu dimensions\n", collection_size, dimensions);
+
+    int32_t const devices[1] = {0};
+    usearch_vram_options_t const vram = {.devices = devices, .devices_count = 1};
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_vram(&(usearch_dense_init_vram_t) {.index = &index,
+                                                          .outcome = &outcome,
+                                                          .metric = usearch_dense_metric_euclidean_k,
+                                                          .quantization = usearch_scalar_bf16_k,
+                                                          .dimensions = dimensions,
+                                                          .vram = vram});
+    expect(!outcome.message, outcome.message);
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_vram(
+        &(usearch_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = vram});
+    expect(!outcome.message, outcome.message);
+
+    float* const data = create_vectors(collection_size, dimensions);
+    usearch_key_t* const keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
+    expect(keys, "Failed to allocate keys");
+    for (size_t row = 0; row != collection_size; ++row) keys[row] = key_of(row);
+    size_t const row_bytes = dimensions * sizeof(float);
+    usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .capacity = collection_size});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = collection_size,
+                                                    .keys = {keys, sizeof(usearch_key_t)},
+                                                    .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+
+    // The matches land in device memory, which plain C cannot read; the C++ VRAM suite checks them.
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_matches_view_t matches = {0};
+    usearch_traversal_stats_t stats = {0};
+    usearch_dense_search_t search = {.index = index,
+                                     .executor = executor,
+                                     .outcome = &outcome,
+                                     .count = collection_size,
+                                     .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                     .matches = &matches,
+                                     .arena = arena,
+                                     .wanted = 10,
+                                     .traversal = usearch_traversal_scan_k,
+                                     .stats = &stats};
+    usearch_dense_search(&search);
+    if (device.vendor == usearch_gpu_vendor_nvidia_k) {
+        expect(!outcome.message, outcome.message);
+        expect(matches.keys && matches.counts, "A VRAM scan lands its matches in the arena");
+        expect_eq(stats.computed_distances, collection_size * collection_size, "A scan scores every row per query");
+        size_t widest_batch = 0;
+        search.predicate = (usearch_predicate_t) {admits_even, &widest_batch};
+        usearch_dense_search(&search);
+        expect_eq(outcome.status, usearch_status_device_k, "A host predicate cannot narrow a device scan");
+    }
+    else expect_eq(outcome.status, usearch_status_unsupported_k, "Only NVIDIA devices scan");
+
+    usearch_arena_free(arena);
+    usearch_dense_free(index);
+    usearch_executor_free(executor);
+    free(keys);
+    free(data);
+    printf("Test: VRAM Scan - PASSED\n");
+}
+
 int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
@@ -2553,9 +3106,11 @@ int main(int argc, char* argv[]) {
     if (selected("sample")) test_sample();
     if (selected("cursor_steps")) test_cursor_steps();
     if (selected("sequence_round_trip")) test_sequence_round_trip();
+    if (selected("sequence_vram")) test_sequence_vram();
     if (selected("shapes_round_trip")) test_shapes_round_trip();
     if (selected("shapes_vram")) test_shapes_vram();
     if (selected("geospatial_round_trip")) test_geospatial_round_trip();
+    if (selected("geospatial_vram")) test_geospatial_vram();
 #if USEARCH_DENSE_DTYPES >= 2
     if (selected("multiply_packed")) test_multiply_packed();
 #endif

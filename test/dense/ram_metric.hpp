@@ -219,7 +219,7 @@ static int check_tiles() noexcept {
                                          queries_k, nullptr) == nk_success_k);
     auto dots = nk::matrix<raw_dot_t>::zeros({rows_k, queries_k}).value;
     failures += expect(tiles_kit_t::dots_packed(rows.raw_values_data(), packed.data(), dots.data(), rows_k, queries_k,
-                                                dimensions_k, stride, queries_k * sizeof(raw_dot_t),
+                                                dimensions_k, stride, queries_k * sizeof(raw_dot_t), nullptr, 0,
                                                 nullptr) == nk_success_k);
 
     for (std::size_t row = 0; row != rows_k; ++row) {

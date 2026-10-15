@@ -404,6 +404,7 @@ std::size_t test_vram_indexes_configuration(char const* name, u64_t seed, execut
     failures_count += test_dense_indexes_planned_insert<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_absorb<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_absorb_many<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_vram_indexes_indexer_search<indexes_t, kernel_>(seed, executor);

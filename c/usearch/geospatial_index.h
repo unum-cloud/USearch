@@ -17,8 +17,10 @@
  *  Handles live in RAM or VRAM, created empty by @c usearch_geospatial_init_ram or
  *  @c usearch_geospatial_init_vram, copied from a checkpoint by @c usearch_geospatial_load_ram
  *  or @c usearch_geospatial_load_vram, or served from one in place by
- *  @c usearch_geospatial_view_ram, which is read-only and refuses every mutating verb with
- *  @c usearch_status_read_only_k.
+ *  @c usearch_geospatial_view_ram or @c usearch_geospatial_view_nvme, which are read-only and
+ *  refuse every mutating verb with @c usearch_status_read_only_k. An NVMe handle answers every
+ *  ranked search as a RAM handle does, judging each relation on the observations its walks read,
+ *  while containment walks and saving answer @c usearch_status_unsupported_k.
  *
  *  @section geospatial_index_geometry Internal Geometry
  *
@@ -365,6 +367,40 @@ typedef struct usearch_geospatial_view_ram_t {
  *  verbs report @c usearch_status_read_only_k. */
 USEARCH_EXPORT void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments);
 
+/** The arguments of @c usearch_geospatial_view_nvme. */
+typedef struct usearch_geospatial_view_nvme_t {
+
+    /** Output for the new, read-only index, written by the time the call is final. */
+    usearch_geospatial_index_t* index;
+
+    /** The NVMe executor the call is ordered on; the headers come through blocking reads. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Checkpoint path - a monolith, or a manifest naming many. */
+    usearch_bytes_view_t path;
+
+    /** The devices the parts are served from; naming none serves each where its manifest points. */
+    usearch_nvme_options_t nvme;
+
+    /** The @b optional terrain lines of sight are tested over, which no checkpoint carries. */
+    usearch_geospatial_terrain_t terrain;
+} usearch_geospatial_view_nvme_t;
+
+/**
+ *  @brief Serves a checkpoint in place from NVMe drives as a read-only index, every later call
+ *      reading it through its executor's engines.
+ *
+ *  Opening reads the headers alone. Every mutating verb on the handle reports
+ *  @c usearch_status_read_only_k, and the parts must stay unmodified until the handle is freed.
+ */
+USEARCH_EXPORT void usearch_geospatial_view_nvme(usearch_geospatial_view_nvme_t* arguments);
+
 /** Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so takes
  *  no outcome.
  *  Waits until every deferred call naming the handle is final. */
@@ -430,21 +466,6 @@ typedef struct usearch_geospatial_tolerance_t {
     double seconds;
 } usearch_geospatial_tolerance_t;
 
-/** Traversal telemetry, shared by insertion and every search form - a pure output,
- *  fully overwritten by the call it is passed to. Passing @c NULL skips reporting. */
-typedef struct usearch_geospatial_traversal_stats_t {
-
-    /** Graph members visited while resolving the batch. */
-    size_t visited_members;
-
-    /** Distances computed while resolving the batch, diversity re-selections included. */
-    size_t computed_distances;
-
-    /** Starvation restarts - re-seedings after the frontier drained prematurely,
-     *  and a graph-connectivity health signal rather than a cost counter. */
-    size_t restarts;
-} usearch_geospatial_traversal_stats_t;
-
 /** The arguments of @c usearch_geospatial_insert. */
 typedef struct usearch_geospatial_insert_t {
 
@@ -477,7 +498,7 @@ typedef struct usearch_geospatial_insert_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_geospatial_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_geospatial_insert_t;
 
 /**
@@ -526,7 +547,7 @@ typedef struct usearch_geospatial_refine_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_geospatial_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_geospatial_refine_t;
 
 /**
@@ -594,7 +615,7 @@ typedef struct usearch_geospatial_search_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_geospatial_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_geospatial_search_t;
 
 /**
@@ -657,7 +678,7 @@ typedef struct usearch_geospatial_within_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_geospatial_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_geospatial_within_t;
 
 /**
@@ -913,7 +934,7 @@ typedef struct usearch_geospatial_sample_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_geospatial_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_geospatial_sample_t;
 
 /**

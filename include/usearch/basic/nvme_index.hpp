@@ -14,7 +14,9 @@
  *
  *  A search keeps one metric per row slot, built by the caller's factory on the slot's arena, since
  *  every walk of a row shares its query, and hands it each landed value as the codec's borrowed
- *  @c view. Key lookups scan the key columns, and @c get reads the value rows of the keys it found.
+ *  @c view. A caller's judge reads the same views before the flights recycle, so a relation tested
+ *  on stored values needs no second read. Key lookups scan the key columns, and @c get reads the
+ *  value rows of the keys it found.
  */
 #pragma once
 
@@ -159,6 +161,19 @@ class nvme_index {
         return total;
     }
 
+    /** Entries the view hosts, which are exactly those its parts hold, since a view never grows. */
+    std::size_t capacity() const noexcept { return size(); }
+
+    /** Value elements across every part, in the units the value columns count: bytes of strings,
+     *  or three coordinates a point of clouds. */
+    std::size_t value_elements() const noexcept {
+        std::size_t total = 0;
+        for (part_t const& part : parts_)
+            total += part.value_starts.empty() ? part.nodes * (part.value_row_bytes / part.value_element_bytes)
+                                               : part.value_starts.select(part.nodes);
+        return total;
+    }
+
     /** Neighbor IDs of the widest neighbors row across every part. */
     std::size_t connectivity() const noexcept {
         std::size_t widest = 0;
@@ -201,26 +216,32 @@ class nvme_index {
      *  @param[in] predicate The optional admission filter over keys, a quad at a time or key by
      *      key; it narrows each row to the entries it admits among a ranking as wide as the walk's
      *      pool.
+     *  @param[in] judge The optional admission test over stored values, as
+     *      `judge(query, values, verdicts, scratch_allocator) noexcept`, handed the codec's views
+     *      of up to four landed rows with every verdict admitting; it hears only rows that would
+     *      enter the row's ranking, which then holds the nearest entries it admitted across every
+     *      walk.
      *
      *  A failed read stops the call, which answers @c io_k; a refused query or metric answers its
      *  own status, its row left short.
      */
     template <typename make_metric_type_, typename query_of_type_, typename score_type_,
-              typename predicate_type_ = dummy_predicate_t>
+              typename predicate_type_ = dummy_predicate_t, typename judge_type_ = dummy_predicate_t>
     expected<search_result_t> search(std::size_t count, make_metric_type_&& make_metric, query_of_type_&& query_of,
                                      executor_t& executor, search_config_t config, std::span<key_t> keys,
                                      std::span<score_type_> distances, std::span<std::size_t> counts,
-                                     predicate_type_&& predicate = {}) noexcept {
+                                     predicate_type_&& predicate = {}, judge_type_&& judge = {}) noexcept {
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != count || keys.size() != distances.size() || (count && keys.size() % count))
             return {{}, status_t::config_mismatch_k};
         if (!count) return {{}, status_t::success_k};
-        using row_t = search_row<std::remove_reference_t<make_metric_type_>, std::remove_reference_t<query_of_type_>,
-                                 std::remove_reference_t<predicate_type_>, score_type_>;
+        using row_t =
+            search_row<std::remove_reference_t<make_metric_type_>, std::remove_reference_t<query_of_type_>,
+                       std::remove_reference_t<predicate_type_>, std::remove_reference_t<judge_type_>, score_type_>;
         std::size_t const wanted = keys.size() / count, expansion_factor = non_zero_expansion_factor(config);
         constexpr bool filtered = !std::is_same_v<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>;
         typename row_t::inputs_t const inputs {
-            &make_metric, &query_of, &predicate, filtered ? max_of(expansion_factor, wanted) : wanted,
+            &make_metric, &query_of, &predicate, &judge, filtered ? max_of(expansion_factor, wanted) : wanted,
             wanted,       keys,      distances,  counts};
         return walk_rows_<row_t>(to_span(media_), to_span(parts_), executor, count, expansion_factor, inputs, counts);
     }
@@ -264,8 +285,9 @@ class nvme_index {
      *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted when
      *      its values truncated, zero when absent.
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
-     *  @param[in] on_value Takes every kept value as `on_value(position, rank, view)`, the codec's
-     *      view borrowed for the call alone, on whichever thread read it, in no particular order.
+     *  @param[in] on_value Takes every kept value as `on_value(position, rank, thread, view)`, the
+     *      codec's view borrowed for the call alone, on the executor thread that read it, in no
+     *      particular order.
      */
     template <typename on_value_type_>
     status_t get(std::span<key_t const> keys, std::size_t wanted, std::span<std::size_t> entries, executor_t& executor,
@@ -312,7 +334,7 @@ class nvme_index {
             auto const [landed, read_status] = read_(executor, thread, locator.shard,
                                                      row_offset_(part, nvme_purpose_t::score_k, locator.node), bytes);
             if (succeeded(read_status)) {
-                on_value(position, rank, codec_t {}.view(bytes_view_t {landed, bytes}));
+                on_value(position, rank, thread, codec_t {}.view(bytes_view_t {landed, bytes}));
                 return;
             }
             status_t unset = status_t::success_k;
@@ -320,6 +342,56 @@ class nvme_index {
                                                                        std::memory_order_relaxed);
         };
         if (status_t const fanned = executor.for_tasks(keys.size() * wanted, read_value); failed(fanned)) return fanned;
+        return failure;
+    }
+
+    /**
+     *  @brief The keys and values of @p keys.size() rows from row @p first on, numbered across the
+     *      parts in part and row order: one key-row and one value-row read per row, spread over the
+     *      executor's threads.
+     *
+     *  @param[in] first The first row read; every row read must lie before @ref size.
+     *  @param[out] keys The key of every row read, in row order.
+     *  @param[inout] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in] on_value Takes every row's value as `on_value(row, thread, view)`, @c row counted
+     *      from @p first, the codec's view borrowed for the call alone, on the executor thread that
+     *      read it, in no particular order.
+     */
+    template <typename on_value_type_>
+    status_t read_rows(std::size_t first, std::span<key_t> keys, executor_t& executor,
+                       on_value_type_&& on_value) const noexcept {
+        if (parts_.empty()) return status_t::uninitialized_k;
+        if (first + keys.size() > size()) return status_t::config_mismatch_k;
+        if (keys.empty()) return status_t::success_k;
+        auto [call, call_status] = begin_scans_(executor);
+        if (failed(call_status)) return call_status;
+        status_t failure = status_t::success_k;
+        auto read_row = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
+            if (failed(std::atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
+            u32_t shard = 0;
+            std::size_t node = first + row;
+            while (node >= parts_[shard].nodes) node -= parts_[shard].nodes, ++shard;
+            part_t const& part = parts_[shard];
+            u32_t const id = static_cast<u32_t>(node);
+            auto const [key_bytes, key_status] = read_(
+                executor, thread, shard, row_offset_(part, nvme_purpose_t::key_k, id), part.key_row_bytes);
+            status_t read_status = key_status;
+            if (succeeded(read_status)) {
+                keys[row] = safegraphs_widened_key<key_t>(key_bytes, part.key_dtype);
+                std::size_t const bytes = static_cast<std::size_t>(row_length_(part, nvme_purpose_t::score_k, id));
+                auto const [landed, value_status] = read_(executor, thread, shard,
+                                                          row_offset_(part, nvme_purpose_t::score_k, id), bytes);
+                read_status = value_status;
+                if (succeeded(read_status)) {
+                    on_value(row, thread, codec_t {}.view(bytes_view_t {landed, bytes}));
+                    return;
+                }
+            }
+            status_t unset = status_t::success_k;
+            std::atomic_ref<status_t>(failure).compare_exchange_strong(unset, read_status, std::memory_order_relaxed,
+                                                                       std::memory_order_relaxed);
+        };
+        if (status_t const fanned = executor.for_tasks(keys.size(), read_row); failed(fanned)) return fanned;
         return failure;
     }
 
@@ -587,8 +659,9 @@ class nvme_index {
     }
 
     /** Hands the staged flights of @p walk to its row's metric as the codec's views of their landed
-     *  values, drains them within the pool's radius, at a refusal and once all are staged, releases
-     *  them and ranks them through @p walker; a metric refusing a lone value saturates the walk. */
+     *  values, drains them within the pool's radius, at a refusal and once all are staged, lets a
+     *  judging row test them, releases them and ranks them through @p walker; a metric refusing a
+     *  lone value saturates the walk. */
     template <typename walker_type_>
     [[gnu::always_inline]] static void score_staged_(walker_type_& walker, walk_t& walk) noexcept {
         using row_t = typename walker_type_::row_t;
@@ -598,6 +671,11 @@ class nvme_index {
         distance_t const radius = walk.results.size() == walker.shape_.expansion_factor
                                       ? walk.results.top().distance
                                       : unbounded_radius<distance_t>();
+        auto landed_value = [&](u32_t flight) noexcept {
+            return codec_t {}.view(bytes_view_t {
+                walker.landed_row_(flight, nvme_purpose_t::score_k, flight),
+                static_cast<std::size_t>(walker.row_bytes_(walker.flights_[flight], nvme_purpose_t::score_k))});
+        };
         std::array<distance_t, 4> distances;
         std::size_t staged = 0, drained = 0;
         auto drain = [&]() noexcept {
@@ -605,12 +683,9 @@ class nvme_index {
             drained = staged;
         };
         for (u32_t const flight : walk.staged) {
-            bytes_view_t const landed {
-                walker.landed_row_(flight, nvme_purpose_t::score_k, flight),
-                static_cast<std::size_t>(walker.row_bytes_(walker.flights_[flight], nvme_purpose_t::score_k))};
-            if (row.metric.push(codec_t {}.view(landed)) == metric_staging_t::refused_k) {
+            if (row.metric.push(landed_value(flight)) == metric_staging_t::refused_k) {
                 drain();
-                if (row.metric.push(codec_t {}.view(landed)) == metric_staging_t::refused_k) break;
+                if (row.metric.push(landed_value(flight)) == metric_staging_t::refused_k) break;
             }
             ++staged;
         }
@@ -619,6 +694,12 @@ class nvme_index {
         std::array<scored_node_t, 4> scored_batch;
         for (std::size_t lane = 0; lane != staged; ++lane)
             scored_batch[lane] = scored_node_t {walker.flights_[walk.staged[lane]].node, distances[lane]};
+        if constexpr (row_t::judged_k) {
+            std::array<decltype(landed_value(0)), 4> values;
+            for (std::size_t lane = 0; lane != staged; ++lane) values[lane] = landed_value(walk.staged[lane]);
+            row.admit(walk.shard, std::span<scored_node_t const>(scored_batch).first(staged),
+                      std::span<decltype(landed_value(0)) const>(values).first(staged));
+        }
         bool const refused = staged != walk.staged.size();
         for (u32_t const flight : walk.staged) walker.release_flight_(flight);
         walk.staged.clear();
@@ -633,10 +714,12 @@ class nvme_index {
 #pragma region Rows
 
     /** The rows of a batched search across the shards: each walk's pool merges into the row's
-     *  ranking by locator, and the ranked locators resolve into keys once every walk finished, then
-     *  pass the predicate into the outputs. Each slot keeps one metric from the caller's factory
-     *  and the query of its current row. */
-    template <typename make_metric_type_, typename query_of_type_, typename predicate_type_, typename score_type_>
+     *  ranking by locator, or with a judge every admitted row as it is scored, and the ranked
+     *  locators resolve into keys once every walk finished, then pass the predicate into the
+     *  outputs. Each slot keeps one metric from the caller's factory and the query of its current
+     *  row. */
+    template <typename make_metric_type_, typename query_of_type_, typename predicate_type_, typename judge_type_,
+              typename score_type_>
     struct search_row {
         using key_t = key_type_;
         using metric_t =
@@ -644,6 +727,7 @@ class nvme_index {
         using query_t =
             typename std::invoke_result_t<query_of_type_&, std::size_t, scratch_allocator_t const&>::value_t;
         inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
+        inline static constexpr bool judged_k = !std::is_same_v<std::remove_cv_t<judge_type_>, dummy_predicate_t>;
 
         /** Candidates a metric stages per round: one quad of landed values. */
         inline static constexpr std::size_t staging_k = 4;
@@ -653,6 +737,7 @@ class nvme_index {
             make_metric_type_* make_metric = nullptr;
             query_of_type_* query_of = nullptr;
             predicate_type_* predicate = nullptr;
+            judge_type_* judge = nullptr;
             std::size_t ranked = 0;
             std::size_t wanted = 0;
             std::span<key_t> keys;
@@ -701,7 +786,34 @@ class nvme_index {
         }
         results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const& walk) noexcept {
-            found = merge_search_results(to_span(walk.results), nvme_shard_locators_t {walk.shard},
+            // A judging row ranked what it admitted as each walk scored it.
+            if constexpr (!judged_k)
+                found = merge_search_results(to_span(walk.results), nvme_shard_locators_t {walk.shard},
+                                             to_writable_span(locators), to_writable_span(ranked_distances), found);
+        }
+
+        /** Ranks the rows of @p scored, landed on @p shard with @p values, that the judge admits,
+         *  asking it only about those that would enter the ranking. */
+        template <typename value_type_>
+        void admit(u32_t shard, std::span<scored_node_t const> scored, std::span<value_type_ const> values) noexcept {
+            std::array<scored_node_t, 4> asked;
+            std::array<value_type_, 4> asked_values;
+            std::size_t asking = 0;
+            for (std::size_t lane = 0; lane != scored.size(); ++lane) {
+                if (found == inputs.ranked && (!found || ranked_distances[found - 1] < scored[lane].distance)) continue;
+                asked[asking] = scored[lane], asked_values[asking] = values[lane], ++asking;
+            }
+            if (!asking) return;
+            std::array<admission_t, 4> verdicts;
+            verdicts.fill(admission_t::admit_k);
+            (*inputs.judge)(query, std::span<value_type_ const>(asked_values).first(asking),
+                            std::span<admission_t>(verdicts).first(asking), allocator);
+            std::size_t admitted = 0;
+            for (std::size_t lane = 0; lane != asking; ++lane)
+                if (verdicts[lane] == admission_t::admit_k) asked[admitted++] = asked[lane];
+            std::span<scored_node_t> const ranking = std::span(asked).first(admitted);
+            network_sort(ranking, typename scored_node_t::closer_t {});
+            found = merge_search_results(std::span<scored_node_t const>(ranking), nvme_shard_locators_t {shard},
                                          to_writable_span(locators), to_writable_span(ranked_distances), found);
         }
         std::size_t outputs() const noexcept { return found; }

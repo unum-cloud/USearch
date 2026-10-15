@@ -1859,6 +1859,7 @@ struct ram_index {
                 if (context.visited.contains(neighbor_id)) continue;
                 if (metric.push(published_value_of(neighbor_id)) == metric_staging_t::refused_k) {
                     context.staged_ids.resize_reserved(kept);
+                    ++context.telemetry.saturated_walks;
                     return walk_step_t::saturated_k;
                 }
                 [[maybe_unused]] membership_t const marked = context.visited.insert(neighbor_id);

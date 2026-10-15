@@ -28,7 +28,7 @@
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_nvidia_device.hpp"
 #include "usearch/dense/types.hpp"
-#include "usearch/dense/vram_queue.cuh"
+#include "usearch/utilities/vram_queue.cuh"
 #include "usearch/dense/vram_index.cuh"
 #include "usearch/dense/vram_nvidia_index.hpp"
 #include "usearch/dense/vram_nvidia_metric.cuh"
@@ -52,28 +52,11 @@ struct cuda_kit_of {
                   std::is_same_v<typename traits_t::norms_t, typename type::norms_t>);
     static_assert(traits_t::picked_k == type::capability_k);
     static_assert(traits_t::gathered_bytes_k == sizeof(vram_gathered<type>));
+    static_assert(traits_t::schedule_bytes_k == sizeof(typename cuda_schedule_of<capability_>::shared_t));
 };
 
 template <nk_dtype_t vector_dtype_, nk_capability_t capability_>
 using cuda_kit_t = typename cuda_kit_of<vector_dtype_, capability_>::type;
-
-/** The kernels' twin of a host-computed arena slice layout. */
-constexpr vram_arena_shape_t cuda_arena_shape(cuda_arena_shape_t shape) noexcept {
-    return {shape.visited_slots, shape.visited_hash_shift, shape.tail_entries, shape.cache_bytes};
-}
-
-/** Whether @p bitset - a reachability audit's reached set or frontier, a refinement pass's touched
- *  rows - holds @p row. Every access is relaxed: the launch boundary orders the marks before any
- *  later launch or host copy reads them. */
-__device__ __forceinline__ bool cuda_bitset_contains(cuda_bitset_t bitset, u32_t row) noexcept {
-    return (cuda_atomic_ref<u32_t>(bitset.words[row >> 5]).load(cuda::memory_order_relaxed) >> (row & 31u)) & 1u;
-}
-
-/** Sets the bit of @p row, answering whether this call was the one that set it. */
-__device__ __forceinline__ bool cuda_bitset_insert(cuda_bitset_t bitset, u32_t row) noexcept {
-    u32_t const bit = 1u << (row & 31u);
-    return !(cuda_atomic_ref<u32_t>(bitset.words[row >> 5]).fetch_or(bit, cuda::memory_order_relaxed) & bit);
-}
 
 /** Grouped-query heads as a device rescoring: the walk navigates by a token's first head
  *  and keeps its dots, the warp reads the batch once more for every further head, every
@@ -169,7 +152,8 @@ __device__ __forceinline__ void cuda_insert(vram_build_view<kit_> const& view) {
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t>(view, dynamic_scratch);
     u32_t const warp = slice.warp, lane = slice.lane;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
+    vram_vector_cache<typename kit_::fragment_t> const cache {
+        query_span, view.storage.row_fragments, view.arena_shape.cache_bytes ? gathered[warp].ids : nullptr};
     schedule_ schedule {schedule_states[warp], lane};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(cache, view.storage.connectivity);
     using frontier_t = std::conditional_t<pool_slots_ == 0, vram_arena_frontier<cuda_warp_t>,
@@ -209,7 +193,8 @@ __device__ __forceinline__ void cuda_refine(vram_refine_view<kit_> const& view) 
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t>(view, dynamic_scratch);
     u32_t const warp = slice.warp, lane = slice.lane;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
+    vram_vector_cache<typename kit_::fragment_t> const cache {
+        query_span, view.storage.row_fragments, view.arena_shape.cache_bytes ? gathered[warp].ids : nullptr};
     schedule_ schedule {schedule_states[warp], lane};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(cache, view.storage.connectivity);
     using frontier_t = std::conditional_t<pool_slots_ == 0, vram_arena_frontier<cuda_warp_t>,
@@ -239,30 +224,6 @@ __device__ __forceinline__ void cuda_refine(vram_refine_view<kit_> const& view) 
     }
 }
 
-/** Scatters the walked rows' shadow neighbors in reverse: every forward pick @b u → @b v lands
- *  @b u in @b v's reverse bucket, and marks both rows in @p touched - the rows the merge
- *  re-selects. The walked rows are the range from @p first_id, or a heal round's islands listed in
- *  @p node_ids, which mark only themselves and land in no bucket; appends past @p bucket_width are
- *  counted, never written. */
-__device__ __forceinline__ void cuda_scatter_back_links(u32_t const* shadow_neighbors, u32_t rows_count, u32_t first_id,
-                                                        u32_t walk_count, u32_t const* node_ids, u32_t connectivity,
-                                                        u32_t bucket_width, u32_t* bucket_ids, u32_t* bucket_counts,
-                                                        cuda_bitset_t touched) {
-    vram_grid_warp_t const warp = vram_grid_warp<cuda_warp_t>();
-    for (u32_t offset = warp.index; offset < walk_count; offset += warp.count) {
-        u32_t const row = node_ids ? node_ids[offset] : first_id + offset;
-        if (warp.lane == 0) cuda_bitset_insert(touched, row);
-        if (node_ids) continue;
-        vram_for_each_link<cuda_warp_t>(
-            shadow_neighbors, connectivity, rows_count, row, warp.lane, [&](u32_t target) noexcept {
-                cuda_bitset_insert(touched, target);
-                u32_t const landing = cuda_warp_t::fetch_add_relaxed(bucket_counts[target], 1u);
-                u32_t* const bucket = vram_row(bucket_ids, target, bucket_width);
-                if (landing < bucket_width) bucket[landing] = row;
-            });
-    }
-}
-
 /** One warp merges one node's forward & reverse candidates into its final neighbors, assigning
  *  itself node IDs from the pass counter. */
 template <vram_quads_kit kit_, vram_schedule<kit_> schedule_>
@@ -277,7 +238,8 @@ __device__ __forceinline__ void cuda_merge_back_links(vram_refine_view<kit_> con
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t>(view, dynamic_scratch);
     u32_t const warp = slice.warp, lane = slice.lane;
     vram_vector_cache<typename kit_::fragment_t> const cache {
-        reinterpret_cast<typename kit_::fragment_t*>(slice.scratch), view.storage.row_fragments};
+        reinterpret_cast<typename kit_::fragment_t*>(slice.scratch), view.storage.row_fragments,
+        view.arena_shape.cache_bytes ? gathered[warp].ids : nullptr};
     schedule_ schedule {schedule_states[warp], lane};
     while (true) {
         u32_t node_id = lane == 0 ? cuda_warp_t::fetch_add_relaxed(*view.assigned_rows, 1u) : 0;
@@ -612,17 +574,19 @@ __device__ __forceinline__ void cuda_mark_seeds(cuda_bitset_t reached, cuda_bits
  *  ones it reaches first join @p next_frontier. Only the frontier expands, so a level is the same
  *  set of rows however the warps interleave, and sweeping until a level expands nothing takes the
  *  landmarks' eccentricity in levels; a level whose @p expanded_before reads zero was queued past
- *  convergence and has nothing to expand. */
+ *  convergence and has nothing to expand. The first expansion of a level counts it in @p levels, so
+ *  the host reads the depth from one word. */
 __device__ __forceinline__ void cuda_reachability_sweep(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
                                                         cuda_bitset_t reached, cuda_bitset_t frontier,
                                                         cuda_bitset_t next_frontier, u32_t* expanded,
-                                                        u32_t const* expanded_before) {
+                                                        u32_t const* expanded_before, u32_t* levels) {
     // The level before landed ahead of this launch, so every thread reads one settled word.
     if (expanded_before && !*expanded_before) return;
     vram_grid_warp_t const warp = vram_grid_warp<cuda_warp_t>();
     for (u32_t row = warp.index; row < rows_count; row += warp.count) {
         if (!cuda_bitset_contains(frontier, row)) continue;
-        if (warp.lane == 0) cuda_warp_t::fetch_add_relaxed(*expanded, 1u);
+        if (warp.lane == 0 && !cuda_warp_t::fetch_add_relaxed(*expanded, 1u))
+            cuda_warp_t::fetch_add_relaxed(*levels, 1u);
         vram_for_each_link<cuda_warp_t>(neighbors, connectivity, rows_count, row, warp.lane,
                                         [&](u32_t target) noexcept {
                                             if (cuda_bitset_insert(reached, target))
@@ -1129,7 +1093,9 @@ __device__ __forceinline__ vram_refine_view<kit_> cuda_view(cuda_refine_t const&
             refine.assigned_rows,
             refine.node_ids,
             refine.sampling_bound,
-            refine.appended_base};
+            refine.part_bases,
+            refine.parts,
+            refine.round};
 }
 template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_search_sink<kit_> cuda_view(cuda_search_sink_t const& sink) noexcept {
@@ -1186,7 +1152,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
                                   cuda_resident_blocks(static_cast<cuda_kernel_t>(kernel_), slots_))
     cuda_kernel(cuda_arguments_t arguments) {
     using kit_t = cuda_kit<capabilities_, dtype_>;
-    using schedule_t = cuda_schedule_chain<static_cast<nk_capability_t>(capabilities_) * nk_cap_cuda_k>;
+    using schedule_t = cuda_schedule_of<static_cast<nk_capability_t>(capabilities_) * nk_cap_cuda_k>;
     constexpr cuda_kernel_t kernel = static_cast<cuda_kernel_t>(kernel_);
     cuda_graph_t const& graph = arguments.graph;
     // Launched overlapping its predecessor's drain, so nothing is read before that predecessor
@@ -1257,7 +1223,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
         cuda_mark_seeds(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
     else if constexpr (kernel == cuda_kernel_t::reachability_sweep_k)
         cuda_reachability_sweep(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached, graph.frontier,
-                                graph.next_frontier, graph.counter, graph.previous_counter);
+                                graph.next_frontier, graph.counter, graph.previous_counter, graph.levels);
     else if constexpr (kernel == cuda_kernel_t::reachability_islands_k)
         cuda_reachability_islands(graph.reached, graph.rows_count, graph.island_ids, graph.counter);
     else if constexpr (kernel == cuda_kernel_t::reached_in_links_k)

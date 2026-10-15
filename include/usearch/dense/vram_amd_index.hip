@@ -23,7 +23,7 @@
 #include <numkong/cast/simt.cuh> // `nk_cast_unit_simt_` - the import casts' device body
 #include <numkong/each/rocm.cuh> // `nk_each_rmscast_e4m3_rocm_vectors_` & kin - the unit-RMS import's device bodies
 
-#include "usearch/dense/vram_queue.cuh"
+#include "usearch/utilities/vram_queue.cuh"
 #include "usearch/dense/vram_index.cuh"
 #include "usearch/dense/vram_amd_metric.hip"
 #include "usearch/dense/vram_amd_index.hpp"
@@ -97,7 +97,9 @@ __device__ __forceinline__ vram_refine_view<kit_> amd_view(amd_refine_t const& r
             refine.assigned_rows,
             refine.node_ids,
             refine.sampling_bound,
-            refine.appended_base};
+            refine.part_bases,
+            refine.parts,
+            refine.round};
 }
 template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_search_sink<kit_> amd_view(amd_search_sink_t const& sink) noexcept {
@@ -216,7 +218,8 @@ __device__ __forceinline__ void amd_insert(vram_build_view<kit_> const& view) {
     vram_warp_slice_t const slice = vram_carve_slice<hip_warp_t>(view, dynamic_scratch);
     u32_t const warp = slice.warp, lane = slice.lane;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
+    vram_vector_cache<typename kit_::fragment_t> const cache {
+        query_span, view.storage.row_fragments, view.arena_shape.cache_bytes ? gathered[warp].ids : nullptr};
     schedule_ schedule {schedule_states[warp], lane};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(cache, view.storage.connectivity);
     using frontier_t = std::conditional_t<pool_slots_ == 0, vram_arena_frontier<hip_warp_t>,
@@ -255,7 +258,8 @@ __device__ __forceinline__ void amd_refine(vram_refine_view<kit_> const& view) {
     vram_warp_slice_t const slice = vram_carve_slice<hip_warp_t>(view, dynamic_scratch);
     u32_t const warp = slice.warp, lane = slice.lane;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
+    vram_vector_cache<typename kit_::fragment_t> const cache {
+        query_span, view.storage.row_fragments, view.arena_shape.cache_bytes ? gathered[warp].ids : nullptr};
     schedule_ schedule {schedule_states[warp], lane};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(cache, view.storage.connectivity);
     using frontier_t = std::conditional_t<pool_slots_ == 0, vram_arena_frontier<hip_warp_t>,
@@ -555,7 +559,8 @@ __device__ __forceinline__ void amd_merge_back_links(vram_refine_view<kit_> cons
     vram_warp_slice_t const slice = vram_carve_slice<hip_warp_t>(view, dynamic_scratch);
     u32_t const warp = slice.warp, lane = slice.lane;
     vram_vector_cache<typename kit_::fragment_t> const cache {
-        reinterpret_cast<typename kit_::fragment_t*>(slice.scratch), view.storage.row_fragments};
+        reinterpret_cast<typename kit_::fragment_t*>(slice.scratch), view.storage.row_fragments,
+        view.arena_shape.cache_bytes ? gathered[warp].ids : nullptr};
     schedule_ schedule {schedule_states[warp], lane};
     while (true) {
         u32_t node_id = lane == 0 ? hip_warp_t::fetch_add_relaxed(*view.assigned_rows, 1u) : 0;
@@ -619,17 +624,18 @@ __device__ __forceinline__ void amd_mark_seeds(hip_bitset_t reached, hip_bitset_
 }
 
 /** One level of forward reachability from the frontier; a level whose @p expanded_before reads zero
- *  was queued past convergence and has nothing to expand. */
+ *  was queued past convergence and has nothing to expand. The first expansion of a level counts it
+ *  in @p levels, so the host reads the depth from one word. */
 __device__ __forceinline__ void amd_reachability_sweep(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
                                                        hip_bitset_t reached, hip_bitset_t frontier,
                                                        hip_bitset_t next_frontier, u32_t* expanded,
-                                                       u32_t const* expanded_before) {
+                                                       u32_t const* expanded_before, u32_t* levels) {
     // The level before landed ahead of this launch, so every thread reads one settled word.
     if (expanded_before && !*expanded_before) return;
     vram_grid_warp_t const warp = vram_grid_warp<hip_warp_t>();
     for (u32_t row = warp.index; row < rows_count; row += warp.count) {
         if (!amd_bitset_contains(frontier, row)) continue;
-        if (warp.lane == 0) hip_warp_t::fetch_add_relaxed(*expanded, 1u);
+        if (warp.lane == 0 && !hip_warp_t::fetch_add_relaxed(*expanded, 1u)) hip_warp_t::fetch_add_relaxed(*levels, 1u);
         vram_for_each_link<hip_warp_t>(neighbors, connectivity, rows_count, row, warp.lane, [&](u32_t target) noexcept {
             if (amd_bitset_insert(reached, target)) amd_bitset_insert(next_frontier, target);
         });
@@ -767,7 +773,7 @@ __device__ __forceinline__ void amd_walk_rung(vram_search_view<kit_> const& view
 template <u32_t kernel_, u32_t gpu_class_, u32_t dtype_, u32_t slots_, u32_t lookup_>
 __global__ void __launch_bounds__(vram_warps_per_block_k* hip_warp_t::width_k) amd_kernel(amd_arguments_t arguments) {
     using kit_t = amd_kit<gpu_class_, dtype_>;
-    using schedule_t = hip_schedule_chain<amd_capabilities_of(static_cast<gpu_class_t>(gpu_class_))>;
+    using schedule_t = rocm_schedule_of<amd_capabilities_of(static_cast<gpu_class_t>(gpu_class_))>;
     constexpr amd_kernel_t kernel = static_cast<amd_kernel_t>(kernel_);
     amd_graph_t const& graph = arguments.graph;
     if constexpr (kernel == amd_kernel_t::insert_k)
@@ -813,7 +819,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_warp_t::width_k) a
         amd_mark_seeds(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
     else if constexpr (kernel == amd_kernel_t::reachability_sweep_k)
         amd_reachability_sweep(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached, graph.frontier,
-                               graph.next_frontier, graph.counter, graph.previous_counter);
+                               graph.next_frontier, graph.counter, graph.previous_counter, graph.levels);
     else if constexpr (kernel == amd_kernel_t::reachability_islands_k)
         amd_reachability_islands(graph.reached, graph.rows_count, graph.island_ids, graph.counter);
     else if constexpr (kernel == amd_kernel_t::reached_in_links_k)

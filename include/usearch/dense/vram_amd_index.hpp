@@ -177,7 +177,9 @@ struct amd_refine_t {
     u32_t* assigned_rows = nullptr;
     u32_t const* node_ids = nullptr;
     u32_t sampling_bound = 0;
-    u32_t appended_base = 0;
+    u32_t const* part_bases = nullptr;
+    u32_t parts = 0;
+    u32_t round = 0;
 };
 
 /** A search's landing, mirroring the shared search sink. */
@@ -227,6 +229,9 @@ struct amd_graph_t {
 
     /** The count of the sweep before; zero sends a sweep queued past convergence home at entry. */
     u32_t const* previous_counter = nullptr;
+
+    /** The levels that expanded anything, each counted by its first expansion. */
+    u32_t* levels = nullptr;
     u32_t* island_ids = nullptr;
     u32_t islands_count = 0;
     u32_t seed_count = 0;
@@ -1315,123 +1320,307 @@ struct vram_amd_index {
     using refine_result_t = dense::refine_result_t;
     using health_result_t = dense::health_result_t;
 
+  private:
+
+    /** Sweeps an audit numbers from one and stops below: every row joins one frontier at most, so
+     *  the levels are bounded by the landmarks' eccentricity, capped defensively. */
+    inline static constexpr std::size_t audit_sweeps_cap_k = 256;
+
+    /** Device scratch one refine plan carves once and its passes and audits reuse, or the audit
+     *  share one @c health carves: the reached set and two frontiers, the levels counter beside
+     *  every sweep's expanded counter, the unreached, reconnected and claim counters an audit lands
+     *  together, then for a refine the passes' buffers, the unreached rows' IDs and in-link counts,
+     *  and the parts' bases. */
+    struct refine_scratch_t {
+        typename traversal_context_t::bytes_ptr_t bytes;
+        hip_bitset_t reached, frontier, next_frontier;
+
+        /** Rows each sweep expanded, at the sweep's number, @b [audit_sweeps_cap_k]; slot zero,
+         *  which no sweep numbers, counts the levels that expanded anything. */
+        u32_t* expanded = nullptr;
+        u32_t* unreached = nullptr;
+        u32_t* reconnected = nullptr;
+
+        /** The walk's and the merge's claim counters, the last pass's completion oracle. */
+        u32_t* claims = nullptr;
+
+        /** The reverse buckets' fill counters, then the bitset of rows the merge re-selects. */
+        u32_t* bucket_counts = nullptr;
+        hip_bitset_t touched;
+        u32_t* island_ids = nullptr;
+        u32_t* in_links = nullptr;
+
+        /** The shadow neighbors the walks land and the reverse buckets, @b [rows,connectivity]
+         *  each. */
+        u32_t* shadow_neighbors = nullptr;
+        u32_t* buckets = nullptr;
+
+        /** The ascending first rows of the parts the walks merge, uploaded once by the plan. */
+        u32_t* part_bases = nullptr;
+        std::size_t words = 0;
+    };
+
+    /** The counters an audit lands in page-locked memory, in the order of the device's: the levels
+     *  that expanded, the last sweep's count, which only a sweep short of convergence leaves
+     *  nonzero, then the unreached, reconnected and claim counters. */
+    struct audit_landing_t {
+        u32_t levels;
+        u32_t last_expanded;
+        u32_t unreached;
+        u32_t reconnected;
+        u32_t claims[2];
+    };
+
+    /** Gives a landing back to the stream's slots it came from. */
+    struct landing_return_t {
+        hip_landings_t* landings = nullptr;
+        void operator()(audit_landing_t* landing) const noexcept { landings->give_back(landing); }
+    };
+    using audit_landing_ptr_t = std::unique_ptr<audit_landing_t, landing_return_t>;
+    static_assert(sizeof(audit_landing_t) <= hip_landings_t::slot_bytes_k);
+
+  public:
     /**
-     *  @brief Re-selects the neighbors of every node in @p nodes from a fresh walk seeded by the
-     *      ones it holds, then heals whatever no search can reach - the same pass the CPU's
-     *      @c refine_plan_t runs. An empty range heals.
+     *  @brief One refinement in flight on this index's device - the CPU's @c refine_plan_t in the
+     *      shape one host thread drives over many devices at once: @ref queue a phase, @ref wait
+     *      for it, @ref advance past it, and @ref finish once no phase follows.
      *
-     *  The walk lands shadow neighbors, the scatter buckets every pick under its target, and the
-     *  merge re-judges forward and reverse candidates together, backfilling what diversity leaves
-     *  empty. The heal then sweeps reachability and, round by round while the islands shrink,
-     *  re-selects them and reconnects whatever stays unreached into a reached pick or the landmark
-     *  covering it.
+     *  The phases re-select every node of the planned range, once per round of walks across while
+     *  the shard holds several parts, then audit reachability, then heal round by round while the
+     *  islands shrink: re-select them, and reconnect whatever stays unreached into a reached pick
+     *  or the landmark covering it. A phase queues its launches and the landing of its counters
+     *  behind the context's event and never waits; @ref plan_refine made every allocation, so no
+     *  phase allocates, and only a device fault fails one. Demands an exclusive caller: the merge
+     *  writes live neighbors with plain stores.
+     */
+    struct refine_plan_t {
+
+        /** An unbound plan over @p scratch - what a refused plan answers with. */
+        explicit refine_plan_t(refine_scratch_t&& scratch) noexcept : scratch_(std::move(scratch)) {}
+        refine_plan_t(refine_plan_t&&) noexcept = default;
+        refine_plan_t& operator=(refine_plan_t&&) noexcept = default;
+
+        /** Queues the current phase on the context's stream, then the landing of its counters and
+         *  telemetry behind the context's event; never waits and never allocates. */
+        status_t queue() noexcept {
+            if (!index_) return status_t::uninitialized_k;
+            if (failed(status_)) return status_;
+            hip_stream_handle_t const stream = context_->stream();
+            switch (phase_) {
+            case phase_t::reselect_k: {
+                iota_view<node_id_t> const range = round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
+                walked_ = range.size();
+                if (walked_) status_ = index_->refine_pass_(*context_, scratch_, config_, range, {}, parts_, round_);
+                if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), stream);
+                break;
+            }
+            case phase_t::audit_k:
+                walked_ = 0;
+                status_ = index_->queue_audit_(*context_, scratch_, landing_.get());
+                break;
+            case phase_t::heal_k:
+                // The island IDs replace the range: offsets below their count index them. Only
+                // island rows change, and no reached row points at one, so the audit before stands.
+                walked_ = islands_;
+                status_ = index_->refine_pass_(*context_, scratch_, config_, {0, islands_},
+                                               {scratch_.island_ids, islands_});
+                if (succeeded(status_)) status_ = index_->queue_reconnect_(scratch_, islands_, stream);
+                if (succeeded(status_)) status_ = index_->queue_audit_(*context_, scratch_, landing_.get());
+                break;
+            default: return status_t::success_k;
+            }
+            if (succeeded(status_)) status_ = context_->record();
+            return status_;
+        }
+
+        /** Sleeps until the queued phase landed, on the context's event. */
+        status_t wait() noexcept {
+            if (!index_ || phase_ == phase_t::done_k) return status_;
+            if (succeeded(status_)) status_ = context_->event_.drain();
+            return status_;
+        }
+
+        /** The barrier after a phase landed: reads its counters, picks the next phase, and answers
+         *  whether one follows. */
+        bool advance() noexcept {
+            if (!index_ || failed(status_) || phase_ == phase_t::done_k) return false;
+            audit_landing_t const& landed = *landing_;
+            // The claim counts are the completion oracle: every offset claimed means every row
+            // landed.
+            if (walked_ && (landed.claims[0] < walked_ || landed.claims[1] < scratch_rows_)) {
+                status_ = status_t::device_error_k;
+                return false;
+            }
+            tally_.visited_nodes += walked_;
+            if (phase_ == phase_t::reselect_k) {
+                if (!stopped_ && ++round_ != rounds_) return true;
+                phase_ = phase_t::audit_k;
+                return true;
+            }
+            auto const [health, audit_status] = audited_(landed, scratch_rows_);
+            tally_.health = health;
+            tally_.islands_reconnected = landed.reconnected;
+            // Rows past an unconverged audit are unjudged, not unreached, so nothing heals them.
+            if (failed(audit_status)) {
+                status_ = audit_status;
+                phase_ = phase_t::done_k;
+                return false;
+            }
+            u32_t const left = landed.unreached;
+            if (phase_ == phase_t::audit_k) tally_.islands_found = left;
+            // A round that frees no island frees none on the next either, since the picks it needs
+            // are unreached.
+            bool const healing = left && (phase_ == phase_t::audit_k || left < islands_);
+            islands_ = left;
+            phase_ = healing ? phase_t::heal_k : phase_t::done_k;
+            return healing;
+        }
+
+        /** Stops the re-selection after the round that landed last, so the next phase audits and
+         *  heals; a no-op in any other phase. */
+        void stop() noexcept {
+            if (phase_ == phase_t::reselect_k) stopped_ = true, phase_ = phase_t::audit_k;
+        }
+
+        /** Whether the current phase re-selects the planned range - the phase a caller's
+         *  progress counts. */
+        bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
+
+        /** Nodes re-selected so far. */
+        std::size_t visited() const noexcept { return tally_.visited_nodes; }
+
+        /** The pass: its telemetry read from the last landing, complete once @ref advance answered
+         *  false, otherwise @c cancelled_k; a failure a phase kept answers instead. */
+        expected<refine_result_t> finish() const noexcept {
+            if (!index_) return {{}, status_t::uninitialized_k};
+            refine_result_t result = tally_;
+            vram_telemetry_block_t const spent = context_->spent();
+            result.changed_nodes = spent.changed_nodes;
+            result.visited_members = spent.hops;
+            result.computed_distances = spent.scored;
+            result.restarts = spent.restarts;
+            if (failed(status_)) return {result, status_};
+            return {result, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
+        }
+
+      private:
+        friend struct vram_amd_index;
+        enum class phase_t : u8_t { reselect_k, audit_k, heal_k, done_k };
+
+        refine_scratch_t scratch_;
+        vram_amd_index* index_ = nullptr;
+        traversal_context_t* context_ = nullptr;
+        audit_landing_ptr_t landing_ {nullptr, landing_return_t {}};
+        refine_config_t config_ {};
+
+        /** The IDs the first round re-selects, and the rows the scratch covers. */
+        iota_view<node_id_t> nodes_;
+        std::size_t scratch_rows_ = 0;
+
+        /** Parts the rounds merge, the rounds, and the round queued or, once they
+         *  ended, finished. */
+        u32_t parts_ = 0;
+        u32_t rounds_ = 1;
+        u32_t round_ = 0;
+        bool stopped_ = false;
+
+        /** Rows the queued phase walks, and the islands the last audit left. */
+        std::size_t walked_ = 0;
+        u32_t islands_ = 0;
+        phase_t phase_ = phase_t::done_k;
+        status_t status_ = status_t::success_k;
+        refine_result_t tally_;
+    };
+
+    /**
+     *  @brief Opens a refinement of the nodes in @p nodes, clamped to the published IDs, on
+     *      @p context 's stream: carves the scratch, grows the context's arena for the widest walk,
+     *      takes a page-locked landing and queues the upload of @p part_bases.
      *
-     *  An @p appended_base inside the published IDs splits the rows into two parts no edge joins,
-     *  the resident part below it and the appended part from it on, as a shard that absorbed
-     *  another's rows holds them. Each node of @p nodes then first walks across into the other part
-     *  alone, from an empty pool and landmarks drawn there, before its own neighbors and the whole
-     *  graph, and re-selects from the union. The live graph stays as it was through the walks, so a
-     *  walk across never leaves the other part, and the heal's passes walk no part first.
+     *  No phase allocates. An empty range heals alone.
      *
-     *  Demands an exclusive caller: the merge writes live neighbors with plain stores. A stopped
-     *  sequence of passes leaves the graph correct and merely less improved.
+     *  Two or more @p part_bases below the published IDs split the rows into parts, as a shard
+     *  that absorbed others' rows holds them: each node then first walks across the neighboring
+     *  group of parts alone, round after round as @c part_across names them, from an empty pool
+     *  and landmarks drawn there, before its own neighbors and the whole graph, and re-selects
+     *  from the union. The live graph stays as it was through a round's walks, so a walk across
+     *  never leaves its group, and the heal's passes walk no part first.
      *
      *  @param[in] nodes The ID range to walk; IDs at or past @c size() are skipped.
      *  @param[inout] context The driving context; its arena grows to the pass's shape.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     *  @param[in] appended_base The first row of the appended part; zero, or one at or past
-     *      @c size(), refines with no parts.
+     *  @param[in] part_bases The ascending first rows of the parts; need not outlive the plan.
      */
-    expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
-                                     refine_config_t config = {}, node_id_t appended_base = 0) noexcept {
+    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
+                                        refine_config_t config = {},
+                                        std::span<node_id_t const> part_bases = {}) noexcept {
         std::size_t const rows = size();
-        if (!rows) return {{}, status_t::success_k};
-        if (!context) return {{}, status_t::config_mismatch_k};
-        auto [scratch, carve_status] = carve_scratch_(context, scratch_use_t::refine_k);
-        if (failed(carve_status)) return {{}, carve_status};
-        // Zeroed once, so every pass adds up, and read once the last audit landed them all.
-        if (hip_api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) !=
-            hip_success_k)
-            return {{}, status_t::device_error_k};
-        refine_result_t result;
+        std::size_t parts = 0;
+        while (parts != part_bases.size() && part_bases[parts] < rows) ++parts;
+        if (parts < 2) parts = 0;
+        auto [scratch, carve_status] = carve_scratch_(context, scratch_use_t::refine_k, parts);
+        refine_plan_t plan {std::move(scratch)};
+        if (failed(carve_status)) return {std::move(plan), carve_status};
+        if (!context) return {std::move(plan), status_t::config_mismatch_k};
+        plan.landing_ = take_landing_(context);
+        if (!plan.landing_) return {std::move(plan), status_t::bad_alloc_k};
+        // The widest walk's arena now, so no pass grows it; a fresh run is zeroed by the pass.
+        u32_t const expansion = non_zero_expansion_factor(config);
+        u32_t const walks = parts ? 2 : 1;
+        std::size_t const arena_warps = device_.multiprocessor_count * insert_blocks_per_multiprocessor_k *
+                                        vram_warps_per_block_k;
+        if (!context.ensure_arena(
+                arena_warps *
+                build_arena_shape_(expansion * walks, pool_slots_for_(expansion, 4) * walks).slice_bytes()))
+            return {std::move(plan), status_t::bad_alloc_k};
+        hip_stream_handle_t const stream = context.stream();
+        hip_api_t const& runtime = hip_api();
+        // Zeroed once, so every pass adds up, and landed with every phase. A pageable upload stages
+        // on the host at once and waits on nothing.
+        if (runtime.fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != hip_success_k ||
+            (parts && runtime.copy_async(plan.scratch_.part_bases, part_bases.data(), parts * sizeof(node_id_t),
+                                         hip_copy_host_to_device_k, stream) != hip_success_k))
+            return {std::move(plan), status_t::device_error_k};
         node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
-        if (nodes.first < bound) {
-            if (status_t const queued = refine_pass_(context, scratch, config, {nodes.first, bound}, {},
-                                                     appended_base < rows ? appended_base : 0);
-                failed(queued))
-                return {result, queued};
-            result.visited_nodes = bound - nodes.first;
-        }
-
-        auto [islands, audit_status] = audit_(context, scratch, result.visited_nodes);
-        if (failed(audit_status)) return {result, audit_status};
-        result.islands_found = islands;
-        result.sweeps = scratch.sweeps;
-        for (u32_t islands_before = islands; islands; islands_before = islands) {
-            // The island IDs replace the range: offsets below their count index them. Only island
-            // rows change, and no reached row points at one, so the audit before stands.
-            if (status_t const queued = refine_pass_(context, scratch, config, {0, islands},
-                                                     {scratch.island_ids, islands});
-                failed(queued))
-                return {result, queued};
-            result.visited_nodes += islands;
-            // The reached in-links first, so no reconnection takes the last link a reached node is
-            // found through.
-            if (hip_api().fill_async(scratch.in_links, 0, rows * sizeof(u32_t), context.stream()) != hip_success_k)
-                return {result, status_t::device_error_k};
-            amd_arguments_t heal {};
-            heal.graph.neighbors = neighbor_rows_();
-            heal.graph.rows_count = static_cast<u32_t>(rows);
-            heal.graph.connectivity = static_cast<u32_t>(connectivity());
-            heal.graph.reached = scratch.reached;
-            heal.graph.in_links = scratch.in_links;
-            heal.graph.island_ids = scratch.island_ids;
-            heal.graph.islands_count = islands;
-            heal.graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(connectivity(), rows));
-            heal.graph.reconnected = scratch.reconnected;
-            if (status_t const counted = launch_(amd_kernel_t::reached_in_links_k, 0,
-                                                 device_.multiprocessor_count * search_blocks_per_multiprocessor_k, 0,
-                                                 context.stream(), heal);
-                failed(counted))
-                return {result, counted};
-            if (status_t const launched = launch_(amd_kernel_t::reconnect_island_k, 0,
-                                                  divide_round_up<u32_t>(islands, block_threads()), 0, context.stream(),
-                                                  heal);
-                failed(launched))
-                return {result, launched};
-            auto const [left, left_status] = audit_(context, scratch, islands);
-            if (failed(left_status)) return {result, left_status};
-            result.sweeps += scratch.sweeps;
-            islands = left;
-            // A round that frees no island frees none on the next either, since the picks it needs
-            // are unreached.
-            if (islands >= islands_before) break;
-        }
-        vram_telemetry_block_t spent = {};
-        if (hip_api().copy_async(&spent, context.telemetry_.get(), sizeof(spent), hip_copy_device_to_host_k,
-                                 context.stream()) != hip_success_k ||
-            hip_api().stream_synchronize(context.stream()) != hip_success_k)
-            return {result, status_t::device_error_k};
-        result.changed_nodes = spent.changed_nodes;
-        result.visited_members = spent.hops;
-        result.computed_distances = spent.scored;
-        result.restarts = spent.restarts;
-        result.islands_reconnected = scratch.reconnections;
-        result.reachable_nodes = rows - islands;
-        return {result, status_t::success_k};
+        plan.index_ = this;
+        plan.context_ = &context;
+        plan.config_ = config;
+        plan.nodes_ = {min_of(nodes.first, bound), bound};
+        plan.scratch_rows_ = rows;
+        plan.parts_ = static_cast<u32_t>(parts);
+        plan.rounds_ = parts ? static_cast<u32_t>(std::bit_width(parts - 1)) : 1u;
+        plan.phase_ = plan.nodes_.empty() && plan.rounds_ == 1 ? refine_plan_t::phase_t::audit_k
+                                                               : refine_plan_t::phase_t::reselect_k;
+        if (!rows) plan.phase_ = refine_plan_t::phase_t::done_k;
+        return {std::move(plan), status_t::success_k};
     }
 
-    /** Measures forward reachability from as many stride-spread landmarks as one search draws - the
-     *  connectivity; any shortfall against @c size() is the population no search can discover.
-     *  Read-only on the graph, so concurrent insertions may leave fresh nodes uncounted. */
+    /** One @ref refine_plan_t driven to its end on the calling thread, waiting once per phase. */
+    expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
+                                     refine_config_t config = {}, std::span<node_id_t const> part_bases = {}) noexcept {
+        auto [plan, status] = plan_refine(nodes, context, config, part_bases);
+        if (failed(status)) return {{}, status};
+        do
+            if (status_t const landed = plan.queue(); failed(landed) || failed(plan.wait())) break;
+        while (plan.advance());
+        return plan.finish();
+    }
+
+    /** Measures forward reachability from as many stride-spread landmarks as one search draws -
+     *  the connectivity; any shortfall against @c size() is the population no search can
+     *  discover. Read-only on the graph, so concurrent insertions may leave fresh nodes
+     *  uncounted. Waits once, on the context's event; @c overflow_k when the sweeps reached
+     *  their cap unconverged. */
     expected<health_result_t> health(traversal_context_t& context) noexcept {
         std::size_t const rows = size();
         if (!rows) return {{}, status_t::success_k};
         auto [scratch, carve_status] = carve_scratch_(context, scratch_use_t::audit_k);
         if (failed(carve_status)) return {{}, carve_status};
-        auto const [unreached, audit_status] = audit_(context, scratch, 0);
-        if (failed(audit_status)) return {{}, audit_status};
-        return {{rows, rows - unreached, scratch.sweeps}, status_t::success_k};
+        audit_landing_ptr_t const landing = take_landing_(context);
+        if (!landing) return {{}, status_t::bad_alloc_k};
+        if (status_t const queued = queue_audit_(context, scratch, landing.get()); failed(queued)) return {{}, queued};
+        if (status_t const drained = context.drain(); failed(drained)) return {{}, drained};
+        return audited_(*landing, rows);
     }
 
     /** The bytes an executor's run must hold before a context carved over it can refine the rows
@@ -2030,8 +2219,7 @@ struct vram_amd_index {
             return {load_plan_t {*this, {}, {}, stream, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
         // A closed word is the caller's, who refines or absorbs around the load; an open one is
         // claimed like a batch's, so no batch lands beside it.
-        bool const claiming = standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire) !=
-                              node_id_unknown_k;
+        bool const claiming = !claims_.closed();
         node_id_t base = static_cast<node_id_t>(size());
         if (claiming) {
             auto const [first_id, claim_status] = claim_(rows);
@@ -2593,53 +2781,22 @@ struct vram_amd_index {
 
 #pragma region Refinement
 
-    /** Sweeps an audit numbers from one and stops below: every row joins one frontier at most, so
-     *  the levels are bounded by the landmarks' eccentricity, capped defensively. */
-    inline static constexpr std::size_t audit_sweeps_cap_k = 256;
+    /** A zeroed landing from @p context 's stream slots, or null when none can pin. */
+    static audit_landing_ptr_t take_landing_(traversal_context_t& context) noexcept {
+        hip_landings_t* const landings = context.allocator_.landings();
+        void* const slot = landings ? landings->take() : nullptr;
+        return {slot ? new (slot) audit_landing_t {} : nullptr, landing_return_t {landings}};
+    }
 
-    /** Device scratch one @c refine carves once and its passes and audits reuse, or the audit share
-     *  one @c health carves: the reached set and two frontiers, every sweep's expanded counter, the
-     *  unreached, reconnected and claim counters an audit reads back together, then for a refine
-     *  the passes' buffers and the unreached rows' IDs and in-link counts. */
-    struct refine_scratch_t {
-        typename traversal_context_t::bytes_ptr_t bytes;
-        hip_bitset_t reached, frontier, next_frontier;
-
-        /** Rows each sweep expanded, at the sweep's number, @b [audit_sweeps_cap_k]. */
-        u32_t* expanded = nullptr;
-        u32_t* unreached = nullptr;
-        u32_t* reconnected = nullptr;
-
-        /** The walk's and the merge's claim counters, the last pass's completion oracle. */
-        u32_t* claims = nullptr;
-
-        /** The reverse buckets' fill counters, then the bitset of rows the merge re-selects. */
-        u32_t* bucket_counts = nullptr;
-        hip_bitset_t touched;
-        u32_t* island_ids = nullptr;
-        u32_t* in_links = nullptr;
-
-        /** The shadow neighbors the walks land and the reverse buckets, @b [rows,connectivity]
-         *  each. */
-        u32_t* shadow_neighbors = nullptr;
-        u32_t* buckets = nullptr;
-        std::size_t words = 0;
-
-        /** Levels the last audit swept to convergence, and the links every reconnection wrote by
-         *  then. */
-        std::size_t sweeps = 0;
-        std::size_t reconnections = 0;
-    };
-
-    /** Queues one pass of the three-pass refinement engine behind @c refine() into its carved
+    /** Queues one pass of the three-pass refinement engine behind @c refine_plan_t into its carved
      *  @p scratch: the walk covers @p nodes, or under a device-resident @p node_ids the listed IDs
-     *  with @p nodes spanning the array's offsets, each node first walking across into the other
-     *  part when @p appended_base is nonzero; the back-link passes re-select the walked rows and
-     *  the rows they pick, and leave every other row as it was. Nothing waits: the audit after it
-     *  lands the pass and checks its claims. */
+     *  with @p nodes spanning the array's offsets, each node first walking across the neighboring
+     *  group in round @p round when @p parts parts are given; the back-link passes re-select the
+     *  walked rows and the rows they pick, and leave every other row as it was. Nothing waits: the
+     *  landing queued after it checks its claims. */
     status_t refine_pass_(traversal_context_t& context, refine_scratch_t const& scratch, refine_config_t config,
-                          iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
-                          node_id_t appended_base = 0) noexcept {
+                          iota_view<node_id_t> nodes, std::span<u32_t const> node_ids, u32_t parts = 0,
+                          u32_t round = 0) noexcept {
         if (status_t const kept = status(); failed(kept)) return kept;
         std::size_t const nodes_count = size();
         std::size_t const walk_count = nodes.size();
@@ -2658,7 +2815,7 @@ struct vram_amd_index {
         u32_t const expansion = non_zero_expansion_factor(config);
         u32_t const pool_slots = pool_slots_for_(expansion, 4);
         // Walking across makes two walks into one visited set, so the slice is shaped for both.
-        u32_t const walks = appended_base ? 2 : 1;
+        u32_t const walks = parts > 1 ? 2 : 1;
         auto const arena_shape = build_arena_shape_(expansion * walks, pool_slots * walks);
         std::size_t const arena_warps = device_.multiprocessor_count * insert_blocks_per_multiprocessor_k *
                                         vram_warps_per_block_k;
@@ -2690,7 +2847,9 @@ struct vram_amd_index {
                            scratch.claims,
                            node_ids.data(),
                            static_cast<u32_t>(nodes_count),
-                           appended_base};
+                           parts > 1 ? scratch.part_bases : nullptr,
+                           parts > 1 ? parts : 0,
+                           round};
         // A range short of the whole graph starts from the live neighbors copied into the shadow
         // verbatim, so a row it never rewrites but one of its picks lands in merges its own
         // neighbors with the new reverse links; islands scatter nothing, so only their own rows
@@ -2736,21 +2895,25 @@ struct vram_amd_index {
     enum class scratch_use_t : bool { audit_k, refine_k };
 
     /** Bytes of the scratch over the rows published now: the audit share, and for @c refine_k the
-     *  passes' buffers and the islands' IDs and in-links too. */
-    std::size_t scratch_bytes_(scratch_use_t use) const noexcept {
+     *  passes' buffers, the islands' IDs and in-links, and @p parts bases too. */
+    std::size_t scratch_bytes_(scratch_use_t use, std::size_t parts = 0) const noexcept {
         std::size_t const rows = size(), words = divide_round_up<std::size_t>(rows, 32);
-        std::size_t const passes_words = use == scratch_use_t::refine_k ? rows * (3 + 2 * connectivity()) + words : 0;
+        std::size_t const passes_words = use == scratch_use_t::refine_k
+                                             ? rows * (3 + 2 * connectivity()) + words + parts
+                                             : 0;
         return (words * 3 + audit_sweeps_cap_k + 4 + passes_words) * sizeof(u32_t);
     }
 
-    /** Carves the scratch over the rows published now, for @c refine_k the whole of a refine's,
-     *  otherwise the audit share alone, the reconnected counter zeroed. */
-    expected<refine_scratch_t> carve_scratch_(traversal_context_t& context, scratch_use_t use) noexcept {
+    /** Carves the scratch over the rows published now, for @c refine_k the whole of a refine's
+     *  with room for @p parts bases, otherwise the audit share alone, the reconnected counter
+     *  zeroed. */
+    expected<refine_scratch_t> carve_scratch_(traversal_context_t& context, scratch_use_t use,
+                                              std::size_t parts = 0) noexcept {
         refine_scratch_t scratch {typename traversal_context_t::bytes_ptr_t {
             nullptr, hip_deleter<typename traversal_context_t::allocator_t> {context.allocator_, 0}}};
         if (!vectors_matrix_.reserved_bytes()) return {std::move(scratch), status_t::uninitialized_k};
         if (context.device() != device_.ordinal) return {std::move(scratch), status_t::config_mismatch_k};
-        std::size_t const rows = size(), bytes = scratch_bytes_(use);
+        std::size_t const rows = size(), bytes = scratch_bytes_(use, parts);
         scratch.bytes.reset(context.allocator_.allocate(bytes));
         scratch.bytes.get_deleter().count = bytes;
         if (!scratch.bytes) return {std::move(scratch), status_t::bad_alloc_k};
@@ -2769,24 +2932,42 @@ struct vram_amd_index {
             scratch.in_links = scratch.island_ids + rows;
             scratch.shadow_neighbors = scratch.in_links + rows;
             scratch.buckets = scratch.shadow_neighbors + rows * connectivity();
+            scratch.part_bases = scratch.buckets + rows * connectivity();
         }
         if (hip_api().fill_async(scratch.reconnected, 0, sizeof(u32_t), context.stream()) != hip_success_k)
             return {std::move(scratch), status_t::device_error_k};
         return {std::move(scratch), status_t::success_k};
     }
 
-    /** Sweeps reachability to convergence from as many stride-spread landmarks as one search draws
-     *  - the connectivity - then counts the rows it never reached, collecting their IDs when
-     *    @p scratch has room for them. Waits once, reading every counter back together, which also
-     *    lands a pass queued before it over @p walked rows and checks that pass's claims. */
-    expected<u32_t> audit_(traversal_context_t& context, refine_scratch_t& scratch, std::size_t walked) noexcept {
+    /** Queues the copy of @p scratch 's counters into @p landing: the levels apart, then the last
+     *  sweep's count beside the unreached, reconnected and claim counters, which lie back to
+     *  back. */
+    static status_t land_counters_(refine_scratch_t const& scratch, audit_landing_t* landing,
+                                   hip_stream_handle_t stream) noexcept {
+        hip_api_t const& runtime = hip_api();
+        return runtime.copy_async(&landing->levels, scratch.expanded, sizeof(u32_t), hip_copy_device_to_host_k,
+                                  stream) == hip_success_k &&
+                       runtime.copy_async(&landing->last_expanded, scratch.expanded + audit_sweeps_cap_k - 1,
+                                          sizeof(audit_landing_t) - sizeof(u32_t), hip_copy_device_to_host_k,
+                                          stream) == hip_success_k
+                   ? status_t::success_k
+                   : status_t::device_error_k;
+    }
+
+    /** Queues a reachability sweep to convergence from as many stride-spread landmarks as one
+     *  search draws - the connectivity - then a count of the rows it never reached, collecting
+     *  their IDs when @p scratch has room for them, then the landing of every counter. Nothing
+     *  waits; the caller reads @p landing once its event fired. */
+    status_t queue_audit_(traversal_context_t& context, refine_scratch_t const& scratch,
+                          audit_landing_t* landing) noexcept {
         std::size_t const rows = size();
         hip_stream_handle_t const stream = context.stream();
         std::size_t const seed_count = min_of<std::size_t>(connectivity(), rows);
-        // The bitsets, the sweeps' expanded counters and the unreached counter lie back to back.
+        // The bitsets, the levels and sweeps' expanded counters and the unreached counter lie back
+        // to back.
         if (hip_api().fill_async(scratch.reached.words, 0, (scratch.words * 3 + audit_sweeps_cap_k + 1) * sizeof(u32_t),
                                  stream) != hip_success_k)
-            return {0, status_t::device_error_k};
+            return status_t::device_error_k;
         amd_arguments_t sweep {};
         sweep.graph.neighbors = neighbor_rows_();
         sweep.graph.rows_count = static_cast<u32_t>(rows);
@@ -2796,12 +2977,13 @@ struct vram_amd_index {
         sweep.graph.frontier = scratch.frontier;
         sweep.graph.next_frontier = scratch.next_frontier;
         sweep.graph.counter = scratch.expanded;
+        sweep.graph.levels = scratch.expanded;
         sweep.graph.island_ids = scratch.island_ids;
         if (status_t const launched = launch_(amd_kernel_t::mark_seeds_k, 0,
                                               divide_round_up<u32_t>(static_cast<u32_t>(seed_count), block_threads()),
                                               0, stream, sweep);
             failed(launched))
-            return {0, launched};
+            return launched;
 
         // Every sweep up to the cap queues blind: one queued past convergence finds the one before
         // it expanded nothing and leaves at entry.
@@ -2811,10 +2993,10 @@ struct vram_amd_index {
             sweep.graph.previous_counter = sweep_number == 1 ? nullptr : scratch.expanded + sweep_number - 1;
             if (hip_api().fill_async(sweep.graph.next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) !=
                 hip_success_k)
-                return {0, status_t::device_error_k};
+                return status_t::device_error_k;
             if (status_t const launched = launch_(amd_kernel_t::reachability_sweep_k, 0, grid, 0, stream, sweep);
                 failed(launched))
-                return {0, launched};
+                return launched;
             std::swap(sweep.graph.frontier, sweep.graph.next_frontier);
         }
         sweep.graph.counter = scratch.unreached;
@@ -2822,22 +3004,42 @@ struct vram_amd_index {
                                               divide_round_up<u32_t>(static_cast<u32_t>(rows), block_threads()), 0,
                                               stream, sweep);
             failed(launched))
-            return {0, launched};
-        // The expanded, unreached, reconnected and claim counters lie back to back.
-        u32_t counters[audit_sweeps_cap_k + 4] = {};
-        if (hip_api().copy_async(counters, scratch.expanded, sizeof(counters), hip_copy_device_to_host_k, stream) !=
-                hip_success_k ||
-            hip_api().stream_synchronize(stream) != hip_success_k)
-            return {0, status_t::device_error_k};
-        // The claim counts are the completion oracle: every offset claimed means every row landed.
-        u32_t const* const claimed = counters + audit_sweeps_cap_k + 2;
-        if (walked && (claimed[0] < walked || claimed[1] < rows)) return {0, status_t::device_error_k};
-        scratch.sweeps = audit_sweeps_cap_k;
-        for (std::size_t sweep_number = 1; sweep_number != audit_sweeps_cap_k && scratch.sweeps == audit_sweeps_cap_k;
-             ++sweep_number)
-            if (!counters[sweep_number]) scratch.sweeps = sweep_number;
-        scratch.reconnections = counters[audit_sweeps_cap_k + 1];
-        return {counters[audit_sweeps_cap_k], status_t::success_k};
+            return launched;
+        return land_counters_(scratch, landing, stream);
+    }
+
+    /** The audit @p landing reports over @p rows rows: @c overflow_k when its last sweep still
+     *  expanded, since the rows past the cap are then unjudged rather than unreached. */
+    static expected<health_result_t> audited_(audit_landing_t const& landing, std::size_t rows) noexcept {
+        if (landing.last_expanded) return {{rows, rows - landing.unreached, audit_sweeps_cap_k}, status_t::overflow_k};
+        // A sweep that expands nothing ends the levels, and it counts as one, as on the CPU.
+        return {{rows, rows - landing.unreached, std::size_t {landing.levels} + 1}, status_t::success_k};
+    }
+
+    /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected:
+     *  the reached in-links first, so no reconnection takes the last link a reached node is found
+     *  through, then each island into a reached pick or its landmark. */
+    status_t queue_reconnect_(refine_scratch_t const& scratch, u32_t islands, hip_stream_handle_t stream) noexcept {
+        std::size_t const rows = size();
+        if (hip_api().fill_async(scratch.in_links, 0, rows * sizeof(u32_t), stream) != hip_success_k)
+            return status_t::device_error_k;
+        amd_arguments_t heal {};
+        heal.graph.neighbors = neighbor_rows_();
+        heal.graph.rows_count = static_cast<u32_t>(rows);
+        heal.graph.connectivity = static_cast<u32_t>(connectivity());
+        heal.graph.reached = scratch.reached;
+        heal.graph.in_links = scratch.in_links;
+        heal.graph.island_ids = scratch.island_ids;
+        heal.graph.islands_count = islands;
+        heal.graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(connectivity(), rows));
+        heal.graph.reconnected = scratch.reconnected;
+        if (status_t const counted = launch_(amd_kernel_t::reached_in_links_k, 0,
+                                             device_.multiprocessor_count * search_blocks_per_multiprocessor_k, 0,
+                                             stream, heal);
+            failed(counted))
+            return counted;
+        return launch_(amd_kernel_t::reconnect_island_k, 0, divide_round_up<u32_t>(islands, block_threads()), 0, stream,
+                       heal);
     }
 
 #pragma endregion Refinement
@@ -2871,49 +3073,23 @@ struct vram_amd_index {
 
     /** Rows claimed by batches and loads, visible or not; a closed word holds none past the
      *  watermark. */
-    std::size_t claimed_() const noexcept {
-        std::size_t const claimed =
-            standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire);
-        return claimed == node_id_unknown_k ? size() : claimed;
-    }
+    std::size_t claimed_() const noexcept { return claims_.claimed(size()); }
 
     /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone grows, launches and publishes them. */
-    expected<node_id_t> claim_(std::size_t rows) noexcept {
-        std::size_t first = size();
-        if (rows > max_node_count_k - first) return {{}, status_t::overflow_k};
-        if (!standard_atomic_ref<std::size_t>(claimed_rows_)
-                 .compare_exchange_strong(first, first + rows, std::memory_order_acq_rel, std::memory_order_relaxed))
-            return {{}, status_t::contended_k};
-        return {static_cast<node_id_t>(first), status_t::success_k};
-    }
+    expected<node_id_t> claim_(std::size_t rows) noexcept { return claims_.claim(size(), rows, max_node_count_k); }
 
     /** Gives back the claim over @p rows from @p first, which launched nothing; a word that moved
      *  on, closed by a caller around a load, stays as it is. */
-    void unclaim_(std::size_t first, std::size_t rows) noexcept {
-        std::size_t claimed = first + rows;
-        standard_atomic_ref<std::size_t>(claimed_rows_)
-            .compare_exchange_strong(claimed, first, std::memory_order_release, std::memory_order_relaxed);
-    }
+    void unclaim_(std::size_t first, std::size_t rows) noexcept { claims_.unclaim(first, rows); }
 
     /** Closes the claim word at the watermark, so every claim refuses until @ref reopen_; refused
      *  while a batch or load is in flight. */
-    status_t close_() noexcept {
-        std::size_t visible = size();
-        return standard_atomic_ref<std::size_t>(claimed_rows_)
-                       .compare_exchange_strong(visible, node_id_unknown_k, std::memory_order_acq_rel,
-                                                std::memory_order_relaxed)
-                   ? status_t::success_k
-                   : status_t::contended_k;
-    }
+    status_t close_() noexcept { return claims_.close(size()); }
 
     /** Reopens a closed claim word at the watermark, past every row a load published meanwhile; an
      *  open one stays as it is. */
-    void reopen_() noexcept {
-        std::size_t closed = node_id_unknown_k;
-        standard_atomic_ref<std::size_t>(claimed_rows_)
-            .compare_exchange_strong(closed, size(), std::memory_order_acq_rel, std::memory_order_relaxed);
-    }
+    void reopen_() noexcept { claims_.reopen(size()); }
 
     /** Turns the watermark from @p first over @p rows drained rows once every batch claimed before
      *  has turned it, so the visible rows are always whole batches; a failure kept meanwhile
@@ -3253,10 +3429,9 @@ struct vram_amd_index {
     /** The neighbors matrix, on the same terms. */
     neighbors_matrix_allocator_t neighbors_matrix_;
 
-    /** The claim word: past the watermark by the rows of the one batch or load in flight, claimed
-     *  from the watermark by one compare-exchange, or the sentinel while a refine, an absorb, a
-     *  load or a save of the sharded index holds it closed. */
-    std::size_t claimed_rows_ = 0;
+    /** The claim word, closed while a refine, an absorb, a load or a save of the sharded index
+     *  holds it. */
+    vram_claim_word_t claims_;
 
     /** Mapped rows whose neighbors a grow sentinel-filled, read and advanced by the claim's holder
      *  alone; a reservation maps past it and the next claim fills the rest. */

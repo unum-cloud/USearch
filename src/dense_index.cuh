@@ -56,8 +56,8 @@
  */
 struct usearch_dense_index_handle_t {
 
-    using variants_t = std::variant<
-#if NUMKONG_TARGET_HASWELL
+    using dense_variant_t = std::variant<
+#if USEARCH_TARGET_INTEL_HASWELL
         // intel_haswell over serial by haswell: every dtype, 11 arms
         ram_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
@@ -90,7 +90,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         ram_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>, //
 #endif
-#endif // NUMKONG_TARGET_HASWELL
+#endif // USEARCH_TARGET_INTEL_HASWELL
+#if USEARCH_TARGET_INTEL_SIERRA
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
         // intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd:
         // bf16 u1 e4m3 f16 e5m2 i4 u4 e3m2, 8 arms
@@ -117,7 +118,6 @@ struct usearch_dense_index_handle_t {
         ram_indexes<nk_e3m2_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
     // intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd, alder, sierra:
     // i8 u8 e2m3, 3 arms
 #if USEARCH_DENSE_DTYPES >= 3
@@ -129,8 +129,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         ram_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>, //
 #endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-#if NUMKONG_TARGET_SKYLAKE
+#endif // USEARCH_TARGET_INTEL_SIERRA
+#if USEARCH_TARGET_INTEL_SKYLAKE
         // intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms
         ram_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
@@ -148,8 +148,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         ram_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>, //
 #endif
-#endif // NUMKONG_TARGET_SKYLAKE
-#if NUMKONG_TARGET_ICELAKE
+#endif // USEARCH_TARGET_INTEL_SKYLAKE
+#if USEARCH_TARGET_INTEL_ICELAKE
     // intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>, //
@@ -166,8 +166,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 9
         ram_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>, //
 #endif
-#endif // NUMKONG_TARGET_ICELAKE
-#if NUMKONG_TARGET_GENOA
+#endif // USEARCH_TARGET_INTEL_ICELAKE
+#if USEARCH_TARGET_AMD_GENOA
         // amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms
         ram_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
@@ -176,7 +176,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 7
         ram_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>, //
 #endif
-#endif // NUMKONG_TARGET_GENOA
+#endif // USEARCH_TARGET_AMD_GENOA
+#if USEARCH_TARGET_INTEL_SAPPHIRE
 #if NUMKONG_TARGET_SAPPHIREAMX
         // intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms
         ram_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>, //
@@ -199,7 +200,8 @@ struct usearch_dense_index_handle_t {
         ram_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #endif // NUMKONG_TARGET_SAPPHIREAMX
-#if NUMKONG_TARGET_GRANITEAMX
+#endif // USEARCH_TARGET_INTEL_SAPPHIRE
+#if USEARCH_TARGET_INTEL_GRANITE
     // intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms
 #if USEARCH_DENSE_DTYPES >= 5
         ram_indexes<nk_f16_k, cpu_class_t::intel_granite_k>, //
@@ -207,7 +209,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 7
         ram_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>, //
 #endif
-#endif // NUMKONG_TARGET_GRANITEAMX
+#endif // USEARCH_TARGET_INTEL_GRANITE
+#if USEARCH_TARGET_INTEL_DIAMOND
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
         // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd:
         // bf16 u1 f16 i4 u4 e3m2, 6 arms
@@ -249,8 +252,10 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         ram_indexes<nk_e2m3_k, cpu_class_t::intel_diamond_k>, //
 #endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-#if NUMKONG_TARGET_NEON
+#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER ||
+       // NUMKONG_TARGET_SIERRA
+#endif // USEARCH_TARGET_INTEL_DIAMOND
+#if USEARCH_TARGET_AWS_G2
         // aws_g2 over serial by neon: bf16 u1 f16, 3 arms
         ram_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
@@ -259,7 +264,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 5
         ram_indexes<nk_f16_k, cpu_class_t::aws_g2_k>, //
 #endif
-#endif // NUMKONG_TARGET_NEON
+#endif // USEARCH_TARGET_AWS_G2
+#if USEARCH_TARGET_APPLE_M2
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONBFDOT
         // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 1 arm
         ram_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>, //
@@ -303,6 +309,8 @@ struct usearch_dense_index_handle_t {
         ram_indexes<nk_u1_k, cpu_class_t::apple_m2_k>, //
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
+#endif // USEARCH_TARGET_APPLE_M2
+#if USEARCH_TARGET_APPLE_M4
 #if NUMKONG_TARGET_SME
         // apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms
         ram_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>, //
@@ -340,7 +348,8 @@ struct usearch_dense_index_handle_t {
         ram_indexes<nk_u1_k, cpu_class_t::apple_m4_k>, //
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
-#if FORKUNION_TARGET_ARM64_WFET
+#endif // USEARCH_TARGET_APPLE_M4
+#if USEARCH_TARGET_AWS_G5
         // aws_g5 over apple_m2 by arm64_wfet: every dtype, 11 arms
         ram_indexes<nk_bf16_k, cpu_class_t::aws_g5_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
@@ -373,8 +382,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         ram_indexes<nk_e2m3_k, cpu_class_t::aws_g5_k>, //
 #endif
-#endif // FORKUNION_TARGET_ARM64_WFET
-#if NUMKONG_TARGET_NEONFP8
+#endif // USEARCH_TARGET_AWS_G5
+#if USEARCH_TARGET_NVIDIA_VERA
     // nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms
 #if USEARCH_DENSE_DTYPES >= 4
         ram_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>, //
@@ -388,7 +397,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         ram_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>, //
 #endif
-#endif // NUMKONG_TARGET_NEONFP8
+#endif // USEARCH_TARGET_NVIDIA_VERA
+#if USEARCH_TARGET_ALIBABA_C930
 #if FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
         // alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 11 arms
         ram_indexes<nk_bf16_k, cpu_class_t::alibaba_c930_k>, //
@@ -423,7 +433,8 @@ struct usearch_dense_index_handle_t {
         ram_indexes<nk_e2m3_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #endif // FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
-#if NUMKONG_TARGET_V128
+#endif // USEARCH_TARGET_ALIBABA_C930
+#if USEARCH_TARGET_WASM32_V128
         // wasm32_v128 over serial by v128: bf16 u1 i8 u8, 4 arms
         ram_indexes<nk_bf16_k, cpu_class_t::wasm32_v128_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
@@ -435,8 +446,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 6
         ram_indexes<nk_u8_k, cpu_class_t::wasm32_v128_k>, //
 #endif
-#endif // NUMKONG_TARGET_V128
-#if NUMKONG_TARGET_V128RELAXED
+#endif // USEARCH_TARGET_WASM32_V128
+#if USEARCH_TARGET_WASM64_EXTENDED
         // wasm64_extended over wasm32_v128 by v128relaxed:
         // bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms
         ram_indexes<nk_bf16_k, cpu_class_t::wasm64_extended_k>, //
@@ -467,8 +478,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         ram_indexes<nk_e2m3_k, cpu_class_t::wasm64_extended_k>, //
 #endif
-#endif // NUMKONG_TARGET_V128RELAXED
-#if NUMKONG_TARGET_HASWELL
+#endif // USEARCH_TARGET_WASM64_EXTENDED
+#if USEARCH_TARGET_INTEL_HASWELL
         // NVMe intel_haswell over serial by haswell: every dtype, 11 arms
         nvme_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
@@ -501,7 +512,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         nvme_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>, //
 #endif
-#endif // NUMKONG_TARGET_HASWELL
+#endif // USEARCH_TARGET_INTEL_HASWELL
+#if USEARCH_TARGET_INTEL_SIERRA
 #if NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
     // NVMe intel_sierra over intel_haswell by alder, sierra: i8 u8 e2m3, 3 arms
 #if USEARCH_DENSE_DTYPES >= 3
@@ -514,7 +526,8 @@ struct usearch_dense_index_handle_t {
         nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #endif // NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-#if NUMKONG_TARGET_SKYLAKE
+#endif // USEARCH_TARGET_INTEL_SIERRA
+#if USEARCH_TARGET_INTEL_SKYLAKE
         // NVMe intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms
         nvme_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
@@ -532,8 +545,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         nvme_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>, //
 #endif
-#endif // NUMKONG_TARGET_SKYLAKE
-#if NUMKONG_TARGET_ICELAKE
+#endif // USEARCH_TARGET_INTEL_SKYLAKE
+#if USEARCH_TARGET_INTEL_ICELAKE
     // NVMe intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms
 #if USEARCH_DENSE_DTYPES >= 2
         nvme_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>, //
@@ -550,8 +563,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 9
         nvme_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>, //
 #endif
-#endif // NUMKONG_TARGET_ICELAKE
-#if NUMKONG_TARGET_GENOA
+#endif // USEARCH_TARGET_INTEL_ICELAKE
+#if USEARCH_TARGET_AMD_GENOA
         // NVMe amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms
         nvme_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
@@ -560,7 +573,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 7
         nvme_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>, //
 #endif
-#endif // NUMKONG_TARGET_GENOA
+#endif // USEARCH_TARGET_AMD_GENOA
+#if USEARCH_TARGET_INTEL_SAPPHIRE
 #if NUMKONG_TARGET_SAPPHIREAMX
         // NVMe intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms
         nvme_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>, //
@@ -583,7 +597,8 @@ struct usearch_dense_index_handle_t {
         nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #endif // NUMKONG_TARGET_SAPPHIREAMX
-#if NUMKONG_TARGET_GRANITEAMX
+#endif // USEARCH_TARGET_INTEL_SAPPHIRE
+#if USEARCH_TARGET_INTEL_GRANITE
     // NVMe intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms
 #if USEARCH_DENSE_DTYPES >= 5
         nvme_indexes<nk_f16_k, cpu_class_t::intel_granite_k>, //
@@ -591,7 +606,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 7
         nvme_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>, //
 #endif
-#endif // NUMKONG_TARGET_GRANITEAMX
+#endif // USEARCH_TARGET_INTEL_GRANITE
+#if USEARCH_TARGET_INTEL_DIAMOND
 #if NUMKONG_TARGET_DIAMOND
     // NVMe intel_diamond over intel_granite by diamond: e4m3 e5m2, 2 arms
 #if USEARCH_DENSE_DTYPES >= 4
@@ -601,7 +617,8 @@ struct usearch_dense_index_handle_t {
         nvme_indexes<nk_e5m2_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #endif // NUMKONG_TARGET_DIAMOND
-#if NUMKONG_TARGET_NEON
+#endif // USEARCH_TARGET_INTEL_DIAMOND
+#if USEARCH_TARGET_AWS_G2
         // NVMe aws_g2 over serial by neon: bf16 u1 f16, 3 arms
         nvme_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
@@ -610,7 +627,8 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 5
         nvme_indexes<nk_f16_k, cpu_class_t::aws_g2_k>, //
 #endif
-#endif // NUMKONG_TARGET_NEON
+#endif // USEARCH_TARGET_AWS_G2
+#if USEARCH_TARGET_APPLE_M2
 #if NUMKONG_TARGET_NEONBFDOT
         // NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 1 arm
         nvme_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>, //
@@ -648,6 +666,8 @@ struct usearch_dense_index_handle_t {
         nvme_indexes<nk_e2m3_k, cpu_class_t::apple_m2_k>, //
 #endif
 #endif // NUMKONG_TARGET_NEONSDOT
+#endif // USEARCH_TARGET_APPLE_M2
+#if USEARCH_TARGET_APPLE_M4
 #if NUMKONG_TARGET_SME
         // NVMe apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms
         nvme_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>, //
@@ -685,7 +705,8 @@ struct usearch_dense_index_handle_t {
         nvme_indexes<nk_u1_k, cpu_class_t::apple_m4_k>, //
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
-#if NUMKONG_TARGET_NEONFP8
+#endif // USEARCH_TARGET_APPLE_M4
+#if USEARCH_TARGET_NVIDIA_VERA
     // NVMe nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms
 #if USEARCH_DENSE_DTYPES >= 4
         nvme_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>, //
@@ -699,7 +720,7 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         nvme_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>, //
 #endif
-#endif // NUMKONG_TARGET_NEONFP8
+#endif // USEARCH_TARGET_NVIDIA_VERA
 #if USEARCH_ARCH_CUDA_
         // nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 arms
         vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
@@ -1065,7 +1086,7 @@ struct usearch_dense_index_handle_t {
 
     /** The chosen backend - one alternative of the compiled grid, selected once at construction.
      *  Residency, quantization and compute tier all live in the alternative's own type. */
-    variants_t variants;
+    dense_variant_t variants;
 
     /** The dimensionality the init arguments requested, consumed by the first @c reserve; once any shard
      *  froze real geometry, the variant answers and this stops mattering. */
@@ -1086,7 +1107,7 @@ struct usearch_dense_index_handle_t {
 
 /** The arms' explicit instantiation declarations: every body compiles in its class's unit, so this
  *  unit only visits. */
-#if NUMKONG_TARGET_HASWELL
+#if USEARCH_TARGET_INTEL_HASWELL
 /* intel_haswell over serial by haswell: every dtype, 11 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -1119,7 +1140,8 @@ extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::int
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>>;
 #endif
-#endif // NUMKONG_TARGET_HASWELL
+#endif // USEARCH_TARGET_INTEL_HASWELL
+#if USEARCH_TARGET_INTEL_SIERRA
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 /* intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd:
  * bf16 u1 e4m3 f16 e5m2 i4 u4 e3m2, 8 arms */
@@ -1146,7 +1168,6 @@ extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel
 extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 /* intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd, alder, sierra:
  * i8 u8 e2m3, 3 arms */
 #if USEARCH_DENSE_DTYPES >= 3
@@ -1158,8 +1179,8 @@ extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>>;
 #endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-#if NUMKONG_TARGET_SKYLAKE
+#endif // USEARCH_TARGET_INTEL_SIERRA
+#if USEARCH_TARGET_INTEL_SKYLAKE
 /* intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
@@ -1177,8 +1198,8 @@ extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::int
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>>;
 #endif
-#endif // NUMKONG_TARGET_SKYLAKE
-#if NUMKONG_TARGET_ICELAKE
+#endif // USEARCH_TARGET_INTEL_SKYLAKE
+#if USEARCH_TARGET_INTEL_ICELAKE
 /* intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms */
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>>;
@@ -1195,8 +1216,8 @@ extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::intel
 #if USEARCH_DENSE_DTYPES >= 9
 extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>>;
 #endif
-#endif // NUMKONG_TARGET_ICELAKE
-#if NUMKONG_TARGET_GENOA
+#endif // USEARCH_TARGET_INTEL_ICELAKE
+#if USEARCH_TARGET_AMD_GENOA
 /* amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
@@ -1205,7 +1226,8 @@ extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::amd
 #if USEARCH_DENSE_DTYPES >= 7
 extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>>;
 #endif
-#endif // NUMKONG_TARGET_GENOA
+#endif // USEARCH_TARGET_AMD_GENOA
+#if USEARCH_TARGET_INTEL_SAPPHIRE
 #if NUMKONG_TARGET_SAPPHIREAMX
 /* intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
@@ -1228,7 +1250,8 @@ extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::int
 extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #endif // NUMKONG_TARGET_SAPPHIREAMX
-#if NUMKONG_TARGET_GRANITEAMX
+#endif // USEARCH_TARGET_INTEL_SAPPHIRE
+#if USEARCH_TARGET_INTEL_GRANITE
 /* intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms */
 #if USEARCH_DENSE_DTYPES >= 5
 extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_granite_k>>;
@@ -1236,7 +1259,8 @@ extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::inte
 #if USEARCH_DENSE_DTYPES >= 7
 extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>>;
 #endif
-#endif // NUMKONG_TARGET_GRANITEAMX
+#endif // USEARCH_TARGET_INTEL_GRANITE
+#if USEARCH_TARGET_INTEL_DIAMOND
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 /* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd: bf16 u1 f16 i4 u4 e3m2, 6 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_diamond_k>>;
@@ -1277,8 +1301,10 @@ extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_diamond_k>>;
 #endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-#if NUMKONG_TARGET_NEON
+#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER ||
+       // NUMKONG_TARGET_SIERRA
+#endif // USEARCH_TARGET_INTEL_DIAMOND
+#if USEARCH_TARGET_AWS_G2
 /* aws_g2 over serial by neon: bf16 u1 f16, 3 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -1287,7 +1313,8 @@ extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::aws_g
 #if USEARCH_DENSE_DTYPES >= 5
 extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::aws_g2_k>>;
 #endif
-#endif // NUMKONG_TARGET_NEON
+#endif // USEARCH_TARGET_AWS_G2
+#if USEARCH_TARGET_APPLE_M2
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONBFDOT
 /* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 1 arm */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>>;
@@ -1331,6 +1358,8 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::app
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::apple_m2_k>>;
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
+#endif // USEARCH_TARGET_APPLE_M2
+#if USEARCH_TARGET_APPLE_M4
 #if NUMKONG_TARGET_SME
 /* apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>>;
@@ -1368,7 +1397,8 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::app
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::apple_m4_k>>;
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
-#if FORKUNION_TARGET_ARM64_WFET
+#endif // USEARCH_TARGET_APPLE_M4
+#if USEARCH_TARGET_AWS_G5
 /* aws_g5 over apple_m2 by arm64_wfet: every dtype, 11 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::aws_g5_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -1401,8 +1431,8 @@ extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::aws
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::aws_g5_k>>;
 #endif
-#endif // FORKUNION_TARGET_ARM64_WFET
-#if NUMKONG_TARGET_NEONFP8
+#endif // USEARCH_TARGET_AWS_G5
+#if USEARCH_TARGET_NVIDIA_VERA
 /* nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms */
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>>;
@@ -1416,7 +1446,8 @@ extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::nvi
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>>;
 #endif
-#endif // NUMKONG_TARGET_NEONFP8
+#endif // USEARCH_TARGET_NVIDIA_VERA
+#if USEARCH_TARGET_ALIBABA_C930
 #if FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
 /* alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 11 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::alibaba_c930_k>>;
@@ -1451,7 +1482,8 @@ extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::ali
 extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #endif // FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
-#if NUMKONG_TARGET_V128
+#endif // USEARCH_TARGET_ALIBABA_C930
+#if USEARCH_TARGET_WASM32_V128
 /* wasm32_v128 over serial by v128: bf16 u1 i8 u8, 4 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::wasm32_v128_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -1463,8 +1495,8 @@ extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::wasm3
 #if USEARCH_DENSE_DTYPES >= 6
 extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::wasm32_v128_k>>;
 #endif
-#endif // NUMKONG_TARGET_V128
-#if NUMKONG_TARGET_V128RELAXED
+#endif // USEARCH_TARGET_WASM32_V128
+#if USEARCH_TARGET_WASM64_EXTENDED
 /* wasm64_extended over wasm32_v128 by v128relaxed:
  * bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::wasm64_extended_k>>;
@@ -1495,7 +1527,7 @@ extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::was
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::wasm64_extended_k>>;
 #endif
-#endif // NUMKONG_TARGET_V128RELAXED
+#endif // USEARCH_TARGET_WASM64_EXTENDED
 #if USEARCH_ARCH_CUDA_
 /* nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 arms */
 extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
@@ -1791,7 +1823,7 @@ extern template struct specialized_index<vram_apple_indexes<nk_e3m2_k>>;
 extern template struct specialized_index<vram_apple_indexes<nk_e2m3_k>>;
 #endif
 #endif // USEARCH_ARCH_METAL_
-#if NUMKONG_TARGET_HASWELL
+#if USEARCH_TARGET_INTEL_HASWELL
 /* NVMe intel_haswell over serial by haswell: every dtype, 11 arms */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -1824,7 +1856,8 @@ extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::in
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>>;
 #endif
-#endif // NUMKONG_TARGET_HASWELL
+#endif // USEARCH_TARGET_INTEL_HASWELL
+#if USEARCH_TARGET_INTEL_SIERRA
 #if NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 /* NVMe intel_sierra over intel_haswell by alder, sierra: i8 u8 e2m3, 3 arms */
 #if USEARCH_DENSE_DTYPES >= 3
@@ -1837,7 +1870,8 @@ extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::inte
 extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #endif // NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-#if NUMKONG_TARGET_SKYLAKE
+#endif // USEARCH_TARGET_INTEL_SIERRA
+#if USEARCH_TARGET_INTEL_SKYLAKE
 /* NVMe intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
@@ -1855,8 +1889,8 @@ extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::in
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>>;
 #endif
-#endif // NUMKONG_TARGET_SKYLAKE
-#if NUMKONG_TARGET_ICELAKE
+#endif // USEARCH_TARGET_INTEL_SKYLAKE
+#if USEARCH_TARGET_INTEL_ICELAKE
 /* NVMe intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms */
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>>;
@@ -1873,8 +1907,8 @@ extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::inte
 #if USEARCH_DENSE_DTYPES >= 9
 extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>>;
 #endif
-#endif // NUMKONG_TARGET_ICELAKE
-#if NUMKONG_TARGET_GENOA
+#endif // USEARCH_TARGET_INTEL_ICELAKE
+#if USEARCH_TARGET_AMD_GENOA
 /* NVMe amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
@@ -1883,7 +1917,8 @@ extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::am
 #if USEARCH_DENSE_DTYPES >= 7
 extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>>;
 #endif
-#endif // NUMKONG_TARGET_GENOA
+#endif // USEARCH_TARGET_AMD_GENOA
+#if USEARCH_TARGET_INTEL_SAPPHIRE
 #if NUMKONG_TARGET_SAPPHIREAMX
 /* NVMe intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
@@ -1906,7 +1941,8 @@ extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::in
 extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #endif // NUMKONG_TARGET_SAPPHIREAMX
-#if NUMKONG_TARGET_GRANITEAMX
+#endif // USEARCH_TARGET_INTEL_SAPPHIRE
+#if USEARCH_TARGET_INTEL_GRANITE
 /* NVMe intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms */
 #if USEARCH_DENSE_DTYPES >= 5
 extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::intel_granite_k>>;
@@ -1914,7 +1950,8 @@ extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::int
 #if USEARCH_DENSE_DTYPES >= 7
 extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>>;
 #endif
-#endif // NUMKONG_TARGET_GRANITEAMX
+#endif // USEARCH_TARGET_INTEL_GRANITE
+#if USEARCH_TARGET_INTEL_DIAMOND
 #if NUMKONG_TARGET_DIAMOND
 /* NVMe intel_diamond over intel_granite by diamond: e4m3 e5m2, 2 arms */
 #if USEARCH_DENSE_DTYPES >= 4
@@ -1924,7 +1961,8 @@ extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::in
 extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #endif // NUMKONG_TARGET_DIAMOND
-#if NUMKONG_TARGET_NEON
+#endif // USEARCH_TARGET_INTEL_DIAMOND
+#if USEARCH_TARGET_AWS_G2
 /* NVMe aws_g2 over serial by neon: bf16 u1 f16, 3 arms */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -1933,7 +1971,8 @@ extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::aws_
 #if USEARCH_DENSE_DTYPES >= 5
 extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::aws_g2_k>>;
 #endif
-#endif // NUMKONG_TARGET_NEON
+#endif // USEARCH_TARGET_AWS_G2
+#if USEARCH_TARGET_APPLE_M2
 #if NUMKONG_TARGET_NEONBFDOT
 /* NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 1 arm */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>>;
@@ -1971,6 +2010,8 @@ extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::ap
 extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::apple_m2_k>>;
 #endif
 #endif // NUMKONG_TARGET_NEONSDOT
+#endif // USEARCH_TARGET_APPLE_M2
+#if USEARCH_TARGET_APPLE_M4
 #if NUMKONG_TARGET_SME
 /* NVMe apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>>;
@@ -2008,7 +2049,8 @@ extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::ap
 extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::apple_m4_k>>;
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
-#if NUMKONG_TARGET_NEONFP8
+#endif // USEARCH_TARGET_APPLE_M4
+#if USEARCH_TARGET_NVIDIA_VERA
 /* NVMe nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms */
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>>;
@@ -2022,7 +2064,7 @@ extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::nv
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>>;
 #endif
-#endif // NUMKONG_TARGET_NEONFP8
+#endif // USEARCH_TARGET_NVIDIA_VERA
 /* The NVMe serial floor: every wired cell, every platform. */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::serial_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -2227,8 +2269,9 @@ static usearch_dense_index_t make_punned_dense_index(usearch_dense_metadata_t co
     return handle;
 }
 
-/** Whether one rung is genuinely distinct from the class it degrades to: a different picked 4-way
- *  or tiles kit, or a different ForkUnion mask - the one fact justifying its instantiation. */
+/** Whether one rung of a compiled class is genuinely distinct from the class it degrades to: a
+ *  different picked 4-way or tiles kit, or a different ForkUnion mask - the one fact justifying its
+ *  instantiation. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 consteval bool rung_advances() noexcept {
     constexpr cpu_class_t parent_k = parent_class_of(cpu_class_);
@@ -2237,8 +2280,9 @@ consteval bool rung_advances() noexcept {
     using lower_chain_t = us::dense::quads_chain<scalar_t, numkong_capabilities_of(parent_k)>;
     using upper_tiles_t = us::dense::tiles_chain<scalar_t, numkong_capabilities_of(cpu_class_)>;
     using lower_tiles_t = us::dense::tiles_chain<scalar_t, numkong_capabilities_of(parent_k)>;
-    return upper_chain_t::picked_k != lower_chain_t::picked_k || upper_tiles_t::picked_k != lower_tiles_t::picked_k ||
-           forkunion_capabilities_of<cpu_class_>() != forkunion_capabilities_of<parent_k>();
+    return cpu_class_compiled(cpu_class_) &&
+           (upper_chain_t::picked_k != lower_chain_t::picked_k || upper_tiles_t::picked_k != lower_tiles_t::picked_k ||
+            forkunion_capabilities_of<cpu_class_>() != forkunion_capabilities_of<parent_k>());
 }
 
 /** The unconditional serial floor - every ladder's last rung. */
@@ -2260,7 +2304,7 @@ static usearch_dense_index_t descend_ram_ladder(usearch_dense_metadata_t const& 
             return make_punned_dense_index<ram_indexes<dtype_, cpu_class_>>(geometry, ram, kernel, outcome);
     }
     else {
-        static_assert(!variant_carries<ram_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::variants_t>,
+        static_assert(!variant_carries<ram_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::dense_variant_t>,
                       "This rung no longer advances past the one below - drop its arm from the variant list");
     }
     return descend_ram_ladder<dtype_, lower_classes_...>(geometry, ram, kernel, available, outcome);
@@ -2275,14 +2319,23 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
 #if NUMKONG_ARCH_X8664_
-    return descend_ram_ladder<dtype_, cpu_class_t::intel_diamond_k, cpu_class_t::intel_granite_k,
-                              cpu_class_t::intel_sapphire_k, cpu_class_t::amd_genoa_k, cpu_class_t::intel_icelake_k,
-                              cpu_class_t::intel_skylake_k, cpu_class_t::intel_sierra_k,
+    return descend_ram_ladder<dtype_,                        //
+                              cpu_class_t::intel_diamond_k,  //
+                              cpu_class_t::intel_granite_k,  //
+                              cpu_class_t::intel_sapphire_k, //
+                              cpu_class_t::amd_genoa_k,      //
+                              cpu_class_t::intel_icelake_k,  //
+                              cpu_class_t::intel_skylake_k,  //
+                              cpu_class_t::intel_sierra_k,   //
                               cpu_class_t::intel_haswell_k>( //
         geometry, ram, kernel, available, outcome);
 #elif NUMKONG_ARCH_ARM64_
-    return descend_ram_ladder<dtype_, cpu_class_t::nvidia_vera_k, cpu_class_t::apple_m4_k, cpu_class_t::aws_g5_k,
-                              cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k>( //
+    return descend_ram_ladder<dtype_,                     //
+                              cpu_class_t::nvidia_vera_k, //
+                              cpu_class_t::apple_m4_k,    //
+                              cpu_class_t::aws_g5_k,      //
+                              cpu_class_t::apple_m2_k,    //
+                              cpu_class_t::aws_g2_k>(     //
         geometry, ram, kernel, available, outcome);
 #elif NUMKONG_ARCH_RISCV64_
     return descend_ram_ladder<dtype_, cpu_class_t::alibaba_c930_k>(geometry, ram, kernel, available, outcome);
@@ -2294,16 +2347,17 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
 #endif
 }
 
-/** Whether one NVMe rung picks a different 4-way or tiles kit than the class it degrades to: a
- *  storage walk carries no waiter or atomic reference, and a scan streams through the tiles kit, so
- *  the kits alone tell two classes apart. */
+/** Whether one NVMe rung of a compiled class picks a different 4-way or tiles kit than the class it
+ *  degrades to: a storage walk carries no waiter or atomic reference, and a scan streams through
+ *  the tiles kit, so the kits alone tell two classes apart. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 consteval bool nvme_rung_advances() noexcept {
     using scalar_t = typename nk::type_for<dtype_>::type;
     constexpr nk_capability_t upper = numkong_capabilities_of(cpu_class_);
     constexpr nk_capability_t lower = numkong_capabilities_of(parent_class_of(cpu_class_));
-    return us::dense::quads_chain<scalar_t, upper>::picked_k != us::dense::quads_chain<scalar_t, lower>::picked_k ||
-           us::dense::tiles_chain<scalar_t, upper>::picked_k != us::dense::tiles_chain<scalar_t, lower>::picked_k;
+    return cpu_class_compiled(cpu_class_) &&
+           (us::dense::quads_chain<scalar_t, upper>::picked_k != us::dense::quads_chain<scalar_t, lower>::picked_k ||
+            us::dense::tiles_chain<scalar_t, upper>::picked_k != us::dense::tiles_chain<scalar_t, lower>::picked_k);
 }
 
 /** The unconditional serial floor of every NVMe ladder. */
@@ -2327,9 +2381,10 @@ static usearch_dense_index_t descend_nvme_ladder(usearch_dense_metadata_t const&
     else {
         // A class sharing its parent's mask names the parent's very arm, which the variant rightly
         // carries.
-        static_assert(numkong_capabilities_of(cpu_class_) == numkong_capabilities_of(parent_class_of(cpu_class_)) ||
-                          !variant_carries<nvme_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::variants_t>,
-                      "This NVMe rung no longer advances past the one below - drop its arm from the variant list");
+        static_assert(
+            numkong_capabilities_of(cpu_class_) == numkong_capabilities_of(parent_class_of(cpu_class_)) ||
+                !variant_carries<nvme_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::dense_variant_t>,
+            "This NVMe rung no longer advances past the one below - drop its arm from the variant list");
     }
     return descend_nvme_ladder<dtype_, lower_classes_...>(geometry, nvme, kernel, available, outcome);
 }
@@ -2343,14 +2398,23 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
 #if NUMKONG_ARCH_X8664_
-    return descend_nvme_ladder<dtype_, cpu_class_t::intel_diamond_k, cpu_class_t::intel_granite_k,
-                               cpu_class_t::intel_sapphire_k, cpu_class_t::amd_genoa_k, cpu_class_t::intel_icelake_k,
-                               cpu_class_t::intel_skylake_k, cpu_class_t::intel_sierra_k,
+    return descend_nvme_ladder<dtype_,                        //
+                               cpu_class_t::intel_diamond_k,  //
+                               cpu_class_t::intel_granite_k,  //
+                               cpu_class_t::intel_sapphire_k, //
+                               cpu_class_t::amd_genoa_k,      //
+                               cpu_class_t::intel_icelake_k,  //
+                               cpu_class_t::intel_skylake_k,  //
+                               cpu_class_t::intel_sierra_k,   //
                                cpu_class_t::intel_haswell_k>( //
         geometry, nvme, kernel, available, outcome);
 #elif NUMKONG_ARCH_ARM64_
-    return descend_nvme_ladder<dtype_, cpu_class_t::nvidia_vera_k, cpu_class_t::apple_m4_k, cpu_class_t::aws_g5_k,
-                               cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k>( //
+    return descend_nvme_ladder<dtype_,                     //
+                               cpu_class_t::nvidia_vera_k, //
+                               cpu_class_t::apple_m4_k,    //
+                               cpu_class_t::aws_g5_k,      //
+                               cpu_class_t::apple_m2_k,    //
+                               cpu_class_t::aws_g2_k>(     //
         geometry, nvme, kernel, available, outcome);
 #elif NUMKONG_ARCH_RISCV64_
     return descend_nvme_ladder<dtype_, cpu_class_t::alibaba_c930_k>(geometry, nvme, kernel, available, outcome);
@@ -2569,11 +2633,11 @@ static nk_dtype_t rows_dtype_of(usearch_scalar_t scalar, std::size_t columns, us
  *  @p outcome only on failure, leaving the success to the verb once its last output is written.
  */
 template <typename variant_type_, typename sink_type_>
-static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t executor_handle,         //
-                                 std::size_t rows_count, usearch_rows_view_t const& rows,            //
-                                 std::size_t rows_per_query, std::size_t expansion_factor,           //
-                                 usearch_progress_t progress,                                        //
-                                 usearch_dense_traversal_stats_t* stats, usearch_outcome_t* outcome, //
+static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t executor_handle,   //
+                                 std::size_t rows_count, usearch_rows_view_t const& rows,      //
+                                 std::size_t rows_per_query, std::size_t expansion_factor,     //
+                                 usearch_progress_t progress,                                  //
+                                 usearch_traversal_stats_t* stats, usearch_outcome_t* outcome, //
                                  sink_type_&& sink) noexcept {
     if (stats) *stats = {};
     if (!rows_count) return true;
@@ -2608,11 +2672,11 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
  *  writes them, viewed as one row of @c wanted per output row; @p rows_per_query input rows share
  *  one output row, and @p count output rows land. */
 template <typename variant_type_, typename verb_type_>
-static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor,                //
-                             std::size_t count, usearch_rows_view_t const& rows,                 //
-                             std::size_t rows_per_query, matches_landing_t const& landing,       //
-                             std::size_t expansion_factor, usearch_progress_t progress,          //
-                             usearch_dense_traversal_stats_t* stats, usearch_outcome_t* outcome, //
+static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor,          //
+                             std::size_t count, usearch_rows_view_t const& rows,           //
+                             std::size_t rows_per_query, matches_landing_t const& landing, //
+                             std::size_t expansion_factor, usearch_progress_t progress,    //
+                             usearch_traversal_stats_t* stats, usearch_outcome_t* outcome, //
                              verb_type_&& verb) noexcept {
     using key_t = typename variant_type_::key_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
@@ -2654,13 +2718,53 @@ struct cursors_of<std::variant<alternatives_...>> {
 
 /** What @c usearch_dense_cursor_t owns: the walk state of one arm, with no hold on its index. */
 struct usearch_dense_cursor_handle_t {
-    typename cursors_of<usearch_dense_index_handle_t::variants_t>::type walk;
+    typename cursors_of<usearch_dense_index_handle_t::dense_variant_t>::type walk;
 
     /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
     usearch_dense_index_handle_t const* opened_on;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
     std::atomic_flag busy;
+};
+
+/** The plan of a writable arm with the donors it lands; an NVMe view refines nothing. */
+template <typename variant_type_>
+struct refinement_of {
+    using type = std::monostate;
+};
+template <typename variant_type_>
+    requires is_ram_index<variant_type_> || is_vram_index<variant_type_>
+struct refinement_of<variant_type_> {
+    struct type {
+
+        /** The typed donors the plan lands, each nulled once landed; the plan reads them in
+         *  place. */
+        growing_buffer<variant_type_*> donors;
+        typename variant_type_::refine_plan_t plan;
+    };
+};
+
+/** The refinements of every arm of @p variants_type_, as one variant of their own. */
+template <typename variants_type_>
+struct refinements_of;
+template <typename... alternatives_>
+struct refinements_of<std::variant<alternatives_...>> {
+    using type = std::variant<std::monostate, typename refinement_of<alternatives_>::type...>;
+};
+
+/** What @c usearch_dense_refinement_t owns: one arm's plan, which keeps its index closed until it
+ *  dies, and the caller's donor slots it nulls. */
+struct usearch_dense_refinement_handle_t {
+    typename refinements_of<usearch_dense_index_handle_t::dense_variant_t>::type refining;
+
+    /** The handle and executor the refinement was opened with, only ever compared with the ones
+     *  each call passes. */
+    usearch_dense_index_handle_t const* opened_on;
+    usearch_executor_t opened_with;
+
+    /** The caller's donor array, @c count slots. */
+    usearch_dense_index_t* donors;
+    std::size_t count;
 };
 
 /** Fills every field a checkpoint froze; the type carries nothing a checkpoint cannot say. */
@@ -2895,7 +2999,7 @@ static bool rejects_columns(usearch_dense_index_handle_t& index, std::size_t cou
 USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
     if (submitted<usearch_dense_insert>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    usearch_dense_traversal_stats_t* const stats = arguments->stats;
+    usearch_traversal_stats_t* const stats = arguments->stats;
     usearch_keys_view_t const keys = arguments->keys;
     usearch_rows_view_t const vectors = arguments->vectors;
     std::size_t const count = arguments->count;
@@ -2932,7 +3036,7 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
 USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
     if (submitted<usearch_dense_refine>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    usearch_dense_traversal_stats_t* const stats = arguments->stats;
+    usearch_traversal_stats_t* const stats = arguments->stats;
     if (stats) *stats = {};
     visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         usearch_executor_handle_t call_executor;
@@ -2944,11 +3048,14 @@ USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
         progress_ticks_t ticks {arguments->progress, specialized_index {variant}.size()};
         auto const [refined, refined_status] = specialized_index {variant}.refine(*executor, config, ticks);
         accumulate_stats(stats, refined);
-        // A stopped pass is not a failure: it still healed, the graph stands, and the next call
-        // sweeps again toward the same fixed point.
+        // A stopped pass still healed, so its report stands beside the cancel.
         if (failed(refined_status) && refined_status != status_t::cancelled_k)
             return propagate_error(refined_status, outcome), void();
         if (arguments->changed) *arguments->changed = refined.changed_nodes;
+        if (arguments->reachability)
+            *arguments->reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
+                                        refined.health.sweeps};
+        if (failed(refined_status)) return propagate_error(refined_status, outcome), void();
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -3214,6 +3321,7 @@ USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor) {
 USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
     if (submitted<usearch_dense_absorb>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
+    if (arguments->stats) *arguments->stats = {};
     if (arguments->count && !arguments->donors)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
     visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
@@ -3221,7 +3329,10 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
         typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
                                                                          outcome);
         if (!executor) return;
-        progress_ticks_t ticks {arguments->progress, arguments->count};
+        growing_buffer<variant_type_*> typed_donors {global_allocator};
+        if (failed(typed_donors.reserve_exactly(arguments->count)))
+            return propagate_error(status_t::bad_alloc_k, outcome), void();
+        std::size_t population = specialized_index {variant}.size();
         for (std::size_t position = 0; position != arguments->count; ++position) {
             usearch_dense_index_t& donor = arguments->donors[position];
             if (!donor)
@@ -3238,12 +3349,146 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
                                        "A donor must share the index's residency, scalar and class"),
                        void();
             finish_calls_using(donor);
-            status_t const absorbed = specialized_index {variant}.absorb(*typed, *executor).status;
-            if (failed(absorbed)) return propagate_error(absorbed, outcome), void();
-            delete std::exchange(donor, nullptr);
-            if (ticks(position + 1, arguments->count) == continuation_t::cancel_k)
-                return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call"), void();
+            typed_donors.push_back_reserved(typed);
+            population += specialized_index {*typed}.size();
         }
+        typename variant_type_::refine_config_t config {};
+        config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
+        progress_ticks_t ticks {arguments->progress, population};
+        auto const [refined, status] = specialized_index {variant}.absorb(to_writable_span(typed_donors), *executor,
+                                                                          config, ticks);
+        // The engine nulls every donor it consumed; their handles go with them.
+        for (std::size_t position = 0; position != arguments->count; ++position)
+            if (!typed_donors[position]) delete std::exchange(arguments->donors[position], nullptr);
+        accumulate_stats(arguments->stats, refined);
+        // A stopped closing refine still healed, so its report stands beside the cancel.
+        if (failed(status) && status != status_t::cancelled_k) return propagate_error(status, outcome), void();
+        if (arguments->changed) *arguments->changed = refined.changed_nodes;
+        if (arguments->reachability)
+            *arguments->reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
+                                        refined.health.sweeps};
+        if (failed(status)) return propagate_error(status, outcome), void();
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
+}
+
+USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_t* arguments) {
+    if (submitted<usearch_dense_refinement_init>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    *arguments->refinement = nullptr;
+    if (!arguments->executor)
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "A refinement needs an executor that outlives it"),
+               void();
+    if (arguments->count && !arguments->donors)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
+    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
+        if (!executor) return;
+        growing_buffer<variant_type_*> typed_donors {global_allocator};
+        if (failed(typed_donors.reserve_exactly(arguments->count)))
+            return propagate_error(status_t::bad_alloc_k, outcome), void();
+        for (std::size_t position = 0; position != arguments->count; ++position) {
+            usearch_dense_index_t const donor = arguments->donors[position];
+            if (!donor)
+                return propagate_error(usearch_status_invalid_argument_k, outcome, "A donor must not be null"), void();
+            if (donor == arguments->index)
+                return propagate_error(usearch_status_config_mismatch_k, outcome, "An index cannot absorb itself"),
+                       void();
+            variant_type_* const typed = std::get_if<variant_type_>(&donor->variants);
+            if (!typed)
+                return propagate_error(usearch_status_config_mismatch_k, outcome,
+                                       "A donor must share the index's residency, scalar and class"),
+                       void();
+            finish_calls_using(donor);
+            typed_donors.push_back_reserved(typed);
+        }
+        typename variant_type_::refine_config_t config {};
+        config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
+        auto [plan, status] = specialized_index {variant}.plan_absorb(to_writable_span(typed_donors), *executor,
+                                                                      config);
+        if (failed(status)) return propagate_error(status, outcome), void();
+        using refining_t = typename refinement_of<variant_type_>::type;
+        usearch_dense_refinement_t const opened = new (std::nothrow) usearch_dense_refinement_handle_t {
+            decltype(usearch_dense_refinement_handle_t::refining) {std::in_place_type<refining_t>,
+                                                                   std::move(typed_donors), std::move(plan)},
+            arguments->index, arguments->executor, arguments->donors, arguments->count};
+        if (!opened)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the refinement"),
+                   void();
+        *arguments->refinement = opened;
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
+}
+
+USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments) {
+    if (submitted<usearch_dense_refinement_next>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    if (arguments->visited) *arguments->visited = 0;
+    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->stats) *arguments->stats = {};
+    usearch_dense_refinement_t const refinement = arguments->refinement;
+    if (!refinement)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement must not be null"), void();
+    if (arguments->index != refinement->opened_on || arguments->executor != refinement->opened_with)
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "The refinement was opened on another index or executor"),
+               void();
+    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        auto* const refining = std::get_if<typename refinement_of<variant_type_>::type>(&refinement->refining);
+        if (!refining)
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another arm"),
+                   void();
+        usearch_executor_handle_t call_executor;
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
+        if (!executor) return;
+        progress_ticks_t ticks {arguments->progress, specialized_index {variant}.size()};
+        status_t const ran = specialized_index {variant}.run(refining->plan, *executor, ticks);
+        // The plan nulls every donor it landed; their handles go with them.
+        for (std::size_t position = 0; position != refinement->count; ++position)
+            if (!refining->donors[position] && refinement->donors[position])
+                delete std::exchange(refinement->donors[position], nullptr);
+        // Running totals, so a cancelled or failed call still says how far the pass got.
+        auto const refined = refining->plan.running();
+        if (arguments->visited) *arguments->visited = refined.visited_nodes;
+        if (arguments->changed) *arguments->changed = refined.changed_nodes;
+        accumulate_stats(arguments->stats, refined);
+        if (failed(ran)) return propagate_error(ran, outcome), void();
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
+}
+
+USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_finish_t* arguments) {
+    if (submitted<usearch_dense_refinement_finish>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    if (arguments->stats) *arguments->stats = {};
+    // Freed whatever the call answers; a plan dying unfinished reopens its index.
+    std::unique_ptr<usearch_dense_refinement_handle_t> const refinement {arguments->refinement};
+    if (!refinement)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement must not be null"), void();
+    if (arguments->index != refinement->opened_on || arguments->executor != refinement->opened_with)
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "The refinement was opened on another index or executor"),
+               void();
+    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        auto* const refining = std::get_if<typename refinement_of<variant_type_>::type>(&refinement->refining);
+        if (!refining)
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another arm"),
+                   void();
+        usearch_executor_handle_t call_executor;
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
+        if (!executor) return;
+        auto const [refined, status] = specialized_index {variant}.finish(refining->plan, *executor);
+        accumulate_stats(arguments->stats, refined);
+        if (failed(status)) return propagate_error(status, outcome), void();
+        if (arguments->changed) *arguments->changed = refined.changed_nodes;
+        if (arguments->reachability)
+            *arguments->reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
+                                        refined.health.sweeps};
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }

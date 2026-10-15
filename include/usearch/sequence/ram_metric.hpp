@@ -237,24 +237,26 @@ struct levenshtein_utf8_neon_kit_t : levenshtein_neon_kit_t {
 };
 #endif // STRINGZILLA_TARGET_NEON
 
-/** The widest Levenshtein kit this build compiled in among the backends @p capability_ admits, over
- *  the symbols @p symbol_ names; each row's flag is the backend's @c STRINGZILLA_TARGET_* and the
- *  mask's bit, so an unselected kit's body never has to exist. */
+/** The widest Levenshtein kit over the symbols @p symbol_ names this build compiled in among the
+ *  backends @p capability_ admits, newest first; each row's flag is the backend's
+ *  @c STRINGZILLA_TARGET_* and the mask's bit, so an unselected kit's body never has to exist. */
 template <sz_capability_t capability_, sz_levenshtein_symbol_t symbol_ = sz_levenshtein_bytes_k>
 using levenshtein_kit = std::conditional_t<
     symbol_ == sz_levenshtein_bytes_k,
-    std::conditional_t<
-        STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, levenshtein_skylake_kit_t,
-        std::conditional_t<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0,
-                           levenshtein_haswell_kit_t,
-                           std::conditional_t<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0,
-                                              levenshtein_neon_kit_t, levenshtein_serial_kit_t>>>,
-    std::conditional_t<
-        STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, levenshtein_utf8_skylake_kit_t,
-        std::conditional_t<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0,
-                           levenshtein_utf8_haswell_kit_t,
-                           std::conditional_t<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0,
-                                              levenshtein_utf8_neon_kit_t, levenshtein_utf8_serial_kit_t>>>>;
+    typename first_available_kit<                                                                                    //
+        levenshtein_serial_kit_t,                                                                                    //
+        chain_layer<STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, levenshtein_skylake_kit_t>, //
+        chain_layer<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0, levenshtein_haswell_kit_t>, //
+        chain_layer<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0, levenshtein_neon_kit_t>           //
+        >::type,                                                                                                     //
+    typename first_available_kit<                                                                                    //
+        levenshtein_utf8_serial_kit_t,                                                                               //
+        chain_layer<STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0,                             //
+                    levenshtein_utf8_skylake_kit_t>,                                                                 //
+        chain_layer<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0,                             //
+                    levenshtein_utf8_haswell_kit_t>,                                                                 //
+        chain_layer<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0, levenshtein_utf8_neon_kit_t>      //
+        >::type>;
 
 /** Query words whose verticals stay register-resident: one and two measured faster than the scratch walk,
  *  wider ones spill on sixteen-register machines. */
@@ -447,14 +449,16 @@ struct overlap_neon_kit_t {
 };
 #endif // STRINGZILLA_TARGET_NEON
 
-/** The widest overlap kit this build compiled in among the backends @p capability_ admits; each row's flag is
- *  the backend's @c STRINGZILLA_TARGET_* and the mask's bit, so an unselected kit's body never has to exist. */
+/** The widest overlap kit this build compiled in among the backends @p capability_ admits, newest
+ *  first; each row's flag is the backend's @c STRINGZILLA_TARGET_* and the mask's bit, so an
+ *  unselected kit's body never has to exist. */
 template <sz_capability_t capability_>
-using overlap_kit = std::conditional_t<
-    STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, overlap_skylake_kit_t,
-    std::conditional_t<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0, overlap_haswell_kit_t,
-                       std::conditional_t<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0,
-                                          overlap_neon_kit_t, overlap_serial_kit_t>>>;
+using overlap_kit = typename first_available_kit<                                                            //
+    overlap_serial_kit_t,                                                                                    //
+    chain_layer<STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, overlap_skylake_kit_t>, //
+    chain_layer<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0, overlap_haswell_kit_t>, //
+    chain_layer<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0, overlap_neon_kit_t>           //
+    >::type;
 
 /** Candidates whose prefix-hash chains advance together: one chain's recurrence is latency-bound at about fifty
  *  cycles per step, and four independent chains hide it - measured 39 → 26 µs per round of 64 candidates. */

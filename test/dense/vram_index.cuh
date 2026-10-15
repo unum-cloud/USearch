@@ -309,7 +309,7 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
         failures += expect(refined_status == status_t::success_k && refined.changed_nodes > 0);
         // A dot graph's hubs can stall the heal short of every row.
         if constexpr (kernel_ != nk_kernel_dot_k) {
-            failures += expect_eq(refined.reachable_nodes, dense_growth_nodes_k);
+            failures += expect_eq(refined.health.reachable_nodes, dense_growth_nodes_k);
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
         }
     }

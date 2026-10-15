@@ -274,7 +274,8 @@ void scan_tiles(nk_kernel_kind_t kernel, nk::matrix_view<typename quads_kit_type
                                                                               nk::slice);
         [[maybe_unused]] nk_status_t const scored = tiles_kit_type_::dots_packed(
             step.raw_values_data(), packed, dots.data(), step_rows, columns, dimensions,
-            static_cast<std::size_t>(step.stride_bytes(0)), static_cast<std::size_t>(dots.stride_bytes(0)), nullptr);
+            static_cast<std::size_t>(step.stride_bytes(0)), static_cast<std::size_t>(dots.stride_bytes(0)), nullptr, 0,
+            nullptr);
         assert(scored == nk_success_k && "A matrix engine scores any call");
         for (std::size_t row = 0; row != step_rows; ++row) {
             // The finalizer's seats are symmetric, so the stored row takes the query's against four
@@ -809,8 +810,8 @@ struct ram_index {
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     template <typename config_type_>
-    std::size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
-        return config.expansion_factor ? config.expansion_factor : connectivity() * 2;
+    small_size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
+        return config.expansion_factor ? config.expansion_factor : static_cast<small_size_t>(connectivity() * 2);
     }
 
     /** Scalar dimensions per stored vector; zero until the first reservation freezes it. */
@@ -1514,29 +1515,45 @@ struct ram_index {
     }
 
     /**
-     *  @brief One refinement pass in flight: the planned range is re-selected, reachability swept level by level, and
-     *      the islands re-selected and reconnected round by round while their count shrinks. An empty range heals.
+     *  @brief One refinement pass in flight: the planned range is re-selected, once per round of
+     *      walks across while the index holds several parts, reachability swept level by level, and
+     *      the islands re-selected and reconnected round by round while their count shrinks.
      *
-     *  Steps of the current phase are disjoint ID ranges, so any number of threads may @ref run them at once;
-     *  @ref advance is the single-caller barrier between phases and answers whether another phase follows.
-     *  Re-selection and reconnection edit under the per-node locks like an insertion, so searches run throughout and a
-     * pass stopped between steps leaves the graph correct. Insertions may not overlap.
+     *  An empty range heals.
+     *
+     *  Round @c r walks every node across the neighboring group of `2^r` parts, as
+     *  @ref part_across names it, so @c k parts merge in `bit_width(k - 1)` rounds and two parts
+     *  in one. The first round starts at the planned range's first node, every later one at node
+     *  zero.
+     *
+     *  Steps of the current phase are disjoint ID ranges, so any number of threads may @ref run
+     *  them at once; @ref advance is the single-caller barrier between phases and answers whether
+     *  another phase follows. Re-selection and reconnection edit under the per-node locks like an
+     *  insertion, so searches run throughout and a pass stopped between steps leaves the graph
+     *  correct. Insertions may not overlap.
      */
     struct refine_plan_t {
         using step_t = typename health_plan_t::step_t;
+        using part_bases_allocator_t =
+            typename std::allocator_traits<candidates_allocator_t>::template rebind_alloc<node_id_t>;
+        using part_bases_t = growing_buffer<node_id_t, part_bases_allocator_t>;
 
         /** The audit the heal phases sweep. */
         health_plan_t audit;
 
         /** An unbound pass over @p audit - what a refused plan answers with. */
-        explicit refine_plan_t(health_plan_t&& audit) noexcept : audit(std::move(audit)) {}
-        refine_plan_t(ram_index& index, health_plan_t&& audit, iota_view<node_id_t> nodes, node_id_t appended_base,
-                      std::size_t expansion_factor) noexcept
-            : audit(std::move(audit)), index_(&index), nodes_(nodes), appended_base_(appended_base),
-              expansion_factor_(expansion_factor), phase_(nodes.empty() ? phase_t::sweep_k : phase_t::reselect_k) {}
+        refine_plan_t(health_plan_t&& audit, part_bases_t&& part_bases) noexcept
+            : audit(std::move(audit)), part_bases_(std::move(part_bases)) {}
+        refine_plan_t(ram_index& index, health_plan_t&& audit, iota_view<node_id_t> nodes, part_bases_t&& part_bases,
+                      small_size_t expansion_factor) noexcept
+            : audit(std::move(audit)), index_(&index), nodes_(nodes), part_bases_(std::move(part_bases)),
+              rounds_(part_bases_.size() > 1 ? static_cast<std::size_t>(std::bit_width(part_bases_.size() - 1)) : 1u),
+              expansion_factor_(expansion_factor),
+              phase_(nodes.empty() && rounds_ == 1 ? phase_t::sweep_k : phase_t::reselect_k) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : audit(std::move(other.audit)), index_(std::exchange(other.index_, nullptr)), nodes_(other.nodes_),
-              appended_base_(other.appended_base_), expansion_factor_(other.expansion_factor_), phase_(other.phase_),
+              part_bases_(std::move(other.part_bases_)), rounds_(other.rounds_), round_(other.round_),
+              stopped_(other.stopped_), expansion_factor_(other.expansion_factor_), phase_(other.phase_),
               swept_after_(other.swept_after_), islands_before_(other.islands_before_), tally_(other.tally_) {}
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
@@ -1546,9 +1563,10 @@ struct ram_index {
             if (phase_ != phase_t::reselect_k) return audit[position];
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = nodes_.first + (position * chunk_schedule_t::rows_in(0));
+            iota_view<node_id_t> const range = round_nodes_();
+            std::size_t const first = range.first + (position * chunk_schedule_t::rows_in(0));
             std::size_t const bound = min_of(first + chunk_schedule_t::rows_in(0),
-                                             static_cast<std::size_t>(nodes_.bound));
+                                             static_cast<std::size_t>(range.bound));
             step.position = position;
             step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             return step;
@@ -1558,19 +1576,22 @@ struct ram_index {
         indexed_range<refine_plan_t> steps() const noexcept {
             if (!index_ || phase_ == phase_t::done_k) return {this, 0u};
             if (phase_ != phase_t::reselect_k) return {this, audit.steps().size()};
-            return {this, divide_round_up<std::size_t>(nodes_.size(), chunk_schedule_t::rows_in(0))};
+            return {this, divide_round_up<std::size_t>(round_nodes_().size(), chunk_schedule_t::rows_in(0))};
         }
 
-        /** Runs @p step of the current phase on the calling thread - safe for disjoint steps of one phase. */
+        /** Runs @p step of the current phase on the calling thread - safe for disjoint steps of
+         *  one phase, and never failing on a bound plan, since @ref plan_refine reserved its
+         *  scratch. */
         status_t run(step_t const& step, traversal_context_t& context) noexcept {
             if (!index_) return status_t::uninitialized_k;
             switch (phase_) {
             case phase_t::reselect_k:
-            case phase_t::reselect_islands_k: return reselect_(step, context);
-            case phase_t::sweep_k: audit.sweep(step); return status_t::success_k;
-            case phase_t::reconnect_k: reconnect_(step, context); return status_t::success_k;
-            default: return status_t::success_k;
+            case phase_t::reselect_islands_k: reselect_(step, context); break;
+            case phase_t::sweep_k: audit.sweep(step); break;
+            case phase_t::reconnect_k: reconnect_(step, context); break;
+            default: break;
             }
+            return status_t::success_k;
         }
 
         /** The barrier between phases, one caller after every step of the current one ran: picks the next phase
@@ -1578,15 +1599,21 @@ struct ram_index {
         bool advance() noexcept {
             if (!index_) return false;
             if (phase_ == phase_t::sweep_k) {
-                ++tally_.sweeps;
                 if (!audit.advance_level()) converge_();
             }
             else if (phase_ != phase_t::done_k) {
+                if (phase_ == phase_t::reselect_k && !stopped_ && ++round_ != rounds_) return true;
                 audit.restart_sweep();
                 swept_after_ = phase_;
                 phase_ = phase_t::sweep_k;
             }
             return phase_ != phase_t::done_k;
+        }
+
+        /** Stops the re-selection where its steps ran, so the next @ref advance turns to the heal;
+         *  a no-op in any other phase. */
+        void stop() noexcept {
+            if (phase_ == phase_t::reselect_k) stopped_ = true;
         }
 
         /** Whether the current phase re-selects the planned range - the phase a caller's progress counts. */
@@ -1605,11 +1632,17 @@ struct ram_index {
             atomic_ref<std::size_t>(into).fetch_add(value, std::memory_order_relaxed);
         }
 
+        /** The nodes the current round of re-selection walks: the planned range in the first round,
+         *  every node below its bound in a later one. */
+        iota_view<node_id_t> round_nodes_() const noexcept {
+            return round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
+        }
+
         /** Picks what follows a converged audit, from the phase the audit followed. */
         void converge_() noexcept {
             auto const [health, status] = audit.finish();
             std::size_t const left = succeeded(status) ? audit.visible - health.reachable_nodes : 0;
-            tally_.reachable_nodes = health.reachable_nodes;
+            tally_.health = health;
             if (swept_after_ == phase_t::reselect_k) {
                 tally_.islands_found = left;
                 phase_ = left ? phase_t::reselect_islands_k : phase_t::done_k;
@@ -1623,11 +1656,7 @@ struct ram_index {
         }
 
         /** Re-selects every node of @p step, or only its islands once the heal rounds began. */
-        status_t reselect_(step_t const& step, traversal_context_t& context) noexcept {
-            if (status_t const sized = index_->reserve_traversal(
-                    context, insert_config_t {static_cast<small_size_t>(expansion_factor_)});
-                failed(sized))
-                return sized;
+        void reselect_(step_t const& step, traversal_context_t& context) noexcept {
             std::size_t const visited_members_before = context.visited_members;
             std::size_t const computed_distances_before = context.computed_distances;
             std::size_t const refines_before = context.computed_distances_in_refines;
@@ -1635,11 +1664,14 @@ struct ram_index {
             std::size_t const restarts_before = context.restarts;
             std::size_t const saturated_walks_before = context.saturated_walks;
             std::size_t visited = 0, changed = 0;
-            // Only the planned range walks across; the heal rounds re-select as a plain pass does.
-            node_id_t const appended_base = phase_ == phase_t::reselect_k ? appended_base_ : 0;
+            // Only the planned rounds walk across; the heal rounds re-select as a plain pass does.
+            bool const across = phase_ == phase_t::reselect_k && part_bases_.size() > 1;
             for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
                 if (phase_ == phase_t::reselect_islands_k && audit.reached(node_id)) continue;
-                changed += index_->refine_one_(node_id, audit.visible, appended_base, expansion_factor_, context);
+                iota_view<node_id_t> const other = across ? part_across(part_bases_.data(), part_bases_.size(), round_,
+                                                                        audit.visible, node_id)
+                                                          : iota_view<node_id_t> {};
+                changed += index_->refine_one_(node_id, audit.visible, other, expansion_factor_, context);
                 ++visited;
             }
             add_(tally_.visited_nodes, visited);
@@ -1651,7 +1683,6 @@ struct ram_index {
                  context.computed_distances_in_reverse_refines - reverse_refines_before);
             add_(tally_.restarts, context.restarts - restarts_before);
             add_(tally_.saturated_walks, context.saturated_walks - saturated_walks_before);
-            return status_t::success_k;
         }
 
         /** Reconnects every island in @p step to its nearest reached neighbor - a free slot when there is one,
@@ -1716,14 +1747,24 @@ struct ram_index {
         /** The refined index; null on a moved-from plan. */
         ram_index* index_ = nullptr;
 
-        /** The IDs the first phase re-selects, clamped to the audit's watermark. */
+        /** The IDs the first round re-selects, clamped to the audit's watermark. */
         iota_view<node_id_t> nodes_;
 
-        /** The first row of the appended part, every row below it resident; zero for no parts. */
-        node_id_t appended_base_ = 0;
+        /** The ascending first rows of the parts the rounds walk across, below the audit's
+         *  watermark; empty for none. */
+        part_bases_t part_bases_;
+
+        /** Rounds of re-selection, one with fewer than three parts. */
+        std::size_t rounds_ = 1;
+
+        /** The round the re-selection runs, or, once it left, the rounds it finished. */
+        std::size_t round_ = 0;
+
+        /** Whether @ref stop cut the re-selection short. */
+        bool stopped_ = false;
 
         /** Breadth of every re-selection walk. */
-        std::size_t expansion_factor_ = 0;
+        small_size_t expansion_factor_ = 0;
 
         /** The phase whose steps run now. */
         phase_t phase_ = phase_t::done_k;
@@ -1741,23 +1782,37 @@ struct ram_index {
     /**
      *  @brief Opens a refinement pass over @p nodes, clamped to the published IDs, with a fresh
      *      audit seeded like @ref plan_health; an empty range heals alone. The bitsets come from
-     *      @p context 's allocator.
+     *      @p context 's allocator, which also reserves @p context for the walks, so the steps it
+     *      runs cannot fail; a caller fanning the steps out reserves its other contexts alike.
      *
-     *  An @p appended_base inside the published IDs splits the rows into the resident part below it
-     *  and the appended part from it on: every node of @p nodes first walks across into the other
-     *  part alone, the resident rows into the appended part and the appended rows into the resident
-     *  one, then re-selects as a plain pass does from that walk's pool and its own. A part whose
-     *  neighbors all stay inside it is then seen from the other, which a walk seeded by those
-     *  neighbors never reaches.
+     *  Two or more @p part_bases below the published IDs split the rows into parts, the resident
+     *  part from the first base and each appended part from its own: every node first walks across
+     *  into the neighboring group of parts alone, round after round as @ref refine_plan_t merges
+     *  them, then re-selects as a plain pass does from that walk's pool and its own. A part whose
+     *  neighbors all stay inside it is then seen from the others, which a walk seeded by those
+     *  neighbors never reaches. The plan keeps its own copy of the bases.
      */
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
-                                        refine_config_t config = {}, node_id_t appended_base = 0) noexcept {
+                                        refine_config_t config = {},
+                                        std::span<node_id_t const> part_bases = {}) noexcept {
+        typename refine_plan_t::part_bases_t owned {
+            typename refine_plan_t::part_bases_allocator_t {context.allocator_}};
         auto [audit, status] = plan_health(context);
-        if (failed(status)) return {refine_plan_t {std::move(audit)}, status};
-        if (!geometry()) return {refine_plan_t {std::move(audit)}, status_t::uninitialized_k};
+        if (failed(status)) return {refine_plan_t {std::move(audit), std::move(owned)}, status};
+        if (!geometry()) return {refine_plan_t {std::move(audit), std::move(owned)}, status_t::uninitialized_k};
+        small_size_t const expansion_factor = non_zero_expansion_factor(config);
+        if (status_t const sized = reserve_traversal(context, insert_config_t {expansion_factor}); failed(sized))
+            return {refine_plan_t {std::move(audit), std::move(owned)}, sized};
         node_id_t const bound = min_of(nodes.bound, audit.visible);
         iota_view<node_id_t> const planned {min_of(nodes.first, bound), bound};
-        return {refine_plan_t {*this, std::move(audit), planned, appended_base, non_zero_expansion_factor(config)},
+        std::size_t parts = 0;
+        while (parts != part_bases.size() && part_bases[parts] < audit.visible) ++parts;
+        if (parts > 1) {
+            if (failed(owned.reserve_exactly(parts)))
+                return {refine_plan_t {std::move(audit), std::move(owned)}, status_t::bad_alloc_k};
+            for (node_id_t const base : part_bases.first(parts)) owned.push_back_reserved(base);
+        }
+        return {refine_plan_t {*this, std::move(audit), planned, std::move(owned), expansion_factor},
                 status_t::success_k};
     }
 
@@ -3201,11 +3256,10 @@ struct ram_index {
      *      picks the new ones, the rewrite runs under the node's lock, and every kept neighbor is
      *      back-linked. No distance math runs under a lock.
      *
-     *  Under a nonzero @p appended_base, a walk across into the other part alone fills the pool
-     *  first.
+     *  A non-empty @p across fills the pool first with a walk across into those rows alone.
      *  @return Whether the new neighbors differ as a set from the ones read.
      */
-    bool refine_one_(node_id_t node_id, node_id_t first_invisible_id, node_id_t appended_base,
+    bool refine_one_(node_id_t node_id, node_id_t first_invisible_id, iota_view<node_id_t> across,
                      std::size_t expansion_factor, traversal_context_t& context) noexcept {
         std::size_t const node_connectivity = connectivity();
         location_t const location = chunk_schedule_t::locate(node_id);
@@ -3220,13 +3274,11 @@ struct ram_index {
         context.frontier.clear();
         context.visited.clear();
         [[maybe_unused]] membership_t const self_marked = context.visited.insert(node_id);
-        // The pass rewires both parts in place meanwhile, so only the admission keeps this walk
-        // inside the other.
-        part_admission_t const across = node_id < appended_base
-                                            ? part_admission_t {appended_base, first_invisible_id}
-                                            : part_admission_t {0, min_of(appended_base, first_invisible_id)};
-        if (across.first_id < across.first_invisible_id &&
-            failed(search_around(own_vector, own_norms, across, expansion_factor, context, context.results)))
+        // The pass rewires every part in place meanwhile, so only the admission keeps this walk
+        // inside the others.
+        part_admission_t const other {across.first, min_of(across.bound, first_invisible_id)};
+        if (other.first_id < other.first_invisible_id &&
+            failed(search_around(own_vector, own_norms, other, expansion_factor, context, context.results)))
             ++context.saturated_walks;
         small_size_t const staged_count = stage_neighbors_(own_neighbors, node_id, context);
         std::span<node_id_t const> const seeds {context.staged_ids.data(), staged_count};

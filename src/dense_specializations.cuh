@@ -222,6 +222,7 @@ struct specialized_index {
     using search_result_t = typename index_type_::search_result_t;
     using refine_config_t = typename index_type_::refine_config_t;
     using refine_result_t = typename index_type_::refine_result_t;
+    using refine_plan_t = typename index_type_::refine_plan_t;
     using health_result_t = typename index_type_::health_result_t;
     using rows_view_t = us::dense::rows_view_t;
     using rows_span_t = us::dense::rows_span_t;
@@ -261,8 +262,16 @@ struct specialized_index {
                                   insert_config_t config) noexcept;
     expected<refine_result_t> refine(executor_t& executor, refine_config_t config, progress_ticks_t& ticks) noexcept;
 
-    /** Moves every row of @p donor into the index, linked in across, and leaves @p donor empty. */
-    expected<refine_result_t> absorb(index_type_& donor, executor_t& executor) noexcept;
+    /** Moves every row of each of @p donors into the index, one donor after another, nulling each
+     *  once consumed, then links them in across with one refine that @p ticks reports. */
+    expected<refine_result_t> absorb(std::span<index_type_*> donors, executor_t& executor, refine_config_t config,
+                                     progress_ticks_t& ticks) noexcept;
+
+    /** Opens a refinement the caller holds, landing @p donors first when any are named. */
+    expected<refine_plan_t> plan_absorb(std::span<index_type_*> donors, executor_t& executor,
+                                        refine_config_t config) noexcept;
+    status_t run(refine_plan_t& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    expected<refine_result_t> finish(refine_plan_t& plan, executor_t& executor) noexcept;
     expected<health_result_t> health(executor_t& executor) noexcept;
     expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
                                      keys_span_t keys, scores_span_t distances, counts_span_t counts,
@@ -391,8 +400,25 @@ expected<typename specialized_index<index_type_>::refine_result_t> specialized_i
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::refine_result_t> specialized_index<index_type_>::absorb(
-    index_type_& donor, executor_t& executor) noexcept {
-    return index.absorb(donor, executor);
+    std::span<index_type_*> donors, executor_t& executor, refine_config_t config, progress_ticks_t& ticks) noexcept {
+    return index.absorb(donors, executor, config,
+                        [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
+}
+template <typename index_type_>
+expected<typename specialized_index<index_type_>::refine_plan_t> specialized_index<index_type_>::plan_absorb(
+    std::span<index_type_*> donors, executor_t& executor, refine_config_t config) noexcept {
+    return index.plan_absorb(donors, executor, config);
+}
+template <typename index_type_>
+status_t specialized_index<index_type_>::run(refine_plan_t& plan, executor_t& executor,
+                                             progress_ticks_t& ticks) noexcept {
+    return plan.run(executor,
+                    [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
+}
+template <typename index_type_>
+expected<typename specialized_index<index_type_>::refine_result_t> specialized_index<index_type_>::finish(
+    refine_plan_t& plan, executor_t& executor) noexcept {
+    return plan.finish(executor);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::health_result_t> specialized_index<index_type_>::health(

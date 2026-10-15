@@ -196,7 +196,7 @@ static bool land_entries(shapes_index_t const& index, std::span<std::size_t cons
  */
 static std::size_t search_tape(shapes_index_t& index, usearch_tape_view_t queries, std::size_t count,
                                ranked_landing_t const& landing, std::size_t expansion_factor,
-                               usearch_shapes_traversal_stats_t* stats, usearch_predicate_t predicate,
+                               usearch_traversal_stats_t* stats, usearch_predicate_t predicate,
                                usearch_progress_t progress) {
     std::size_t const rows = index.entries.size();
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
@@ -488,7 +488,7 @@ void usearch_shapes_describe(usearch_shapes_describe_t* arguments) {
 void usearch_shapes_insert(usearch_shapes_insert_t* arguments) {
     if (through_executor<usearch_shapes_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
-    usearch_shapes_traversal_stats_t* const stats = arguments->stats;
+    usearch_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
     usearch_shapes_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;

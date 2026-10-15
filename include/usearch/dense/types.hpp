@@ -27,16 +27,6 @@ using namespace unum::usearch::utilities;
 template <nk::numeric_dtype scalar_, nk_capability_t caps_>
 struct quads_chain;
 
-/** Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
-using node_id_t = u32_t;
-
-/** Distance representation shared by all metrics, regardless of the stored dtype. */
-using distance_t = f32_t;
-
-/** Reserved all-ones value, never a valid node ID within a sub-index. Doubles as the
- *  lock & empty-slot sentinel in neighbor lists of every index design. */
-inline constexpr node_id_t node_id_unknown_k = 0xFFFFFFFFu;
-
 /** The NumKong dtype a column of @p dtype stores, or @c nk_dtype_unknown_k where NumKong has
  *  none. */
 constexpr nk_dtype_t nk_dtype_of(dtype_t dtype) noexcept {
@@ -91,16 +81,6 @@ constexpr dtype_t dtype_of(nk_dtype_t dtype) noexcept {
     }
 }
 
-/** One traversal candidate: a node ID paired with its distance to the query. */
-struct scored_node_t {
-
-    /** Identifier of the scored node within its sub-index. */
-    node_id_t node_id;
-
-    /** Distance to the query, in the instantiated kernel's metric. */
-    distance_t distance;
-};
-
 /** Orders scored nodes nearest-first; the comparator of the sorted results pool. */
 struct closer_scored_node_t {
     inline bool operator()(scored_node_t first, scored_node_t second) const noexcept {
@@ -143,11 +123,8 @@ struct [[nodiscard]] refine_result_t {
     /** Links actually written from a reached node to an island. */
     std::size_t islands_reconnected = 0;
 
-    /** Nodes the final audit reached. */
-    std::size_t reachable_nodes = 0;
-
-    /** Audit levels swept across the pass. */
-    std::size_t sweeps = 0;
+    /** The audit closing the heal, as a @c health call right after would take it. */
+    health_result_t health;
 
     /** Frontier candidates expanded across all re-selection walks. */
     std::size_t visited_members = 0;
@@ -177,15 +154,14 @@ inline health_result_t& operator+=(health_result_t& into, health_result_t const&
     return into;
 }
 
-/** Folds another pass or shard in: every count is a population or a spend and adds, but the audit
- *  depth, which is the deepest one's. */
+/** Folds another pass or shard in: every count is a population or a spend and adds, and the audits
+ *  fold as @c health_result_t does. */
 inline refine_result_t& operator+=(refine_result_t& into, refine_result_t const& other) noexcept {
     into.visited_nodes += other.visited_nodes;
     into.changed_nodes += other.changed_nodes;
     into.islands_found += other.islands_found;
     into.islands_reconnected += other.islands_reconnected;
-    into.reachable_nodes += other.reachable_nodes;
-    into.sweeps = max_of(into.sweeps, other.sweeps);
+    into.health += other.health;
     into.visited_members += other.visited_members;
     into.computed_distances += other.computed_distances;
     into.computed_distances_in_refines += other.computed_distances_in_refines;
@@ -201,6 +177,19 @@ inline refine_result_t& operator+=(refine_result_t& into, refine_result_t const&
 template <typename size_type_>
 constexpr size_type_ heal_spread(size_type_ connectivity) noexcept {
     return connectivity / 2;
+}
+
+/** The rows that @p node_id walks across first in round @p round of merging @p parts parts, whose
+ *  ascending @p part_bases start below @p rows: the neighboring group of `2^round` parts, or none
+ *  when no group neighbors its own. */
+template <typename node_id_type_>
+constexpr iota_view<node_id_type_> part_across(node_id_type_ const* part_bases, std::size_t parts, std::size_t round,
+                                               node_id_type_ rows, node_id_type_ node_id) noexcept {
+    std::size_t part = 0;
+    while (part + 1 < parts && part_bases[part + 1] <= node_id) ++part;
+    std::size_t const first = ((part >> round) ^ 1u) << round, bound = first + (std::size_t {1} << round);
+    if (first >= parts) return {};
+    return {part_bases[first], bound < parts ? part_bases[bound] : rows};
 }
 
 /** The online-softmax carry of one attended row, in natural-log units - the C++ face of
@@ -276,49 +265,6 @@ struct indexer_heads {
 /** The walks' default: no heads, so every node scores as the kit scored it. */
 struct dummy_heads_t {
     dummy_heads_t row(std::size_t) const noexcept { return {}; }
-};
-
-/** Warps per thread block across every kernel of the VRAM design - four schedulers per
- *  multiprocessor on every modern GPU, one lane group each. */
-inline constexpr u32_t vram_warps_per_block_k = 4;
-
-/** Resident blocks per multiprocessor - shared by the launch grids and the kernels' launch
- *  bounds, so the register allocator sizes to it; small-pool search kernels fit four. */
-inline constexpr u32_t vram_resident_blocks_per_multiprocessor_k = 3;
-
-/** Rows of the per-warp shared candidate cache; also bounds the diversity-selection pool prefix
- *  and the staging arrays. */
-inline constexpr u32_t vram_cache_rows_k = 64;
-
-/** Ceiling on concurrently in-flight candidate-vector gathers per lane - the memory-parallelism
- *  window over the @b candidate axis; the NVIDIA index also caps the lanes sharing one row at it,
- *  so a wide row takes more steps rather than more reductions. */
-inline constexpr u32_t vram_max_gathers_in_flight_k = 8;
-
-/** IDs the first insert wave over an empty shard admits at once; every later wave doubles, as wide
- *  as the rows already below it. */
-inline constexpr u32_t vram_admission_ramp_floor_k = 32;
-
-/** Slots of the widest register pool on the walks' rung ladder, @c vram_sorted_pool<16,warp_t>:
- *  as many ranks per lane. A walk expanding past that pool's width - this times the warp's lanes,
- *  512 on 32-lane warps - takes the arena frontier instead, so no expansion or count is capped by
- *  it. */
-inline constexpr u32_t vram_widest_pool_slots_k = 16;
-
-/** Device-resident telemetry counters, one block per driving context, zeroed at each submission
- *  and read after its drain. */
-struct vram_telemetry_block_t {
-    u64_t hops, scored, lock_attempts, lock_skips, reselections, restarts, locked_drops;
-
-    /** Scored candidates split by storage residency; zero unless the view names a resident
-     *  range. */
-    u64_t local_scored, remote_scored;
-
-    /** Frontier tail entries shed past their slice, and visited-set claims out of probes. */
-    u64_t tail_drops, visited_saturations;
-
-    /** Nodes whose neighbors a refinement merge landed in a different sequence than they held. */
-    u64_t changed_nodes;
 };
 
 /** Why @p keys and @p scores cannot hold @p rows rankings side by side with contiguous rows, or

@@ -261,6 +261,9 @@ int main() {
             continue;
         }
         failures_count += suite->check(settings, device);
+        failures_count += test::sequence::check_sequence_vram(settings, device);
+        failures_count += test::shapes::check_shapes_vram(settings, device);
+        failures_count += test::geospatial::check_geospatial_vram(settings, device);
         failures_count += check_vram_arms(settings, ordinal, *suite);
     }
     return report("total", failures_count) ? 1 : 0;

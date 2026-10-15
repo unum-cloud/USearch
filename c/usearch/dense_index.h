@@ -193,6 +193,16 @@ typedef struct usearch_dense_cursor_handle_t* usearch_dense_cursor_t;
  */
 typedef struct usearch_dense_search_stream_handle_t* usearch_dense_search_stream_t;
 
+/**
+ *  @brief One refinement in flight, optionally absorbing donors first: it holds everything the
+ *      pass needs between calls, so a cancelled @c usearch_dense_refinement_next continues where
+ *      it stopped, and nothing about it stays in the index once it finishes.
+ *
+ *  The index admits no insertion and no save while the handle lives; searches proceed as during
+ *  @c usearch_dense_refine. Each call names the index and the executor it was opened with.
+ */
+typedef struct usearch_dense_refinement_handle_t* usearch_dense_refinement_t;
+
 /** The dense metric kinds supported out of the box, with SIMD kernels dispatched by the
  *  machine's capabilities. The last two read their rows as @c usearch_scalar_u1x8_k bit sets
  *  and refuse any other quantization; the first four refuse that one. */
@@ -560,21 +570,6 @@ typedef struct usearch_dense_clear_t {
  *  the same handle while it runs. */
 USEARCH_EXPORT void usearch_dense_clear(usearch_dense_clear_t* arguments);
 
-/** Traversal telemetry, shared by every verb that walks the graph - a pure output, fully
- *  overwritten by the call it is passed to. Passing @c NULL skips reporting. */
-typedef struct usearch_dense_traversal_stats_t {
-
-    /** Graph members visited while resolving the batch. */
-    size_t visited_members;
-
-    /** Distances computed while resolving the batch, diversity re-selections included. */
-    size_t computed_distances;
-
-    /** Starvation restarts - re-seedings after the frontier drained prematurely,
-     *  and a graph-connectivity health signal rather than a cost counter. */
-    size_t restarts;
-} usearch_dense_traversal_stats_t;
-
 /** The arguments of @c usearch_dense_insert. */
 typedef struct usearch_dense_insert_t {
 
@@ -606,7 +601,7 @@ typedef struct usearch_dense_insert_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_dense_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_dense_insert_t;
 
 /**
@@ -657,14 +652,19 @@ typedef struct usearch_dense_refine_t {
     /** The @b optional output for the number of nodes whose neighbors changed; zero means settled. */
     size_t* changed;
 
+    /** The @b optional output for the audit closing the heal, as @c usearch_dense_health would take
+     *  it right after; @c reachable short of @c audited is what no reconnection could reach. */
+    usearch_reachability_t* reachability;
+
     /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with nodes swept. */
+    /** The @b optional handler, called with nodes re-selected; a cancel stops the re-selection,
+     *  still heals, and answers @c usearch_status_cancelled_k. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_dense_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_dense_refine_t;
 
 /**
@@ -677,10 +677,10 @@ typedef struct usearch_dense_refine_t {
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting a node's
  *  neighbors is idempotent and claims no identity, so a stopped pass leaves the graph correct and
- *  merely less improved - nothing unwinds, and no @c usearch_status_cancelled_k is reported. That
- *  idempotence is also why a stopped pass needs nothing remembered: the next call sweeps the graph
- *  again and re-selecting a settled node changes nothing, so calling under a time budget still
- *  converges, and a caller loops until @c changed falls below whatever change rate they consider
+ *  merely less improved: nothing unwinds, and the call answers @c usearch_status_cancelled_k. The
+ *  index keeps nothing of a stopped pass, so the next call starts at the first entry again; a
+ *  caller wanting to continue where a cancel stopped holds a @c usearch_dense_refinement_t
+ *  instead. A caller loops until @c changed falls below whatever change rate they consider
  *  settled.
  *
  *  Re-selection alone can strand an entry no search reaches, so every call closes by re-linking
@@ -696,21 +696,6 @@ typedef struct usearch_dense_refine_t {
  *  @c usearch_status_read_only_k, like every other mutating verb.
  */
 USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments);
-
-/** One reachability audit: the population it judged, and how much of it a search reaches. */
-typedef struct usearch_dense_reachability_t {
-
-    /** Entries published when the audit started - the population it judges; entries inserted
-     *  while it ran are not counted, so compare @c reachable against this, never a later size. */
-    size_t audited;
-
-    /** Of those, the entries a search reaches from the landmarks; the rest no search finds until
-     *  a @c usearch_dense_refine re-links them. */
-    size_t reachable;
-
-    /** Levels the sweep took to converge - a diameter proxy; the deepest shard's on a sharded handle. */
-    size_t sweeps;
-} usearch_dense_reachability_t;
 
 /** The arguments of @c usearch_dense_health. */
 typedef struct usearch_dense_health_t {
@@ -728,7 +713,7 @@ typedef struct usearch_dense_health_t {
     usearch_completion_t completion;
 
     /** Output for the audit; zeroed on failure. */
-    usearch_dense_reachability_t* reachability;
+    usearch_reachability_t* reachability;
 } usearch_dense_health_t;
 
 /** Audits how much of the graph a search can reach: forward reachability from as many landmarks
@@ -780,7 +765,7 @@ typedef struct usearch_dense_search_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_dense_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_dense_search_t;
 
 /**
@@ -911,7 +896,7 @@ typedef struct usearch_dense_absorb_t {
     /** The handle absorbing the donors. */
     usearch_dense_index_t index;
 
-    /** The executor each donor's landing and refinement fan out over, one donor after another. */
+    /** The executor each donor's landing and the closing refinement fan out over. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -923,11 +908,24 @@ typedef struct usearch_dense_absorb_t {
     /** Donor handles to absorb. */
     size_t count;
 
-    /** Array of @c count handles, every one of them consumed and nulled as it goes. */
+    /** Array of @c count handles, each consumed and nulled once its rows are published here. */
     usearch_dense_index_t* donors;
 
-    /** The @b optional handler, called with donors absorbed. */
+    /** The @b optional output for the nodes the closing refine changed. */
+    size_t* changed;
+
+    /** The @b optional output for the audit closing the heal. */
+    usearch_reachability_t* reachability;
+
+    /** The @b optional candidate-pool breadth of the closing refine's walks; zero derives. */
+    size_t expansion_factor;
+
+    /** The @b optional handler, called with nodes the closing refine re-selected; a cancel stops it
+     *  as it stops @c usearch_dense_refine, never a landing. */
     usearch_progress_t progress;
+
+    /** The @b optional traversal telemetry; @c NULL skips reporting. */
+    usearch_traversal_stats_t* stats;
 } usearch_dense_absorb_t;
 
 /**
@@ -939,23 +937,24 @@ typedef struct usearch_dense_absorb_t {
  *      for a nonzero @c count.
  *  @retval usearch_status_config_mismatch_k A donor of another residency, scalar, class, metric or
  *      geometry, a donor on a device the executor does not drive, or @c index itself.
- *  @retval usearch_status_cancelled_k The handler stopped the call between donors.
  *  @retval usearch_status_contended_k An insertion in flight on @c index or on the next donor, or
  *      on VRAM a save of either; that donor and every later one stay live handles.
  *
- *  Each donor's rows append to @c index shard by shard with their edges rebased, then a refinement
- *  of every shard that took them re-selects each of its rows across the appended part, so a group
- *  costs one such refinement per donor. Readers of a RAM @c index may keep searching throughout,
- *  since unpublished rows hide behind the watermark, while a VRAM one rewrites neighbors in place
- *  and admits no overlapping search, as refinement does. Insertions into @c index arriving
- *  meanwhile are refused with @c usearch_status_contended_k, while nothing may search a donor or
- *  start an insertion into it. A donor whose absorption fails stays a live handle, though its rows
- *  may already have landed in @c index.
+ *  The donors land one after another, each all-or-nothing: its rows append to @c index shard by
+ *  shard with their edges rebased, publish at once, and the donor is consumed, so at most one
+ *  donor's rows are ever held twice. One refinement then walks every shard across the parts the
+ *  donors appended, round by round, so a group of donors costs one refinement rather than one per
+ *  donor. Readers of a RAM @c index may keep searching throughout, since unpublished rows hide
+ *  behind the watermark, while a VRAM one rewrites neighbors in place and admits no overlapping
+ *  search, as refinement does. Insertions into @c index arriving meanwhile are refused with
+ *  @c usearch_status_contended_k, while nothing may search a donor or start an insertion into it.
  *
- *  Cancellation stops @b between donors, which makes this the one verb where it is not
- *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
- *  caller still owns and must free. Every consumed slot is nulled as it goes, so the array itself
- *  says which handles survived, and the count the handler last saw says how many did.
+ *  A failure leaves the donor it struck and every later one as live handles the caller still owns
+ *  and must free, and @c index holding the donors before it; every consumed slot is nulled, so the
+ *  array itself says which handles survived. The handler reports and cancels the closing
+ *  refinement alone, exactly as in @c usearch_dense_refine: a cancel skips the rest of the walks
+ *  across, still re-links, and answers @c usearch_status_cancelled_k with every donor consumed. A
+ *  caller wanting to continue those walks later holds a @c usearch_dense_refinement_t instead.
  *
  *  @code{.c}
  *  usearch_dense_index_t shards[4] = {built_on_socket_0, built_on_socket_1, built_on_socket_2, built_on_socket_3};
@@ -967,6 +966,134 @@ typedef struct usearch_dense_absorb_t {
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments);
+
+/** The arguments of @c usearch_dense_refinement_init. */
+typedef struct usearch_dense_refinement_init_t {
+
+    /** The handle to be refined. */
+    usearch_dense_index_t index;
+
+    /** The executor every call on the refinement runs on; its kind must match the residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Output for the new handle; @c NULL on failure. The index admits no insertion or save until
+     *  @c usearch_dense_refinement_finish frees it. */
+    usearch_dense_refinement_t* refinement;
+
+    /** The @b optional donors to absorb first, each consumed and nulled once its rows land; the
+     *  array must outlive the refinement. */
+    usearch_dense_index_t* donors;
+
+    /** Donor handles in @c donors. */
+    size_t count;
+
+    /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
+    size_t expansion_factor;
+} usearch_dense_refinement_init_t;
+
+/**
+ *  @brief Opens a refinement of @c index, absorbing @c donors first when any are named, as
+ *      @c usearch_dense_absorb lands them. Every allocation the refinement needs happens here or
+ *      in a donor's landing, never in a step.
+ *  @retval usearch_status_read_only_k @c index is an NVMe view.
+ *  @retval usearch_status_invalid_argument_k A @c NULL slot in @c donors, or @c NULL @c donors
+ *      for a nonzero @c count.
+ *  @retval usearch_status_config_mismatch_k A donor of another residency, scalar, class, metric or
+ *      geometry, or @c index itself.
+ *  @retval usearch_status_contended_k An insertion, save or another refinement in flight on
+ *      @c index.
+ */
+USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_t* arguments);
+
+/** The arguments of @c usearch_dense_refinement_next. */
+typedef struct usearch_dense_refinement_next_t {
+
+    /** The handle the refinement was opened on. */
+    usearch_dense_index_t index;
+
+    /** The executor the refinement was opened with. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The refinement to continue. */
+    usearch_dense_refinement_t refinement;
+
+    /** The @b optional handler, called with nodes re-selected across every call so far. */
+    usearch_progress_t progress;
+
+    /** The @b optional outputs for the nodes re-selected so far and, of those, the ones whose
+     *  neighbors changed; their ratio falling is what says another call buys little. */
+    size_t* visited;
+    size_t* changed;
+
+    /** The @b optional traversal telemetry of every call on the refinement so far; @c NULL skips
+     *  reporting. */
+    usearch_traversal_stats_t* stats;
+} usearch_dense_refinement_next_t;
+
+/**
+ *  @brief Continues the refinement until it ends or @c progress cancels, landing any donors still
+ *      pending first. Answers @c usearch_status_cancelled_k when a later call has more to do; that
+ *      call continues exactly where this one stopped. The executor is held only for the call.
+ *
+ *  Every call reaching the refinement writes the running totals, a cancelled or failed one too, so
+ *  they only grow from one call to the next and @c changed never exceeds @c visited; all stay zero
+ *  while donors are pending.
+ *  @retval usearch_status_invalid_argument_k @c index is not the handle the refinement was opened
+ *      on.
+ *  @retval usearch_status_contended_k An insertion in flight on the next donor; that donor and
+ *      every later one stay live handles, and a later call retries them.
+ */
+USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments);
+
+/** The arguments of @c usearch_dense_refinement_finish. */
+typedef struct usearch_dense_refinement_finish_t {
+
+    /** The handle the refinement was opened on. */
+    usearch_dense_index_t index;
+
+    /** The executor the refinement was opened with. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The refinement to finish; freed by the call, whatever it answers. */
+    usearch_dense_refinement_t refinement;
+
+    /** The @b optional output for the number of nodes whose neighbors changed. */
+    size_t* changed;
+
+    /** The @b optional output for the audit closing the heal. */
+    usearch_reachability_t* reachability;
+
+    /** The @b optional traversal telemetry of every call on the refinement; @c NULL skips
+     *  reporting. */
+    usearch_traversal_stats_t* stats;
+} usearch_dense_refinement_finish_t;
+
+/**
+ *  @brief Skips whatever re-selection a stopped refinement left, re-links what it strands as
+ *      @c usearch_dense_refine does, reports, reopens the index, and frees the handle. A
+ *      refinement whose donors have not all landed re-links nothing and reports zeros.
+ *  @retval usearch_status_invalid_argument_k @c index is not the handle the refinement was opened
+ *      on; the handle is still freed.
+ */
+USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_finish_t* arguments);
 
 /** The arguments of @c usearch_dense_cursor_init. */
 typedef struct usearch_dense_cursor_init_t {
@@ -1094,7 +1221,7 @@ typedef struct usearch_dense_sample_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_dense_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_dense_sample_t;
 
 /**
@@ -1410,7 +1537,7 @@ typedef struct usearch_dense_multiply_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_dense_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_dense_multiply_t;
 
 /**
@@ -1545,7 +1672,7 @@ typedef struct usearch_dense_attend_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_dense_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_dense_attend_t;
 
 /**
@@ -1648,7 +1775,7 @@ typedef struct usearch_dense_maxsim_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_dense_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_dense_maxsim_t;
 
 /**

@@ -27,6 +27,7 @@
 #include <cmath>   // `std::sin`, `std::cos`, `std::atan2`, `std::sqrt`, `std::exp`, `std::log`, `std::llround`
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::int32_t`, `std::int64_t`
+#include <cstring> // `std::memcpy` - a stored row read in place
 
 #include <array>   // `std::array`
 #include <bit>     // `std::bit_cast` - the codec's byte images
@@ -216,7 +217,7 @@ inline tangent_frame_t tangent_frame(earth_fixed_t base) noexcept {
  *  points along its initial great-circle bearing at any separation short of the antipode,
  *  so the cone is exact in bearing whether the candidate is a metre or a continent away.
  */
-inline unsigned octant_of(tangent_frame_t const& frame, earth_fixed_t base, earth_fixed_t candidate) noexcept {
+constexpr unsigned octant_of(tangent_frame_t const& frame, earth_fixed_t base, earth_fixed_t candidate) noexcept {
     i64_t const delta_x = static_cast<i64_t>(candidate.x_centimetres) - static_cast<i64_t>(base.x_centimetres);
     i64_t const delta_y = static_cast<i64_t>(candidate.y_centimetres) - static_cast<i64_t>(base.y_centimetres);
     i64_t const delta_z = static_cast<i64_t>(candidate.z_centimetres) - static_cast<i64_t>(base.z_centimetres);
@@ -613,6 +614,14 @@ struct earth_observation_codec_t {
         if (status_t const copied = copy_bytes(image, input); failed(copied)) return copied;
         value = std::bit_cast<earth_observation_t>(image);
         return status_t::success_k;
+    }
+
+    /** The observation a stored @p row holds, its 32 bytes loaded straight into the value, since an
+     *  I/O buffer promises no alignment to point into. */
+    earth_observation_t view(bytes_view_t row) const noexcept {
+        earth_observation_t value;
+        std::memcpy(&value, row.data(), sizeof(value));
+        return value;
     }
 };
 

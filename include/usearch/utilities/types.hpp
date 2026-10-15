@@ -1333,6 +1333,131 @@ struct uniform_below<u64_t> {
     }
 };
 
+/** Graph node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
+using node_id_t = u32_t;
+
+/** Distance representation shared by all metrics, regardless of the stored dtype. */
+using distance_t = f32_t;
+
+/** Reserved all-ones value, never a valid node ID within a sub-index. Doubles as the
+ *  lock & empty-slot sentinel in neighbor lists of every index design. */
+inline constexpr node_id_t node_id_unknown_k = 0xFFFFFFFFu;
+
+/** One traversal candidate: a node ID paired with its distance to the query. */
+struct scored_node_t {
+
+    /** Identifier of the scored node within its sub-index. */
+    node_id_t node_id;
+
+    /** Distance to the query, in the instantiated kernel's metric. */
+    distance_t distance;
+};
+
+/** Warps per thread block across every kernel of the VRAM design - four schedulers per
+ *  multiprocessor on every modern GPU, one lane group each. */
+inline constexpr u32_t vram_warps_per_block_k = 4;
+
+/** Resident blocks per multiprocessor - shared by the launch grids and the kernels' launch
+ *  bounds, so the register allocator sizes to it; small-pool search kernels fit four. */
+inline constexpr u32_t vram_resident_blocks_per_multiprocessor_k = 3;
+
+/** Rows of the per-warp shared candidate cache; also bounds the diversity-selection pool prefix
+ *  and the staging arrays. */
+inline constexpr u32_t vram_cache_rows_k = 64;
+
+/** Ceiling on concurrently in-flight candidate-vector gathers per lane - the memory-parallelism
+ *  window over the @b candidate axis; the NVIDIA index also caps the lanes sharing one row at it,
+ *  so a wide row takes more steps rather than more reductions. */
+inline constexpr u32_t vram_max_gathers_in_flight_k = 8;
+
+/** IDs the first insert wave over an empty shard admits at once; every later wave doubles, as wide
+ *  as the rows already below it. */
+inline constexpr u32_t vram_admission_ramp_floor_k = 32;
+
+/** Slots of the widest register pool on the walks' rung ladder, @c vram_sorted_pool<16,warp_t>:
+ *  as many ranks per lane. A walk expanding past that pool's width - this times the warp's lanes,
+ *  512 on 32-lane warps - takes the arena frontier instead, so no expansion or count is capped by
+ *  it. */
+inline constexpr u32_t vram_widest_pool_slots_k = 16;
+
+/** Device-resident telemetry counters, one block per driving context, zeroed at each submission
+ *  and read after its drain. */
+struct vram_telemetry_block_t {
+    u64_t hops, scored, lock_attempts, lock_skips, reselections, restarts, locked_drops;
+
+    /** Scored candidates split by storage residency; zero unless the view names a resident
+     *  range. */
+    u64_t local_scored, remote_scored;
+
+    /** Frontier tail entries shed past their slice, and visited-set claims out of probes. */
+    u64_t tail_drops, visited_saturations;
+
+    /** Nodes whose neighbors a refinement merge landed in a different sequence than they held. */
+    u64_t changed_nodes;
+};
+
+/**
+ *  @brief A VRAM index's claim word: past the watermark by the rows of the one batch or load in
+ *      flight, claimed from the watermark by one compare-exchange, or the sentinel while a caller
+ *      holds it closed, so a second claimant refuses rather than waits.
+ *
+ *  The watermark, the rows visible, is the index's own, and every call takes it as @p visible.
+ */
+struct vram_claim_word_t {
+    std::size_t claimed_rows = 0;
+
+    /** Whether a caller holds the word closed. */
+    bool closed() const noexcept {
+        return standard_atomic_ref<std::size_t const>(claimed_rows).load(std::memory_order_acquire) ==
+               node_id_unknown_k;
+    }
+
+    /** Rows claimed by batches and loads, visible or not; a closed word holds none past
+     *  @p visible. */
+    std::size_t claimed(std::size_t visible) const noexcept {
+        std::size_t const claimed =
+            standard_atomic_ref<std::size_t const>(claimed_rows).load(std::memory_order_acquire);
+        return claimed == node_id_unknown_k ? visible : claimed;
+    }
+
+    /** Claims @p rows from @p visible: one compare-exchange that succeeds only on an open word
+     *  with no batch or load in flight, so its holder alone grows, launches and publishes them. */
+    expected<node_id_t> claim(std::size_t visible, std::size_t rows, std::size_t max_rows) noexcept {
+        std::size_t first = visible;
+        if (rows > max_rows - first) return {{}, status_t::overflow_k};
+        if (!standard_atomic_ref<std::size_t>(claimed_rows)
+                 .compare_exchange_strong(first, first + rows, std::memory_order_acq_rel, std::memory_order_relaxed))
+            return {{}, status_t::contended_k};
+        return {static_cast<node_id_t>(first), status_t::success_k};
+    }
+
+    /** Gives back the claim over @p rows from @p first, which launched nothing; a word that moved
+     *  on, closed by a caller around a load, stays as it is. */
+    void unclaim(std::size_t first, std::size_t rows) noexcept {
+        std::size_t claimed = first + rows;
+        standard_atomic_ref<std::size_t>(claimed_rows)
+            .compare_exchange_strong(claimed, first, std::memory_order_release, std::memory_order_relaxed);
+    }
+
+    /** Closes the word at @p visible, so every claim refuses until @ref reopen; refused while a
+     *  batch or load is in flight. */
+    status_t close(std::size_t visible) noexcept {
+        return standard_atomic_ref<std::size_t>(claimed_rows)
+                       .compare_exchange_strong(visible, node_id_unknown_k, std::memory_order_acq_rel,
+                                                std::memory_order_relaxed)
+                   ? status_t::success_k
+                   : status_t::contended_k;
+    }
+
+    /** Reopens a closed word at @p visible, past every row a load published meanwhile; an open
+     *  one stays as it is. */
+    void reopen(std::size_t visible) noexcept {
+        std::size_t closed = node_id_unknown_k;
+        standard_atomic_ref<std::size_t>(claimed_rows)
+            .compare_exchange_strong(closed, visible, std::memory_order_acq_rel, std::memory_order_relaxed);
+    }
+};
+
 } // namespace unum::usearch::utilities
 
 /** Makes @c uuid_t a first-class key of standard-hash-keyed containers: fold one mixed

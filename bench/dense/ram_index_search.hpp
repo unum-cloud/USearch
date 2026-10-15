@@ -360,8 +360,8 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
         changed_per_pass.push_back(pass_result.changed_nodes);
         report.islands_found += pass_result.islands_found;
         report.islands_reconnected += pass_result.islands_reconnected;
-        report.reachable_nodes = pass_result.reachable_nodes;
-        report.sweeps = pass_result.sweeps;
+        report.reachable_nodes = pass_result.health.reachable_nodes;
+        report.sweeps = pass_result.health.sweeps;
         report.sums.visited_members += pass_result.visited_members;
         report.sums.computed_distances += pass_result.computed_distances;
         report.sums.restarts += pass_result.restarts;

@@ -2992,8 +2992,9 @@ std::size_t test_basic_safegraphs_hostile(u64_t seed, std::string_view metric_to
  *  @brief A monolith viewed from storage: @p count entries saved by a RAM index, then read through
  *      @p nvme_index_type_ on a one-thread executor of blocking reads.
  *
- *  Every entry finds itself at distance zero, @c count finds every key once and an absent one
- *  never, and @c get hands back every entry's own value.
+ *  Every entry finds itself at distance zero and ranks the same nearest entries as the RAM index
+ *  it was saved from, both pools as wide as the graph, @c count finds every key once and an
+ *  absent one never, and @c get and @c read_rows hand back every entry's own value.
  *
  *  @param[in] make_value Builds entry @c i on an allocator, as `make_value(i, allocator)`.
  *  @param[in] make_metric Builds a row slot's metric, as @c nvme_index::search takes it.
@@ -3013,6 +3014,10 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
     using executor_t = typename nvme_index_type_::executor_t;
     std::size_t failures = 0;
     allocation_ledger_t ledger;
+    // Both sides rank by one metric over pools as wide as the graph, so every row agrees.
+    constexpr std::size_t wanted_k = 4;
+    std::vector<key_t> ram_keys(count * wanted_k);
+    std::vector<distance_t> ram_distances(count * wanted_k);
     char path[64];
     std::snprintf(path, sizeof(path), "/tmp/usearch-nvme-%08x.safegraphs",
                   static_cast<unsigned>(stream_key(seed, "nvme") ^ reinterpret_cast<std::uintptr_t>(&ledger)));
@@ -3028,6 +3033,16 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
         failures += expect(bool(index.reserve(count)));
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
                                                keep_diverse_t {basic_connectivity_k});
+        for (std::size_t row = 0; row != count; ++row) {
+            auto const [found, status] = index.search(index.published_value_of(assigned_ids[row]), metric, context,
+                                                      {count, 0});
+            failures += expect_eq(status, status_t::success_k);
+            failures += expect(context.results.size() >= wanted_k);
+            for (std::size_t rank = 0; rank != wanted_k && rank < context.results.size(); ++rank) {
+                ram_keys[row * wanted_k + rank] = index.key_of(context.results[rank].node_id).value;
+                ram_distances[row * wanted_k + rank] = context.results[rank].distance;
+            }
+        }
         serial_executor_t serial;
         failures += expect_eq(safegraphs_write_index(std::string_view {path}, index, fixture_type_::make_codec(),
                                                      serial, save_config_t {}, metric_token),
@@ -3045,20 +3060,31 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
         failures += expect_eq(viewed.view(path, {}, metric_token, executor), status_t::success_k);
         failures += expect_eq(viewed.size(), count);
 
-        // Pools as wide as the graph walk all of it, so every entry meets itself.
+        // Pools as wide as the graph walk all of it, so every entry meets itself, and ties aside
+        // the rankings match the RAM index's: keys closer than a row's last distance agree.
         typename nvme_index_type_::search_config_t search_config;
         search_config.expansion_factor = count;
-        std::vector<key_t> keys(count);
-        std::vector<distance_t> distances(count);
+        std::vector<key_t> keys(count * wanted_k);
+        std::vector<distance_t> distances(count * wanted_k);
         std::vector<std::size_t> counts(count);
         auto const [found, search_status] = viewed.search(count, make_metric, query_of, executor, search_config,
                                                           std::span<key_t> {keys}, std::span<distance_t> {distances},
                                                           std::span<std::size_t> {counts});
         failures += expect_eq(search_status, status_t::success_k);
-        failures += expect_eq(found.count, count);
+        failures += expect_eq(found.count, count * wanted_k);
         for (std::size_t row = 0; row != count; ++row) {
-            failures += expect_eq(counts[row], 1u);
-            failures += basic_expect_distance<fixture_type_>(distances[row], distance_t {});
+            failures += expect_eq(counts[row], wanted_k);
+            failures += basic_expect_distance<fixture_type_>(distances[row * wanted_k], distance_t {});
+            distance_t const last = ram_distances[row * wanted_k + wanted_k - 1];
+            for (std::size_t rank = 0; rank != wanted_k; ++rank) {
+                std::size_t const match = row * wanted_k + rank;
+                failures += basic_expect_distance<fixture_type_>(distances[match], ram_distances[match]);
+                if (!(ram_distances[match] < last)) continue;
+                bool listed = false;
+                for (std::size_t other = 0; other != wanted_k; ++other)
+                    listed |= keys[row * wanted_k + other] == ram_keys[match];
+                failures += expect(listed);
+            }
         }
 
         std::vector<key_t> asked(count + 1);
@@ -3070,7 +3096,7 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
         failures += expect_eq(entries[count], 0u);
 
         std::atomic<std::size_t> handed {0}, mismatched {0};
-        auto on_value = [&](std::size_t position, std::size_t rank, auto const& view) noexcept {
+        auto on_value = [&](std::size_t position, std::size_t rank, std::size_t, auto const& view) noexcept {
             handed.fetch_add(1, std::memory_order_relaxed);
             if (rank || !matches(position, view)) mismatched.fetch_add(1, std::memory_order_relaxed);
         };
@@ -3078,6 +3104,20 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
                               status_t::success_k);
         failures += expect_eq(handed.load(), count);
         failures += expect_eq(mismatched.load(), 0u);
+
+        // Rows read in placement order hold the entries in insertion order, the last one included.
+        std::vector<key_t> read_keys(count - 1);
+        handed = 0, mismatched = 0;
+        auto on_row = [&](std::size_t row, std::size_t, auto const& view) noexcept {
+            handed.fetch_add(1, std::memory_order_relaxed);
+            if (!matches(row + 1, view)) mismatched.fetch_add(1, std::memory_order_relaxed);
+        };
+        failures += expect_eq(viewed.read_rows(1, std::span<key_t> {read_keys}, executor, on_row), status_t::success_k);
+        failures += expect_eq(handed.load(), count - 1);
+        failures += expect_eq(mismatched.load(), 0u);
+        for (std::size_t row = 0; row + 1 != count; ++row) failures += expect(read_keys[row] == asked[row + 1]);
+        failures += expect_eq(viewed.read_rows(count, std::span<key_t> {read_keys}.first(1), executor, on_row),
+                              status_t::config_mismatch_k);
     }
     fu_topology_delete(topology);
     std::remove(path);

@@ -115,8 +115,9 @@ function (usearch_c_interface_bench target source)
                           ${CMAKE_DL_LIBS}
     )
 endfunction ()
-usearch_c_interface_bench(usearch_bench_sequence_ram_index_search sequence_ram_index_search.cpp)
-usearch_c_interface_bench(usearch_bench_shapes_ram_index_search shapes_ram_index_search.cpp)
+usearch_c_interface_bench(usearch_bench_sequence_index_search sequence_index_search.cpp)
+usearch_c_interface_bench(usearch_bench_shapes_index_search shapes_index_search.cpp)
+usearch_c_interface_bench(usearch_bench_geospatial_index_search geospatial_index_search.cpp)
 
 # The kernel microbench times the distance kits alone, one row per kernel, dtype, capability tier and shape.
 add_executable(usearch_bench_dense_ram_metric dense/ram_metric.cpp)

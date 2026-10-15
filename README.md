@@ -106,7 +106,7 @@ Sharding partitions the indexed rows rather than replicating the entire graph.
 
 The useful unit of parallelism changes with residency.
 CPU workers overlap independent walks; GPU warps cooperate on their candidates & vector fragments; NVMe workers keep many pending walks alive while reads complete.
-Blackwell kits can gather candidate fragments with Tensor Memory Accelerator instructions, while storage walks explicitly yield the reads they need next.
+Blackwell kits score candidate batches in `mma.sync` tiles fed by 256-bit loads, while storage walks explicitly yield the reads they need next.
 `io_uring` submits those reads through kernel-managed rings; SPDK uses user-space storage drivers & polling.
 The traversal's latency hiding depends on keeping useful work ready between memory accesses, device instructions, or I/O completions.
 

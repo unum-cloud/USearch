@@ -524,7 +524,7 @@ endforeach ()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong 0604027604d3adc6c6cc955e28372735fb5f8220
+    numkong numkong::header https://github.com/ashvardanian/NumKong 473e88e4ec88b6567dbb9def7625df769fafe527
 )
 usearch_sibling(
     forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 075d14137420f204ff175acd2d29c22e163e241c

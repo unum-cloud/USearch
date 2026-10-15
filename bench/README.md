@@ -33,8 +33,8 @@ The algebra family measures the graph products `multiply` and the graph attentio
 The sequence and shapes binaries drive one RAM index through the C interface, as users do, holding the file's last `--queries` entries out of it, and judge the hits against an exact scan of `--oracle-queries`.
 A hit counts when its distance is within the exact k-th, so edit distances, where many entries tie, are not undercounted.
 
-- `usearch_bench_sequence_ram_index_search` reads `--base-texts`, one entry per line, under `levenshtein`, `levenshtein-utf8` or `overlap` with `--window-widths`.
-- `usearch_bench_shapes_ram_index_search` reads `--base-points`, a `.fbin` or `.f16bin` of 3 columns stored in that scalar, cut by `--base-counts`, an `.ibin` of points per shape, under `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`.
+- `usearch_bench_sequence_index_search` reads `--base-texts`, one entry per line, under `levenshtein`, `levenshtein-utf8` or `overlap` with `--window-widths`.
+- `usearch_bench_shapes_index_search` reads `--base-points`, a `.fbin` or `.f16bin` of 3 columns stored in that scalar, cut by `--base-counts`, an `.ibin` of points per shape, under `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`.
 
 Each dense search binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript; the `nvme` one prints a `Storage` block in place of `Insertions`.
 The `Insertions` block reports the wall time, the throughput in IPS, the distances computed with the shares spent in refinement, the visited members and the restarts.
@@ -226,17 +226,20 @@ build_host_release/usearch_bench_dense_ram_metric --filter 'dot/bf16/.*/1to[14]/
 ## Datasets
 
 Datasets live outside the repository and are reached through `data/<name>` symlinks, lowercase with dashes and the scale suffix last, such as `data/sift-10m`.
-The files follow the RetriEval layout: two little-endian `u32` counters, rows then columns, followed by the row-major payload, with the dtype carried by the extension, `.fbin` for `f32`, `.i8bin`, `.u8bin`, `.bf16bin`, and `.ibin` for `u32` neighbor IDs.
+The files follow the RetriEval layout: two little-endian `u32` counters, rows then columns, followed by the row-major payload, with the dtype carried by the extension, `.fbin` for `f32`, `.f16bin`, `.f64bin`, `.i8bin`, `.u8bin`, `.bf16bin`, `.b1bin` with columns counting bits, and `.ibin` for `u32` neighbor IDs.
 Datasets and ground truth stay in this layout, while every index the benchmarks save is SafeGraphs, as [Checkpoints](#checkpoints) describes.
 
-| Dataset               | Stored dtype | Dimensions | Metric    | Scales        | Ground truth          |
-| :-------------------- | -----------: | ---------: | :-------- | :------------ | :-------------------- |
-| `wiki-1m`, UForm Wiki |        `f32` |        256 | dot       | 1M            | 100K queries          |
-| `sift-*`, Meta BigANN |         `u8` |        128 | euclidean | 10M, 100M, 1B | 10K queries           |
-| `spacev-*`, Microsoft |         `i8` |        100 | euclidean | 100M, 1B      | 30K queries           |
-| `deep-*`, Yandex Deep |        `f32` |         96 | euclidean | 10M, 100M, 1B | 10K queries, 1B only  |
-| `turing-*`, Microsoft |        `f32` |        100 | euclidean | 100M, 1B      | 100K queries          |
-| `t2i-1b`, Yandex T2I  |        `f32` |        200 | angular   | 1B            | 100K queries, 1B only |
+| Dataset                     | Stored dtype | Dimensions | Metric    | Scales        | Ground truth           |
+| :-------------------------- | -----------: | ---------: | :-------- | :------------ | :--------------------- |
+| `wiki-1m`, UForm Wiki       |        `f32` |        256 | dot       | 1M            | 100K queries           |
+| `sift-*`, Meta BigANN       |         `u8` |        128 | euclidean | 10M, 100M, 1B | 10K queries            |
+| `spacev-*`, Microsoft       |         `i8` |        100 | euclidean | 100M, 1B      | 30K queries            |
+| `deep-*`, Yandex Deep       |        `f32` |         96 | euclidean | 10M, 100M, 1B | 10K queries, 1B only   |
+| `turing-*`, Microsoft       |        `f32` |        100 | euclidean | 100M, 1B      | 100K queries           |
+| `t2i-1b`, Yandex T2I        |        `f32` |        200 | angular   | 1B            | 100K queries, 1B only  |
+| `pubchem-ecfp4-*`, PubChem  |         `u1` |       2048 | jaccard   | 10M, 100M     | 10K queries, 100M only |
+| `pubchem-maccs-*`, PubChem  |         `u1` |        168 | jaccard   | 10M, 100M     | 10K queries, 100M only |
+| `pubchem-usrcat-*`, PubChem |        `f16` |         60 | euclidean | 10M, 100M     | 10K queries, 100M only |
 
 The BigANN base file has no pre-sliced subsets, so a subset is a range request followed by a header patch.
 
@@ -251,6 +254,25 @@ mkdir -p ~/datasets/sift-10m && ln -sfn ~/datasets/sift-10m data/sift-10m && cd 
 The Yandex ground truth is published against the full 1B set only, so a 10M or 100M slice of Deep or T2I is judged by `--self-search`.
 Every other recipe is in RetriEval's README under the same names.
 
+The PubChem sets come from the USearchMolecules bucket, 99,964,587 base molecules with 10,000 held-out queries, Tanimoto ties judged by distance rather than by ID.
+
+The other modalities keep their own entries, judged by the exact scan each binary runs.
+
+| Dataset                             | Entries                                     | Metric                 | Scales        |
+| :---------------------------------- | :------------------------------------------ | :--------------------- | :------------ |
+| `leipzig-news-10m`, Leipzig Corpora | English news sentences                      | `levenshtein-utf8`     | 10M           |
+| `fineweb-sentences-*`, FineWeb      | English web sentences, deduplicated         | `levenshtein-utf8`     | 100M, 1B      |
+| `hg002-reads-*`, GIAB HG002         | 150-nt Illumina reads                       | `levenshtein`          | 10M, 100M, 1B |
+| `pubchem-conformers-*`, PubChem 3D  | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff` | 10M, 100M     |
+| `gdb13-conformers-1b`, GDB-13 3D    | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff` | 1B            |
+| `panoramax-*`, Panoramax            | street-level observations, 11 `f64` columns | near, sees, seen       | 10M, 100M     |
+
+Sequence sets are text files with one entry per line, which `--base-texts` reads.
+Leipzig publishes at most 1M sentences per corpus, so `leipzig-news-10m` joins ten yearly English news corpora.
+Shape sets are one `.f16bin` of 3 columns with every cloud's points end to end and an `.ibin` of points per cloud, which `--base-points` and `--base-counts` read.
+Geospatial sets keep each observation in the field order of `usearch_geospatial_observation_t`, one `.f64bin` row of 11 values with NaN wherever the source recorded nothing, beside a `.u64bin` of each row's source picture ID.
+Panoramax publishes every picture's metadata across its federated instances as one weekly GeoParquet file, `https://api.panoramax.xyz/data/geoparquet/panoramax.parquet`, so its sets are a filter and a column mapping away.
+
 ## Results
 
 Every table below holds one row per machine and core class, so a new machine is a new row and nothing else moves.
@@ -260,23 +282,25 @@ Unless a row says otherwise the configuration is the default: connectivity 32, e
 
 SIFT, `u8`, euclidean, 10,000,000 rows of 128 dimensions.
 
-| Machine                                            | Class       |  Insertions |      Queries | Recall@10 | Date       |
-| :------------------------------------------------- | :---------- | ----------: | -----------: | --------: | :--------- |
-| Intel i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell`   |  12.8 k IPS |   46.9 k QPS |     98.5% | 2026-09-02 |
-| NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`       | 114.5 k IPS |  210.9 k QPS |     98.6% | 2026-09-02 |
-| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot`  | 23.05 k IPS |  75.15 k QPS |   98.800% | 2026-10-11 |
-| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory   | `metal`     | 72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
-| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB     | `blackwell` | 59.89 k IPS | 235.81 k QPS |   97.726% | 2026-10-14 |
+| Machine                                            | Class       |   Insertions |      Queries | Recall@10 | Date       |
+| :------------------------------------------------- | :---------- | -----------: | -----------: | --------: | :--------- |
+| Intel i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell`   |   12.8 k IPS |   46.9 k QPS |     98.5% | 2026-09-02 |
+| NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`       |  114.5 k IPS |  210.9 k QPS |     98.6% | 2026-09-02 |
+| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot`  |  23.05 k IPS |  75.15 k QPS |   98.800% | 2026-10-11 |
+| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory   | `metal`     |  72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
+| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB     | `blackwell` |  59.89 k IPS | 235.81 k QPS |   97.726% | 2026-10-14 |
+| NVIDIA B200, 148 SMs, 178.35 GB                    | `blackwell` | 522.31 k IPS | 512.23 k QPS |   97.630% | 2026-10-15 |
 
 ### 100M
 
 SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, and SpaceV, `i8`, euclidean, 100,000,000 rows of 100 dimensions.
 
-| Machine                                           | Class       | Dataset |  Insertions |      Queries | Recall@10 | Date       |
-| :------------------------------------------------ | :---------- | :------ | ----------: | -----------: | --------: | :--------- |
-| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages | `neonsdot`  | SIFT    | 16.86 k IPS |   5.63 k QPS |   96.410% | 2026-10-11 |
-| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory  | `metal`     | SIFT    | 61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
-| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB    | `blackwell` | SIFT    | 56.52 k IPS | 214.77 k QPS |   95.190% | 2026-10-14 |
+| Machine                                           | Class       | Dataset |   Insertions |      Queries | Recall@10 | Date       |
+| :------------------------------------------------ | :---------- | :------ | -----------: | -----------: | --------: | :--------- |
+| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages | `neonsdot`  | SIFT    |  16.86 k IPS |   5.63 k QPS |   96.410% | 2026-10-11 |
+| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory  | `metal`     | SIFT    |  61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
+| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB    | `blackwell` | SIFT    |  56.52 k IPS | 214.77 k QPS |   95.190% | 2026-10-14 |
+| NVIDIA B200, 148 SMs, 178.35 GB                   | `blackwell` | SIFT    | 342.23 k IPS | 483.06 k QPS |   95.160% | 2026-10-15 |
 
 ### 1B
 

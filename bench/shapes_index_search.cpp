@@ -1,21 +1,29 @@
 /**
- *  @file bench/shapes_ram_index_search.cpp
+ *  @file bench/shapes_index_search.cpp
  *  @author Ash Vardanian
  *  @date October 14, 2026
  *  @brief The shapes search benchmark: point clouds end to end and their point counts, built into
- *      one RAM index through the C interface and judged against an exact scan.
+ *      one RAM or VRAM index through the C interface and judged against an exact scan.
  *
  *  Points are stored in the scalar the file holds, so the oracle packs exactly what the index
- *  stores.
+ *  stores. A VRAM index lands its matches in a host arena, as a C caller reading them would. An
+ *  NVMe run builds in RAM, saves a checkpoint to the temporary directory and searches a view of
+ *  it.
  *
  *  @verbatim
  *  --base-points  required  Every shape's points end to end, `.fbin` or `.f16bin` with 3 columns
  *  --base-counts  required  Points per shape, `.ibin` with 1 column
+ *  --residency    ram       Where the index lives: ram, vram on GPU zero, or nvme
  *  --metric       chamfer, hausdorff, gromov_wasserstein or wasserstein_procrustes; chamfer by default
  *  @endverbatim
  */
+#include <cstdint> // `std::uint8_t` - the checkpoint path's bytes
+#include <cstdio>  // `std::remove` - the checkpoint an NVMe run saved
+
 #include <array>       // `std::array` - the kinds, and one round of the exact scan
+#include <filesystem>  // `std::filesystem::temp_directory_path` - where an NVMe run saves
 #include <limits>      // `std::numeric_limits` - the exact scan's open radius
+#include <string>      // `std::string` - the checkpoint path
 #include <string_view> // `std::string_view`
 
 #include "usearch/shapes_index.h"
@@ -59,8 +67,8 @@ status_t pack_shape(std::span<scalar_type_ const> coordinates, std::span<std::si
 /** Builds, searches and judges an index over the shapes in @p points_file, which hold
  *  @p scalar_type_ points, cut by the counts in @p counts_file. */
 template <typename scalar_type_>
-int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, bytes_view_t points_file,
-               bytes_view_t counts_file) {
+int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, std::string_view residency,
+               bytes_view_t points_file, bytes_view_t counts_file) {
     auto const [points, points_parse_status] = utilities::parse_matrix_header<scalar_type_, u32_t>(points_file);
     if (failed(points_parse_status) || points.columns != 3)
         return fmt::println(stderr, "--base-points must hold 3 columns per point"), 1;
@@ -85,21 +93,33 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, byte
 
     usearch_outcome_t outcome {};
     usearch_shapes_index_t index = nullptr;
-    usearch_shapes_init_ram_t init {.index = &index,
-                                    .outcome = &outcome,
-                                    .metric = kind.metric,
-                                    .quantization = tape.scalar,
-                                    .connectivity = settings.connectivity.value};
-    usearch_shapes_init_ram(&init);
+    usearch_vram_options_t const vram {};
+    if (residency == "vram") {
+        usearch_shapes_init_vram_t init {.index = &index,
+                                         .outcome = &outcome,
+                                         .metric = kind.metric,
+                                         .quantization = tape.scalar,
+                                         .connectivity = settings.connectivity.value,
+                                         .vram = vram};
+        usearch_shapes_init_vram(&init);
+    }
+    else {
+        usearch_shapes_init_ram_t init {.index = &index,
+                                        .outcome = &outcome,
+                                        .metric = kind.metric,
+                                        .quantization = tape.scalar,
+                                        .connectivity = settings.connectivity.value};
+        usearch_shapes_init_ram(&init);
+    }
     if (outcome.message) return fmt::println(stderr, "Init: {}", outcome.message), 1;
     usearch_shapes_index_description_t description {};
     usearch_shapes_describe_t describe {.index = index, .outcome = &outcome, .description = &description};
     usearch_shapes_describe(&describe);
-    fmt::println("- Metric: {} · scalar: {} · CPU class: {}", kind.token, half_k ? "f16" : "f32",
+    fmt::println("- Metric: {} · scalar: {} · residency: {} · class: {}", kind.token, half_k ? "f16" : "f32", residency,
                  description.capabilities);
 
     auto const insert = [&](usearch_executor_t executor, usearch_keys_view_t keys, usearch_tape_view_t entries,
-                            std::size_t count, usearch_shapes_traversal_stats_t* stats, usearch_outcome_t* reached) {
+                            std::size_t count, usearch_traversal_stats_t* stats, usearch_outcome_t* reached) {
         usearch_shapes_insert_t arguments {.index = index,
                                            .executor = executor,
                                            .outcome = reached,
@@ -111,7 +131,7 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, byte
         usearch_shapes_insert(&arguments);
     };
     auto const search = [&](usearch_executor_t executor, usearch_arena_t arena, usearch_tape_view_t queries,
-                            std::size_t count, usearch_matches_view_t* matches, usearch_shapes_traversal_stats_t* stats,
+                            std::size_t count, usearch_matches_view_t* matches, usearch_traversal_stats_t* stats,
                             usearch_outcome_t* reached) {
         usearch_shapes_search_t arguments {.index = index,
                                            .executor = executor,
@@ -149,29 +169,60 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, byte
         }
     };
 
-    int const exit_code = run_basic_bench<usearch_shapes_traversal_stats_t>(settings, tape, insert, search, exact);
+    // An NVMe run saves what it built and searches a view of the checkpoint, on storage threads.
+    std::string const checkpoint =
+        (std::filesystem::temp_directory_path() / "usearch-bench-shapes.safegraphs").string();
+    usearch_bytes_view_t const checkpoint_view {reinterpret_cast<std::uint8_t const*>(checkpoint.data()),
+                                                checkpoint.size()};
+    usearch_executor_t storage = nullptr;
+    auto const serve = [&](usearch_executor_t executor, usearch_outcome_t* reached) {
+        if (residency != "nvme") return executor;
+        usearch_shapes_save_t save {.index = index, .executor = executor, .outcome = reached, .path = checkpoint_view};
+        usearch_shapes_save(&save);
+        if (reached->message) return executor;
+        usearch_shapes_free(index);
+        index = nullptr;
+        usearch_executor_for_nvme_t storage_arguments {.executor = &storage,
+                                                       .outcome = reached,
+                                                       .threads = settings.threads.value};
+        usearch_executor_for_nvme(&storage_arguments);
+        if (reached->message) return executor;
+        usearch_shapes_view_nvme_t view {.index = &index,
+                                         .executor = storage,
+                                         .outcome = reached,
+                                         .path = checkpoint_view};
+        usearch_shapes_view_nvme(&view);
+        return storage;
+    };
+    int const exit_code = run_basic_bench<usearch_traversal_stats_t>(
+        settings, tape, residency == "vram" ? &vram : nullptr, insert, search, exact, serve);
     usearch_shapes_free(index);
+    usearch_executor_free(storage);
+    if (residency == "nvme") std::remove(checkpoint.c_str());
     return exit_code;
 }
 
 /** Runs the shapes search benchmark over the flags in @p argv. */
-int bench_shapes_ram_index_search(int argc, char const* const* argv) {
+int bench_shapes_index_search(int argc, char const* const* argv) {
     basic_settings_t settings;
-    std::string_view base_points_path, base_counts_path;
-    std::array<flag_t, 2> const flags {{
+    std::string_view base_points_path, base_counts_path, residency = "ram";
+    std::array<flag_t, 3> const flags {{
         {"--base-points", "path", "every shape's points end to end, `.fbin` or `.f16bin` with 3 columns",
          &base_points_path},
         {"--base-counts", "path", "points per shape, `.ibin` with 1 column", &base_counts_path},
+        {"--residency", "name", "where the index lives: ram, vram on GPU zero, or nvme; ram by default", &residency},
     }};
     read_basic_settings(argc, argv,
-                        "usearch_bench_shapes_ram_index_search --base-points <path> --base-counts <path> [flags]",
-                        settings, flags);
+                        "usearch_bench_shapes_index_search --base-points <path> --base-counts <path> [flags]", settings,
+                        flags);
 
     std::string_view const metric_name = settings.metric_name.empty() ? "chamfer" : settings.metric_name;
     shapes_kind_t const* kind = nullptr;
     for (shapes_kind_t const& candidate : shapes_kinds_k)
         if (candidate.token == metric_name) kind = &candidate;
     if (!kind) return fmt::println(stderr, "--metric=\"{}\" names no shapes kind", metric_name), 1;
+    if (residency != "ram" && residency != "vram" && residency != "nvme")
+        return fmt::println(stderr, "--residency=\"{}\" does not parse, expected ram, vram or nvme", residency), 1;
     auto [points_file, points_read_status] = mapped_file_t::read(base_points_path);
     if (failed(points_read_status))
         return fmt::println(stderr, "--base-points=\"{}\" could not be read", base_points_path), 1;
@@ -179,9 +230,9 @@ int bench_shapes_ram_index_search(int argc, char const* const* argv) {
     if (failed(counts_read_status))
         return fmt::println(stderr, "--base-counts=\"{}\" could not be read", base_counts_path), 1;
     if (base_points_path.ends_with(".fbin"))
-        return run_shapes<nk::f32_t>(settings, *kind, points_file.view(), counts_file.view());
+        return run_shapes<nk::f32_t>(settings, *kind, residency, points_file.view(), counts_file.view());
     if (base_points_path.ends_with(".f16bin"))
-        return run_shapes<nk::f16_t>(settings, *kind, points_file.view(), counts_file.view());
+        return run_shapes<nk::f16_t>(settings, *kind, residency, points_file.view(), counts_file.view());
     return fmt::println(stderr, "--base-points=\"{}\" does not parse, expected a .fbin or .f16bin path",
                         base_points_path),
            1;
@@ -189,4 +240,4 @@ int bench_shapes_ram_index_search(int argc, char const* const* argv) {
 
 } // namespace unum::usearch::bench
 
-int main(int argc, char** argv) { return us::bench::bench_shapes_ram_index_search(argc, argv); }
+int main(int argc, char** argv) { return us::bench::bench_shapes_index_search(argc, argv); }

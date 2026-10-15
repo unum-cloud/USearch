@@ -583,107 +583,323 @@ struct vram_nvidia_indexes {
 #pragma region Refinement
 
     /**
-     *  @brief Re-selects the neighbors of every stored node and heals whatever that strands, one
-     *      shard at a time.
+     *  @brief One refine in flight over every shard, holding every claim word closed meanwhile.
      *
-     *  A shard's pass owns its device and drains its stream before returning, so the shards run one
-     *  after another. A stopped pass leaves the graph correct and merely less improved, and the
-     *  next call sweeps again toward the same fixed point. Every shard's claim word stays closed
-     *  for the pass, so a batch, load or save in flight refuses it with @c contended_k, and one
-     *  arriving meanwhile is refused; searches may not overlap.
+     *  It owns its walk contexts, their device runs and its part starts, so nothing about it lives
+     *  in the index; @ref run continues it after a cancel, and @ref finish heals what a stopped
+     *  pass leaves and reopens. Every shard's @c refine_plan_t is driven phase by phase from this
+     *  thread: each phase queues on every shard's device first, then waits once per shard on its
+     *  event, so the devices work side by side. An absorb's plan first lands its donors, one after
+     *  another, and only then opens the shards' passes over the parts they appended. The
+     *  executor's streams must outlive the plan.
+     */
+    struct [[nodiscard]] refine_plan_t {
+        refine_plan_t() noexcept : refine_plan_t(forkunion_allocator_t {}) {}
+
+        /** An empty plan over @p allocator; only @ref plan_absorb ever fills it. */
+        explicit refine_plan_t(forkunion_allocator_t allocator) noexcept
+            : arenas_(allocator), traversals_(allocator), shard_plans_(allocator), part_bases_(allocator),
+              part_offsets_(allocator) {}
+        refine_plan_t(refine_plan_t&& other) noexcept
+            : arenas_(std::move(other.arenas_)), traversals_(std::move(other.traversals_)),
+              shard_plans_(std::move(other.shard_plans_)), part_bases_(std::move(other.part_bases_)),
+              part_offsets_(std::move(other.part_offsets_)), donors_(other.donors_),
+              landed_donors_(other.landed_donors_), config_(other.config_), population_(other.population_),
+              owner_(std::exchange(other.owner_, nullptr)) {}
+        refine_plan_t& operator=(refine_plan_t&&) = delete;
+        refine_plan_t(refine_plan_t const&) = delete;
+        refine_plan_t& operator=(refine_plan_t const&) = delete;
+
+        /** An unfinished plan heals nothing: it reopens, and the graph is as the last phase left
+         *  it. */
+        ~refine_plan_t() noexcept {
+            if (!owner_) return;
+            shard_plans_.clear();
+            owner_->reopen_shards_();
+        }
+
+        /**
+         *  @brief Drives the pending phases on @p executor until the pass ends or @p on_visited
+         *      cancels; @c cancelled_k means a later call continues where this one stopped.
+         *
+         *  Lands the donors still pending first, as @ref plan_absorb describes; a failing one stays
+         *  pending, with every later one, for the next call. The executor is held only for the
+         *  call.
+         *
+         *  @param[inout] executor The executor the plan was opened over.
+         *  @param[in] on_visited Fires per re-selecting phase with the nodes visited so far and the
+         *      population; a @c cancel_k answer stops before the next phase.
+         */
+        template <typename progress_type_ = dummy_progress_t>
+        status_t run(executor_t& executor, progress_type_&& on_visited = {}) noexcept {
+            if (!owner_) return status_t::uninitialized_k;
+            if (status_t const paired = owner_->pairs_with_(executor); failed(paired)) return paired;
+            auto [claim, claim_status] = executor.claim();
+            if (failed(claim_status)) return claim_status;
+            for (; landed_donors_ != donors_.size(); ++landed_donors_) {
+                vram_nvidia_indexes*& donor = donors_[landed_donors_];
+                if (status_t const closed = donor->close_shards_(); failed(closed)) return closed;
+                status_t const landed = owner_->absorb_(*donor, executor, *this);
+                // Emptied donor shards are fresh and open, so only a failure leaves them closed.
+                donor->reopen_shards_();
+                if (failed(landed)) return landed;
+                donor = nullptr;
+            }
+            if (shard_plans_.empty())
+                if (status_t const opened = open_shards_(); failed(opened)) return opened;
+            return drive_(on_visited);
+        }
+
+        /** Stops any re-selection, audits and heals, reopens the claim words, and reports. A plan
+         *  whose donors have not all landed heals nothing and reports nothing. */
+        expected<refine_result_t> finish(executor_t& executor) noexcept {
+            if (!owner_) return {{}, status_t::uninitialized_k};
+            if (status_t const paired = owner_->pairs_with_(executor); failed(paired)) return {{}, paired};
+            auto [claim, claim_status] = executor.claim();
+            if (failed(claim_status)) return {{}, claim_status};
+            status_t healed = status_t::success_k;
+            if (!shard_plans_.empty()) {
+                for (typename index_t::refine_plan_t& plan : shard_plans_) plan.stop();
+                dummy_progress_t heal_alone;
+                healed = drive_(heal_alone);
+                for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                    if (status_t const kept = plan.finish().status; failed(kept) && succeeded(healed)) healed = kept;
+            }
+            refine_result_t const result = running();
+            shard_plans_.clear();
+            std::exchange(owner_, nullptr)->reopen_shards_();
+            return {result, healed};
+        }
+
+        /** The totals so far, summed over the shards' passes from the counters and telemetry the
+         *  last phase landed: what @ref finish reports once it healed, and zeros while donors are
+         *  pending. */
+        refine_result_t running() const noexcept {
+            refine_result_t result;
+            for (typename index_t::refine_plan_t const& plan : shard_plans_) result += plan.finish().value;
+            return result;
+        }
+
+      private:
+        friend vram_nvidia_indexes;
+
+        /** Opens every shard's pass over its parts on its own context, once no donor is pending. */
+        status_t open_shards_() noexcept {
+            for (std::size_t shard = 0; shard != owner_->shards_.size(); ++shard) {
+                index_t& one = *owner_->shards_[shard].index;
+                std::span<node_id_t const> parts;
+                if (!part_offsets_.empty())
+                    parts = {part_bases_.data() + part_offsets_[shard],
+                             part_offsets_[shard + 1] - part_offsets_[shard]};
+                if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k)
+                    return shard_plans_.clear(), status_t::device_error_k;
+                auto [plan, status] = one.plan_refine({0, node_id_unknown_k}, traversals_[shard], config_, parts);
+                if (failed(status)) return shard_plans_.clear(), status;
+                shard_plans_.push_back_reserved(std::move(plan));
+            }
+            population_ = owner_->size();
+            return status_t::success_k;
+        }
+
+        /** Drives every shard's pending phases until none follows or @p on_visited cancels; a
+         *  failed phase keeps its status in its plan, and the first one answers. */
+        template <typename progress_type_>
+        status_t drive_(progress_type_& on_visited) noexcept {
+            status_t outcome = status_t::success_k;
+            std::size_t advancing = 0;
+            do {
+                bool reselected = false;
+                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
+                    reselected |= shard_plans_[shard].reselecting();
+                    if (cuda_set_device(owner_->shards_[shard].index->device_specs().ordinal) == cuda_success_k)
+                        static_cast<void>(shard_plans_[shard].queue());
+                }
+                for (typename index_t::refine_plan_t& plan : shard_plans_)
+                    if (status_t const waited = plan.wait(); failed(waited) && succeeded(outcome)) outcome = waited;
+                advancing = 0;
+                std::size_t visited = 0;
+                for (typename index_t::refine_plan_t& plan : shard_plans_) {
+                    advancing += plan.advance();
+                    visited += plan.visited();
+                }
+                if (advancing && reselected && on_visited(visited, population_) == continuation_t::cancel_k)
+                    return status_t::cancelled_k;
+            } while (advancing);
+            return outcome;
+        }
+
+        /** One device run per shard, on its stream, so no other call on the executor rewinds what
+         *  the plan keeps between its calls. */
+        growing_buffer<typename executor_t::arena_t, forkunion_allocator_t> arenas_;
+
+        /** One walk context per shard, over its run of the plan. */
+        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
+
+        /** Every shard's own pass in placement order; none until the donors landed. */
+        growing_buffer<typename index_t::refine_plan_t, forkunion_allocator_t> shard_plans_;
+
+        /** The parts the landings appended, ascending per shard, @c node_id_unknown_k past the
+         *  last. */
+        growing_buffer<node_id_t, forkunion_allocator_t> part_bases_;
+
+        /** Where each shard's run of @ref part_bases_ starts, and one past the last; empty with no
+         *  donors. */
+        growing_buffer<std::size_t, forkunion_allocator_t> part_offsets_;
+
+        /** The caller's donor slots, each nulled once landed. */
+        std::span<vram_nvidia_indexes*> donors_;
+
+        /** Donors landed so far. */
+        std::size_t landed_donors_ = 0;
+
+        /** The passes' knobs. */
+        refine_config_t config_ {};
+
+        /** The rows published once the donors landed - the population @c on_visited reports. */
+        std::size_t population_ = 0;
+
+        /** The index refined, closed while the plan lives; null in an empty plan and once
+         *  finished. */
+        vram_nvidia_indexes* owner_ = nullptr;
+    };
+
+    /** Opens a refine of every shard: closes the claim words and builds everything the plan runs
+     *  on, as @ref plan_absorb does with no donors, then opens the shards' passes. */
+    expected<refine_plan_t> plan_refine(executor_t& executor, refine_config_t config = {}) noexcept {
+        return plan_absorb({}, executor, config);
+    }
+
+    /**
+     *  @brief Re-selects the neighbors of every stored node and heals whatever that strands:
+     *      @ref plan_refine, then @c run and @c finish.
+     *
+     *  A stopped pass leaves the graph correct and merely less improved. Every shard's claim word
+     *  stays closed for the pass, so a batch, load or save in flight refuses it with
+     *  @c contended_k, and one arriving meanwhile is refused; searches may not overlap.
      *
      *  @param[inout] executor The streams and their scratch, one per shard.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     *  @param[in] on_visited Fires per shard with the nodes swept so far and the population; a
-     *      @c cancel_k answer stops before the next shard, reported as @c cancelled_k.
+     *  @param[in] on_visited Fires per re-selecting phase with the nodes visited so far and the
+     *      population; a @c cancel_k answer skips the rounds left, still heals, and reports
+     *      @c cancelled_k.
      */
     template <typename progress_type_ = dummy_progress_t>
     expected<refine_result_t> refine(executor_t& executor, refine_config_t config = {},
                                      progress_type_&& on_visited = {}) noexcept {
-        std::size_t const shards = shards_.size();
-        if (!shards) return {{}, status_t::uninitialized_k};
-        if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {{}, claim_status};
-        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
-        if (status_t const ready = reserve_traversals_(traversals, executor, config); failed(ready)) return {{}, ready};
-        if (status_t const closed = close_shards_(); failed(closed)) return {{}, closed};
-
-        refine_result_t result;
-        status_t status = status_t::success_k;
-        std::size_t const published = size();
-        for (std::size_t shard = 0; shard != shards && succeeded(status); ++shard) {
-            index_t& one = *shards_[shard].index;
-            if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k) {
-                status = status_t::device_error_k;
-                break;
-            }
-            auto const [part, refine_status] = one.refine({0, node_id_unknown_k}, traversals[shard], config);
-            result += part;
-            status = refine_status;
-            if (succeeded(status) && on_visited(result.visited_nodes, published) == continuation_t::cancel_k)
-                status = status_t::cancelled_k;
-        }
-        reopen_shards_();
-        return {result, status};
+        auto [plan, status] = plan_refine(executor, config);
+        if (failed(status)) return {{}, status};
+        status_t const ran = plan.run(executor, on_visited);
+        auto const [result, finish_status] = plan.finish(executor);
+        return {result, failed(finish_status) ? finish_status : ran};
     }
 
     /**
-     *  @brief Moves every row of @p donor into this index: donor shard @c s appends to shard @c s
-     *      modulo the shard count with its edges rebased and its keys beside it.
+     *  @brief Opens an absorb of @p donors, whose plan's first phase moves every row of each into
+     *      this index, one donor after another: donor shard @c s appends to shard @c s modulo the
+     *      shard count with its edges rebased and its keys beside it, as a part of its own.
      *
-     *  One refine over every row of each shard that took an appended part then links it with the
-     *  resident part: each row first walks across into the other part alone, from landmarks drawn
-     *  there, then its own neighbors and the whole graph, and re-selects from the union, so both
-     *  parts gain links across. A shard empty beforehand keeps the first part landing in it as its
-     *  resident part, and a shard left with no appended part only heals, so the reported reach
-     *  covers every shard.
+     *  Each donor lands through one plan that does every fallible thing first: a load claiming all
+     *  the rows each receiving shard takes, the key slots, the locator seats and the donor's fresh
+     *  empty shards. A donor shard then crosses as one device copy per column on the receiving
+     *  shard's stream, its device keys beside them, or through the load's bounce from another
+     *  device; one drain lands every part, every shard publishes, and only then do the keys
+     *  resolve. The donor empties into its fresh shards, which keep their devices but no capacity,
+     *  its slot nulls, and its shards join the receiving shards' parts in the plan, so at most one
+     *  donor's rows are ever held twice.
      *
-     *  Each shard opens one load for every row it takes, and a donor shard crosses into it as one
-     *  device copy per column on the receiving shard's stream, its device keys beside them, or
-     *  through the load's bounce from another device. One drain lands every part, then every shard
-     *  publishes, and only then do the keys resolve. The donor empties before the first refine, and
-     *  each refine drains its device before the next shard's starts, as in @ref refine. The donor
-     *  keeps its shards, and an index never reserved takes its geometry. Both indexes' claim words
-     *  stay closed for the call, so a batch, load or save in flight on either refuses it with
-     *  @c contended_k, and an insertion into this index arriving meanwhile is refused. Searches may
-     *  not overlap on either index, and nothing may start an insertion into the donor, whose shards
-     *  emptying rebuilds.
+     *  Once the last donor landed, the plan's re-selection walks every shard across the parts the
+     *  landings appended, round by round; a cancel pauses only that walk. This index's claim words
+     *  stay closed while the plan lives and the donor's while it lands, so a batch, load or save in
+     *  flight on either refuses it with @c contended_k, and an insertion into this index arriving
+     *  meanwhile is refused. Searches may not overlap on either index, and nothing may start an
+     *  insertion into a donor. An index never reserved takes the first donor's geometry.
      *
-     *  @param[inout] donor The index giving its rows up.
-     *  @param[inout] executor The streams and their scratch, driving every device of both indexes.
+     *  @param[inout] donors The indexes giving their rows up, each nulled once consumed; the slots
+     *      must outlive the landings.
+     *  @param[inout] executor The streams every @c run and @c finish names, driving every device of
+     *      every index.
      *  @param[in] config The refine's knobs; zeros mean "derive from connectivity".
-     *  @retval config_mismatch_k Another metric or geometry, a device the executor does not drive,
-     *      or @p donor being this index.
-     *  @retval contended_k A batch, load or save in flight on either index, or another refine or
+     *  @retval config_mismatch_k A null donor, another metric or geometry, a device the executor
+     *      does not drive, or this index itself.
+     *  @retval contended_k A batch, load or save in flight on this index, or another refine or
      *      absorb.
-     *  @retval others A failure before publication publishes nothing and leaves the donor whole; a
-     *      device fault while publishing leaves the shards before it published, their keys
-     *      unresolved; one while refining leaves every row here, merely less linked.
      */
+    expected<refine_plan_t> plan_absorb(std::span<vram_nvidia_indexes*> donors, executor_t& executor,
+                                        refine_config_t config = {}) noexcept {
+        std::size_t const shards = shards_.size();
+        if (!shards) return {{}, status_t::uninitialized_k};
+        if (status_t const kept = status(); failed(kept)) return {{}, kept};
+        vram_nvidia_indexes const* shaped = capacity() ? this : nullptr;
+        for (vram_nvidia_indexes* donor : donors) {
+            if (!donor || donor == this || donor->kernel_ != kernel_) return {{}, status_t::config_mismatch_k};
+            if (status_t const kept = donor->status(); failed(kept)) return {{}, kept};
+            if (status_t const paired = donor->pairs_with_(executor); failed(paired)) return {{}, paired};
+            if (!donor->capacity()) continue;
+            if (!shaped) shaped = donor;
+            else if (donor->dimensions() != shaped->dimensions() || donor->connectivity() != shaped->connectivity())
+                return {{}, status_t::config_mismatch_k};
+        }
+        if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
+        if (status_t const closed = close_shards_(); failed(closed)) return {{}, closed};
+        refine_plan_t plan {allocator_};
+        plan.owner_ = this;
+        plan.donors_ = donors;
+        plan.config_ = config;
+        if (failed(plan.arenas_.reserve_exactly(shards)) || failed(plan.traversals_.reserve_exactly(shards)) ||
+            failed(plan.shard_plans_.reserve_exactly(shards)))
+            return {{}, status_t::bad_alloc_k};
+
+        // A shard's parts: its resident one, and one per donor shard landing in it.
+        if (!donors.empty()) {
+            if (failed(plan.part_offsets_.resize(shards + 1))) return {{}, status_t::bad_alloc_k};
+            std::size_t parts = 0;
+            for (std::size_t into = 0; into != shards; ++into) {
+                plan.part_offsets_[into] = parts++;
+                for (vram_nvidia_indexes const* donor : donors)
+                    for (std::size_t from = into; from < donor->shards_.size(); from += shards) ++parts;
+            }
+            plan.part_offsets_[shards] = parts;
+            if (failed(plan.part_bases_.resize(parts))) return {{}, status_t::bad_alloc_k};
+            for (node_id_t& base : plan.part_bases_) base = node_id_unknown_k;
+        }
+
+        // Each run is seeded for the widest shard as it stands, two walks into one visited set
+        // wherever a node walks across; landed rows grow it.
+        std::size_t walk_bytes = 0;
+        for (shard_t const& one : (shaped ? shaped : this)->shards_)
+            walk_bytes = max_of(walk_bytes, one.index->traversal_memory_usage(config, donors.empty() ? 1u : 2u));
+        for (std::size_t shard = 0; shard != shards; ++shard) {
+            typename executor_t::stream_t& stream = executor.stream(stream_of_(executor, shard));
+            plan.arenas_.push_back_reserved(typename executor_t::arena_t {cuda_device_allocator_t {stream}});
+            if (failed(plan.arenas_[shard].reserve_exactly(walk_bytes))) return {{}, status_t::bad_alloc_k};
+            plan.traversals_.push_back_reserved(
+                traversal_context_t {typename traversal_context_t::allocator_t {plan.arenas_[shard], stream}});
+            if (!plan.traversals_.back()) return {{}, status_t::bad_alloc_k};
+        }
+        if (donors.empty())
+            if (status_t const opened = plan.open_shards_(); failed(opened)) return {{}, opened};
+        return {std::move(plan), status_t::success_k};
+    }
+
+    /** Moves every row of each of @p donors into this index and links them in: @ref plan_absorb,
+     *  then @c run and @c finish. @p on_visited answers as in @ref refine, for the re-selection
+     *  alone; a cancel still heals and reports @c cancelled_k. */
+    template <typename progress_type_ = dummy_progress_t>
+    expected<refine_result_t> absorb(std::span<vram_nvidia_indexes*> donors, executor_t& executor,
+                                     refine_config_t config = {}, progress_type_&& on_visited = {}) noexcept {
+        auto [plan, status] = plan_absorb(donors, executor, config);
+        if (failed(status)) return {{}, status};
+        status_t const ran = plan.run(executor, on_visited);
+        auto const [result, finish_status] = plan.finish(executor);
+        return {result, failed(finish_status) ? finish_status : ran};
+    }
+
+    /** Moves every row of @p donor into this index, as the plural @ref absorb does with one
+     *  donor. */
     expected<refine_result_t> absorb(vram_nvidia_indexes& donor, executor_t& executor,
                                      refine_config_t config = {}) noexcept {
-        if (&donor == this || donor.kernel_ != kernel_) return {{}, status_t::config_mismatch_k};
-        if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        if (status_t const kept = donor.status(); failed(kept)) return {{}, kept};
-        if (!donor.size()) return {{}, status_t::success_k};
-        if (capacity() && (donor.dimensions() != dimensions() || donor.connectivity() != connectivity()))
-            return {{}, status_t::config_mismatch_k};
-        if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
-        if (status_t const paired = donor.pairs_with_(executor); failed(paired)) return {{}, paired};
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {{}, claim_status};
-        if (status_t const closed = close_shards_(); failed(closed)) return {{}, closed};
-        if (status_t const closed = donor.close_shards_(); failed(closed)) {
-            reopen_shards_();
-            return {{}, closed};
-        }
-        expected<refine_result_t> const absorbed = absorb_(donor, executor, config);
-        // Emptied donor shards come back open, so only an earlier failure leaves them closed.
-        donor.reopen_shards_();
-        reopen_shards_();
-        return absorbed;
+        vram_nvidia_indexes* donors[1] = {&donor};
+        return absorb(std::span<vram_nvidia_indexes*>(donors), executor, config);
     }
 
     /**
@@ -1749,95 +1965,103 @@ struct vram_nvidia_indexes {
         return total;
     }
 
-    /** The landing and the closing refines of @ref absorb, under both indexes' closed claim words
-     *  and the executor's hold the caller keeps. */
-    expected<refine_result_t> absorb_(vram_nvidia_indexes& donor, executor_t& executor,
-                                      refine_config_t config) noexcept {
+    /** Lands every row of @p donor and consumes it, under both indexes' closed claim words and the
+     *  executor's hold @p refining keeps: every fallible step first, then the copies, one drain,
+     *  and the publication, and the donor's shards join the plan's parts. */
+    status_t absorb_(vram_nvidia_indexes& donor, executor_t& executor, refine_plan_t& refining) noexcept {
         std::size_t const shards = shards_.size();
+        if (!donor.size()) return status_t::success_k;
         if (!capacity())
             if (status_t const reserved = reserve({donor.size(), static_cast<connectivity_t>(donor.connectivity()),
                                                    donor.dimensions()})
                                               .status;
                 failed(reserved))
-                return {{}, reserved};
+                return reserved;
 
-        // Every shard claims all its rows first, so a failure before publication releases them all.
+        // Every shard claims all its rows first, and the donor's fresh shards exist before any
+        // lands, so a failure before publication releases them all.
         std::size_t const donors = donor.shards_.size();
         growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {allocator_};
-        growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> appended_parts {allocator_};
-        if (failed(plans.reserve_exactly(shards)) || failed(appended_parts.reserve_exactly(shards)))
-            return {{}, status_t::bad_alloc_k};
+        growing_buffer<std::unique_ptr<index_t>, forkunion_allocator_t> emptied {allocator_};
+        if (failed(plans.reserve_exactly(shards)) || failed(emptied.reserve_exactly(donors)))
+            return status_t::bad_alloc_k;
         std::size_t landing = 0;
         for (std::size_t into = 0; into != shards; ++into) {
             index_t& target = *shards_[into].index;
             std::size_t rows = 0;
             for (std::size_t from = into; from < donors; from += shards) rows += donor.shards_[from].index->size();
-            if (cuda_set_device(target.device_specs().ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
+            if (cuda_set_device(target.device_specs().ordinal) != cuda_success_k) return status_t::device_error_k;
             auto [plan, status] = target.plan_load(rows, executor.stream(stream_of_(executor, into)));
-            if (failed(status)) return {{}, status};
-            appended_parts.push_back_reserved({plan.base, plan.base});
+            if (failed(status)) return status;
             plans.push_back_reserved(std::move(plan));
             if (status_t const covered = cover_keys_(shards_[into], plans[into].base + rows); failed(covered))
-                return {{}, covered};
+                return covered;
             landing += rows;
         }
         auto [seats, seat_status] = locators_of_key_.claim(landing);
-        if (failed(seat_status)) return {{}, seat_status};
+        if (failed(seat_status)) return seat_status;
+        for (shard_t const& part : donor.shards_) {
+            emptied.push_back_reserved(donor.build_(part.index->device_specs().ordinal));
+            if (!emptied.back()) return status_t::bad_alloc_k;
+        }
 
         // A refused copy still waits for those queued before it, whose rows go to the next claim.
         status_t queued = status_t::success_k;
-        for (std::size_t from = 0; from != donors && succeeded(queued); ++from) {
-            std::size_t const into = from % shards;
+        for (std::size_t into = 0; into != shards && succeeded(queued); ++into) {
             shard_t& one = shards_[into];
-            shard_t const& part = donor.shards_[from];
-            node_id_t const part_rows = static_cast<node_id_t>(part.index->size());
-            if (!part_rows) continue;
             typename index_t::load_plan_t& plan = plans[into];
-            iota_view<node_id_t>& appended = appended_parts[into];
-            typename index_t::load_plan_t::step_t step;
-            step.index_rows = {appended.bound, appended.bound + part_rows};
-            step.source_rows = {0, part_rows};
-            queued = plan.load(step, *part.index, step.source_rows,
-                               executor.stream(donor.stream_of_(executor, from)).handle);
-            if (failed(queued)) continue;
-            for (node_id_t row : step.source_rows) one.keys[appended.bound + row] = part.keys[row];
-            // Another device's keys may not map here, so they cross from the host column.
-            if (part.index->device_specs().ordinal != one.index->device_specs().ordinal)
-                queued = upload_keys_(one, {appended.bound, appended.bound + part_rows}, plan.stream);
-            else if (cuda_copy_async(one.device_keys.base() + appended.bound, part.device_keys.base(),
-                                     part_rows * sizeof(key_t), plan.stream) != cuda_success_k)
-                queued = status_t::device_error_k;
-            appended.bound += part_rows;
-            // An empty shard keeps its first part resident, so later parts still walk across.
-            if (!appended.first) appended.first = appended.bound;
+            node_id_t base = plan.base;
+            for (std::size_t from = into; from < donors && succeeded(queued); from += shards) {
+                shard_t const& part = donor.shards_[from];
+                node_id_t const part_rows = static_cast<node_id_t>(part.index->size());
+                if (!part_rows) continue;
+                typename index_t::load_plan_t::step_t step;
+                step.index_rows = {base, base + part_rows};
+                step.source_rows = {0, part_rows};
+                queued = plan.load(step, *part.index, step.source_rows,
+                                   executor.stream(donor.stream_of_(executor, from)).handle);
+                if (failed(queued)) continue;
+                for (node_id_t row : step.source_rows) one.keys[base + row] = part.keys[row];
+                // Another device's keys may not map here, so they cross from the host column.
+                if (part.index->device_specs().ordinal != one.index->device_specs().ordinal)
+                    queued = upload_keys_(one, {base, base + part_rows}, plan.stream);
+                else if (cuda_copy_async(one.device_keys.base() + base, part.device_keys.base(),
+                                         part_rows * sizeof(key_t), plan.stream) != cuda_success_k)
+                    queued = status_t::device_error_k;
+                base += part_rows;
+            }
         }
         if (status_t const drained = executor.drain(); failed(queued) || failed(drained))
-            return {{}, failed(queued) ? queued : drained};
+            return failed(queued) ? queued : drained;
         for (typename index_t::load_plan_t& plan : plans)
-            if (status_t const published = plan.finish(); failed(published)) return {{}, published};
+            if (status_t const published = plan.finish(); failed(published)) return published;
         for (std::size_t into = 0; into != shards; ++into)
             for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
                 locators_of_key_.insert(seats, shards_[into].keys[row], key_locator_t {into, row});
-        if (status_t const cleared = donor.clear(); failed(cleared)) return {{}, cleared};
 
-        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
-        // Two walks into one visited set, since every row first walks across into the other part
-        // alone.
-        if (status_t const ready = reserve_traversals_(traversals, executor, config, 2u); failed(ready))
-            return {{}, ready};
-        refine_result_t result;
-        for (std::size_t shard = 0; shard != shards; ++shard) {
-            index_t& one = *shards_[shard].index;
-            if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k)
-                return {result, status_t::device_error_k};
-            iota_view<node_id_t> const appended = appended_parts[shard];
-            iota_view<node_id_t> const nodes = appended.empty() ? appended
-                                                                : iota_view<node_id_t> {0, node_id_unknown_k};
-            auto const [part, status] = one.refine(nodes, traversals[shard], config, appended.first);
-            result += part;
-            if (failed(status)) return {result, status};
+        // Each donor shard becomes a part of its own in the plan, which sized every shard's run.
+        for (std::size_t into = 0; into != shards; ++into) {
+            node_id_t* const parts = refining.part_bases_.data() + refining.part_offsets_[into];
+            std::size_t const room = refining.part_offsets_[into + 1] - refining.part_offsets_[into];
+            std::size_t count = 0;
+            while (count != room && parts[count] != node_id_unknown_k) ++count;
+            node_id_t base = plans[into].base;
+            for (std::size_t from = into; from < donors; from += shards) {
+                node_id_t const rows = static_cast<node_id_t>(donor.shards_[from].index->size());
+                if (!rows) continue;
+                if (!count && base) parts[count++] = 0;
+                parts[count++] = base;
+                base += rows;
+            }
         }
-        return {result, status_t::success_k};
+        for (std::size_t from = 0; from != donors; ++from) {
+            shard_t& part = donor.shards_[from];
+            part.index = std::move(emptied[from]);
+            part.keys = keys_column_t {donor.allocator_};
+        }
+        donor.locators_of_key_.clear();
+        donor.routed_rows_ = 0;
+        return status_t::success_k;
     }
 
 #pragma region Insertion

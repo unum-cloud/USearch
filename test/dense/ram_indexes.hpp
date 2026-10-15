@@ -154,6 +154,7 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     failures_count += test_dense_indexes_arena_growth<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_absorb<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_absorb_many<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_absorb_refusals<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_growth<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);

@@ -1802,7 +1802,7 @@ std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, alloca
 
     auto const [repair, repair_status] = islanded.refine({}, context);
     failures += expect(succeeded(repair_status));
-    failures += expect_eq(repair.reachable_nodes, nodes_count);
+    failures += expect_eq(repair.health.reachable_nodes, nodes_count);
     failures += expect(repair.islands_found > 0);
 
     auto const [after_health, after_status] = dense_audit_health(islanded, context);
@@ -2637,7 +2637,8 @@ std::size_t test_dense_indexes_refine(u64_t seed, placement_types_&... placement
     failures += expect(succeeded(first_status));
     failures += expect(first.visited_nodes >= rows && first.changed_nodes <= first.visited_nodes);
     failures += expect(first.changed_nodes > 0);
-    failures += expect(first.reachable_nodes <= rows && first.reachable_nodes + first.islands_found >= rows);
+    failures += expect(first.health.reachable_nodes <= rows &&
+                       first.health.reachable_nodes + first.islands_found >= rows);
 
     auto const [second, second_status] = indexes.refine(executor);
     failures += expect(succeeded(second_status));
@@ -2646,8 +2647,26 @@ std::size_t test_dense_indexes_refine(u64_t seed, placement_types_&... placement
     // The audit reads the graph the last pass left, so it counts what that pass ended on.
     auto const [health, health_status] = indexes.health(executor);
     failures += expect(succeeded(health_status));
-    failures += expect_eq(health.reachable_nodes, second.reachable_nodes);
+    failures += expect_eq(health.reachable_nodes, second.health.reachable_nodes);
+    failures += expect_eq(health.audited_nodes, second.health.audited_nodes);
     failures += expect(health.sweeps >= 1);
+
+    // A plan dropped after a cancelled run heals nothing, but reopens the index it held closed.
+    key_t const late_key = static_cast<key_t>(rows + 1);
+    auto insert_late = [&] {
+        return indexes.insert(std::span<key_t const> {&late_key, 1}, vectors(nk::range(0, 1), nk::slice), executor)
+            .status;
+    };
+    {
+        auto [plan, plan_status] = indexes.plan_refine(executor);
+        failures += expect_eq(plan_status, status_t::success_k);
+        auto cancel = [](std::size_t, std::size_t) noexcept { return continuation_t::cancel_k; };
+        failures += expect_eq(plan.run(executor, cancel), status_t::cancelled_k);
+        failures += expect_eq(insert_late(), status_t::contended_k);
+        failures += expect_eq(indexes.plan_refine(executor).status, status_t::contended_k);
+    }
+    failures += expect_eq(insert_late(), status_t::success_k);
+    failures += expect_eq(indexes.size(), rows + 1);
     return failures;
 }
 
@@ -2898,7 +2917,7 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
     // every row.
     auto const [health, health_status] = recipient.health(executor);
     failures += expect(succeeded(health_status));
-    failures += expect_eq(health.reachable_nodes, absorbed.reachable_nodes);
+    failures += expect_eq(health.reachable_nodes, absorbed.health.reachable_nodes);
     failures += expect(health.reachable_nodes * 100 >= rows * dense_minimal_recall_percent_k);
 
     // Sampled self-recall through the merged search, judged by distance band on each half alone, so
@@ -2927,6 +2946,112 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
             failures += expect(hits * 100 >= samples_count * dense_minimal_recall_percent_k);
         }
     }
+    return failures;
+}
+
+/** Four indexes over the quarters of one dataset merge into an empty recipient through one plan:
+ *  a group naming a null donor refuses before any lands, leaving every donor whole; a plan whose
+ *  first run is cancelled mid re-selection has consumed every donor and refuses insertions, and on
+ *  a GPU saves, while it lives; the next run continues it, and it finishes having re-selected
+ *  exactly as many nodes as an uncancelled absorb of the same quarters, every key resolving to its
+ *  own row. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
+std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... placement) {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    std::size_t failures = 0;
+    std::size_t const rows = dense_growth_nodes_k, quarter = rows / 4;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+
+    dense_indexes_executor<indexes_type_> driver {placement...};
+    if (failed(driver.status)) return failures + expect(false);
+    auto& executor = driver.executor;
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_absorb_many"));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+
+    auto build_quarters = [&](std::array<std::unique_ptr<indexes_type_>, 4>& quarters,
+                              std::array<indexes_type_*, 4>& donors) {
+        for (std::size_t which = 0; which != quarters.size(); ++which) {
+            quarters[which] = std::make_unique<indexes_type_>(kernel_, forkunion_allocator_t {no_memory_domain_k});
+            indexes_type_& built = *quarters[which];
+            failures += expect(succeeded(place_shards(built, placement...)));
+            failures += expect(succeeded(built.reserve({quarter, connectivity_16_k, dimensions}).status));
+            std::size_t const first = which * quarter;
+            failures += expect(succeeded(built
+                                             .insert(std::span<key_t const> {keys.data() + first, quarter},
+                                                     vectors(nk::range(first, first + quarter), nk::slice), executor)
+                                             .status));
+            donors[which] = &built;
+        }
+    };
+    // Re-selection reports from every worker at once, so the furthest count wins.
+    std::atomic<std::size_t> reported {0};
+    auto note = [&](std::size_t visited) noexcept {
+        std::size_t seen = reported.load();
+        while (seen < visited && !reported.compare_exchange_weak(seen, visited)) {}
+    };
+    auto cancel = [&](std::size_t visited, std::size_t) noexcept { return note(visited), continuation_t::cancel_k; };
+    auto proceed = [&](std::size_t visited, std::size_t) noexcept { return note(visited), continuation_t::continue_k; };
+
+    // The baseline: the same quarters absorbed in one uncancelled call.
+    indexes_type_ baseline {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(baseline, placement...)));
+    std::array<std::unique_ptr<indexes_type_>, 4> baseline_quarters;
+    std::array<indexes_type_*, 4> baseline_donors {};
+    build_quarters(baseline_quarters, baseline_donors);
+    failures += expect_eq(baseline.absorb(std::span<indexes_type_*> {baseline_donors}, executor, {}, proceed).status,
+                          status_t::success_k);
+    std::size_t const baseline_visited = reported.exchange(0);
+    failures += expect(baseline_visited >= rows);
+
+    indexes_type_ recipient {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(recipient, placement...)));
+    std::array<std::unique_ptr<indexes_type_>, 4> quarters;
+    std::array<indexes_type_*, 4> donors {};
+    build_quarters(quarters, donors);
+
+    // Validation comes before the first landing, so a null slot leaves every donor as it was.
+    std::array<indexes_type_*, 2> refused {donors[0], nullptr};
+    failures += expect_eq(recipient.plan_absorb(std::span<indexes_type_*> {refused}, executor).status,
+                          status_t::config_mismatch_k);
+    failures += expect(refused[0] == donors[0] && donors[0]->size() == quarter && recipient.size() == 0);
+
+    std::array<indexes_type_*, 4> consumed = donors;
+    {
+        auto [plan, plan_status] = recipient.plan_absorb(std::span<indexes_type_*> {consumed}, executor);
+        failures += expect_eq(plan_status, status_t::success_k);
+        failures += expect_eq(plan.run(executor, cancel), status_t::cancelled_k);
+        for (std::size_t which = 0; which != donors.size(); ++which)
+            failures += expect(!consumed[which] && donors[which]->size() == 0);
+        failures += expect(reported.load() > 0 && reported.load() < baseline_visited);
+
+        // The plan holds the index closed between its calls, never the executor.
+        key_t const late_key = static_cast<key_t>(rows + 1);
+        failures += expect_eq(
+            recipient.insert(std::span<key_t const> {&late_key, 1}, vectors(nk::range(0, 1), nk::slice), executor)
+                .status,
+            status_t::contended_k);
+        if constexpr (!ram_collection<indexes_type_>) {
+            save_config_t const monolith = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k);
+            auto const [bytes, measure_status] = recipient.storage_requirements(monolith);
+            failures += expect(succeeded(measure_status));
+            std::vector<std::byte> buffer(bytes);
+            failures += expect_eq(recipient.save(bytes_span_t {buffer}, monolith, executor), status_t::contended_k);
+        }
+
+        failures += expect_eq(plan.run(executor, proceed), status_t::success_k);
+        auto const [absorbed, finish_status] = plan.finish(executor);
+        failures += expect_eq(finish_status, status_t::success_k);
+        failures += expect_eq(reported.load(), baseline_visited);
+        failures += expect(absorbed.visited_nodes >= baseline_visited);
+    }
+    failures += expect_eq(recipient.size(), rows);
+    failures += dense_indexes_expect_restored(recipient, vectors, keys, dimensions, executor, seed);
+    auto const [health, health_status] = recipient.health(executor);
+    failures += expect(succeeded(health_status));
+    failures += expect(health.reachable_nodes * 100 >= rows * dense_minimal_recall_percent_k);
     return failures;
 }
 
@@ -4035,6 +4160,73 @@ template <typename index_type_, typename make_index_type_>
 std::size_t test_dense_saturated(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_saturated<index_type_>(make_index, ledger, seed);
+    return failures + expect_eq(ledger.live_bytes.load(), 0);
+}
+
+/** A refine over two parts is atomic by construction: under every budget short of its plan's needs
+ *  the plan refuses with @c bad_alloc_k and leaves the neighbors byte-identical, and once planned
+ *  it runs every step and phase to its end under a budget frozen where planning left it, since no
+ *  step allocates. */
+template <typename index_type_, typename make_index_type_>
+std::size_t dense_expect_refine_atomic(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    using node_id_t = typename index_type_::node_id_t;
+    std::size_t failures = 0;
+    std::size_t const rows = dense_growth_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+    index_type_& index = *index_ptr;
+    failures += expect(succeeded(index.reserve({rows, connectivity_16_k, dimensions}).status));
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "refine_atomic"));
+    typename index_type_::traversal_context_t context {counting_allocator_t(ledger)};
+    typename index_type_::insert_config_t cheap;
+    cheap.expansion_factor = 4;
+    failures += expect(succeeded(index.insert(vectors.view(), {}, context, cheap).status));
+
+    auto saved_vectors = nk::matrix<scalar_t>::zeros({rows, dimensions}).value;
+    auto before = nk::matrix<node_id_t>::zeros({rows, connectivity_16_k}).value;
+    auto after = nk::matrix<node_id_t>::zeros({rows, connectivity_16_k}).value;
+    auto scratch = nk::matrix<node_id_t>::zeros({rows, connectivity_16_k}).value;
+    failures += expect(!saved_vectors.empty() && !before.empty() && !after.empty() && !scratch.empty());
+    auto const snapshot = [&](nk::matrix<node_id_t>& neighbors) {
+        return index.save({dense_matrix_bytes(saved_vectors), dense_matrix_bytes(neighbors)},
+                          synchronization_t::exclusive_k, scratch.span());
+    };
+    failures += expect_eq(snapshot(before), status_t::success_k);
+
+    std::array<node_id_t, 2> const part_bases {0, static_cast<node_id_t>(rows / 2)};
+    iota_view<node_id_t> const every_node {0, static_cast<node_id_t>(rows)};
+    std::size_t refusals = 0;
+    for (std::ptrdiff_t slack = 0;; slack = slack * 2 + 64) {
+        ledger.byte_budget.store(ledger.live_bytes.load() + slack);
+        auto [plan, status] = index.plan_refine(every_node, context, {}, part_bases);
+        if (failed(status)) {
+            failures += expect_eq(status, status_t::bad_alloc_k);
+            failures += expect_eq(snapshot(after), status_t::success_k);
+            failures += expect(std::memcmp(before.data(), after.data(), dense_matrix_bytes(before).size()) == 0);
+            ++refusals;
+            continue;
+        }
+        ledger.byte_budget.store(ledger.live_bytes.load());
+        do
+            for (typename index_type_::refine_plan_t::step_t const step : plan.steps())
+                failures += expect_eq(plan.run(step, context), status_t::success_k);
+        while (plan.advance());
+        auto const [refined, refined_status] = plan.finish();
+        failures += expect_eq(refined_status, status_t::success_k);
+        failures += expect(refined.visited_nodes >= rows && refined.changed_nodes > 0);
+        break;
+    }
+    ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
+    failures += expect(refusals > 0);
+    return failures;
+}
+
+/** @ref dense_expect_refine_atomic, then the ledger it left must balance. */
+template <typename index_type_, typename make_index_type_>
+std::size_t test_dense_refine_atomic(make_index_type_ const& make_index, u64_t seed) {
+    allocation_ledger_t ledger;
+    std::size_t const failures = dense_expect_refine_atomic<index_type_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 

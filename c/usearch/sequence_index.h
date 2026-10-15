@@ -13,11 +13,15 @@
  *  alignments take a substitution matrix and gap costs. Handles are created by a lifecycle verb
  *  naming both an action and a residency:
  *
- *      Action                           RAM                          NVMe
- *      init: start empty, mutable       usearch_sequence_init_ram    none
- *      load: copy a checkpoint in       usearch_sequence_load_ram    none
- *      view: serve one in place         usearch_sequence_view_ram    usearch_sequence_view_nvme
- *      save: write a checkpoint         usearch_sequence_save        none
+ *      Action                           RAM          VRAM         NVMe
+ *      init: start empty, mutable       init_ram     init_vram    none
+ *      load: copy a checkpoint in       load_ram     none         none
+ *      view: serve one in place         view_ram     none         view_nvme
+ *      save: write a checkpoint         save         none         none
+ *
+ *  Each is spelled @c usearch_sequence_ and the suffix above. A VRAM handle serves byte and UTF-8
+ *  Levenshtein, on one GPU, through the insertion, search and description verbs, refusing the rest
+ *  with @c usearch_status_unsupported_k, and a search there takes no @c predicate.
  *
  *  A viewed handle is read-only, refusing every mutating verb with @c usearch_status_read_only_k.
  *  An NVMe handle answers every read verb as a RAM handle does, its rows read through the
@@ -273,6 +277,51 @@ typedef struct usearch_sequence_init_ram_t {
  *  the weighted alignments alike. */
 USEARCH_EXPORT void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments);
 
+/** The arguments of @c usearch_sequence_init_vram, which match @c usearch_sequence_init_ram_t but
+ *  for the placement. */
+typedef struct usearch_sequence_init_vram_t {
+
+    /** Output for the new index. */
+    usearch_sequence_index_t* index;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** The scoring kind; byte and UTF-8 Levenshtein serve a GPU. */
+    usearch_sequence_metric_t metric;
+
+    /** The weights an alignment kind needs; @c NULL for the Levenshtein kinds, which refuse any. */
+    usearch_sequence_weights_t const* weights;
+
+    /** Window widths in bytes for the overlap kind; every other kind refuses any. */
+    size_t const* window_widths;
+
+    /** Number of entries in @c window_widths. */
+    size_t window_widths_count;
+
+    /** The @b optional connections-per-node bound; zero derives. */
+    size_t connectivity;
+
+    /** Zero alone: a GPU index keeps no key lookup, so it bounds no key's entries and refuses any
+     *  bound it is given. */
+    size_t values_per_key;
+
+    /** The one device to place the index on; naming none picks device zero. */
+    usearch_vram_options_t vram;
+} usearch_sequence_init_vram_t;
+
+/**
+ *  @brief Creates an empty, mutable sequence index in device memory.
+ *  @retval usearch_status_unsupported_k A kind other than byte or UTF-8 Levenshtein, a
+ *      @c values_per_key bound, or more than one device.
+ *  @retval usearch_status_device_k A device past the listing, one whose vendor no kernel serves, or
+ *      a build without GPU kernels.
+ *
+ *  Insertions and searches on it run on an executor driving its device, and a search lands its
+ *  matches in device memory in an arena made for that executor, or on host pages in a host one.
+ */
+USEARCH_EXPORT void usearch_sequence_init_vram(usearch_sequence_init_vram_t* arguments);
+
 /** The arguments of @c usearch_sequence_load_ram. */
 typedef struct usearch_sequence_load_ram_t {
 
@@ -416,21 +465,6 @@ typedef struct usearch_sequence_clear_t {
 /** Erases all entries, keeping the reserved capacity. */
 USEARCH_EXPORT void usearch_sequence_clear(usearch_sequence_clear_t* arguments);
 
-/** Traversal telemetry, shared by insertion and search - a pure output, fully overwritten by the
- *  call it is passed to. Passing @c NULL skips reporting. */
-typedef struct usearch_sequence_traversal_stats_t {
-
-    /** Graph members visited while resolving the batch. */
-    size_t visited_members;
-
-    /** Distances computed while resolving the batch, diversity re-selections included. */
-    size_t computed_distances;
-
-    /** Starvation restarts - re-seedings after the frontier drained prematurely,
-     *  and a graph-connectivity health signal rather than a cost counter. */
-    size_t restarts;
-} usearch_sequence_traversal_stats_t;
-
 /** The arguments of @c usearch_sequence_insert. */
 typedef struct usearch_sequence_insert_t {
 
@@ -463,7 +497,7 @@ typedef struct usearch_sequence_insert_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_sequence_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_sequence_insert_t;
 
 /**
@@ -507,7 +541,7 @@ typedef struct usearch_sequence_refine_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_sequence_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_sequence_refine_t;
 
 /**
@@ -570,7 +604,7 @@ typedef struct usearch_sequence_search_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_sequence_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_sequence_search_t;
 
 /**
@@ -829,7 +863,7 @@ typedef struct usearch_sequence_sample_t {
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_sequence_traversal_stats_t* stats;
+    usearch_traversal_stats_t* stats;
 } usearch_sequence_sample_t;
 
 /**

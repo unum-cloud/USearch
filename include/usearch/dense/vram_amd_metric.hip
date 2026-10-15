@@ -1030,6 +1030,7 @@ struct rocm_registers_schedule_t {
     template <typename storage_, typename cache_>
     static __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids,
                                                       u32_t rows, u32_t lane) noexcept {
+        if (cache.ids_) return;
         for (u32_t word = lane; word < rows * storage.row_fragments; word += hip_warp_t::width_k) {
             u32_t const row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, row);
             cache.at(row, fragment) = storage.vector_for(ids[row], fragment);
@@ -1061,13 +1062,13 @@ __device__ __forceinline__ __attribute__((address_space(3))) void* hip_shared_po
  *  until its asynchronous LDS loads are wired.
  */
 template <u32_t lane_bytes_>
-struct hip_lds_schedule {
+struct rocm_lds_schedule {
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies count on the wavefront's own @c vmcnt. */
     struct shared_t {};
 
-    __device__ __forceinline__ hip_lds_schedule(shared_t&, u32_t) noexcept {}
+    __device__ __forceinline__ rocm_lds_schedule(shared_t&, u32_t) noexcept {}
 
     /** Scores a walk's batch as @ref rocm_registers_schedule_t does. */
     template <vram_quads_kit kit_, u32_t resident_blocks_>
@@ -1081,8 +1082,7 @@ struct hip_lds_schedule {
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
-        if (!__builtin_amdgcn_is_shared(cache.row(0)))
-            return rocm_registers_schedule_t::stage_rows(storage, cache, ids, rows, lane);
+        if (cache.ids_) return;
         constexpr u32_t units_per_fragment_k = sizeof(typename storage_::fragment_t) / lane_bytes_;
         u32_t const row_units = storage.row_fragments * units_per_fragment_k, units = rows * row_units;
         byte_t* const cache_bytes = reinterpret_cast<byte_t*>(cache.row(0));
@@ -1102,8 +1102,8 @@ struct hip_lds_schedule {
     __device__ __forceinline__ void await_rows(u32_t) noexcept { asm volatile("s_waitcnt vmcnt(0)" ::: "memory"); }
 };
 
-using cdna3_lds_schedule_t = hip_lds_schedule<sizeof(u32_t)>;
-using cdna4_lds_schedule_t = hip_lds_schedule<sizeof(uint4)>;
+using cdna3_lds_schedule_t = rocm_lds_schedule<sizeof(u32_t)>;
+using cdna4_lds_schedule_t = rocm_lds_schedule<sizeof(uint4)>;
 
 #pragma endregion Schedules
 
@@ -1116,12 +1116,10 @@ using cdna4_lds_schedule_t = hip_lds_schedule<sizeof(uint4)>;
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::f16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                    //
-        f16_rocm_quads_kit_t,                                                                      //
-        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, f16_rocm_quads_kit_t>,  //
-        chain_layer<NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0, f16_cdna3_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_CDNA3 && (caps_ & nk_cap_cdna3_k) != 0, f16_cdna3_quads_kit_t>  //
-        >::type;
+    using kit_t = std::conditional_t<!(NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0) &&
+                                         ((NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0) ||
+                                          (NUMKONG_TARGET_CDNA3 && (caps_ & nk_cap_cdna3_k) != 0)),
+                                     f16_cdna3_quads_kit_t, f16_rocm_quads_kit_t>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -1155,22 +1153,18 @@ struct quads_chain<nk::u8_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::e5m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                     //
-        e5m2_rocm_quads_kit_t,                                                                      //
-        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, e5m2_cdna4_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0, e5m2_cdna4_quads_kit_t>  //
-        >::type;
+    using kit_t = std::conditional_t<(NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0) ||
+                                         (NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0),
+                                     e5m2_cdna4_quads_kit_t, e5m2_rocm_quads_kit_t>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::e4m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                                     //
-        e4m3_rocm_quads_kit_t,                                                                      //
-        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, e4m3_cdna4_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0, e4m3_cdna4_quads_kit_t>  //
-        >::type;
+    using kit_t = std::conditional_t<(NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0) ||
+                                         (NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0),
+                                     e4m3_cdna4_quads_kit_t, e4m3_rocm_quads_kit_t>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -1215,12 +1209,10 @@ struct quads_chain<nk::u1x8_t, caps_> {
 /** The staging schedule under @p caps_: the LDS DMA copies on CDNA3 and CDNA4, a fragment per lane
  *  where CDNA4 allows it, and the register copies on MI400 and every other ROCm device. */
 template <nk_capability_t caps_>
-using hip_schedule_chain = typename first_available_kit<                   //
-    rocm_registers_schedule_t,                                             //
-    chain_layer<(caps_ & nk_cap_cdna5_k) != 0, rocm_registers_schedule_t>, //
-    chain_layer<(caps_ & nk_cap_cdna4_k) != 0, cdna4_lds_schedule_t>,      //
-    chain_layer<(caps_ & nk_cap_cdna3_k) != 0, cdna3_lds_schedule_t>       //
-    >::type;
+using rocm_schedule_of =
+    std::conditional_t<(caps_ & nk_cap_cdna5_k) != 0 || (caps_ & (nk_cap_cdna4_k | nk_cap_cdna3_k)) == 0,
+                       rocm_registers_schedule_t,
+                       std::conditional_t<(caps_ & nk_cap_cdna4_k) != 0, cdna4_lds_schedule_t, cdna3_lds_schedule_t>>;
 
 #pragma endregion Chains
 

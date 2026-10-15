@@ -103,7 +103,8 @@ static std::size_t test_starved_configuration(char const* name, u64_t seed) {
         return std::unique_ptr<index_t>(
             new (std::nothrow) index_t(kernel_, counting_allocator_t(ledger), counting_allocator_t(ledger)));
     };
-    return report(name, test_dense_saturated<index_t>(make_index, seed));
+    return report(
+        name, test_dense_saturated<index_t>(make_index, seed) + test_dense_refine_atomic<index_t>(make_index, seed));
 }
 
 /** Per-dtype CPU index suite entries the shard translation units define and

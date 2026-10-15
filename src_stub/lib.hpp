@@ -205,27 +205,36 @@ inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_o
 #pragma region Executors and Arenas
 
 /** The copied arguments of any verb that takes an executor; whatever they point to stays the caller's until final. */
-using call_arguments_t = std::variant<
-    usearch_dense_load_ram_t, usearch_dense_load_vram_t, usearch_dense_load_ram_buffer_t,
-    usearch_dense_load_vram_buffer_t, usearch_dense_view_nvme_t, usearch_dense_reserve_t, usearch_dense_clear_t,
-    usearch_dense_insert_t, usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_search_t,
-    usearch_dense_count_t, usearch_dense_get_t, usearch_dense_absorb_t, usearch_dense_cursor_next_t,
-    usearch_dense_search_stream_next_t, usearch_dense_save_t, usearch_dense_save_buffer_t,
-    usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,
-    usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t, usearch_sequence_load_ram_t,
-    usearch_sequence_view_nvme_t, usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,
-    usearch_sequence_refine_t, usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,
-    usearch_sequence_absorb_t, usearch_sequence_cursor_next_t, usearch_sequence_save_t,
-    usearch_sequence_metadata_read_t, usearch_sequence_describe_t, usearch_shapes_load_ram_t,
-    usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t, usearch_shapes_reserve_t, usearch_shapes_clear_t,
-    usearch_shapes_insert_t, usearch_shapes_refine_t, usearch_shapes_search_t, usearch_shapes_count_t,
-    usearch_shapes_get_t, usearch_shapes_absorb_t, usearch_shapes_cursor_next_t, usearch_shapes_save_t,
-    usearch_shapes_metadata_read_t, usearch_shapes_describe_t, usearch_geospatial_load_ram_t,
-    usearch_geospatial_load_vram_t, usearch_geospatial_reserve_t, usearch_geospatial_clear_t,
-    usearch_geospatial_insert_t, usearch_geospatial_refine_t, usearch_geospatial_search_t, usearch_geospatial_within_t,
-    usearch_geospatial_count_t, usearch_geospatial_get_t, usearch_geospatial_absorb_t, usearch_geospatial_cursor_next_t,
-    usearch_geospatial_save_t, usearch_geospatial_metadata_read_t, usearch_geospatial_describe_t,
-    usearch_dense_sample_t, usearch_sequence_sample_t, usearch_shapes_sample_t, usearch_geospatial_sample_t>;
+using call_arguments_t = std::variant<                                                                   //
+    usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
+    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
+    usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                              //
+    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t,                              //
+    usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t, //
+    usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t,                                  //
+    usearch_dense_search_stream_next_t, usearch_dense_cursor_next_t, usearch_dense_sample_t,             //
+    usearch_dense_save_t, usearch_dense_save_buffer_t,                                                   //
+    usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,       //
+    usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t,                            //
+    usearch_sequence_load_ram_t, usearch_sequence_view_nvme_t,                                           //
+    usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,                     //
+    usearch_sequence_refine_t, usearch_sequence_absorb_t,                                                //
+    usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,                         //
+    usearch_sequence_cursor_next_t, usearch_sequence_sample_t,                                           //
+    usearch_sequence_save_t, usearch_sequence_metadata_read_t, usearch_sequence_describe_t,              //
+    usearch_shapes_load_ram_t, usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t,                   //
+    usearch_shapes_reserve_t, usearch_shapes_clear_t, usearch_shapes_insert_t,                           //
+    usearch_shapes_refine_t, usearch_shapes_absorb_t,                                                    //
+    usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t,                               //
+    usearch_shapes_cursor_next_t, usearch_shapes_sample_t,                                               //
+    usearch_shapes_save_t, usearch_shapes_metadata_read_t, usearch_shapes_describe_t,                    //
+    usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t, usearch_geospatial_view_nvme_t,       //
+    usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t,               //
+    usearch_geospatial_refine_t, usearch_geospatial_absorb_t,                                            //
+    usearch_geospatial_search_t, usearch_geospatial_within_t,                                            //
+    usearch_geospatial_count_t, usearch_geospatial_get_t,                                                //
+    usearch_geospatial_cursor_next_t, usearch_geospatial_sample_t,                                       //
+    usearch_geospatial_save_t, usearch_geospatial_metadata_read_t, usearch_geospatial_describe_t>;
 
 /** A stand-in's executor: no threads, so every call it is given runs on the thread of a caller -
  *  the one that submits it blocking, drains the executor, waits on the call, or frees a handle it uses. */
@@ -248,8 +257,8 @@ struct call_t {
     call_arguments_t arguments;
     void (*verb)(void*);
 
-    /** The call's outcome, its executor, and every index, cursor, stream and arena it reads or writes:
-     *  the addresses a wait or a free looks for before it returns. */
+    /** The call's outcome, its executor, and every index, cursor, refinement, stream and arena it
+     *  reads or writes: the addresses a wait or a free looks for before it returns. */
     std::vector<void const*> handles;
 };
 
@@ -277,6 +286,7 @@ std::vector<void const*> handles_used_by(arguments_ const& arguments) {
     };
     if constexpr (requires { arguments.index; }) add(arguments.index);
     if constexpr (requires { arguments.cursor; }) add(arguments.cursor);
+    if constexpr (requires { arguments.refinement; }) add(arguments.refinement);
     if constexpr (requires { arguments.stream; }) add(arguments.stream);
     if constexpr (requires { arguments.arena; }) add(arguments.arena);
     return handles;

@@ -119,7 +119,7 @@ struct metal_arguments_t {
     u32_t sampling_bound = 0, queries_count = 0, count = 0, epoch_base = 0;
     u32_t visited_slots = 0, hash_shift = 0, cache_rows = 0, slice_bytes = 0;
     u32_t heads_count = 0, row_fragments_magic = 0, use_node_ids = 0, expansion = 0;
-    u32_t tail_entries = 0, appended_base = 0;
+    u32_t tail_entries = 0, parts = 0, round = 0;
 };
 
 /** The counter words a launch binds: the batch's assigned rows, the published rows, the changed
@@ -702,61 +702,191 @@ struct vram_apple_index {
     };
 
     /**
-     *  @brief Re-selects the neighbors of every node in @p nodes from a fresh walk seeded by the
-     *      ones it holds, then heals whatever no search can reach. An empty range heals.
+     *  @brief One refinement in flight on this index's device, in the shape of the CUDA and HIP
+     *      plans so one host thread drives every shard: @ref queue a phase, @ref wait for it,
+     *      @ref advance past it, and @ref finish once no phase follows.
      *
-     *  The walk lands the re-selection in a shadow matrix that replaces the walked rows once the
-     *  device finishes; unlike the CUDA pass no back-link merge follows, since the heal's audit and
-     *  reconnection, run on the host over unified memory, restore whatever a re-selection strands.
-     *
-     *  An @p appended_base inside the published IDs splits the rows into two parts no edge joins,
-     *  the resident part below it and the appended part from it on, as a shard that absorbed
-     *  another's rows holds them. Each node of @p nodes then first walks across into the other part
-     *  alone, from an empty pool and landmarks drawn there, before its own neighbors and the whole
-     *  graph, and re-selects from the union. The live graph stays as it was through the walks, so a
-     *  walk across never leaves the other part, and the heal's passes walk no part first.
-     *
-     *  Demands an exclusive caller.
+     *  A re-selecting phase walks every node of the planned range, once per round of walks across
+     *  while the shard holds several parts, into a shadow matrix that replaces the walked rows once
+     *  the device finishes; unlike the CUDA pass no back-link merge follows, since the heal's audit
+     *  and reconnection, run on the host over unified memory in @ref advance, restore whatever a
+     *  re-selection strands. @ref plan_refine sized every buffer, so no phase allocates. Holds the
+     *  index's batch lock from plan to death, so demands an exclusive caller.
      */
-    expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
-                                     refine_config_t config = {}, node_id_t appended_base = 0) noexcept {
-        std::unique_lock batch {batch_};
-        std::size_t const rows = size();
-        refine_result_t result;
-        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
-        if (nodes.first < bound) {
-            auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {},
-                                                       appended_base < rows ? appended_base : 0);
-            if (failed(status)) return {result, status};
-            result += walked;
-        }
-        if (!rows) return {result, status_t::success_k};
+    struct refine_plan_t {
+        refine_plan_t() noexcept = default;
+        refine_plan_t(refine_plan_t&&) noexcept = default;
+        refine_plan_t& operator=(refine_plan_t&&) noexcept = default;
 
-        metal_audit_t& audit = context.audit_;
-        if (status_t const audited = audit_(audit); failed(audited)) return {result, audited};
-        result.sweeps += audit.sweeps;
-        result.islands_found = audit.islands.size();
-        for (std::size_t islands_before = audit.islands.size(); !audit.islands.empty();
-             islands_before = audit.islands.size()) {
-            // Only island rows change, and no reached row points at one, so the audit before
-            // stands.
-            auto const [healed, healed_status] = refine_pass_(
-                context, config, {0, static_cast<node_id_t>(audit.islands.size())}, to_span(audit.islands));
-            if (failed(healed_status)) return {result, healed_status};
-            result += healed;
-            result.islands_reconnected += reconnect_(audit);
-            if (status_t const audited = audit_(audit); failed(audited)) return {result, audited};
-            result.sweeps += audit.sweeps;
+        /** Submits the current phase's pass on the context's stream; the audit, on the host, waits
+         *  for @ref advance. */
+        status_t queue() noexcept {
+            if (!index_) return status_t::uninitialized_k;
+            if (failed(status_)) return status_;
+            if (phase_ == phase_t::reselect_k) {
+                walked_ = round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
+                status_ = index_->submit_pass_(*context_, config_, walked_, {}, parts_, round_);
+            }
+            else if (phase_ == phase_t::heal_k) {
+                walked_ = {0, static_cast<node_id_t>(context_->audit_.islands.size())};
+                status_ = index_->submit_pass_(*context_, config_, walked_, to_span(context_->audit_.islands));
+            }
+            else walked_ = {};
+            return status_;
+        }
+
+        /** Waits for the submitted pass, if one was. */
+        status_t wait() noexcept {
+            if (index_ && succeeded(status_) && !walked_.empty()) status_ = context_->drain();
+            return status_;
+        }
+
+        /** Lands the pass on the host, audits after the rounds and every heal, picks the next
+         *  phase, and answers whether one follows. */
+        bool advance() noexcept {
+            if (!index_ || failed(status_) || phase_ == phase_t::done_k) return false;
+            metal_audit_t& audit = context_->audit_;
+            if (!walked_.empty())
+                tally_ += index_->land_pass_(
+                    *context_, walked_, phase_ == phase_t::heal_k ? to_span(audit.islands) : std::span<u32_t const> {});
+            if (phase_ == phase_t::reselect_k) {
+                if (!stopped_ && ++round_ != rounds_) return true;
+                phase_ = phase_t::audit_k;
+                return true;
+            }
+            std::size_t const islands_before = audit.islands.size();
+            if (phase_ == phase_t::heal_k) tally_.islands_reconnected += index_->reconnect_(audit);
+            status_t const audited = index_->audit_(audit);
+            std::size_t const rows = index_->size(), left = audit.islands.size();
+            tally_.health = {rows, rows - left, audit.sweeps};
+            // Rows past an unconverged audit are unjudged, not unreached, so nothing heals them.
+            if (failed(audited)) {
+                status_ = audited;
+                phase_ = phase_t::done_k;
+                return false;
+            }
+            if (phase_ == phase_t::audit_k) tally_.islands_found = left;
             // A round that frees no island frees none on the next either, since the picks it needs
             // are unreached.
-            if (audit.islands.size() >= islands_before) break;
+            bool const healing = left && (phase_ == phase_t::audit_k || left < islands_before);
+            phase_ = healing ? phase_t::heal_k : phase_t::done_k;
+            return healing;
         }
-        result.reachable_nodes = rows - audit.islands.size();
-        return {result, status_t::success_k};
+
+        /** Stops the re-selection after the round that landed last, so the next phase audits and
+         *  heals; a no-op in any other phase. */
+        void stop() noexcept {
+            if (phase_ == phase_t::reselect_k) stopped_ = true, phase_ = phase_t::audit_k;
+        }
+
+        /** Whether the current phase re-selects the planned range - the phase a caller's
+         *  progress counts. */
+        bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
+
+        /** Nodes re-selected so far. */
+        std::size_t visited() const noexcept { return tally_.visited_nodes; }
+
+        /** The pass, complete once @ref advance answered false, otherwise @c cancelled_k; a failure
+         *  a phase kept answers instead. */
+        expected<refine_result_t> finish() const noexcept {
+            if (!index_) return {{}, status_t::uninitialized_k};
+            if (failed(status_)) return {tally_, status_};
+            return {tally_, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
+        }
+
+      private:
+        friend struct vram_apple_index;
+        enum class phase_t : u8_t { reselect_k, audit_k, heal_k, done_k };
+
+        std::unique_lock<std::mutex> batch_;
+        vram_apple_index* index_ = nullptr;
+        traversal_context_t* context_ = nullptr;
+        refine_config_t config_ {};
+
+        /** The IDs the first round re-selects, and the rows the submitted pass walks. */
+        iota_view<node_id_t> nodes_;
+        iota_view<node_id_t> walked_;
+
+        /** Parts the rounds merge, the rounds, and the round queued or, once they
+         *  ended, finished. */
+        u32_t parts_ = 0;
+        u32_t rounds_ = 1;
+        u32_t round_ = 0;
+        bool stopped_ = false;
+        phase_t phase_ = phase_t::done_k;
+        status_t status_ = status_t::success_k;
+        refine_result_t tally_;
+    };
+
+    /**
+     *  @brief Opens a refinement of the nodes in @p nodes, clamped to the published IDs: takes the
+     *      batch lock, sizes the staging, the arena and the host audit for the widest phase, and
+     *      copies @p part_bases into the staging, so no phase allocates. An empty range heals.
+     *
+     *  Two or more @p part_bases below the published IDs split the rows into parts, as a shard
+     *  that absorbed others' rows holds them: each node then first walks across the neighboring
+     *  group of parts alone, round after round, from an empty pool and landmarks drawn there,
+     *  before its own neighbors and the whole graph, and re-selects from the union. The live graph
+     *  stays as it was through a round's walks, so a walk across never leaves its group, and the
+     *  heal's passes walk no part first.
+     */
+    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
+                                        refine_config_t config = {},
+                                        std::span<node_id_t const> part_bases = {}) noexcept {
+        refine_plan_t plan;
+        plan.batch_ = std::unique_lock {batch_};
+        std::size_t const rows = size();
+        std::size_t parts = 0;
+        while (parts != part_bases.size() && part_bases[parts] < rows) ++parts;
+        if (parts < 2) parts = 0;
+        if (rows) {
+            if (!dimensions_) return {std::move(plan), status_t::uninitialized_k};
+            if (context.device() != device_.ordinal || !context) return {std::move(plan), status_t::config_mismatch_k};
+            bool fresh = false;
+            if (status_t const staged = context.ensure_(context.staging_, staging_bytes_(parts), fresh); failed(staged))
+                return {std::move(plan), staged};
+            std::memcpy(context.staging_.host + bases_offset_(), part_bases.data(), parts * sizeof(u32_t));
+            u32_t const expansion = non_zero_expansion_factor(config);
+            u32_t const walks = parts ? 2 : 1;
+            metal_arguments_t arguments = arguments_();
+            if (status_t const sized = shape_arena_(
+                    context, arguments,
+                    walk_arena_shape_(expansion * walks, walk_slots_(expansion, 4) * walks, cache_rows_k), cache_rows_k,
+                    rows);
+                failed(sized))
+                return {std::move(plan), sized};
+            metal_audit_t& audit = context.audit_;
+            for (growing_buffer<u8_t>* marks : {&audit.reached, &audit.frontier, &audit.next_frontier})
+                if (failed(marks->reserve_exactly(rows))) return {std::move(plan), status_t::bad_alloc_k};
+            if (failed(audit.islands.reserve_exactly(rows)) || failed(audit.in_links.reserve_exactly(rows)))
+                return {std::move(plan), status_t::bad_alloc_k};
+        }
+        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
+        plan.index_ = this;
+        plan.context_ = &context;
+        plan.config_ = config;
+        plan.nodes_ = {min_of(nodes.first, bound), bound};
+        plan.parts_ = static_cast<u32_t>(parts);
+        plan.rounds_ = parts ? static_cast<u32_t>(std::bit_width(parts - 1)) : 1u;
+        plan.phase_ = plan.nodes_.empty() && plan.rounds_ == 1 ? refine_plan_t::phase_t::audit_k
+                                                               : refine_plan_t::phase_t::reselect_k;
+        if (!rows) plan.phase_ = refine_plan_t::phase_t::done_k;
+        return {std::move(plan), status_t::success_k};
+    }
+
+    /** One @ref refine_plan_t driven to its end on the calling thread, waiting once per phase. */
+    expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
+                                     refine_config_t config = {}, std::span<node_id_t const> part_bases = {}) noexcept {
+        auto [plan, status] = plan_refine(nodes, context, config, part_bases);
+        if (failed(status)) return {{}, status};
+        do
+            if (status_t const landed = plan.queue(); failed(landed) || failed(plan.wait())) break;
+        while (plan.advance());
+        return plan.finish();
     }
 
     /** Measures forward reachability from as many stride-spread landmarks as one search draws, on
-     *  the host. */
+     *  the host; @c overflow_k when the sweeps reached their cap unconverged. */
     expected<health_result_t> health(traversal_context_t& context) noexcept {
         std::size_t const rows = size();
         if (!rows) return {{}, status_t::success_k};
@@ -1067,8 +1197,7 @@ struct vram_apple_index {
         if (!batch.owns_lock()) return {{}, status_t::contended_k};
         // A closed word is the caller's, who refines or absorbs around the load; an open one is
         // claimed like a batch's, so no batch lands beside it.
-        bool const claiming = standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire) !=
-                              node_id_unknown_k;
+        bool const claiming = !claims_.closed();
         node_id_t base = static_cast<node_id_t>(size());
         if (claiming) {
             auto const [first_id, claim_status] = claim_(rows);
@@ -1672,64 +1801,70 @@ struct vram_apple_index {
 
 #pragma region Refinement Passes
 
-    /** Re-selects @p nodes, or the IDs @p node_ids lists with @p nodes spanning its offsets, into a
-     *  shadow matrix on the device, each node first walking across into the other part when
-     *  @p appended_base is nonzero, then lands every walked row in the live matrix and counts the
-     *  rows that changed. */
-    expected<refine_result_t> refine_pass_(traversal_context_t& context, refine_config_t config,
-                                           iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
-                                           node_id_t appended_base = 0) noexcept {
+    /** Where a refine's staging keeps the walked rows' shadow neighbors: past room for every row's
+     *  ID, which the heal's passes list. */
+    std::size_t shadow_offset_() const noexcept {
+        return round_up_to_multiple<std::size_t>(size() * sizeof(u32_t), default_alignment_k);
+    }
+
+    /** Where a refine's staging keeps the parts' bases: past the shadow neighbors. */
+    std::size_t bases_offset_() const noexcept { return shadow_offset_() + size() * connectivity() * sizeof(u32_t); }
+
+    /** Bytes of a refine's staging over the rows published now, with room for @p parts bases. */
+    std::size_t staging_bytes_(std::size_t parts) const noexcept { return bases_offset_() + parts * sizeof(u32_t); }
+
+    /** Submits the re-selection of @p nodes, or of the IDs @p node_ids lists with @p nodes spanning
+     *  its offsets, into the shadow matrix of the staging @ref plan_refine sized, each node first
+     *  walking across the neighboring group in round @p round when @p parts parts are given.
+     *  Nothing waits; @ref land_pass_ reads the pass once it landed. */
+    status_t submit_pass_(traversal_context_t& context, refine_config_t config, iota_view<node_id_t> nodes,
+                          std::span<u32_t const> node_ids, u32_t parts = 0, u32_t round = 0) noexcept {
         std::size_t const rows = size();
-        if (!rows || nodes.first >= nodes.bound) return {{}, status_t::success_k};
-        if (!dimensions_) return {{}, status_t::uninitialized_k};
-        if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
-        if (status_t const kept = status(); failed(kept)) return {{}, kept};
+        if (!rows || nodes.first >= nodes.bound) return status_t::success_k;
+        if (status_t const kept = status(); failed(kept)) return kept;
         std::size_t const walk_count = nodes.size();
-        std::size_t const connectivity = this->connectivity();
-        std::size_t const shadow_bytes = rows * connectivity * sizeof(u32_t);
-        std::size_t const ids_bytes = node_ids.size_bytes();
-        bool fresh = false;
-        if (status_t const staged = context.ensure_(context.staging_, ids_bytes + shadow_bytes, fresh); failed(staged))
-            return {{}, staged};
-        if (ids_bytes) std::memcpy(context.staging_.host, node_ids.data(), ids_bytes);
+        if (!node_ids.empty()) std::memcpy(context.staging_.host, node_ids.data(), node_ids.size_bytes());
         u32_t const expansion = non_zero_expansion_factor(config);
         u32_t const pool_slots = walk_slots_(expansion, 4);
         // Walking across makes two walks into one visited set, so the slice is shaped for both.
-        u32_t const walks = appended_base ? 2 : 1;
+        u32_t const walks = parts > 1 ? 2 : 1;
         metal_arguments_t arguments = arguments_();
         if (status_t const sized = shape_arena_(context, arguments,
                                                 walk_arena_shape_(expansion * walks, pool_slots * walks, cache_rows_k),
                                                 cache_rows_k, walk_count);
             failed(sized))
-            return {{}, sized};
+            return sized;
         arguments.first_id = nodes.first;
         arguments.expansion = expansion;
         arguments.end_id = nodes.bound;
         arguments.sampling_bound = static_cast<u32_t>(rows);
         arguments.use_node_ids = node_ids.empty() ? 0 : 1;
-        arguments.appended_base = appended_base;
+        arguments.parts = parts > 1 ? parts : 0;
+        arguments.round = round;
         reset_counters_(counters_);
 
-        status_t launched = status_t::device_error_k;
-        {
-            std::shared_lock storage {storage_};
-            metal_launch_t launch {context.stream(), pipeline_(metal_kernel_t::refine_k, pool_slots)};
-            if (launch) {
-                bind_storage_(launch, arguments);
-                launch.bind(context.staging_, 4);
-                launch.bind(context.arena_, 5);
-                launch.bind(counters_, 6);
-                launch.bind(context.staging_, 7, ids_bytes);
-                launched = context.submit_(launch, groups_for_(walk_count), simdgroups_per_group_k * 32);
-                if (succeeded(launched)) launched = context.drain();
-            }
-        }
-        if (failed(launched)) return {{}, launched};
+        std::shared_lock storage {storage_};
+        metal_launch_t launch {context.stream(), pipeline_(metal_kernel_t::refine_k, pool_slots)};
+        if (!launch) return status_t::device_error_k;
+        bind_storage_(launch, arguments);
+        launch.bind(context.staging_, 4);
+        launch.bind(context.arena_, 5);
+        launch.bind(counters_, 6);
+        launch.bind(context.staging_, 7, shadow_offset_());
+        launch.bind(context.staging_, 8, bases_offset_());
+        return context.submit_(launch, groups_for_(walk_count), simdgroups_per_group_k * 32);
+    }
 
+    /** Lands the pass @ref submit_pass_ submitted over @p nodes or @p node_ids, once it finished:
+     *  every walked row replaces the live one, and the rows that changed are counted. */
+    refine_result_t land_pass_(traversal_context_t& context, iota_view<node_id_t> nodes,
+                               std::span<u32_t const> node_ids) noexcept {
+        std::size_t const walk_count = nodes.size();
+        std::size_t const connectivity = this->connectivity();
         // Exclusive pass: the walked rows land in the live matrix with plain stores.
         refine_result_t result;
         u32_t* const live = neighbor_rows_();
-        u32_t const* const shadow = reinterpret_cast<u32_t const*>(context.staging_.host + ids_bytes);
+        u32_t const* const shadow = reinterpret_cast<u32_t const*>(context.staging_.host + shadow_offset_());
         for (std::size_t offset = 0; offset != walk_count; ++offset) {
             std::size_t const node = node_ids.empty() ? nodes.first + offset : node_ids[offset];
             u32_t* const row = live + node * connectivity;
@@ -1743,7 +1878,7 @@ struct vram_apple_index {
         result.visited_members = metal_tally(counters, metal_hops_k);
         result.computed_distances = metal_tally(counters, metal_scored_k);
         result.restarts = metal_tally(counters, metal_restarts_k);
-        return {result, status_t::success_k};
+        return result;
     }
 
     /** Sweeps forward reachability on the host from as many stride-spread landmarks as one search
@@ -1785,7 +1920,8 @@ struct vram_apple_index {
         audit.islands.clear();
         for (std::size_t row = 0; row != rows; ++row)
             if (!audit.reached[row]) audit.islands.push_back_reserved(static_cast<u32_t>(row));
-        return status_t::success_k;
+        // A sweep still expanding at the cap leaves rows unjudged rather than unreached.
+        return audit.sweeps == sweeps_cap_k ? status_t::overflow_k : status_t::success_k;
     }
 
     /** Reconnects each island into the first of its reached picks with room for it, or into the
@@ -1861,49 +1997,23 @@ struct vram_apple_index {
 
     /** Rows claimed by batches and loads, visible or not; a closed word holds none past the
      *  watermark. */
-    std::size_t claimed_() const noexcept {
-        std::size_t const claimed =
-            standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire);
-        return claimed == node_id_unknown_k ? size() : claimed;
-    }
+    std::size_t claimed_() const noexcept { return claims_.claimed(size()); }
 
     /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone runs and publishes them. */
-    expected<node_id_t> claim_(std::size_t rows) noexcept {
-        std::size_t first = size();
-        if (rows > max_node_count_k - first) return {{}, status_t::overflow_k};
-        if (!standard_atomic_ref<std::size_t>(claimed_rows_)
-                 .compare_exchange_strong(first, first + rows, std::memory_order_acq_rel, std::memory_order_relaxed))
-            return {{}, status_t::contended_k};
-        return {static_cast<node_id_t>(first), status_t::success_k};
-    }
+    expected<node_id_t> claim_(std::size_t rows) noexcept { return claims_.claim(size(), rows, max_node_count_k); }
 
     /** Gives back the claim over @p rows from @p first, which launched nothing; a word that moved
      *  on, closed by a caller around a load, stays as it is. */
-    void unclaim_(std::size_t first, std::size_t rows) noexcept {
-        std::size_t claimed = first + rows;
-        standard_atomic_ref<std::size_t>(claimed_rows_)
-            .compare_exchange_strong(claimed, first, std::memory_order_release, std::memory_order_relaxed);
-    }
+    void unclaim_(std::size_t first, std::size_t rows) noexcept { claims_.unclaim(first, rows); }
 
     /** Closes the claim word at the watermark, so every claim refuses until @ref reopen_; refused
      *  while a batch or load is in flight. */
-    status_t close_() noexcept {
-        std::size_t visible = size();
-        return standard_atomic_ref<std::size_t>(claimed_rows_)
-                       .compare_exchange_strong(visible, node_id_unknown_k, std::memory_order_acq_rel,
-                                                std::memory_order_relaxed)
-                   ? status_t::success_k
-                   : status_t::contended_k;
-    }
+    status_t close_() noexcept { return claims_.close(size()); }
 
     /** Reopens a closed claim word at the watermark, past every row a load published meanwhile; an
      *  open one stays as it is. */
-    void reopen_() noexcept {
-        std::size_t closed = node_id_unknown_k;
-        standard_atomic_ref<std::size_t>(claimed_rows_)
-            .compare_exchange_strong(closed, size(), std::memory_order_acq_rel, std::memory_order_relaxed);
-    }
+    void reopen_() noexcept { claims_.reopen(size()); }
     u32_t published_() const noexcept {
         u32_t const* const words = metal_words(counters_);
         return words[metal_published_k];
@@ -1987,10 +2097,9 @@ struct vram_apple_index {
      *  storage a growth would relocate. */
     std::mutex batch_;
 
-    /** The claim word: past the watermark by the rows of the one batch or load in flight, claimed
-     *  from the watermark by one compare-exchange, or the sentinel while a refine, an absorb, a
-     *  load or a save of the sharded index holds it closed. */
-    std::size_t claimed_rows_ = 0;
+    /** The claim word, closed while a refine, an absorb, a load or a save of the sharded index
+     *  holds it. */
+    vram_claim_word_t claims_;
     std::size_t last_visible_id_ = 0;
     status_t status_ = status_t::success_k;
 

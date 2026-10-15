@@ -47,97 +47,15 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/dense/types.hpp"
+#include "usearch/utilities/vram_nvidia_device.cuh"
 #include "usearch/dense/vram_index.cuh"
 
 namespace unum::usearch::dense {
-
-/** The device-scope atomic reference the NVIDIA kernels reach a shared word through, so each
- *  access names its memory order - relaxed wherever the launch boundary is what publishes the
- *  result. */
-template <typename value_type_>
-using cuda_atomic_ref = cuda::atomic_ref<value_type_, cuda::thread_scope_device>;
 
 /** The shared-window address of @p pointer, the one the asynchronous copies and barriers take. */
 __device__ __forceinline__ u32_t cuda_shared_address(void const* pointer) noexcept {
     return static_cast<u32_t>(__cvta_generic_to_shared(pointer));
 }
-
-/**
- *  @brief The NVIDIA warp policy the shared walk code is written against: 32-lane warps with
- *      32-bit lane masks and device-scope atomics.
- *
- *  Every collective takes the full-warp mask, since the walks keep their warps converged.
- */
-struct cuda_warp_t {
-    using mask_t = u32_t;
-    inline static constexpr u32_t width_k = 32;
-    inline static constexpr mask_t all_k = 0xFFFFFFFFu;
-
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ shuffle(value_type_ value, u32_t source_lane) noexcept {
-        return __shfl_sync(all_k, value, source_lane);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ shuffle_xor(value_type_ value, u32_t lane_mask) noexcept {
-        return __shfl_xor_sync(all_k, value, lane_mask);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ shuffle_up(value_type_ value, u32_t delta) noexcept {
-        return __shfl_up_sync(all_k, value, delta);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ shuffle_down(value_type_ value, u32_t delta,
-                                                               u32_t width = width_k) noexcept {
-        return __shfl_down_sync(all_k, value, delta, width);
-    }
-    // The predicates are `int`, as the warp intrinsics take them, so any nonzero lane votes.
-    static __device__ __forceinline__ mask_t ballot(int predicate) noexcept { return __ballot_sync(all_k, predicate); }
-    static __device__ __forceinline__ bool any(int predicate) noexcept { return __any_sync(all_k, predicate); }
-    static __device__ __forceinline__ bool all(int predicate) noexcept { return __all_sync(all_k, predicate); }
-    static __device__ __forceinline__ void sync() noexcept { __syncwarp(); }
-
-    /** The lanes holding the same @p value as this one, this lane included. */
-    static __device__ __forceinline__ mask_t match_any(u32_t value) noexcept { return __match_any_sync(all_k, value); }
-
-    static __device__ __forceinline__ u32_t count(mask_t mask) noexcept { return __popc(mask); }
-
-    /** The lowest lane of a non-empty @p mask. */
-    static __device__ __forceinline__ u32_t first(mask_t mask) noexcept { return __ffs(mask) - 1; }
-
-    /** The lanes strictly below @p lane. */
-    static __device__ __forceinline__ mask_t below(u32_t lane) noexcept { return (1u << lane) - 1; }
-
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ load_relaxed(value_type_& word) noexcept {
-        return cuda_atomic_ref<value_type_>(word).load(cuda::memory_order_relaxed);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ load_acquire(value_type_& word) noexcept {
-        return cuda_atomic_ref<value_type_>(word).load(cuda::memory_order_acquire);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ void store_relaxed(value_type_& word, value_type_ value) noexcept {
-        cuda_atomic_ref<value_type_>(word).store(value, cuda::memory_order_relaxed);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ void store_release(value_type_& word, value_type_ value) noexcept {
-        cuda_atomic_ref<value_type_>(word).store(value, cuda::memory_order_release);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ exchange_acquire(value_type_& word, value_type_ value) noexcept {
-        return cuda_atomic_ref<value_type_>(word).exchange(value, cuda::memory_order_acquire);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ fetch_add_relaxed(value_type_& word, value_type_ value) noexcept {
-        return cuda_atomic_ref<value_type_>(word).fetch_add(value, cuda::memory_order_relaxed);
-    }
-
-    /** Orders every store before it ahead of any store after it, for readers anywhere on the
-     *  device. */
-    static __device__ __forceinline__ void fence_release() noexcept {
-        cuda::atomic_thread_fence(cuda::memory_order_release, cuda::thread_scope_device);
-    }
-};
 
 #pragma region Metrics
 
@@ -1449,18 +1367,6 @@ struct u1x8_ampere_quads_kit_t {
 
 #pragma region Schedules
 
-/** Lands the rows @p ids names in the leading rows of @p cache through each lane's registers, the
- *  staging a cache outside shared memory takes, since the asynchronous copies write only there. */
-template <typename storage_, typename cache_>
-__device__ __forceinline__ void cuda_stage_rows_through_registers(storage_ const& storage, cache_ cache,
-                                                                  u32_t const* ids, u32_t rows, u32_t lane) noexcept {
-    for (u32_t word = lane; word < rows * storage.row_fragments; word += cuda_warp_t::width_k) {
-        u32_t const row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, row);
-        cache.at(row, fragment) = storage.vector_for(ids[row], fragment);
-    }
-    cuda_warp_t::sync();
-}
-
 /**
  *  @brief Scores a walk's batch through the kit's @c mma.sync step, fed straight from its loads.
  *
@@ -1633,8 +1539,7 @@ struct ampere_cp_async_schedule_t {
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
         rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
-        if (!__isShared(cache.row(0))) {
-            cuda_stage_rows_through_registers(storage, cache, ids, rows, lane);
+        if (cache.ids_) {
             landed_rows_ = rows;
             return;
         }
@@ -1722,8 +1627,7 @@ struct cuda_tma_schedule {
                                                u32_t lane) noexcept {
         u32_t const row_bytes = storage.row_fragments * sizeof(typename storage_::fragment_t);
         rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
-        if (!__isShared(cache.row(0))) {
-            cuda_stage_rows_through_registers(storage, cache, ids, rows, lane);
+        if (cache.ids_) {
             landed_rows_ = rows;
             return;
         }
@@ -1779,22 +1683,16 @@ using blackwell_tma_schedule_t = cuda_tma_schedule<2>;
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::f16_t, caps_> {
-    using kit_t = typename first_available_kit<                                       //
-        f16_ampere_quads_kit_t,                                                       //
-        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, f16_blackwell_quads_kit_t>, //
-        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, f16_blackwell_quads_kit_t>     //
-        >::type;
+    using kit_t = std::conditional_t<(caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0,
+                                     f16_blackwell_quads_kit_t, f16_ampere_quads_kit_t>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                        //
-        bf16_ampere_quads_kit_t,                                                       //
-        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, bf16_blackwell_quads_kit_t>, //
-        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, bf16_blackwell_quads_kit_t>     //
-        >::type;
+    using kit_t = std::conditional_t<(caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0,
+                                     bf16_blackwell_quads_kit_t, bf16_ampere_quads_kit_t>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -1815,46 +1713,34 @@ struct quads_chain<nk::u8_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::e5m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                        //
-        e5m2_ampere_quads_kit_t,                                                       //
-        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, e5m2_blackwell_quads_kit_t>, //
-        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, e5m2_blackwell_quads_kit_t>,    //
-        chain_layer<(caps_ & nk_cap_ada_k) != 0, e5m2_ada_quads_kit_t>                 //
-        >::type;
+    using kit_t = std::conditional_t<
+        (caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0, e5m2_blackwell_quads_kit_t,
+        std::conditional_t<(caps_ & nk_cap_ada_k) != 0, e5m2_ada_quads_kit_t, e5m2_ampere_quads_kit_t>>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::e4m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                        //
-        e4m3_ampere_quads_kit_t,                                                       //
-        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, e4m3_blackwell_quads_kit_t>, //
-        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, e4m3_blackwell_quads_kit_t>,    //
-        chain_layer<(caps_ & nk_cap_ada_k) != 0, e4m3_ada_quads_kit_t>                 //
-        >::type;
+    using kit_t = std::conditional_t<
+        (caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0, e4m3_blackwell_quads_kit_t,
+        std::conditional_t<(caps_ & nk_cap_ada_k) != 0, e4m3_ada_quads_kit_t, e4m3_ampere_quads_kit_t>>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::e3m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                        //
-        e3m2_ampere_quads_kit_t,                                                       //
-        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, e3m2_blackwell_quads_kit_t>, //
-        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, e3m2_blackwell_quads_kit_t>     //
-        >::type;
+    using kit_t = std::conditional_t<(caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0,
+                                     e3m2_blackwell_quads_kit_t, e3m2_ampere_quads_kit_t>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::e2m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                        //
-        e2m3_ampere_quads_kit_t,                                                       //
-        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, e2m3_blackwell_quads_kit_t>, //
-        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, e2m3_blackwell_quads_kit_t>     //
-        >::type;
+    using kit_t = std::conditional_t<(caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0,
+                                     e2m3_blackwell_quads_kit_t, e2m3_ampere_quads_kit_t>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -1883,11 +1769,9 @@ struct quads_chain<nk::u1x8_t, caps_> {
  *  that has one, Hopper on, paired-fragment loads from Blackwell on, and the @c cp.async ring
  *  below. */
 template <nk_capability_t caps_>
-using cuda_schedule_chain = typename first_available_kit<                                               //
-    ampere_cp_async_schedule_t,                                                                         //
-    chain_layer<(caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0, blackwell_tma_schedule_t>, //
-    chain_layer<(caps_ & nk_cap_hopper_k) != 0, hopper_tma_schedule_t>                                  //
-    >::type;
+using cuda_schedule_of = std::conditional_t<
+    (caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0, blackwell_tma_schedule_t,
+    std::conditional_t<(caps_ & nk_cap_hopper_k) != 0, hopper_tma_schedule_t, ampere_cp_async_schedule_t>>;
 
 #pragma endregion Chains
 

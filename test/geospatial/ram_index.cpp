@@ -6,7 +6,7 @@
  *      squared-chord metric, through the basic scenarios and SafeGraphs.
  *
  *  Then the encoding, the relations, the geometry, the octant selector, the long-link draws and the
- *  radius walk, each against brute force.
+ *  radius walk, each against brute force, and last a saved index served from storage.
  *
  *  Values are drawn inside a one-degree box around London and converted to Earth-fixed centimetres,
  *  so the corpus is a dense patch of a curved surface where the tangent-plane cones are exact in
@@ -442,6 +442,30 @@ static std::size_t check_observations_admits() {
     return failures;
 }
 
+/** A saved monolith read back from storage, every observation a fixed 32-byte row the view reads
+ *  without a directory and decodes in place. */
+static std::size_t check_positions_nvme(u64_t seed) {
+    using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
+    using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
+    using nvme_index_t =
+        us::basic::nvme_index<earth_observation_codec_t, us::utilities::uuid_t, i64_t, blocking_files_engine<>>;
+    allocation_ledger_t ledger;
+    std::vector<earth_observation_t> const values = positions_fixture_t::make_values(64, stream_key(seed, "nvme"),
+                                                                                     counting_allocator_t {ledger});
+    auto make_value = [&](std::size_t entry, counting_allocator_t const&) { return values[entry]; };
+    auto make_metric = [](scratch_t const& allocator, std::size_t staging) noexcept {
+        metric_t metric {allocator};
+        status_t const ready = metric.init(staging);
+        return expected<metric_t> {std::move(metric), ready};
+    };
+    auto query_of = [&](std::size_t row, scratch_t const&) noexcept {
+        return expected<earth_observation_t> {values[row], status_t::success_k};
+    };
+    auto matches = [&](std::size_t entry, earth_observation_t const& view) noexcept { return view == values[entry]; };
+    return test_basic_nvme_view<positions_fixture_t, nvme_index_t>(seed, values.size(), "chord", make_value,
+                                                                   make_metric, query_of, matches);
+}
+
 std::size_t check_geospatial(settings_t const& settings) {
     std::size_t failures = 0;
     failures += test_basic_scenarios<positions_fixture_t>(settings.seed);
@@ -454,6 +478,7 @@ std::size_t check_geospatial(settings_t const& settings) {
     failures += check_positions_selector(settings.seed);
     failures += check_positions_long_links(settings.seed);
     failures += check_positions_radius(settings.seed);
+    failures += check_positions_nvme(settings.seed);
     return report("geospatial", failures);
 }
 

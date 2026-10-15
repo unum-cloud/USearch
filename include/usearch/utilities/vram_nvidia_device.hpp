@@ -13,11 +13,11 @@
  *
  *  Plain C++ needing no CUDA SDK, hence the @c .hpp extension: the few driver types, constants and
  *  prototypes USearch calls are spelled here, copied from the driver's stable ABI, so any host
- *  compiler builds it. The warp policy the shared walk code is written against lives beside the
- *  kits in @c vram_nvidia_metric.cuh. The flat @c cuda_allocator carries @c std::allocator's call
- *  surface with the stream bound at construction; the @c cuda_reservable_allocator is the flat
- *  storage backend, a reserve-once / commit-on-demand range whose base survives growth. Nothing
- *  models both.
+ *  compiler builds it. The warp policy the shared walk code is written against lives in
+ *  @c vram_nvidia_device.cuh. The flat @c cuda_allocator carries @c std::allocator's call surface
+ *  with the stream bound at construction; the @c cuda_reservable_allocator is the flat storage
+ *  backend, a reserve-once / commit-on-demand range whose base survives growth. Nothing models
+ *  both.
  */
 #pragma once
 
@@ -1161,12 +1161,17 @@ struct cuda_module_t {
     int device_ = 0;
 };
 
+/** Default dynamic-shared opt-in threshold: launches asking for more must raise the kernel's
+ *  attribute before the first launch. */
+inline constexpr u32_t cuda_static_scratch_limit_k = 48 * 1024;
+
 /** Whether a launch waits for its stream predecessor to finish, or may start while it drains. */
 enum class cuda_overlap_t : bool { serialized_k, overlapping_k };
 
 /** Launches @p function over @p blocks of @p threads on @p stream - the only launch path - passing
  *  each argument by address, as the driver takes them, so each must already be the kernel's own
- *  type; answers the launch's own error, like a bad configuration or too much shared memory. With
+ *  type, raising the kernel's dynamic-shared ceiling first when @p shared_bytes outgrow the static
+ *  window; answers the launch's own error, like a bad configuration or too much shared memory. With
  *  @p overlapping the kernel may start while its predecessor on @p stream drains, which only a
  *  kernel waiting on that predecessor at entry may ask for. */
 template <typename... argument_types_>
@@ -1174,6 +1179,10 @@ status_t cuda_launch(cuda_function_handle_t function, u32_t blocks, u32_t thread
                      cuda_stream_handle_t stream, cuda_overlap_t overlapping, argument_types_... arguments) noexcept {
     static_assert((std::is_trivially_copyable_v<argument_types_> && ...), "Kernels take their arguments by bytes");
     if (!function) return status_t::device_error_k;
+    if (shared_bytes > cuda_static_scratch_limit_k &&
+        cuda_api().function_set_attribute(function, cuda_function_dynamic_shared_bytes_k,
+                                          static_cast<int>(shared_bytes)) != cuda_success_k)
+        return status_t::device_error_k;
     void* addresses[] = {static_cast<void*>(&arguments)...};
     cuda_launch_attribute_t overlap {cuda_launch_programmatic_serialization_k, {1}};
     cuda_launch_config_t config;
@@ -1184,6 +1193,219 @@ status_t cuda_launch(cuda_function_handle_t function, u32_t blocks, u32_t thread
 }
 
 static_assert(cuda_reservable_allocator<cuda_virtual_memory_allocator<byte_t>>);
+
+/** Bytes of one packed traversal candidate on the device, the kernels' scored node. */
+inline constexpr std::size_t cuda_scored_node_bytes_k = sizeof(u64_t);
+
+/** Layout of one warp's slice of the traversal arena, computed on the host: the exact visited set,
+ *  the wide frontier's spill tail when it has one, then a builder's scratch when shared memory
+ *  cannot seat it. The kernels carry it as their own @c vram_arena_shape_t. */
+struct cuda_arena_shape_t {
+    u32_t visited_slots;
+    u32_t visited_hash_shift;
+    u32_t tail_entries;
+    u32_t cache_bytes;
+
+    /** A multiple of 16, as the kernels' twin rounds it. */
+    constexpr std::size_t slice_bytes() const noexcept {
+        std::size_t const bytes = visited_slots * sizeof(u64_t) + tail_entries * cuda_scored_node_bytes_k + cache_bytes;
+        return (bytes + 15) & ~std::size_t {15};
+    }
+};
+
+/** Insertion and refinement blocks per multiprocessor: two, the most whose share of the register
+ *  file holds the walk and its selection without spilling. */
+inline constexpr u32_t cuda_insert_blocks_per_multiprocessor_k = 2;
+
+/** One bit per row over device-resident words, marked concurrently by a whole grid. */
+struct cuda_bitset_t {
+    u32_t* words = nullptr;
+};
+
+/** Rungs per kernel: the arena frontier's zero, then 2, 4, 8 and 16 slots. */
+inline constexpr std::size_t cuda_rungs_per_kernel_k = 5;
+
+constexpr std::size_t cuda_rung_index(u32_t slots) noexcept {
+    return slots == 0 ? 0 : slots == 2 ? 1 : slots == 4 ? 2 : slots == 8 ? 3 : 4;
+}
+
+inline constexpr std::size_t cuda_kernel_name_capacity_k = 160;
+
+/** One stream's device-side scratch for driving a CUDA index: the traversal arena, the batch
+ *  staging, the telemetry counters and the attend miss word, riding the stream its allocator names
+ *  and never opening one. Two contexts on one index share only the storage and the published
+ *  counter, never scratch. Callers observe it through @c results, @ref spent and @ref missed, its
+ *  scratch being the indexes' verbs' alone. */
+template <cuda_allocator allocator_type_ = cuda_device_allocator_t>
+struct cuda_traversal_context {
+    using allocator_t = allocator_type_;
+
+    /** The single-query verb's landing, grown to the walk's breadth in pinned pages: the ascending
+     *  matches, then, past them, the IDs and distances the device copies back. */
+    struct results_t {
+        growing_buffer<scored_node_t, cuda_pinned_allocator_t> entries_ {cuda_pinned_allocator_t {}};
+        std::size_t count_ = 0;
+
+        scored_node_t* data() noexcept { return entries_.data(); }
+        scored_node_t const* data() const noexcept { return entries_.data(); }
+        scored_node_t& operator[](std::size_t rank) noexcept { return entries_[rank]; }
+        scored_node_t const& operator[](std::size_t rank) const noexcept { return entries_[rank]; }
+        std::size_t size() const noexcept { return count_; }
+    };
+
+    results_t results;
+
+    /** Binds this context to @p allocator's stream and device, selecting that device first, since
+     *  the event is born in the current context, allocates only the fixed-size counters, and
+     *  borrows their host twins from the stream's pinned landings; sized buffers wait for the first
+     *  verb. */
+    cuda_traversal_context(allocator_t allocator = {}) noexcept
+        : allocator_ {(cuda_set_device(allocator.device()), allocator)}, //
+          telemetry_ {cuda_make_unique(telemetry_allocator_t {allocator_}, 1)},
+          assigned_rows_ {cuda_make_unique(counter_allocator_t {allocator_}, 1)},
+          missed_ {cuda_make_unique(counter_allocator_t {allocator_}, 1)},
+          host_counters_ {take_counters_(allocator_.landings())},
+          arena_ {nullptr, cuda_deleter<allocator_t> {allocator_, 0}},
+          staging_ {nullptr, cuda_deleter<allocator_t> {allocator_, 0}} {
+        if (telemetry_) cuda_fill_async(telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream());
+        if (missed_) cuda_fill_async(missed_.get(), 0, sizeof(u32_t), stream());
+    }
+
+    cuda_traversal_context(cuda_traversal_context const&) = delete;
+    cuda_traversal_context& operator=(cuda_traversal_context const&) = delete;
+
+    /** Every owned resource frees in stream order, so a move is a member-wise steal and destruction
+     *  needs no drain. */
+    cuda_traversal_context(cuda_traversal_context&&) noexcept = default;
+    ~cuda_traversal_context() noexcept = default;
+
+    cuda_stream_handle_t stream() const noexcept { return allocator_.stream(); }
+    int device() const noexcept { return allocator_.device(); }
+
+    /** Whether this context can walk at all: every device-side word and its host twin claimed, and
+     *  its event born. */
+    explicit operator bool() const noexcept {
+        return telemetry_ && assigned_rows_ && missed_ && host_counters_ && event_;
+    }
+
+    /** Waits for every transfer and launch queued on this context's stream - one stream's
+     *  completion, the executor's @c drain being the fleet's - sleeping on the context's event
+     *  instead of spinning a core. Selects the context's device first, since an event records only
+     *  in its own device's context. */
+    status_t drain() noexcept {
+        if (cuda_set_device(device()) != cuda_success_k) return status_t::device_error_k;
+        if (status_t const recorded = record(); failed(recorded)) return recorded;
+        return event_.drain();
+    }
+
+    /** Marks everything queued on this context's stream so far as the submission @ref landed
+     *  polls, behind the copies of the counters @ref spent and @ref missed read; the context's
+     *  device must be current. */
+    status_t record() noexcept {
+        if (!host_counters_ ||
+            cuda_copy_async(&host_counters_->telemetry, telemetry_.get(), sizeof(vram_telemetry_block_t), stream()) !=
+                cuda_success_k ||
+            cuda_copy_async(&host_counters_->missed, missed_.get(), sizeof(u32_t), stream()) != cuda_success_k)
+            return status_t::device_error_k;
+        return event_.record(stream());
+    }
+
+    /** Polls whether the submission @ref record marked finished - @c success_k once it has,
+     *  @c deferred_k while any of it runs - without blocking, so one host thread awaits whichever
+     *  of several streams lands first. */
+    status_t landed() const noexcept { return event_.landed(); }
+
+    /** Queues on this context's stream a wait for everything @p other marked last, so work here
+     *  follows work there without the host waiting; the two may sit on different devices. */
+    status_t follow(cuda_traversal_context const& other) noexcept {
+        return cuda_api().stream_wait_event(stream(), other.event_, 0) == cuda_success_k ? status_t::success_k
+                                                                                         : status_t::device_error_k;
+    }
+
+    /** The telemetry of the last submission, zeroed when it was queued; read once it landed. */
+    vram_telemetry_block_t spent() const noexcept {
+        return host_counters_ ? host_counters_->telemetry : vram_telemetry_block_t {};
+    }
+
+    /** Whether the last attend met a node its value lookup had no row for, which refuses it; read
+     *  once it landed. */
+    bool missed() const noexcept { return host_counters_ && host_counters_->missed != 0; }
+
+    using telemetry_allocator_t = typename allocator_t::template rebind<vram_telemetry_block_t>::other;
+    using counter_allocator_t = typename allocator_t::template rebind<u32_t>::other;
+    using bytes_ptr_t = cuda_unique_ptr<byte_t, allocator_t>;
+
+    /** The host's twins of the device counters, landed behind each @ref record. */
+    struct host_counters_t {
+        vram_telemetry_block_t telemetry;
+        u32_t missed;
+    };
+    static_assert(sizeof(host_counters_t) <= cuda_landings_t::slot_bytes_k &&
+                      alignof(host_counters_t) <= cuda_landings_t::slot_bytes_k,
+                  "A context's counters fit one landing slot");
+
+    /** Gives a context's counters back to the landings of the stream they came from. */
+    struct counters_return_t {
+        cuda_landings_t* landings = nullptr;
+        void operator()(host_counters_t* counters) const noexcept { landings->give_back(counters); }
+    };
+    using host_counters_ptr_t = std::unique_ptr<host_counters_t, counters_return_t>;
+
+    /** Zeroed counters in a slot of @p landings, or null when there are none or it cannot pin. */
+    static host_counters_ptr_t take_counters_(cuda_landings_t* landings) noexcept {
+        void* const slot = landings ? landings->take() : nullptr;
+        return {slot ? new (slot) host_counters_t {} : nullptr, counters_return_t {landings}};
+    }
+
+    allocator_t allocator_;
+
+    /** Monotone epoch floor over the arena's visited slots, so the arena is zeroed only when
+     *  freshly allocated or when the 32-bit epoch space wraps, never per launch. */
+    u64_t epoch_floor_ = 0;
+
+    /** The device-side counters of the last submission, zeroed when it was queued. */
+    cuda_unique_ptr<vram_telemetry_block_t, telemetry_allocator_t> telemetry_;
+
+    /** Rows of the current launch's batch warps have assigned themselves so far: a builder's rows,
+     *  or a walk's queries. */
+    cuda_unique_ptr<u32_t, counter_allocator_t> assigned_rows_;
+
+    /** Raised by the last attend's walks at a node their value lookup had no row for, zeroed when
+     *  it was queued. */
+    cuda_unique_ptr<u32_t, counter_allocator_t> missed_;
+
+    /** Borrowed from the stream's page-locked landings, so the copies @ref record queues into it
+     *  never wait on the device, and no context pins memory of its own. */
+    host_counters_ptr_t host_counters_;
+    bytes_ptr_t arena_;
+    std::size_t arena_bytes_ = 0;
+    bytes_ptr_t staging_;
+    std::size_t staging_bytes_ = 0;
+
+    /** The point on the stream @ref drain and @ref landed await. */
+    cuda_event_t event_;
+
+    /** Grow-only traversal arena for @p bytes: the exact visited sets and spill tails of every
+     *  resident warp, and a builder's scratch when shared memory cannot seat it, kept across
+     *  calls. @return The base, or null on exhaustion. */
+    byte_t* ensure_arena(std::size_t bytes) noexcept { return ensure_(arena_, arena_bytes_, bytes); }
+
+    /** Grow-only staging for one batch's device transport: an insert's padded vectors, or a
+     *  search's queries and result landing. */
+    byte_t* ensure_staging(std::size_t bytes) noexcept { return ensure_(staging_, staging_bytes_, bytes); }
+
+    /** Grows @p buffer to @p bytes when @p capacity falls short; @return the base, or null. */
+    byte_t* ensure_(bytes_ptr_t& buffer, std::size_t& capacity, std::size_t bytes) noexcept {
+        if (bytes <= capacity) return buffer.get();
+        // The deleter already carries this context's allocator, so only the run and its count
+        // change.
+        buffer.reset(allocator_.allocate(bytes));
+        buffer.get_deleter().count = bytes;
+        capacity = buffer ? bytes : 0;
+        return buffer.get();
+    }
+};
+
 static_assert(cuda_reservable_allocator<cuda_managed_allocator<byte_t>>);
 static_assert(cuda_allocator<cuda_device_allocator_t>);
 static_assert(cuda_allocator<cuda_arena_allocator_t>);

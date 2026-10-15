@@ -7,9 +7,10 @@
  *      and judge the hits against an exact scan.
  *
  *  The index runs as users run it, through the C interface and whichever CPU class it picks at
- *  runtime; the oracle scores with the widest kit this binary compiled. Queries are the file's last
- *  entries, kept out of the index, so no query finds itself. A hit counts when its distance is
- *  within the exact k-th, so integer edit distances, where many entries tie, are not undercounted.
+ *  runtime, or on a GPU; the oracle scores with the widest kit this binary compiled. Queries are
+ *  the file's last entries, kept out of the index, so no query finds itself. A hit counts when its
+ *  distance is within the exact k-th, so integer edit distances, where many entries tie, are not
+ *  undercounted.
  *
  *  @verbatim
  *  --metric            per binary                Distance kind, by its checkpoint token
@@ -158,21 +159,31 @@ inline bool within(double found, double exact) noexcept {
     return found <= exact + 1e-6 * std::max(1.0, std::fabs(exact));
 }
 
+/** Searches the index where it was built, on the executor that built it. */
+struct serve_in_place_t {
+    usearch_executor_t operator()(usearch_executor_t built_on, usearch_outcome_t*) const noexcept { return built_on; }
+};
+
 /**
  *  @brief Builds one index over the entries before @p query_first, searches it with the `--queries`
  *      from there on, and judges the first `--oracle-queries` against an exact scan.
  *
+ *  @param[in] vram The devices of a VRAM index, whose executor drives them; @c NULL for a RAM
+ *      index, driven by `--threads` threads.
  *  @param[in] insert Lands entries through the C interface:
  *      `(executor, keys, entries, count, stats, outcome)`.
  *  @param[in] search Answers queries into an arena:
  *      `(executor, arena, queries, count, matches, stats, outcome)`.
  *  @param[in] exact Fills one distance per base entry for the query at a tape row:
  *      `(row, distances)`.
+ *  @param[in] serve Moves the built index where the searches read it, answering the executor they
+ *      run on, as `(executor, outcome)`; an NVMe residency saves it and views the checkpoint.
  *  @return The process exit code.
  */
-template <typename stats_type_, typename insert_type_, typename search_type_, typename exact_type_>
-int run_basic_bench(basic_settings_t const& settings, tape_t const& tape, insert_type_&& insert, search_type_&& search,
-                    exact_type_&& exact) {
+template <typename stats_type_, typename insert_type_, typename search_type_, typename exact_type_,
+          typename serve_type_ = serve_in_place_t>
+int run_basic_bench(basic_settings_t const& settings, tape_t const& tape, usearch_vram_options_t const* vram,
+                    insert_type_&& insert, search_type_&& search, exact_type_&& exact, serve_type_&& serve = {}) {
     if (tape.size() <= settings.queries.value)
         return fmt::println(stderr, "The file holds {} entries, too few to hold out {} queries", tape.size(),
                             settings.queries.value),
@@ -189,11 +200,18 @@ int run_basic_bench(basic_settings_t const& settings, tape_t const& tape, insert
 
     usearch_outcome_t outcome {};
     usearch_executor_t executor = nullptr;
-    usearch_executor_for_ram_t executor_arguments {.executor = &executor, .outcome = &outcome, .threads = threads};
-    usearch_executor_for_ram(&executor_arguments);
+    if (vram) {
+        usearch_executor_for_vram_t executor_arguments {.executor = &executor, .outcome = &outcome, .vram = *vram};
+        usearch_executor_for_vram(&executor_arguments);
+    }
+    else {
+        usearch_executor_for_ram_t executor_arguments {.executor = &executor, .outcome = &outcome, .threads = threads};
+        usearch_executor_for_ram(&executor_arguments);
+    }
     if (outcome.message) return fmt::println(stderr, "Executor: {}", outcome.message), 1;
+    // A VRAM index lands its matches in a host arena, where the judgment reads them.
     usearch_arena_t arena = nullptr;
-    usearch_arena_init_t arena_arguments {.arena = &arena, .executor = executor, .outcome = &outcome};
+    usearch_arena_init_t arena_arguments {.arena = &arena, .executor = vram ? nullptr : executor, .outcome = &outcome};
     usearch_arena_init(&arena_arguments);
     if (outcome.message) return fmt::println(stderr, "Arena: {}", outcome.message), 1;
 
@@ -218,6 +236,9 @@ int run_basic_bench(basic_settings_t const& settings, tape_t const& tape, insert
                  build_seconds, humanized(base_count / build_seconds),
                  static_cast<double>(built.computed_distances) / static_cast<double>(base_count));
 
+    usearch_executor_t const serving = serve(executor, &outcome);
+    if (outcome.message) return fmt::println(stderr, "Serve: {}", outcome.message), 1;
+
     std::vector<double> found_scores(query_count * top_k);
     std::vector<std::size_t> found_counts(query_count);
     std::size_t const query_batch = std::min(settings.queries_per_core.value * threads, query_count);
@@ -228,7 +249,7 @@ int run_basic_bench(basic_settings_t const& settings, tape_t const& tape, insert
         std::size_t const count = std::min(query_batch, query_count - first);
         usearch_matches_view_t matches {};
         stats_type_ stats {};
-        search(executor, arena, tape.view(query_first + first), count, &matches, &stats, &outcome);
+        search(serving, arena, tape.view(query_first + first), count, &matches, &stats, &outcome);
         if (outcome.message) return fmt::println(stderr, "Search: {}", outcome.message), 1;
         searched.computed_distances += stats.computed_distances;
         for (std::size_t query = 0; query != count; ++query) {

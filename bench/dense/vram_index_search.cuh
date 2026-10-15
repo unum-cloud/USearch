@@ -348,8 +348,8 @@ bool run_refinement(streamed_dataset_type_& streamed) {
         report.sums.restarts += refinement.restarts;
         report.islands_found += refinement.islands_found;
         report.islands_reconnected += refinement.islands_reconnected;
-        report.reachable_nodes = refinement.reachable_nodes;
-        report.sweeps = refinement.sweeps;
+        report.reachable_nodes = refinement.health.reachable_nodes;
+        report.sweeps = refinement.health.sweeps;
         progress.tick(pass + 1);
         if (!refinement.changed_nodes) break;
     }

@@ -60,7 +60,7 @@ struct metal_arguments_t {
     uint sampling_bound, queries_count, count, epoch_base;
     uint visited_slots, hash_shift, cache_rows, slice_bytes;
     uint heads_count, row_fragments_magic, use_node_ids, expansion;
-    uint tail_entries, appended_base;
+    uint tail_entries, parts, round;
 };
 
 struct metal_walk_t;
@@ -1029,7 +1029,8 @@ inline void metal_insert(constant metal_arguments_t& arguments, device uint4* ve
 template <uint slots_>
 inline void metal_refine(constant metal_arguments_t& arguments, device uint4* vectors, device norms_t* norms,
                          device uint* neighbors, device uint const* node_ids, device uchar* arena,
-                         device atomic_uint* counters, device uint* shadow, uint slice, uint lane) {
+                         device atomic_uint* counters, device uint* shadow, device uint const* part_bases, uint slice,
+                         uint lane) {
     metal_walk_t walk = metal_open(arguments, vectors, norms, neighbors, arena, counters, slice, lane);
     while (true) {
         uint offset = lane == 0 ? atomic_fetch_add_explicit(counters + metal_assigned_k, 1u, memory_order_relaxed) : 0;
@@ -1045,13 +1046,22 @@ inline void metal_refine(constant metal_arguments_t& arguments, device uint4* ve
         pool.reset(walk);
         metal_fold_t fold {};
         walk.test_and_set(node_id);
-        // The walk across runs first, from the other part's landmarks alone, as the CUDA and HIP refines do,
-        // and both walks share one call site, so the walk inlines once.
-        bool const appended = node_id >= arguments.appended_base;
-        uint sampling_first = appended ? 0 : arguments.appended_base;
-        uint sampling_bound = appended ? arguments.appended_base : arguments.sampling_bound;
+        // The walk across runs first, from the landmarks of the round's neighboring group of parts alone, the
+        // rows `part_across` names to the CUDA and HIP refines, and both walks share one call site, so the walk
+        // inlines once.
+        uint sampling_first = 0, sampling_bound = 0;
+        if (arguments.parts > 1) {
+            uint part = 0;
+            while (part + 1 < arguments.parts && part_bases[part + 1] <= node_id) ++part;
+            uint const first = ((part >> arguments.round) ^ 1u) << arguments.round;
+            uint const bound = first + (1u << arguments.round);
+            if (first < arguments.parts) {
+                sampling_first = part_bases[first];
+                sampling_bound = bound < arguments.parts ? part_bases[bound] : arguments.sampling_bound;
+            }
+        }
 #pragma unroll 1
-        for (uint walk_number = arguments.appended_base ? 0 : 1; walk_number != 2; ++walk_number) {
+        for (uint walk_number = sampling_first < sampling_bound ? 0 : 1; walk_number != 2; ++walk_number) {
             if (walk_number) {
                 pool.renew();
                 sampling_first = 0, sampling_bound = arguments.sampling_bound;
@@ -1195,10 +1205,11 @@ kernel void metal_refine_kernel(constant metal_arguments_t& arguments [[buffer(0
                                 device uint4* vectors [[buffer(1)]], device norms_t* norms [[buffer(2)]],
                                 device uint* neighbors [[buffer(3)]], device uint const* node_ids [[buffer(4)]],
                                 device uchar* arena [[buffer(5)]], device atomic_uint* counters [[buffer(6)]],
-                                device uint* shadow [[buffer(7)]], uint group [[threadgroup_position_in_grid]],
+                                device uint* shadow [[buffer(7)]], device uint const* part_bases [[buffer(8)]],
+                                uint group [[threadgroup_position_in_grid]],
                                 uint simdgroup [[simdgroup_index_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]]) {
-    metal_refine<slots_>(arguments, vectors, norms, neighbors, node_ids, arena, counters, shadow,
+    metal_refine<slots_>(arguments, vectors, norms, neighbors, node_ids, arena, counters, shadow, part_bases,
                          group * metal_simdgroups_k + simdgroup, lane);
 }
 
@@ -1206,27 +1217,32 @@ template [[host_name("metal_refine_kernel_0")]] kernel void metal_refine_kernel<
                                                                                    device uint4*, device norms_t*,
                                                                                    device uint*, device uint const*,
                                                                                    device uchar*, device atomic_uint*,
-                                                                                   device uint*, uint, uint, uint);
+                                                                                   device uint*, device uint const*,
+                                                                                   uint, uint, uint);
 template [[host_name("metal_refine_kernel_2")]] kernel void metal_refine_kernel<2>(constant metal_arguments_t&,
                                                                                    device uint4*, device norms_t*,
                                                                                    device uint*, device uint const*,
                                                                                    device uchar*, device atomic_uint*,
-                                                                                   device uint*, uint, uint, uint);
+                                                                                   device uint*, device uint const*,
+                                                                                   uint, uint, uint);
 template [[host_name("metal_refine_kernel_4")]] kernel void metal_refine_kernel<4>(constant metal_arguments_t&,
                                                                                    device uint4*, device norms_t*,
                                                                                    device uint*, device uint const*,
                                                                                    device uchar*, device atomic_uint*,
-                                                                                   device uint*, uint, uint, uint);
+                                                                                   device uint*, device uint const*,
+                                                                                   uint, uint, uint);
 template [[host_name("metal_refine_kernel_8")]] kernel void metal_refine_kernel<8>(constant metal_arguments_t&,
                                                                                    device uint4*, device norms_t*,
                                                                                    device uint*, device uint const*,
                                                                                    device uchar*, device atomic_uint*,
-                                                                                   device uint*, uint, uint, uint);
+                                                                                   device uint*, device uint const*,
+                                                                                   uint, uint, uint);
 template [[host_name("metal_refine_kernel_16")]] kernel void metal_refine_kernel<16>(constant metal_arguments_t&,
                                                                                      device uint4*, device norms_t*,
                                                                                      device uint*, device uint const*,
                                                                                      device uchar*, device atomic_uint*,
-                                                                                     device uint*, uint, uint, uint);
+                                                                                     device uint*, device uint const*,
+                                                                                     uint, uint, uint);
 
 /*  Searches and graph products share one entry point per width, plus slot zero's arena frontier past the widest
  *  pool: buffer 13 says which the launch lands. */
