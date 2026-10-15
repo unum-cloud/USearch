@@ -1179,6 +1179,275 @@ template <typename key_at, typename slot_at> void test_slot_lookup_churn() {
 }
 
 /**
+ *  @brief  Keeps surviving vectors searchable when a deleted bridge is replaced by a distant point.
+ */
+template <typename key_at, typename slot_at> void test_replacing_bridge() {
+    using index_t = index_dense_gt<key_at, slot_at>;
+    metric_punned_t metric(3, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+
+    for (std::size_t seed_count : {1u, 15u})
+        for (float shift : {0.f, 100.f})
+            for (float replacement : {0.f, 0.5f, 3000.f}) {
+                index_dense_config_t config;
+                config.expansion_search = 1000;
+                if (seed_count == 1) {
+                    config.connectivity = 2;
+                    config.connectivity_base = 4;
+                }
+                typename index_t::state_result_t result = index_t::make(metric, config);
+                expect(result);
+                index_t& index = result.index;
+                expect(index.try_reserve(seed_count + 3));
+                auto add = [&](key_at key, float coordinate) {
+                    float vector[3] = {shift + coordinate, 0.f, 0.f};
+                    expect(index.add(key, vector));
+                };
+                for (std::size_t i = 0; i != seed_count; ++i)
+                    add(static_cast<key_at>(i), 10.f + static_cast<float>(i));
+                add(100, 0.f);
+                add(103, -1.f);
+                expect_eq(index.remove(100).completed, 1u);
+
+                float query[3] = {shift, 0.f, 0.f};
+                {
+                    auto found = index.search(query, 1);
+                    expect(found);
+                    expect_eq(found.size(), 1u);
+                    expect_eq(static_cast<key_at>(found[0].member.key), static_cast<key_at>(103));
+                }
+                add(105, replacement);
+                expect_eq(index.size(), seed_count + 2);
+                expect(!index.contains(100));
+                expect(index.contains(103));
+                float stored[3] = {};
+                expect_eq(index.get(103, stored), 1u);
+                expect(stored[0] == shift - 1.f);
+
+                // An exhaustive graph traversal must still reach every surviving point.
+                auto found = index.search(query, index.size());
+                expect(found);
+                expect_eq(found.size(), index.size());
+                key_at expected = static_cast<key_at>(replacement < 1.f ? 105 : 103);
+                expect_eq(static_cast<key_at>(found[0].member.key), expected);
+            }
+}
+
+/**
+ *  @brief  Preserves links outside a replaced bridge's neighborhood when neighbor lists are full.
+ */
+template <typename key_at, typename slot_at> void test_replacing_saturated_bridge() {
+    using index_t = index_dense_gt<key_at, slot_at>;
+    index_dense_config_t config;
+    config.connectivity = 2;
+    config.connectivity_base = 4;
+    config.expansion_search = 1000;
+    auto result = index_t::make(metric_punned_t(2, metric_kind_t::l2sq_k, scalar_kind_t::f32_k), config);
+    expect(result);
+    index_t& index = result.index;
+    expect(index.try_reserve(index_limits_t{7, 1}));
+
+    // Key 4 lies outside the replaced key 2's neighborhood.
+    // Its only incoming link comes from key 1's saturated list and must survive the repair.
+    float vectors[7][2] = {{-51.f, 86.f}, {54.f, 36.f},   {-57.f, 50.f}, {-71.f, -57.f},
+                           {90.f, -96.f}, {-41.f, -53.f}, {-8.f, -16.f}};
+    for (std::size_t i = 0; i != 7; ++i)
+        expect(index.add(static_cast<key_at>(i), vectors[i]));
+    expect_eq(index.remove(2).completed, 1u);
+    float replacement[2] = {17.f, 77.f};
+    expect(index.add(7, replacement));
+    expect_eq(index.size(), 7u);
+    expect(!index.contains(2));
+
+    // Replacing the bridge must preserve every surviving point, including its exact match.
+    for (std::size_t i = 0; i != 8; ++i) {
+        if (i == 2)
+            continue;
+        expect(index.contains(static_cast<key_at>(i)));
+        auto found = index.search(i == 7 ? replacement : vectors[i], 1);
+        expect(found);
+        expect_eq(found.size(), 1u);
+        expect_eq(static_cast<key_at>(found[0].member.key), static_cast<key_at>(i));
+        expect_eq(found[0].distance, 0.f);
+    }
+    auto found = index.search(replacement, index.size());
+    expect(found);
+    expect_eq(found.size(), index.size());
+}
+
+/**
+ *  @brief  Reserves reverse-link capacity when reconnecting an old neighbor that remains a new neighbor.
+ */
+template <typename key_at, typename slot_at> void test_updating_reverse_links() {
+    using index_t = index_gt<float, key_at, slot_at>;
+    using member_citerator_t = typename index_t::member_citerator_t;
+    using vectors_t = std::vector<std::vector<float>>;
+    struct metric_t {
+        vectors_t const& vectors;
+        float operator()(float const* query, member_citerator_t const& member) const {
+            auto const& vector = vectors[get_slot(member)];
+            float x = query[0] - vector[0], y = query[1] - vector[1];
+            return x * x + y * y;
+        }
+        float operator()(member_citerator_t const& a, member_citerator_t const& b) const {
+            return operator()(vectors[get_slot(a)].data(), b);
+        }
+    };
+    struct scenario_t {
+        vectors_t vectors;
+        std::size_t updated_slot;
+        std::size_t retained_slot;
+        std::size_t free_slots;
+        std::vector<float> replacement;
+    } scenarios[] = {
+        {{{-84.f, -53.f}, {24.f, -48.f}, {-81.f, 75.f}, {87.f, 31.f}, {83.f, -62.f}, {30.f, -80.f}, {63.f, 24.f}},
+         4,
+         1,
+         1,
+         {16.f, -61.f}},
+        {{{-68.f, 15.f}, {84.f, -99.f}, {1.f, 33.f}, {6.f, -27.f}, {24.f, 8.f}, {-65.f, 41.f}, {48.f, 0.f}},
+         1,
+         2,
+         2,
+         {-19.f, 11.f}},
+    };
+
+    for (auto& scenario : scenarios) {
+        vectors_t& vectors = scenario.vectors;
+        metric_t metric{vectors};
+        index_t index(index_config_t{2, 4});
+        expect(index.reserve(index_limits_t{vectors.size(), 1}));
+        for (std::size_t i = 0; i != vectors.size(); ++i)
+            expect(index.add(static_cast<key_at>(i), vectors[i].data(), metric));
+
+        auto has_neighbor = [&](std::size_t slot, std::size_t target) {
+            for (auto neighbor : index.neighbors(static_cast<slot_at>(slot), 0))
+                if (neighbor.slot == target)
+                    return true;
+            return false;
+        };
+        std::vector<std::size_t> protected_slots;
+        for (auto neighbor : index.neighbors(static_cast<slot_at>(scenario.retained_slot), 0))
+            protected_slots.push_back(neighbor.slot);
+
+        // Both cases require a new reverse link, with either one or two slots left before repair.
+        expect(has_neighbor(scenario.updated_slot, scenario.retained_slot));
+        expect(!has_neighbor(scenario.retained_slot, scenario.updated_slot));
+        expect_eq(protected_slots.size() + scenario.free_slots, 4u);
+
+        index_search_config_t search_config;
+        search_config.expansion = vectors.size() * 2;
+        auto check = [&] {
+            {
+                auto found = index.search(scenario.replacement.data(), vectors.size(), metric, search_config);
+                expect(found);
+                expect_eq(found.size(), vectors.size());
+            }
+            for (std::size_t i = 0; i != vectors.size(); ++i) {
+                auto found = index.search(vectors[i].data(), 1, metric, search_config);
+                expect(found);
+                expect_eq(found.size(), 1u);
+                expect_eq(found[0].member.slot, i);
+                expect_eq(found[0].distance, 0.f);
+                slot_at slot = static_cast<slot_at>(i);
+                for (std::size_t level = 0; level <= index.level_of(slot); ++level)
+                    expect(index.neighbors(slot, level).size() <= (level ? 2u : 4u));
+            }
+        };
+        check();
+        bool committed = false;
+        auto commit = [&](typename index_t::member_ref_t member) {
+            expect_eq(member.slot, scenario.updated_slot);
+            vectors[scenario.updated_slot] = scenario.replacement;
+            committed = true;
+        };
+        expect(index.update(index.iterator_at(static_cast<slot_at>(scenario.updated_slot)),
+                            static_cast<key_at>(scenario.updated_slot), scenario.replacement.data(), metric, {},
+                            commit));
+        expect(committed);
+        expect(has_neighbor(scenario.updated_slot, scenario.retained_slot));
+        expect(has_neighbor(scenario.retained_slot, scenario.updated_slot));
+        for (std::size_t slot : protected_slots)
+            expect(has_neighbor(scenario.retained_slot, slot));
+        check();
+    }
+}
+
+/**
+ *  @brief  Exercises direct updates, including the entry point, without committing vectors early.
+ */
+template <typename key_at, typename slot_at> void test_updating_graph() {
+    using index_t = index_gt<float, key_at, slot_at>;
+    using member_citerator_t = typename index_t::member_citerator_t;
+    std::vector<float> vectors{10.f, 0.f, -1.f};
+    struct metric_t {
+        std::vector<float> const& vectors;
+        float operator()(float query, member_citerator_t const& member) const {
+            float difference = query - vectors[get_slot(member)];
+            return difference * difference;
+        }
+        float operator()(member_citerator_t const& a, member_citerator_t const& b) const {
+            return operator()(vectors[get_slot(a)], b);
+        }
+    } metric{vectors};
+    index_t index(index_config_t{2, 4});
+    expect(index.reserve(vectors.size()));
+    for (std::size_t i = 0; i != vectors.size(); ++i)
+        expect(index.add(static_cast<key_at>(i), vectors[i], metric));
+
+    auto check = [&] {
+        for (std::size_t i = 0; i != vectors.size(); ++i) {
+            auto found = index.search(vectors[i], vectors.size(), metric);
+            expect(found);
+            expect_eq(found.size(), vectors.size());
+            expect_eq(found[0].member.slot, i);
+            expect_eq(found[0].distance, 0.f);
+            slot_at slot = static_cast<slot_at>(i);
+            for (std::size_t level = 0; level <= index.level_of(slot); ++level) {
+                auto neighbors = index.neighbors(slot, level);
+                expect(neighbors.size() <= (level ? 2u : 4u));
+                std::vector<std::size_t> seen;
+                for (auto neighbor : neighbors) {
+                    expect(neighbor.slot != i);
+                    expect(neighbor.slot < vectors.size());
+                    expect(index.level_of(static_cast<slot_at>(neighbor.slot)) >= level);
+                    expect(std::find(seen.begin(), seen.end(), neighbor.slot) == seen.end());
+                    seen.push_back(neighbor.slot);
+                }
+            }
+        }
+    };
+    auto update = [&](std::size_t slot, float value) {
+        bool committed = false;
+        auto commit = [&](typename index_t::member_ref_t member) {
+            expect_eq(member.slot, slot);
+            vectors[slot] = value;
+            committed = true;
+        };
+        expect(index.update(index.iterator_at(static_cast<slot_at>(slot)), static_cast<key_at>(slot), value, metric, {},
+                            commit));
+        expect(committed);
+        check();
+    };
+    check();
+    update(1, 3000.f);
+
+    // The first node at the highest level is the graph's entry point.
+    std::size_t entry_slot = 0;
+    for (std::size_t i = 1; i != vectors.size(); ++i)
+        if (index.level_of(static_cast<slot_at>(i)) > index.level_of(static_cast<slot_at>(entry_slot)))
+            entry_slot = i;
+    update(entry_slot, -4000.f);
+    update(2, -1.5f);
+
+    index_t single(index_config_t{2, 4});
+    expect(single.reserve(1));
+    expect(single.add(0, vectors[0], metric));
+    expect(single.update(single.iterator_at(static_cast<slot_at>(0u)), 0, vectors[0], metric));
+    expect(single.neighbors(static_cast<slot_at>(0u), 0).empty());
+    expect_eq(single.search(vectors[0], 1, metric).size(), 1u);
+}
+
+/**
  *  @brief  Tests replacing and updating entries in `index_dense_gt`, to ensure consistency
  *          after modifications.
  */
@@ -1626,6 +1895,16 @@ int main(int, char**) {
     std::printf("Testing key lookups under churn\n");
     test_slot_lookup_churn<std::int64_t, std::uint32_t>();
     test_slot_lookup_churn<std::int64_t, uint40_t>();
+
+    std::printf("Testing graph reachability after slot reuse\n");
+    test_replacing_bridge<std::int64_t, std::uint32_t>();
+    test_replacing_bridge<std::uint64_t, uint40_t>();
+    test_replacing_saturated_bridge<std::int64_t, std::uint32_t>();
+    test_replacing_saturated_bridge<std::uint64_t, uint40_t>();
+    test_updating_reverse_links<std::int64_t, std::uint32_t>();
+    test_updating_reverse_links<std::uint64_t, uint40_t>();
+    test_updating_graph<std::int64_t, std::uint32_t>();
+    test_updating_graph<std::uint64_t, uint40_t>();
 
     test_filtered_search();
     test_isolate();
