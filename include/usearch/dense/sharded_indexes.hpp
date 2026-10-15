@@ -1963,9 +1963,9 @@ struct sharded_indexes {
     }
 
     /** Walks @p plan 's steps from this one host thread, taking step @c s of every shard before
-     *  step @c s+1; every step drains its stream before the next, so the walk is serial across the
-     *  devices, and the first failing step ends it. A save lands each step, a load reads it
-     *  straight out of its part. The executor is the plan's already, so it rides unused. */
+     *  step @c s+1, so a device copies one step while the host stages another's, and the first
+     *  failing step ends it. A save lands each step, a load reads it straight out of its part.
+     *  The executor is the plan's already, so it rides unused. */
     template <typename plan_type_>
     status_t drain_steps_(plan_type_& plan, executor_t&) noexcept {
         constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step,
@@ -2163,6 +2163,15 @@ struct sharded_indexes {
             for (std::size_t from = into; from < donors; from += shards) rows += donor.shards_[from].index->size();
             auto [plan, status] = derived().plan_shard_load_(into, rows, &executor);
             if (failed(status)) return status;
+            // Only a donor on another device crosses through the host, so only it pins a bounce.
+            if constexpr (requires { plan.pin_bounce(); }) {
+                bool crossing = false;
+                for (std::size_t from = into; from < donors; from += shards)
+                    crossing |= donor.shards_[from].index->device_specs().ordinal !=
+                                shards_[into].index->device_specs().ordinal;
+                if (crossing)
+                    if (status_t const pinned = plan.pin_bounce(); failed(pinned)) return pinned;
+            }
             plans.push_back_reserved(std::move(plan));
             if (status_t const covered = derived().cover_keys_(into, plans[into].base + rows); failed(covered))
                 return covered;
@@ -2713,6 +2722,9 @@ struct sharded_indexes {
         for (std::size_t shard = 0; shard != shards; ++shard) {
             auto [inner, status] = derived().plan_shard_load_(shard, shard_rows[shard], executor);
             if (failed(status)) return status;
+            // The parts' columns cross from host memory, through a bounce where a shard keeps one.
+            if constexpr (requires { inner.pin_bounce(); })
+                if (status_t const pinned = inner.pin_bounce(); failed(pinned)) return pinned;
             plan.plans_.push_back_reserved(std::move(inner));
             typename index_t::load_plan_t const& opened = plan.plans_[shard];
             std::size_t first_row = opened.base;

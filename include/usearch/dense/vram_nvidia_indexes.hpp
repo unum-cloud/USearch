@@ -75,17 +75,18 @@ struct vram_nvidia_indexes
 
     vram_nvidia_indexes() = delete;
     explicit vram_nvidia_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
-        : base_t(kernel, allocator), device_keys_(allocator) {}
+        : base_t(kernel, allocator), device_keys_(allocator), key_stagings_(allocator) {}
     vram_nvidia_indexes(vram_nvidia_indexes&& other) noexcept
-        : base_t(other.kernel_, other.allocator_), device_keys_(other.allocator_) {
+        : base_t(other.kernel_, other.allocator_), device_keys_(other.allocator_), key_stagings_(other.allocator_) {
         swap(other);
     }
     vram_nvidia_indexes& operator=(vram_nvidia_indexes&& other) noexcept { return swap(other), *this; }
 
-    /** Exchanges two indexes whole, device keys included. */
+    /** Exchanges two indexes whole, device keys and their staging included. */
     void swap(vram_nvidia_indexes& other) noexcept {
         base_t::swap(other);
         std::swap(device_keys_, other.device_keys_);
+        std::swap(key_stagings_, other.key_stagings_);
     }
 
     using base_t::emplace;
@@ -226,17 +227,21 @@ struct vram_nvidia_indexes
         return build_(like.device_specs().ordinal);
     }
 
-    /** Appends @p shard with its host key column and a device twin on its device. */
+    /** Appends @p shard with its host key column, a device twin and the staging between them on its
+     *  device, where the staging's events are born. */
     status_t place_(std::unique_ptr<index_t>&& shard) noexcept {
-        if (failed(device_keys_.push_back(cuda_virtual_memory_allocator<key_t> {shard->device_specs().ordinal})))
-            return status_t::bad_alloc_k;
+        int const device = shard->device_specs().ordinal;
+        if (cuda_set_device(device) != cuda_success_k) return status_t::device_error_k;
+        if (failed(device_keys_.push_back(cuda_virtual_memory_allocator<key_t> {device}))) return status_t::bad_alloc_k;
+        if (failed(key_stagings_.push_back(key_staging_t {}))) return device_keys_.pop_back(), status_t::bad_alloc_k;
         status_t const placed = base_t::place_(std::move(shard));
-        if (failed(placed)) device_keys_.pop_back();
+        if (failed(placed)) device_keys_.pop_back(), key_stagings_.pop_back();
         return placed;
     }
 
     /** Covers rows below @p rows in both of shard @p shard 's key columns, reserving the device one
-     *  at its first cover. */
+     *  at its first cover, and widens the staging between them to a power of two of rows, up to a
+     *  window per half. */
     status_t cover_keys_(std::size_t shard, std::size_t rows) noexcept {
         if (status_t const covered = shards_[shard].keys.cover(rows); failed(covered)) return covered;
         cuda_virtual_memory_allocator<key_t>& device_keys = device_keys_[shard];
@@ -244,6 +249,15 @@ struct vram_nvidia_indexes
             if (status_t const reserved = device_keys.reserve_range(index_t::max_node_count_k * sizeof(key_t));
                 failed(reserved))
                 return reserved;
+        key_staging_t& staging = key_stagings_[shard];
+        std::size_t const half_keys = min_of(window_rows_k, std::bit_ceil(rows));
+        if (rows && staging.keys.size() < 2 * half_keys) {
+            // Pinning needs a current context, and the copies out of the old halves must land.
+            if (failed(enter_(shard)) || failed(staging.crossed[0].drain()) || failed(staging.crossed[1].drain()))
+                return status_t::device_error_k;
+            staging.keys.reset();
+            if (failed(staging.keys.resize_uninitialized(2 * half_keys))) return status_t::bad_alloc_k;
+        }
         return device_keys.commit(rows * sizeof(key_t));
     }
 
@@ -255,18 +269,28 @@ struct vram_nvidia_indexes
     }
 
     /** Copies @p rows of shard @p shard 's host key column into its device twin on @p stream,
-     *  run by run, since the host column is chunked. */
+     *  through the shard's staging half by half, since a pageable source would copy synchronously;
+     *  the host refills a half only once the copy out of it landed. */
     status_t upload_keys_(std::size_t shard, iota_view<std::size_t> rows, cuda_stream_handle_t stream) noexcept {
-        status_t uploaded = status_t::success_k;
-        std::size_t row = rows.first;
+        key_staging_t& staging = key_stagings_[shard];
+        std::size_t const half_keys = staging.keys.size() / 2;
+        if (rows.empty()) return status_t::success_k;
+        if (!half_keys) return status_t::uninitialized_k;
         key_t* const device_keys = device_keys_[shard].base();
-        shards_[shard].keys.for_each_span(rows, [&](std::span<key_t> run) noexcept {
-            if (succeeded(uploaded) &&
-                cuda_copy_async(device_keys + row, run.data(), run.size_bytes(), stream) != cuda_success_k)
-                uploaded = status_t::device_error_k;
-            row += run.size();
-        });
-        return uploaded;
+        for (std::size_t first = rows.first; first < rows.bound; first += half_keys) {
+            std::size_t const bound = min_of(first + half_keys, rows.bound);
+            std::size_t const half = staging.chunks++ % 2;
+            key_t* staged = staging.keys.data() + half * half_keys;
+            if (staging.chunks > 2 && failed(staging.crossed[half].drain())) return status_t::device_error_k;
+            shards_[shard].keys.for_each_span({first, bound}, [&](std::span<key_t> run) noexcept {
+                for (key_t const& key : run) *staged++ = key;
+            });
+            if (cuda_copy_async(device_keys + first, staging.keys.data() + half * half_keys,
+                                (bound - first) * sizeof(key_t), stream) != cuda_success_k ||
+                failed(staging.crossed[half].record(stream)))
+                return status_t::device_error_k;
+        }
+        return status_t::success_k;
     }
 
     /** The upload of a load's keys rides the load's own stream. */
@@ -283,7 +307,7 @@ struct vram_nvidia_indexes
                         std::size_t from, executor_t& executor) noexcept {
         index_t const& part = *donor.shards_[from].index;
         if (status_t const queued = plan.load(step, part, step.source_rows,
-                                              executor.stream(donor.stream_of_(executor, from)).handle);
+                                              executor.stream(donor.stream_of_(executor, from)));
             failed(queued))
             return queued;
         node_id_t const base = step.index_rows.first, rows = step.source_rows.bound;
@@ -423,6 +447,21 @@ struct vram_nvidia_indexes
      *  keys; reserved for every ID a shard can hold, since address space is free and the base never
      *  moves under a walk, and mapped as it grows. Parallel to the shards. */
     growing_buffer<cuda_virtual_memory_allocator<key_t>, forkunion_allocator_t> device_keys_;
+
+    /** One shard's page-locked ring between its two key columns: two halves of keys, each refilled
+     *  only once the copy out of it landed. Sized as plans cover rows and freed with the index. */
+    struct key_staging_t {
+        growing_buffer<key_t, cuda_pinned_allocator_t> keys {cuda_pinned_allocator_t {}};
+
+        /** Marks the last copy out of each half. */
+        cuda_event_t crossed[2];
+
+        /** Halves filled so far, alternating between the two. */
+        std::size_t chunks = 0;
+    };
+
+    /** Every shard's key staging, parallel to the shards. */
+    growing_buffer<key_staging_t, forkunion_allocator_t> key_stagings_;
 };
 
 } // namespace unum::usearch::dense

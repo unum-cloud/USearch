@@ -198,7 +198,7 @@ struct vram_nvidia_index {
     /** Pins the index to the storage allocator's device; the first @c reserve freezes the rest. */
     explicit vram_nvidia_index(cuda_virtual_memory_allocator<byte_t> const& allocator = {}) noexcept
         : device_ {allocator.device()}, values_tape_(allocator), offsets_column_(allocator),
-          neighbors_matrix_(allocator) {}
+          neighbors_matrix_(allocator), grown_((cuda_set_device(allocator.device()), cuda_event_t {})) {}
     vram_nvidia_index(vram_nvidia_index const&) = delete;
     vram_nvidia_index& operator=(vram_nvidia_index const&) = delete;
 
@@ -732,17 +732,19 @@ struct vram_nvidia_index {
     }
 
     /** Maps up to @p rows and sentinel-fills on @p stream every mapped neighbor row no fill reached
-     *  yet; callers hold the claim. */
+     *  yet, @p stream first following the last fill, whichever stream queued it; callers hold the
+     *  claim. */
     status_t grow_rows_(std::size_t rows, cuda_stream_handle_t stream) noexcept {
         if (status_t const mapped = map_rows_(rows); failed(mapped)) return mapped;
+        cuda_api_t const& api = cuda_api();
+        if (api.stream_wait_event(stream, grown_, 0) != cuda_success_k) return status_t::device_error_k;
         if (rows <= filled_rows_) return status_t::success_k;
         std::size_t const mapped_rows = capacity(), row_words = connectivity();
-        cuda_api_t const& api = cuda_api();
         if (api.fill_words_async(cuda_address(neighbors_matrix_.base() + filled_rows_ * row_words * sizeof(u32_t)),
-                                 node_id_unknown_k, (mapped_rows - filled_rows_) * row_words, stream) != cuda_success_k)
+                                 node_id_unknown_k, (mapped_rows - filled_rows_) * row_words,
+                                 stream) != cuda_success_k ||
+            failed(grown_.record(stream)))
             return status_t::device_error_k;
-        // Searches on other streams read these rows with no edge to this one, so fills land first.
-        if (api.stream_synchronize(stream) != cuda_success_k) return status_t::device_error_k;
         filled_rows_ = mapped_rows;
         return status_t::success_k;
     }
@@ -858,6 +860,10 @@ struct vram_nvidia_index {
     /** Mapped rows whose neighbors a grow sentinel-filled, read and advanced by the claim's
      *  holder. */
     std::size_t filled_rows_ = 0;
+
+    /** Marks the last sentinel fill, which every grow's stream follows; recorded and followed by
+     *  the claim's holder alone. */
+    cuda_event_t grown_;
 
     /** Rows strictly below it are published and visible, turned once per batch after its drain. */
     std::size_t last_visible_id_ = 0;

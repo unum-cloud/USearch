@@ -698,7 +698,8 @@ struct vram_amd_index {
     explicit vram_amd_index(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
                             neighbors_allocator_t const& neighbors_allocator = {}) noexcept
         : device_ {vectors_allocator.device()}, kernel_ {kernel}, vectors_matrix_(vectors_allocator),
-          norms_column_(vectors_allocator), neighbors_matrix_(neighbors_allocator) {}
+          norms_column_(vectors_allocator), neighbors_matrix_(neighbors_allocator),
+          grown_((hip_set_device(vectors_allocator.device()), hip_event_t {})) {}
     vram_amd_index(vram_amd_index const&) = delete;
     vram_amd_index& operator=(vram_amd_index const&) = delete;
 
@@ -885,21 +886,6 @@ struct vram_amd_index {
                                     hip_copy_device_to_host_k, stream) == hip_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
-    }
-
-    /** Reports whether every claimed ID is published - a derived health check, never cached state -
-     *  reading the count on the caller's @p stream, whose device must be current, and waiting for
-     *  it once, since the answer is the host's. Call it only with no batch in flight. */
-    status_t validate(hip_stream_handle_t stream) const noexcept {
-        // The count is zeroed with the first claim's rows, so before it there is nothing to read.
-        if (!claimed_()) return status_t::success_k;
-        u32_t published = 0;
-        hip_api_t const& runtime = hip_api();
-        if (runtime.copy_async(&published, published_rows_(), sizeof(u32_t), hip_copy_device_to_host_k, stream) !=
-                hip_success_k ||
-            runtime.stream_synchronize(stream) != hip_success_k)
-            return status_t::device_error_k;
-        return published == claimed_() ? status_t::success_k : status_t::device_error_k;
     }
 
 #pragma endregion Measures
@@ -1645,14 +1631,16 @@ struct vram_amd_index {
 
     /**
      *  @brief One save in flight: the watermark it took, the stream its copies ride, and the
-     *      batches it hands out - one pinned bounce of rows at a time, since a device matrix cannot
-     *      be read in place.
+     *      batches it hands out through a double-buffered pinned bounce, since a device matrix
+     *      cannot be read in place.
      *
      *  Vectors travel as logical rows with the fragment padding stripped, neighbors verbatim under
      *  the positional sentinel convention, and norms verbatim when the columns carry theirs.
      *
-     *  One host thread drives a device, so batches are taken one after another, though the tallies
-     *  keep the shape a threaded caller expects.
+     *  A batch crosses half a batch at a time: each half lands on the host while the next one is
+     *  still copying off the device, so the host awaits each half's event once, and the last one
+     *  lands in @c finish. One host thread drives a device, so batches are taken one after another,
+     *  though the tallies keep the shape a threaded caller expects.
      */
     struct [[nodiscard]] save_plan_t {
 
@@ -1662,11 +1650,11 @@ struct vram_amd_index {
         /** What an ID under the watermark moves by - the row this shard starts at. */
         node_id_t id_shift = 0;
 
-        /** The stream every device-to-host copy queues on, drained before its bytes move. */
+        /** The stream every device-to-host copy queues on. */
         hip_stream_handle_t stream = nullptr;
 
-        /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs, then its
-         *  norms. */
+        /** Page-locked host bytes in two halves of @c half_rows rows each: packed vector rows, then
+         *  their neighbor IDs, then their norms. */
         bounce_t bounce {hip_pinned_allocator_t {}};
 
         /** Rows under the watermark at planning. */
@@ -1674,6 +1662,10 @@ struct vram_amd_index {
 
         /** Rows one batch carries - a bounce's worth, or every row when fewer. */
         std::size_t batch_rows = 0;
+
+        /** Rows one half of the bounce carries: half a batch, so two halves pin what one batch
+         *  would. */
+        std::size_t half_rows = 0;
 
         /** Rows whose vectors landed, tallied through @c std::atomic_ref. */
         std::size_t covered_vectors = 0;
@@ -1684,25 +1676,32 @@ struct vram_amd_index {
         save_plan_t() noexcept = default;
 
         /** The index snapshotted into @p columns on @p stream under the watermark at @p visible,
-         *  its IDs shifted by @p id_shift; only @ref plan_save calls it, and sizes the bounce
-         *  afterwards. */
+         *  its IDs shifted by @p id_shift; only @ref plan_save calls it, with the index's device
+         *  current, where the events are born, and sizes the bounce afterwards. */
         save_plan_t(vram_amd_index const& index, columns_t columns, node_id_t id_shift,
                     hip_executor_t::stream_t const& stream, node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), stream(stream.handle), bounce(hip_pinned_allocator_t {stream}),
               visible(visible),
               batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k))),
-              index_(&index) {}
+              half_rows(divide_round_up<std::size_t>(batch_rows, 2)), index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
             : columns(other.columns), id_shift(other.id_shift), stream(other.stream), bounce(std::move(other.bounce)),
-              visible(other.visible), batch_rows(other.batch_rows), covered_vectors(other.covered_vectors),
-              covered_neighbors(other.covered_neighbors), index_(std::exchange(other.index_, nullptr)) {}
+              visible(other.visible), batch_rows(other.batch_rows), half_rows(other.half_rows),
+              covered_vectors(other.covered_vectors), covered_neighbors(other.covered_neighbors),
+              crossed_ {std::move(other.crossed_[0]), std::move(other.crossed_[1])},
+              pending_(std::exchange(other.pending_, {})), pending_half_(other.pending_half_),
+              index_(std::exchange(other.index_, nullptr)) {}
         save_plan_t& operator=(save_plan_t&&) = delete;
         // The tallies are this plan's own: a copy would tally into a twin `finish` never reads.
         save_plan_t(save_plan_t const&) = delete;
         save_plan_t& operator=(save_plan_t const&) = delete;
 
-        /** A save owns nothing but its bounce, so a dying plan leaves the index as it found it. */
-        ~save_plan_t() noexcept = default;
+        /** A save owns nothing but its bounce, so a dying plan leaves the index as it found it,
+         *  once the copies into its pending half landed. */
+        ~save_plan_t() noexcept {
+            if (!pending_.index_rows.empty()) [[maybe_unused]]
+                status_t const drained = crossed_[pending_half_].drain();
+        }
 
         /** One step of the plan: one bounce-sized batch of the rows under the watermark. */
         struct step_t {
@@ -1739,7 +1738,8 @@ struct vram_amd_index {
          *
          *  The vectors land with the fragment padding stripped, then the neighbors with every ID
          *  under the watermark shifted by @c id_shift and every other folded to the sentinel, then
-         *  the norms where the columns take them.
+         *  the norms where the columns take them. The step's last half is still copying when it
+         *  returns, and lands with the next step or in @c finish.
          *
          *  @param[in] step The step to copy, as @ref steps hands them out.
          *  @param[inout] scratch Unused here, since the bounce is already host memory; it rides in
@@ -1750,50 +1750,50 @@ struct vram_amd_index {
             iota_view<node_id_t> const rows = step.index_rows;
             if (rows.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
-            std::size_t const connectivity = index_->connectivity();
-            std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
-            std::size_t const step_slots = rows.size() * connectivity;
+            std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(node_id_t);
             std::size_t const first = step.source_rows.first;
-            bytes_span_t const vectors_rows = flat_rows(columns.vectors, first, rows.size(), scalar_row_bytes);
-            bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes);
-            bytes_span_t const norms_rows = flat_rows(columns.norms, first, rows.size(), sizeof(norms_t));
-            if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
+            if (flat_rows(columns.vectors, first, rows.size(), scalar_row_bytes).empty() ||
+                flat_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes).empty() ||
+                flat_rows(columns.norms, first, rows.size(), sizeof(norms_t)).empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
             hip_api_t const& runtime = hip_api();
-            bytes_span_t const bounce_neighbors = to_writable_span(bounce).subspan(batch_rows * scalar_row_bytes);
-            bytes_span_t const bounce_norms = to_writable_span(bounce).subspan(
-                batch_rows * (scalar_row_bytes + neighbors_row_bytes), norms_rows.size());
-            // The columns land in disjoint stretches of the bounce, so one wait covers all three.
-            if (runtime.copy_2d_async(bounce.data(), scalar_row_bytes,
-                                      index_->vectors_rows_() + rows.first * index_->row_bytes(), index_->row_bytes(),
-                                      scalar_row_bytes, rows.size(), hip_copy_device_to_host_k,
-                                      stream) != hip_success_k ||
-                (!norms_rows.empty() &&
-                 runtime.copy_async(bounce_norms.data(), index_->norms_column_.base() + rows.first * sizeof(norms_t),
-                                    bounce_norms.size(), hip_copy_device_to_host_k, stream) != hip_success_k) ||
-                runtime.copy_async(
-                    bounce_neighbors.data(), index_->neighbors_matrix_.base() + rows.first * neighbors_row_bytes,
-                    rows.size() * neighbors_row_bytes, hip_copy_device_to_host_k, stream) != hip_success_k ||
-                runtime.stream_synchronize(stream) != hip_success_k)
-                return status_t::device_error_k;
-            [[maybe_unused]] status_t const copied_vectors = copy_bytes(vectors_rows,
-                                                                        bytes_of(bounce.data(), vectors_rows.size()));
-            if (!norms_rows.empty()) [[maybe_unused]]
-                status_t const copied_norms = copy_bytes(norms_rows, bounce_norms);
-            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
-
-            std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors.data()), step_slots};
-            for (node_id_t& neighbor : landed)
-                neighbor = neighbor < visible ? static_cast<node_id_t>(neighbor + id_shift) : node_id_unknown_k;
-            [[maybe_unused]] status_t const copied_neighbors = copy_bytes(neighbors_rows, std::as_bytes(landed));
-            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            for (std::size_t chunk = rows.first; chunk < rows.bound; chunk += half_rows) {
+                std::size_t const bound = min_of<std::size_t>(chunk + half_rows, rows.bound);
+                // Every half but the pending one has landed, so the other one is free.
+                std::size_t const half = pending_.index_rows.empty() ? 0 : pending_half_ ^ 1;
+                byte_t* const bounce_vectors =
+                    bounce.data() + half * half_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
+                byte_t* const bounce_neighbors = bounce_vectors + half_rows * scalar_row_bytes;
+                byte_t* const bounce_norms = bounce_neighbors + half_rows * neighbors_row_bytes;
+                std::size_t const count = bound - chunk;
+                if (runtime.copy_2d_async(bounce_vectors, scalar_row_bytes,
+                                          index_->vectors_rows_() + chunk * index_->row_bytes(), index_->row_bytes(),
+                                          scalar_row_bytes, count, hip_copy_device_to_host_k,
+                                          stream) != hip_success_k ||
+                    (!columns.norms.empty() &&
+                     runtime.copy_async(bounce_norms, index_->norms_column_.base() + chunk * sizeof(norms_t),
+                                        count * sizeof(norms_t), hip_copy_device_to_host_k, stream) != hip_success_k) ||
+                    runtime.copy_async(bounce_neighbors, index_->neighbors_matrix_.base() + chunk * neighbors_row_bytes,
+                                       count * neighbors_row_bytes, hip_copy_device_to_host_k,
+                                       stream) != hip_success_k ||
+                    failed(crossed_[half].record(stream)))
+                    return status_t::device_error_k;
+                // The previous half lands on the host while this one copies off the device.
+                if (status_t const landed = land_pending_(); failed(landed)) return landed;
+                pending_.index_rows = {static_cast<node_id_t>(chunk), static_cast<node_id_t>(bound)};
+                pending_.source_rows = {static_cast<node_id_t>(first + chunk - rows.first),
+                                        static_cast<node_id_t>(first + bound - rows.first)};
+                pending_half_ = half;
+            }
             return status_t::success_k;
         }
 
-        /** Pronounces the snapshot complete: every batch's vectors and neighbors landed. A success
-         *  spends the plan; a refusal leaves it whole, so the missing steps can still land. */
+        /** Pronounces the snapshot complete once the last half landed: every batch's vectors and
+         *  neighbors in the columns. A success spends the plan; a refusal leaves it whole, so the
+         *  missing steps can still land. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
+            if (status_t const landed = land_pending_(); failed(landed)) return landed;
             std::size_t const nodes = static_cast<std::size_t>(visible);
             if (standard_atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != nodes ||
                 standard_atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != nodes)
@@ -1804,6 +1804,48 @@ struct vram_amd_index {
 
       private:
 
+        /** Awaits the pending half's copies, then moves its rows into the columns, shifting every
+         *  neighbor under the watermark and folding every other onto the sentinel. */
+        status_t land_pending_() noexcept {
+            iota_view<node_id_t> const rows = pending_.source_rows;
+            if (pending_.index_rows.empty()) return status_t::success_k;
+            if (status_t const drained = crossed_[pending_half_].drain(); failed(drained)) return drained;
+            pending_ = {};
+            std::size_t const scalar_row_bytes = index_->packed_row_bytes();
+            std::size_t const connectivity = index_->connectivity();
+            std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
+            byte_t* const bounce_vectors =
+                bounce.data() + pending_half_ * half_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
+            byte_t* const bounce_neighbors = bounce_vectors + half_rows * scalar_row_bytes;
+            byte_t* const bounce_norms = bounce_neighbors + half_rows * neighbors_row_bytes;
+            bytes_span_t const vectors_rows = flat_rows(columns.vectors, rows.first, rows.size(), scalar_row_bytes);
+            bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, rows.first, rows.size(),
+                                                          neighbors_row_bytes);
+            bytes_span_t const norms_rows = flat_rows(columns.norms, rows.first, rows.size(), sizeof(norms_t));
+            [[maybe_unused]] status_t const copied_vectors = copy_bytes(vectors_rows,
+                                                                        bytes_of(bounce_vectors, vectors_rows.size()));
+            if (!norms_rows.empty()) [[maybe_unused]]
+                status_t const copied_norms = copy_bytes(norms_rows, bytes_of(bounce_norms, norms_rows.size()));
+            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+
+            std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors),
+                                               rows.size() * connectivity};
+            for (node_id_t& neighbor : landed)
+                neighbor = neighbor < visible ? static_cast<node_id_t>(neighbor + id_shift) : node_id_unknown_k;
+            [[maybe_unused]] status_t const copied_neighbors = copy_bytes(neighbors_rows, std::as_bytes(landed));
+            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            return status_t::success_k;
+        }
+
+        /** Marks the last copies into each half of the bounce, born with the plan. */
+        hip_event_t crossed_[2];
+
+        /** The rows whose copies sit in a half not yet landed on the host; empty when none do. */
+        step_t pending_ {};
+
+        /** The half @c pending_ sits in. */
+        std::size_t pending_half_ = 0;
+
         /** The index being snapshotted; null in the empty plan a refused @ref plan_save returns,
          *  and once @c finish succeeded. */
         vram_amd_index const* index_ = nullptr;
@@ -1811,7 +1853,7 @@ struct vram_amd_index {
 
     /**
      *  @brief Opens a save into @p columns under @p synchronization on @p stream: takes the
-     *      watermark and sizes one bounce for it.
+     *      watermark and pins the double-buffered bounce for it.
      *
      *  @c concurrent_k answers @c config_mismatch_k, since the device storage cannot be probed for
      *  settlement; @c exclusive_k reads like @c immutable_k. Columns too short for the rows under
@@ -1831,10 +1873,11 @@ struct vram_amd_index {
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
             return {{}, status_t::config_mismatch_k};
+        if (hip_set_device(device_.ordinal) != hip_success_k) return {{}, status_t::device_error_k};
         save_plan_t plan {*this, columns, id_shift, stream, static_cast<node_id_t>(rows)};
-        std::size_t const batch_bytes = plan.batch_rows *
-                                        (packed_row_bytes() + connectivity() * sizeof(node_id_t) + sizeof(norms_t));
-        if (batch_bytes && failed(plan.bounce.resize_uninitialized(batch_bytes))) return {{}, status_t::bad_alloc_k};
+        std::size_t const bounce_bytes = 2 * plan.half_rows *
+                                         (packed_row_bytes() + connectivity() * sizeof(node_id_t) + sizeof(norms_t));
+        if (bounce_bytes && failed(plan.bounce.resize_uninitialized(bounce_bytes))) return {{}, status_t::bad_alloc_k};
         return {std::move(plan), status_t::success_k};
     }
 
@@ -1851,16 +1894,18 @@ struct vram_amd_index {
 
     /**
      *  @brief One load in flight: the rows it appends past every claimed one, the storage grown to
-     *      hold them, and the steps they span, each filled from host columns through one pinned
-     *      bounce or from another index's storage on the stream; @ref finish derives the norms no
-     *      step carried and publishes.
+     *      hold them, and the steps they span, each filled from host columns through a
+     *      double-buffered pinned bounce or from another index's storage on the stream;
+     *      @ref finish derives the norms no step carried and publishes.
      *
      *  Holds the claim for its whole life, so nothing else claims rows while it runs. A source's
      *  IDs are local to the rows it delivers, so every batch shifts them onto the appended range
      *  and folds every other ID onto the sentinel. Repeated plans append, which is how several
-     *  parts land in one shard. A plan that dies before @c finish claims nothing, drops the mutex,
-     *  and leaves the storage grown for the next one, its rows unfilled, so the next claim
-     *  sentinel-fills over whatever its steps wrote.
+     *  parts land in one shard. A batch crosses half a batch at a time, the host staging one half
+     *  while the other copies to the device, and refilling a half only once its event says the
+     *  copies out of it landed; @c finish is the one full wait. A plan that dies before @c finish
+     *  claims nothing and leaves the storage grown for the next one, its rows unfilled, so the
+     *  next claim sentinel-fills over whatever its steps wrote.
      */
     struct [[nodiscard]] load_plan_t {
 
@@ -1874,8 +1919,8 @@ struct vram_amd_index {
          *  and @c finish select first. */
         hip_stream_handle_t stream = nullptr;
 
-        /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs, then its
-         *  norms, pinned by the first step that crosses through them. */
+        /** Page-locked host bytes in two halves of @c half_rows rows each: packed vector rows, then
+         *  their neighbor IDs, then their norms, pinned at planning by @ref pin_bounce or never. */
         bounce_t bounce {hip_pinned_allocator_t {}};
 
         /** The first appended ID - the row the claim landed at. */
@@ -1886,6 +1931,10 @@ struct vram_amd_index {
 
         /** Rows one batch carries - a bounce's worth, or every row when fewer. */
         std::size_t batch_rows = 0;
+
+        /** Rows one half of the bounce carries: half a batch, so two halves pin what one batch
+         *  would. */
+        std::size_t half_rows = 0;
 
         /** Rows whose vectors landed, tallied through @c std::atomic_ref. */
         std::size_t covered_vectors = 0;
@@ -1900,26 +1949,33 @@ struct vram_amd_index {
         load_plan_t() noexcept = default;
 
         /** The index appended to at @p base on @p stream, under the claim over its rows or a claim
-         *  word its caller closed; only @ref plan_load calls it. */
+         *  word its caller closed; only @ref plan_load calls it, with the index's device current,
+         *  where the events are born. */
         load_plan_t(vram_amd_index& index, columns_view_t columns, iota_view<node_id_t> source_range,
                     hip_executor_t::stream_t const& stream, node_id_t base, std::size_t rows) noexcept
             : columns(columns), source_range(source_range), stream(stream.handle),
               bounce(hip_pinned_allocator_t {stream}), base(base), rows(rows),
-              batch_rows(min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k))), index_(&index) {}
+              batch_rows(min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k))),
+              half_rows(divide_round_up<std::size_t>(batch_rows, 2)), index_(&index) {}
         load_plan_t(load_plan_t&& other) noexcept
             : columns(other.columns), source_range(other.source_range), stream(other.stream),
               bounce(std::move(other.bounce)), base(other.base), rows(std::exchange(other.rows, 0)),
-              batch_rows(other.batch_rows), covered_vectors(other.covered_vectors),
+              batch_rows(other.batch_rows), half_rows(other.half_rows), covered_vectors(other.covered_vectors),
               covered_neighbors(other.covered_neighbors), covered_norms(other.covered_norms),
+              crossed_ {std::move(other.crossed_[0]), std::move(other.crossed_[1])}, chunks_(other.chunks_),
               index_(std::exchange(other.index_, nullptr)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
         // The tallies are this plan's own: a copy would tally into a twin `finish` never reads.
         load_plan_t(load_plan_t const&) = delete;
         load_plan_t& operator=(load_plan_t const&) = delete;
 
-        /** An unfinished plan gives its claim back. */
+        /** An unfinished plan gives its claim back, marking its stream so the next grow follows
+         *  every copy it queued, and awaiting that mark before its bounce unpins. */
         ~load_plan_t() noexcept {
             if (!index_ || !rows) return;
+            if (hip_set_device(index_->device_specs().ordinal) == hip_success_k &&
+                succeeded(index_->grown_.record(stream)) && chunks_) [[maybe_unused]]
+                status_t const drained = index_->grown_.drain();
             // Under the claim or the closed word, which every reader of the filled extent holds.
             index_->filled_rows_ = min_of(index_->filled_rows_, static_cast<std::size_t>(base));
             index_->unclaim_(base, rows);
@@ -1966,6 +2022,15 @@ struct vram_amd_index {
          */
         status_t load(step_t const& step) noexcept { return load(step, columns, source_range); }
 
+        /** Pins the bounce at planning, for a plan whose steps cross host memory or another
+         *  device's storage; a plan whose rows move between matrices on one device never pins. */
+        status_t pin_bounce() noexcept {
+            if (!index_) return status_t::uninitialized_k;
+            std::size_t const row_bytes = index_->packed_row_bytes() + index_->connectivity() * sizeof(node_id_t) +
+                                          sizeof(norms_t);
+            return bounce.empty() ? bounce.resize_uninitialized(2 * half_rows * row_bytes) : status_t::success_k;
+        }
+
         /**
          *  @brief The same copy out of @p columns under @p source_range rather than the plan's own.
          *
@@ -1977,14 +2042,13 @@ struct vram_amd_index {
          *  @param[in] source_range The ID space the part's rows speak.
          */
         status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
-            if (!index_) return status_t::uninitialized_k;
+            if (!index_ || bounce.empty()) return status_t::uninitialized_k;
             if (hip_set_device(index_->device_specs().ordinal) != hip_success_k) return status_t::device_error_k;
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
-            std::size_t const step_slots = range.size() * connectivity;
             std::size_t const first = step.source_rows.first;
             bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), scalar_row_bytes);
             bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
@@ -1998,43 +2062,47 @@ struct vram_amd_index {
             // land in this plan.
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
                 return status_t::config_mismatch_k;
-            if (bounce.empty() && failed(bounce.resize_uninitialized(
-                                      batch_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t)))))
-                return status_t::bad_alloc_k;
-            [[maybe_unused]] status_t const staged_vectors = copy_bytes(bytes_of(bounce.data(), vectors_rows.size()),
-                                                                        vectors_rows);
-            if (hip_api().copy_2d_async(index_->vectors_rows_() + range.first * index_->row_bytes(),
-                                        index_->row_bytes(), bounce.data(), scalar_row_bytes, scalar_row_bytes,
-                                        range.size(), hip_copy_host_to_device_k, stream) != hip_success_k)
-                return index_->fail_(status_t::device_error_k);
             // Dot reserves no norms column, so a part's column has nowhere to land.
-            if (index_->stores_norms() && !norms_rows.empty()) {
-                bytes_span_t const bounce_norms = to_writable_span(bounce).subspan(
-                    batch_rows * (scalar_row_bytes + neighbors_row_bytes), norms_rows.size());
-                [[maybe_unused]] status_t const staged_norms = copy_bytes(bounce_norms, norms_rows);
-                if (hip_api().copy_async(index_->norms_column_.base() + range.first * sizeof(norms_t),
-                                         bounce_norms.data(), bounce_norms.size(), hip_copy_host_to_device_k,
-                                         stream) != hip_success_k)
+            bool const normed = index_->stores_norms() && !norms_rows.empty();
+            hip_api_t const& runtime = hip_api();
+            for (std::size_t done = 0; done < range.size(); done += half_rows) {
+                std::size_t const count = min_of(half_rows, range.size() - done), into = range.first + done;
+                std::size_t const half = chunks_++ % 2;
+                byte_t* const bounce_vectors =
+                    bounce.data() + half * half_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
+                byte_t* const bounce_neighbors = bounce_vectors + half_rows * scalar_row_bytes;
+                byte_t* const bounce_norms = bounce_neighbors + half_rows * neighbors_row_bytes;
+                // The host refills a half only once the copies out of it landed, while the other
+                // half's copies run.
+                if (chunks_ > 2 && failed(crossed_[half].drain())) return index_->fail_(status_t::device_error_k);
+                [[maybe_unused]] status_t const staged_vectors = copy_bytes(
+                    bytes_of(bounce_vectors, count * scalar_row_bytes),
+                    vectors_rows.subspan(done * scalar_row_bytes, count * scalar_row_bytes));
+                if (normed) [[maybe_unused]]
+                    status_t const staged_norms = copy_bytes(
+                        bytes_of(bounce_norms, count * sizeof(norms_t)),
+                        norms_rows.subspan(done * sizeof(norms_t), count * sizeof(norms_t)));
+                [[maybe_unused]] status_t const staged_neighbors = copy_bytes(
+                    bytes_of(bounce_neighbors, count * neighbors_row_bytes),
+                    neighbors_rows.subspan(done * neighbors_row_bytes, count * neighbors_row_bytes));
+                std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors),
+                                                   count * connectivity};
+                rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
+                compact_neighbors(landed, connectivity, static_cast<node_id_t>(into), node_id_unknown_k);
+                if (runtime.copy_2d_async(index_->vectors_rows_() + into * index_->row_bytes(), index_->row_bytes(),
+                                          bounce_vectors, scalar_row_bytes, scalar_row_bytes, count,
+                                          hip_copy_host_to_device_k, stream) != hip_success_k ||
+                    (normed &&
+                     runtime.copy_async(index_->norms_column_.base() + into * sizeof(norms_t), bounce_norms,
+                                        count * sizeof(norms_t), hip_copy_host_to_device_k, stream) != hip_success_k) ||
+                    runtime.copy_async(index_->neighbors_matrix_.base() + into * neighbors_row_bytes, bounce_neighbors,
+                                       count * neighbors_row_bytes, hip_copy_host_to_device_k,
+                                       stream) != hip_success_k ||
+                    failed(crossed_[half].record(stream)))
                     return index_->fail_(status_t::device_error_k);
-                // Tallied ahead of the drain: a failed one keeps the vectors short, which `finish`
-                // refuses.
-                standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
             }
-
-            // The neighbors stage into a stretch of the bounce no queued copy reads, so they
-            // need not wait for the vectors to leave it.
-            bytes_span_t const bounce_neighbors = to_writable_span(bounce).subspan(batch_rows * scalar_row_bytes);
-            [[maybe_unused]] status_t const staged_neighbors = copy_bytes(bounce_neighbors.first(neighbors_rows.size()),
-                                                                          neighbors_rows);
-            std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors.data()), step_slots};
-            rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
-            compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
-            // One wait, before the next step refills the bounce.
-            if (hip_api().copy_async(index_->neighbors_matrix_.base() + range.first * neighbors_row_bytes,
-                                     bounce_neighbors.data(), range.size() * neighbors_row_bytes,
-                                     hip_copy_host_to_device_k, stream) != hip_success_k ||
-                hip_api().stream_synchronize(stream) != hip_success_k)
-                return index_->fail_(status_t::device_error_k);
+            if (normed)
+                standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
             standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
@@ -2047,19 +2115,20 @@ struct vram_amd_index {
          *
          *  Both matrices keep fragment-padded rows of one geometry, so on one device every column
          *  moves as one copy on the plan's stream. Another device's storage is mapped for that
-         *  device alone, so its rows cross through the bounce a batch at a time, read out on
+         *  device alone, so its rows cross through the bounce half a batch at a time, read out on
          *  @p source_stream and written in on the plan's, each stream waiting on the other's event
-         *  rather than the host. The neighbors then rebase on the plan's stream. Nothing waits, so
-         *  @p source must stay quiescent until the caller drains both streams.
+         *  rather than the host, so one half reads out while the other writes in. The neighbors
+         *  then rebase on the plan's stream. Nothing waits, so @p source must stay quiescent until
+         *  the caller drains both streams.
          *
          *  @param[in] step The step to fill; its source rows address @p source.
          *  @param[in] source The index the rows come from.
          *  @param[in] source_range The ID space the source's rows speak.
-         *  @param[in] source_stream A stream on @p source 's device, which reads the rows out when
-         *      the devices differ.
+         *  @param[inout] source_stream An executor stream on @p source 's device, which reads the
+         *      rows out when the devices differ and marks each half filled on its event.
          */
         status_t load(step_t const& step, vram_amd_index const& source, iota_view<node_id_t> source_range,
-                      hip_stream_handle_t source_stream) noexcept {
+                      hip_executor_t::stream_t& source_stream) noexcept {
             if (!index_) return status_t::uninitialized_k;
             int const device = index_->device_specs().ordinal, source_device = source.device_specs().ordinal;
             if (hip_set_device(device) != hip_success_k) return status_t::device_error_k;
@@ -2090,36 +2159,33 @@ struct vram_amd_index {
                     return index_->fail_(status_t::device_error_k);
             }
             else {
-                if (bounce.empty() && failed(bounce.resize_uninitialized(
-                                          batch_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t)))))
-                    return status_t::bad_alloc_k;
-                byte_t* const bounce_vectors = bounce.data();
-                byte_t* const bounce_neighbors = bounce_vectors + batch_rows * scalar_row_bytes;
-                byte_t* const bounce_norms = bounce_neighbors + batch_rows * neighbors_row_bytes;
-                // Each event is born where it records; the first covers an earlier step's reads.
-                hip_event_t emptied;
-                if (failed(emptied.record(stream)) || hip_set_device(source_device) != hip_success_k)
-                    return index_->fail_(status_t::device_error_k);
-                hip_event_t filled;
-                for (std::size_t done = 0; done < count; done += batch_rows) {
-                    std::size_t const batch = min_of(batch_rows, count - done);
+                if (bounce.empty()) return status_t::uninitialized_k;
+                hip_stream_handle_t const reading = source_stream.handle;
+                for (std::size_t done = 0; done < count; done += half_rows) {
+                    std::size_t const batch = min_of(half_rows, count - done);
                     std::size_t const read = from + done, written = into + done;
+                    std::size_t const half = chunks_++ % 2;
+                    byte_t* const bounce_vectors =
+                        bounce.data() + half * half_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
+                    byte_t* const bounce_neighbors = bounce_vectors + half_rows * scalar_row_bytes;
+                    byte_t* const bounce_norms = bounce_neighbors + half_rows * neighbors_row_bytes;
+                    // The source refills a half only once the plan's stream wrote it in; an event
+                    // never recorded holds nothing back.
                     if (hip_set_device(source_device) != hip_success_k ||
-                        runtime.stream_wait_event(source_stream, emptied, 0) != hip_success_k ||
+                        runtime.stream_wait_event(reading, crossed_[half], 0) != hip_success_k ||
                         runtime.copy_2d_async(bounce_vectors, scalar_row_bytes,
                                               source.vectors_rows_() + read * row_bytes, row_bytes, scalar_row_bytes,
-                                              batch, hip_copy_device_to_host_k, source_stream) != hip_success_k ||
+                                              batch, hip_copy_device_to_host_k, reading) != hip_success_k ||
                         runtime.copy_async(
                             bounce_neighbors, source.neighbors_matrix_.base() + read * neighbors_row_bytes,
-                            batch * neighbors_row_bytes, hip_copy_device_to_host_k, source_stream) != hip_success_k ||
-                        (normed &&
-                         runtime.copy_async(bounce_norms, source.norms_column_.base() + read * sizeof(norms_t),
-                                            batch * sizeof(norms_t), hip_copy_device_to_host_k,
-                                            source_stream) != hip_success_k) ||
-                        failed(filled.record(source_stream)))
+                            batch * neighbors_row_bytes, hip_copy_device_to_host_k, reading) != hip_success_k ||
+                        (normed && runtime.copy_async(
+                                       bounce_norms, source.norms_column_.base() + read * sizeof(norms_t),
+                                       batch * sizeof(norms_t), hip_copy_device_to_host_k, reading) != hip_success_k) ||
+                        failed(source_stream.event.record(reading)))
                         return index_->fail_(status_t::device_error_k);
                     if (hip_set_device(device) != hip_success_k ||
-                        runtime.stream_wait_event(stream, filled, 0) != hip_success_k ||
+                        runtime.stream_wait_event(stream, source_stream.event, 0) != hip_success_k ||
                         runtime.copy_2d_async(index_->vectors_rows_() + written * row_bytes, row_bytes, bounce_vectors,
                                               scalar_row_bytes, scalar_row_bytes, batch, hip_copy_host_to_device_k,
                                               stream) != hip_success_k ||
@@ -2129,7 +2195,7 @@ struct vram_amd_index {
                         (normed && runtime.copy_async(index_->norms_column_.base() + written * sizeof(norms_t),
                                                       bounce_norms, batch * sizeof(norms_t), hip_copy_host_to_device_k,
                                                       stream) != hip_success_k) ||
-                        failed(emptied.record(stream)))
+                        failed(crossed_[half].record(stream)))
                         return index_->fail_(status_t::device_error_k);
                 }
             }
@@ -2162,12 +2228,11 @@ struct vram_amd_index {
                     failed(index_->launch_derive_norms_(static_cast<u32_t>(base), static_cast<u32_t>(rows), blocks,
                                                         stream)))
                     return index_->fail_(status_t::device_error_k);
-                // A fill carries the count by value, so no host word must outlive a copy; the wait
-                // lands the norms and the count before the watermark turns.
-                hip_api_t const& runtime = hip_api();
-                if (runtime.fill_words_async(index_->published_rows_(), static_cast<int>(base + rows), 1, stream) !=
+                // A fill carries the count by value, so no host word must outlive a copy; the one
+                // wait lands every step, the norms and the count before the watermark turns.
+                if (hip_api().fill_words_async(index_->published_rows_(), static_cast<int>(base + rows), 1, stream) !=
                         hip_success_k ||
-                    runtime.stream_synchronize(stream) != hip_success_k)
+                    failed(crossed_[0].record(stream)) || failed(crossed_[0].drain()))
                     return index_->fail_(status_t::device_error_k);
             }
             vram_amd_index* const index = std::exchange(index_, nullptr);
@@ -2176,6 +2241,12 @@ struct vram_amd_index {
 
       private:
 
+        /** Marks the last copies out of each half of the bounce, born with the plan. */
+        hip_event_t crossed_[2];
+
+        /** Halves of rows the steps moved through the bounce so far, alternating between them. */
+        std::size_t chunks_ = 0;
+
         /** The index appended to; null in the empty plan a refused @ref plan_load returns, and once
          *  @c finish published. */
         vram_amd_index* index_ = nullptr;
@@ -2183,8 +2254,8 @@ struct vram_amd_index {
 
     /**
      *  @brief Opens a load of @p rows from @p columns at the watermark on @p stream: claims them,
-     *      or lands them under the claim word its caller closed, and grows the storage to hold them
-     *      - the fresh neighbor rows arrive sentinel-filled - leaving the bounce to the first step.
+     *      or lands them under the claim word its caller closed, grows the storage to hold them -
+     *      the fresh neighbor rows arrive sentinel-filled - and pins the double-buffered bounce.
      *
      *  Refuses an unreserved index, a kept failure, columns shorter than the rows, a batch or load
      *  in flight, and rows past the ID space.
@@ -2204,6 +2275,7 @@ struct vram_amd_index {
             return {{}, status_t::config_mismatch_k};
         auto [plan, status] = plan_load(rows, stream);
         if (failed(status)) return {{}, status};
+        if (status_t const pinned = plan.pin_bounce(); failed(pinned)) return {{}, pinned};
         plan.columns = columns;
         plan.source_range = source_range;
         return {std::move(plan), status};
@@ -2215,6 +2287,7 @@ struct vram_amd_index {
     expected<load_plan_t> plan_load(std::size_t rows, hip_executor_t::stream_t const& stream) noexcept {
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
+        if (hip_set_device(device_.ordinal) != hip_success_k) return {{}, status_t::device_error_k};
         if (!rows)
             return {load_plan_t {*this, {}, {}, stream, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
         // A closed word is the caller's, who refines or absorbs around the load; an open one is
@@ -3110,9 +3183,9 @@ struct vram_amd_index {
     /** Row zero of the vectors matrix, one row past its base. */
     byte_t* vectors_rows_() const noexcept { return vectors_matrix_.base() + row_bytes(); }
 
-    /** The device-resident published-row count every inserting wave advances and @ref validate
-     *  reads: the vectors matrix's first word, so it lives as long as the storage, and an
-     *  allocation of its own would map a whole slab for one word. */
+    /** The device-resident published-row count every inserting wave advances: the vectors matrix's
+     *  first word, so it lives as long as the storage, and an allocation of its own would map a
+     *  whole slab for one word. */
     u32_t* published_rows_() const noexcept { return reinterpret_cast<u32_t*>(vectors_matrix_.base()); }
 
     /** Row zero of the neighbors matrix, as the IDs its rows hold. */
@@ -3133,21 +3206,23 @@ struct vram_amd_index {
 
     /** Maps up to @p rows and sentinel-fills on @p stream every mapped neighbor row no fill reached
      *  yet - always ahead of any launch that could assign new_node_ids into them - zeroing the
-     *  published count with the first fill. A refused fill advances nothing, so the next grow
-     *  retries it. Callers hold the claim over the rows, or the closed claim word. */
+     *  published count with the first fill. @p stream first follows the last fill, whichever stream
+     *  queued it, so a claim never launches into rows still filling. A refused fill advances
+     *  nothing, so the next grow retries it. Callers hold the claim over the rows, or the closed
+     *  claim word. */
     status_t grow_rows_(std::size_t rows, hip_stream_handle_t stream) noexcept {
         if (status_t const mapped = map_rows_(rows); failed(mapped)) return mapped;
+        hip_api_t const& runtime = hip_api();
+        if (runtime.stream_wait_event(stream, grown_, 0) != hip_success_k) return status_t::device_error_k;
         if (rows <= filled_rows_) return status_t::success_k;
         std::size_t const mapped_rows = capacity(), row_words = connectivity();
-        hip_api_t const& runtime = hip_api();
         if (!filled_rows_ && runtime.fill_words_async(published_rows_(), 0, 1, stream) != hip_success_k)
             return status_t::device_error_k;
         if (runtime.fill_words_async(neighbors_matrix_.base() + filled_rows_ * row_words * sizeof(u32_t),
                                      static_cast<int>(node_id_unknown_k), (mapped_rows - filled_rows_) * row_words,
-                                     stream) != hip_success_k)
+                                     stream) != hip_success_k ||
+            failed(grown_.record(stream)))
             return status_t::device_error_k;
-        // Other streams launch into these rows with no edge to this one, so the fills land first.
-        if (runtime.stream_synchronize(stream) != hip_success_k) return status_t::device_error_k;
         filled_rows_ = mapped_rows;
         return status_t::success_k;
     }
@@ -3438,6 +3513,10 @@ struct vram_amd_index {
     /** Mapped rows whose neighbors a grow sentinel-filled, read and advanced by the claim's holder
      *  alone; a reservation maps past it and the next claim fills the rest. */
     std::size_t filled_rows_ = 0;
+
+    /** Marks the last sentinel fill, or the copies of a load that died over filled rows, which
+     *  every grow's stream follows; recorded and followed by the claim's holder alone. */
+    hip_event_t grown_;
 
     /** Rows strictly below it are published and visible: turned once per batch, in claim order,
      *  after its drain. */

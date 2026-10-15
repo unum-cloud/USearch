@@ -470,11 +470,6 @@ struct vram_apple_index {
         return status_t::success_k;
     }
 
-    /** Whether every claimed ID is published; call it with no batch in flight. */
-    status_t validate() const noexcept {
-        return published_() == claimed_() ? status_t::success_k : status_t::device_error_k;
-    }
-
     /** The serialized extents. */
     struct saved_shape_t {
         std::size_t nodes = 0;
@@ -2016,10 +2011,6 @@ struct vram_apple_index {
     /** Reopens a closed claim word at the watermark, past every row a load published meanwhile; an
      *  open one stays as it is. */
     void reopen_() noexcept { claims_.reopen(size()); }
-    u32_t published_() const noexcept {
-        u32_t const* const words = metal_words(counters_);
-        return words[metal_published_k];
-    }
 
     /** Row zero of the neighbors matrix, as the IDs its rows hold. */
     node_id_t* neighbor_rows_() const noexcept { return reinterpret_cast<node_id_t*>(neighbors_matrix_.host); }
