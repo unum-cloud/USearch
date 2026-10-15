@@ -165,7 +165,7 @@ inline void report_search_metrics(settings_t const& settings, std::size_t query_
     fmt::println("  queries: {} at top-{}{}", query_count, settings.top_k.value,
                  settings.self_search == switch_t::present_k ? " · self-search" : "");
     fmt::println("  threads: {}", threads);
-    fmt::println("  wall: {:.2f} s", seconds);
+    fmt::println("  wall: {:.4f} s", seconds);
     fmt::println("  throughput: {} QPS", humanized(double(query_count) / seconds));
     // An empty latency span means a batch-shaped backend with no per-query clock.
     if (latencies_us.empty())

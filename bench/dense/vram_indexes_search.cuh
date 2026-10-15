@@ -166,15 +166,18 @@ bool run_indexes_insertion(streamed_dataset_type_& streamed) {
     // Under `--merge` the rows past the split build the donor, so no batch straddles it.
     std::size_t const split = donated_from(bench.settings, rows) - bench.settings.skip_vectors.value;
     progress_bar_t progress {"inserting", inserted_rows, bench.settings.terminal};
-    auto started = steady_clock_t::now();
+    auto const phase_started = steady_clock_t::now();
+    double seconds = 0;
     for (std::size_t offset = 0; offset < inserted_rows;) {
         std::size_t const first_row = bench.settings.skip_vectors.value + offset;
         std::size_t const batch = std::min(batch_rows, (offset < split ? split : inserted_rows) - offset);
         std::iota(keys.begin(), keys.begin() + batch, static_cast<key_t>(first_row));
         auto const staged = stage_batch(streamed, streamed.vectors, first_row, batch);
         auto& into = offset < split ? bench.indexes : bench.donor;
+        auto const started = steady_clock_t::now();
         auto const [result, status] = into.insert(std::span<key_t const> {keys.data(), batch}, staged, bench.executor,
                                                   config);
+        seconds += stdc::duration<double>(steady_clock_t::now() - started).count();
         if (failed(status)) {
             fmt::println("Insertion refused a batch of {} rows at row {}: {}", batch, first_row,
                          status_to_string(status));
@@ -188,7 +191,7 @@ bool run_indexes_insertion(streamed_dataset_type_& streamed) {
         progress.tick(offset);
     }
     progress.finish();
-    double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
+    double const preparing = stdc::duration<double>(steady_clock_t::now() - phase_started).count() - seconds;
 
     auto shard_sizes = std::views::iota(std::size_t {0}, bench.indexes.shards_count()) |
                        std::views::transform([&](std::size_t shard) { return bench.indexes.shard(shard).size(); });
@@ -200,7 +203,8 @@ bool run_indexes_insertion(streamed_dataset_type_& streamed) {
                  fmt::join(bench.devices, ","));
     fmt::println("  shards: {}, one per device, filled {}", bench.indexes.shards_count(), fmt::join(shard_sizes, " "));
     fmt::println("  batch: {} rows per call", batch_rows);
-    fmt::println("  wall: {:.2f} s", seconds);
+    fmt::println("  wall: {:.4f} s", seconds);
+    fmt::println("  preparation: {:.4f} s", preparing);
     fmt::println("  throughput: {} IPS", humanized(double(inserted_rows) / seconds));
     fmt::println("  distances: {}", humanized(sums.computed_distances));
     fmt::println("  visited: {}", humanized(sums.visited_members));
@@ -350,13 +354,14 @@ bool run_indexes_search(streamed_dataset_type_& streamed) {
     telemetry_lane_t sums;
 
     progress_bar_t progress {"searching", query_count, settings.terminal};
+    auto const phase_started = steady_clock_t::now();
     double seconds = 0;
     for (std::size_t base = 0; base < query_count;) {
         std::size_t const count = std::min(batch_rows, query_count - base);
-        vectors_view_t const batch = !heads.navigation.empty()
-                                         ? vectors_view_t {heads.navigation.data() + base * dimensions,
-                                                           {count, dimensions}}
-                                         : stage_batch(streamed, searched_rows(streamed), base, count);
+        rows_view_t const batch = !heads.navigation.empty()
+                                      ? rows_view_t {vectors_view_t {heads.navigation.data() + base * dimensions,
+                                                                     {count, dimensions}}}
+                                      : stage_batch(streamed, searched_rows(streamed), base, count);
         nk::matrix_span<key_t> const keys = bench.results.hit_rows(nk::range(base, base + count), nk::slice);
         nk::matrix_span<distance_t> const distances = bench.results.hit_distances(nk::range(base, base + count),
                                                                                   nk::slice);
@@ -386,9 +391,11 @@ bool run_indexes_search(streamed_dataset_type_& streamed) {
         progress.tick(base);
     }
     progress.finish();
+    double const preparing = stdc::duration<double>(steady_clock_t::now() - phase_started).count() - seconds;
 
     // The empty latency span asks the shared report for the batch-uniform mean.
     report_search_metrics(settings, query_count, seconds, 1, sums, {});
+    fmt::println("  preparation: {:.4f} s", preparing);
     judge_search(settings, heads, bench.results, streamed.ground_truth, streamed.vectors, query_count);
     return true;
 }

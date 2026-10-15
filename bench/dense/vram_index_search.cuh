@@ -232,17 +232,18 @@ bool prepare(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** Stages up to @p batch_rows rows of @p source starting at @p first_row into one device-ready
- *  host matrix - a zero-copy view when the scalars match, or the trampoline's contiguous rows
- *  after per-row rescale and cast. Both phases share it. */
+/** Views up to @p batch_rows rows of @p source starting at @p first_row in the file's scalar,
+ *  which the index casts on the device; only a rescaled source stages on the host, through the
+ *  trampoline's contiguous rows. Both phases share it. */
 template <typename streamed_dataset_type_>
-typename streamed_dataset_type_::bench_t::vectors_view_t stage_batch(
-    streamed_dataset_type_& streamed, nk::matrix_view<typename streamed_dataset_type_::dataset_scalar_t> source,
-    std::size_t first_row, std::size_t batch_rows) {
+rows_view_t stage_batch(streamed_dataset_type_& streamed,
+                        nk::matrix_view<typename streamed_dataset_type_::dataset_scalar_t> source,
+                        std::size_t first_row, std::size_t batch_rows) {
+    using dataset_scalar_t = typename streamed_dataset_type_::dataset_scalar_t;
     using vectors_view_t = typename streamed_dataset_type_::bench_t::vectors_view_t;
     std::size_t const dimensions = source.extent(1);
-    if constexpr (streamed_dataset_type_::zero_copy_k)
-        return vectors_view_t {source.row(first_row).data(), {batch_rows, dimensions}};
+    if constexpr (!streamed_dataset_type_::scaled_k)
+        return nk::matrix_view<dataset_scalar_t> {source.row(first_row).data(), {batch_rows, dimensions}};
     else {
         for (std::size_t row = 0; row != batch_rows; ++row)
             streamed.stage(source.row(first_row + row).as_vector(), 0, row);
@@ -274,12 +275,15 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     std::vector<node_id_t> batch_ids(batch_rows);
 
     progress_bar_t progress {"inserting", inserted_rows, bench.settings.terminal};
-    auto started = steady_clock_t::now();
+    auto const phase_started = steady_clock_t::now();
+    double seconds = 0;
     for (std::size_t offset = 0; offset < inserted_rows;) {
         std::size_t const first_row = bench.settings.skip_vectors.value + offset;
         std::size_t const batch = std::min(batch_rows, inserted_rows - offset);
         auto const staged = stage_batch(streamed, streamed.vectors, first_row, batch);
+        auto const started = steady_clock_t::now();
         auto const [result, status] = bench.index->insert(staged, {batch_ids.data(), batch}, *bench.traversal, config);
+        seconds += stdc::duration<double>(steady_clock_t::now() - started).count();
         if (failed(status)) {
             fmt::println("Insertion failed at row {}: status {}", first_row, int(status));
             return false;
@@ -294,7 +298,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         progress.tick(offset);
     }
     progress.finish();
-    double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
+    double const preparing = stdc::duration<double>(steady_clock_t::now() - phase_started).count() - seconds;
 
     fmt::println("\nInsertions");
     fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
@@ -302,7 +306,8 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     fmt::println("  kit: {} · {} · {} kit · device {}", scalar_t::dtype_name(), nk_kernel_name(bench.settings.kernel),
                  bit_name(cuda_compute_choices_k, index_t::picked_quads_capability_k, "ampere"), bench.device);
     fmt::println("  batch: {} rows per launch", batch_rows);
-    fmt::println("  wall: {:.2f} s", seconds);
+    fmt::println("  wall: {:.4f} s", seconds);
+    fmt::println("  preparation: {:.4f} s", preparing);
     fmt::println("  throughput: {} IPS", humanized(double(inserted_rows) / seconds));
     fmt::println("  distances: {}", humanized(bench.lane.computed_distances));
     fmt::println("  visited: {}", humanized(bench.lane.visited_members));
@@ -410,13 +415,14 @@ bool run_search(streamed_dataset_type_& streamed) {
     bench.lane = telemetry_lane_t {};
 
     progress_bar_t progress {"searching", query_count, settings.terminal};
+    auto const phase_started = steady_clock_t::now();
     double seconds = 0;
     for (std::size_t offset = 0; offset < query_count;) {
         std::size_t const batch = std::min(batch_rows, query_count - offset);
-        vectors_view_t const staged = !heads.navigation.empty()
-                                          ? vectors_view_t {heads.navigation.data() + offset * dimensions,
-                                                            {batch, dimensions}}
-                                          : stage_batch(streamed, searched_rows(streamed), offset, batch);
+        rows_view_t const staged = !heads.navigation.empty()
+                                       ? rows_view_t {vectors_view_t {heads.navigation.data() + offset * dimensions,
+                                                                      {batch, dimensions}}}
+                                       : stage_batch(streamed, searched_rows(streamed), offset, batch);
         auto search = [&](auto const&... ranking) noexcept {
             return bench.index->search(
                 staged, ranking..., nk::matrix_span<node_id_t> {found_ids.data(), {batch, top_k}},
@@ -458,9 +464,11 @@ bool run_search(streamed_dataset_type_& streamed) {
         progress.tick(offset);
     }
     progress.finish();
+    double const preparing = stdc::duration<double>(steady_clock_t::now() - phase_started).count() - seconds;
 
     // The empty latency span asks the shared report for the batch-uniform mean.
     report_search_metrics(settings, query_count, seconds, 1, bench.lane, {});
+    fmt::println("  preparation: {:.4f} s", preparing);
     judge_search(settings, heads, bench.results, streamed.ground_truth, streamed.vectors, query_count);
     return true;
 }
@@ -483,8 +491,9 @@ struct search_workload_t {
 
 #pragma region Dispatch Cascade
 
-/** Wires @p bench to the typed source views and the staging trampoline every batched phase casts through, then
- *  hands the streamed dataset to @p phases - the half of the innermost hop every device binary shares. */
+/** Wires @p bench to the typed source views and the staging trampoline a rescaled source casts
+ *  through, then hands the streamed dataset to @p phases - the half of the innermost hop every
+ *  device binary shares. */
 template <typename dataset_scalar_type_, typename bench_context_type_, typename phases_type_>
 int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_context_type_& bench,
                    phases_type_&& phases) {
@@ -508,29 +517,22 @@ int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dat
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
     // Owns the rescaling rows `streamed_dataset::rescaling` views.
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_rows;
-    if constexpr (!streamed_t::zero_copy_k) {
+    // Only a rescaled source stages on the host; the device casts every other one on import.
+    if constexpr (streamed_t::scaled_k) {
         // The trampoline serves both phases, so it follows the larger of the two batches.
         std::size_t const searchable_rows = std::max(rows, source_queries.extent(0));
         std::size_t const batch_rows = std::max(insert_batch_rows(settings, rows),
                                                 query_batch_rows(settings, searchable_rows));
         staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::zeros({1, batch_rows, dimensions}).value;
-        if (staging.empty()) {
+        rescaling_rows = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros({1, batch_rows, dimensions}).value;
+        if (staging.empty() || rescaling_rows.empty()) {
             fmt::println("Failed to allocate {} staging rows of {}d {}", batch_rows, dimensions,
                          scalar_t::dtype_name());
             return 1;
         }
         streamed.staging = staging.span();
-
-        if constexpr (streamed_t::scaled_k) {
-            rescaling_rows =
-                nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros({1, batch_rows, dimensions}).value;
-            if (rescaling_rows.empty()) {
-                fmt::println("Failed to allocate {} rescaling rows of {}d f32", batch_rows, dimensions);
-                return 1;
-            }
-            streamed.rescaling = rescaling_rows.span();
-            streamed.establish_scale();
-        }
+        streamed.rescaling = rescaling_rows.span();
+        streamed.establish_scale();
     }
 
     if (dataset.has_ground_truth() && !settings.max_base_vectors.value) streamed.ground_truth = dataset.neighbors();
