@@ -13,10 +13,10 @@
  *  @section shapes_ram_metric_kits Kits
  *
  *  A kit binds one ISA's four kernels, Chamfer, Hausdorff, Wasserstein-Procrustes and
- *  Gromov-Wasserstein, with the two transport workspace sizes, which every ISA shares, and the cast
- *  that brings a caller's coordinates into the stored scalar and back out. @c shapes_kit picks the
- *  widest kit this build compiled in under the requested capability mask, at compile time, so no
- *  capability is tested at run time.
+ *  Gromov-Wasserstein, with the two transport workspace sizes and the pack, unpack and pack-reading
+ *  kernels, which every ISA shares, and the cast that brings a caller's coordinates into the stored
+ *  scalar and back out. @c shapes_kit picks the widest kit this build compiled in under the
+ *  requested capability mask, at compile time, so no capability is tested at run time.
  *
  *  @section shapes_ram_metric_bounds Bounds
  *
@@ -42,7 +42,7 @@
 #include <type_traits> // `std::conditional_t`, `std::is_same_v` - the kit choice
 
 #include <numkong/cast.h>     // `nk_cast_serial` & kin - the kits' scalar casts
-#include <numkong/shapes.hpp> // `nk::shapes_packed`, `nk::shapes_packed_shape`, and the per-backend kernels
+#include <numkong/shapes.hpp> // `nk::shapes_packed`, and the per-backend kernels
 #include <numkong/tensor.hpp> // `nk::matrix_view` - the landed clouds a round packs
 
 #include "usearch/utilities/types.hpp"
@@ -92,6 +92,10 @@ struct f32_serial_shapes_kit_t {
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_serial;
+    static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f32_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_serial;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_serial;
@@ -107,6 +111,10 @@ struct f32_neon_shapes_kit_t {
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_neon;
+    static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f32_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_neon;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_neon;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_neon;
@@ -123,6 +131,10 @@ struct f32_haswell_shapes_kit_t {
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_haswell;
+    static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f32_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_haswell;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_haswell;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_haswell;
@@ -139,6 +151,10 @@ struct f32_skylake_shapes_kit_t {
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_skylake;
+    static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f32_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_skylake;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_skylake;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_skylake;
@@ -155,6 +171,10 @@ struct f32_rvv_shapes_kit_t {
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_rvv;
+    static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f32_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_rvv;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_rvv;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_rvv;
@@ -171,6 +191,10 @@ struct f32_v128relaxed_shapes_kit_t {
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_v128relaxed;
+    static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f32_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_v128relaxed;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_v128relaxed;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_v128relaxed;
@@ -185,6 +209,10 @@ struct f16_serial_shapes_kit_t {
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_serial;
+    static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f16_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_serial;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_serial;
@@ -200,6 +228,10 @@ struct f16_neon_shapes_kit_t {
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_neon;
+    static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f16_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_neon;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_neon;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_neon;
@@ -217,6 +249,10 @@ struct f16_neonfhm_shapes_kit_t {
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_neon;
+    static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f16_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_neonfhm;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_neonfhm;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_neon;
@@ -233,6 +269,10 @@ struct f16_haswell_shapes_kit_t {
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_haswell;
+    static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f16_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_haswell;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_haswell;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_haswell;
@@ -249,6 +289,10 @@ struct f16_skylake_shapes_kit_t {
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_skylake;
+    static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f16_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_skylake;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_skylake;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_skylake;
@@ -265,6 +309,10 @@ struct f16_rvv_shapes_kit_t {
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_rvv;
+    static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f16_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_rvv;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_rvv;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_rvv;
@@ -281,6 +329,10 @@ struct f16_v128relaxed_shapes_kit_t {
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_v128relaxed;
+    static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto unpack = nk_shapes_unpack_f16_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_v128relaxed;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_v128relaxed;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_v128relaxed;
@@ -348,6 +400,7 @@ class shapes_metric {
     /** The type of a pack's constants: @c nk::f32_t for @c f16 clouds, @c nk::f64_t for @c f32
      *  ones. */
     using constant_t = typename scalar_t::shapes_distance_t;
+    using raw_constant_t = typename constant_t::raw_t;
 
     /** Which of the four shape kernels scores the rounds. */
     nk_kernel_kind_t kernel_;
@@ -424,10 +477,12 @@ class shapes_metric {
             return;
         }
         query_ = query[0], query_points_ = query.max_points();
-        constant_t spreads[3];
-        last_status_ = status_of(nk::shapes_packed_shape<scalar_t>(query_, nullptr, nullptr, nullptr, nullptr, spreads,
-                                                                   &query_max_radius_, 0));
-        for (std::size_t axis = 0; axis != 3; ++axis) query_spread_roots_[axis] = spread_root_(spreads[axis]);
+        raw_constant_t spreads[3], max_radius;
+        last_status_ = status_of(
+            kit_t::packed_shape(query_, nullptr, nullptr, nullptr, nullptr, spreads, &max_radius, nullptr));
+        query_max_radius_ = constant_t::from_raw(max_radius);
+        for (std::size_t axis = 0; axis != 3; ++axis)
+            query_spread_roots_[axis] = spread_root_(constant_t::from_raw(spreads[axis]));
     }
 
     /** Stages one candidate's pack, or refuses once the round is full. */
@@ -445,8 +500,9 @@ class shapes_metric {
     basic::metric_staging_t push(nk::matrix_view<scalar_t> cloud) noexcept {
         if (staged_.size() == staged_.capacity()) return basic::metric_staging_t::refused_k;
         std::size_t const points = cloud.extent(0);
-        auto const [pack_bytes, size_status] = nk::shapes_pack_size<scalar_t>(points, 0);
-        if (nk::failed(size_status)) return last_status_ = status_of(size_status), basic::metric_staging_t::refused_k;
+        nk_size_t pack_bytes = 0;
+        if (nk_status_t const sized = kit_t::pack_size(points, &pack_bytes); sized != nk_success_k)
+            return last_status_ = status_of(sized), basic::metric_staging_t::refused_k;
         auto pack_offset = [&]() noexcept {
             std::uintptr_t const start = reinterpret_cast<std::uintptr_t>(packed_.data());
             return round_up_to_multiple<std::uintptr_t>(start + packed_.size(), nk_default_alignment_k) - start;
@@ -459,7 +515,7 @@ class shapes_metric {
         std::size_t const offset = pack_offset();
         byte_t* const pack = packed_.data() + offset;
         packed_.extend_uninitialized(offset + pack_bytes);
-        if (status_t const packed = status_of(nk::shapes_pack<scalar_t>(cloud.raw_values_data(), points, pack, 0));
+        if (status_t const packed = status_of(kit_t::pack(cloud.raw_values_data(), points, pack, nullptr));
             failed(packed))
             last_status_ = packed;
         staged_.push_back_reserved(pack);
@@ -513,13 +569,13 @@ class shapes_metric {
     distance_t bound_(void const* candidate) const noexcept {
         bool const procrustes = kernel_ == nk_kernel_wassersteinprocrustes_packed_k;
         if (!procrustes && kernel_ != nk_kernel_hausdorffs_packed_k) return 0;
-        constant_t spreads[3], max_radius;
-        [[maybe_unused]] nk::status_t const read = nk::shapes_packed_shape<scalar_t>(
-            candidate, nullptr, nullptr, nullptr, nullptr, spreads, &max_radius, 0);
-        if (!procrustes) return (query_max_radius_ - max_radius).abs();
+        raw_constant_t spreads[3], max_radius;
+        [[maybe_unused]] nk_status_t const read = kit_t::packed_shape(candidate, nullptr, nullptr, nullptr, nullptr,
+                                                                      spreads, &max_radius, nullptr);
+        if (!procrustes) return (query_max_radius_ - constant_t::from_raw(max_radius)).abs();
         constant_t gaps {};
         for (std::size_t axis = 0; axis != 3; ++axis) {
-            constant_t const gap = query_spread_roots_[axis] - spread_root_(spreads[axis]);
+            constant_t const gap = query_spread_roots_[axis] - spread_root_(constant_t::from_raw(spreads[axis]));
             gaps = gaps + gap * gap;
         }
         return gaps.sqrt();

@@ -196,7 +196,7 @@ struct shapes_fixture {
         [[maybe_unused]] status_t const sized = metric.init(shapes_staging_limit_k);
         return metric;
     }
-    static codec<scalar_t> make_codec() noexcept { return {}; }
+    static codec<kit_t> make_codec() noexcept { return {}; }
     static us::utilities::uuid_t make_key(std::size_t ordinal) {
         return std::bit_cast<us::utilities::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x5A5A5Aull), ordinal});
     }
@@ -207,7 +207,7 @@ struct shapes_fixture {
     /** Whether two values hold the same cloud, as the codec saves it. */
     static bool value_equals(value_t const& first, value_t const& second) noexcept {
         if (first.max_points() != second.max_points()) return false;
-        codec<scalar_t> const shapes_codec;
+        codec<kit_t> const shapes_codec;
         std::array<scalar_t, shapes_max_points_k * 3> first_points, second_points;
         bool const saved = succeeded(shapes_codec.save(first, std::as_writable_bytes(std::span {first_points}))) &&
                            succeeded(shapes_codec.save(second, std::as_writable_bytes(std::span {second_points})));
@@ -247,8 +247,8 @@ static_assert(us::basic::value<chamfer_fixture_t::value_t>);
 static_assert(metric<chamfer_fixture_t::metric_t, chamfer_fixture_t::value_t, chamfer_fixture_t::distance_t>);
 static_assert(metric<procrustes_fixture_t::metric_t, procrustes_fixture_t::value_t, procrustes_fixture_t::distance_t>);
 static_assert(transparent_metric<procrustes_fixture_t::metric_t>);
-static_assert(value_codec<codec<nk::f32_t>, chamfer_fixture_t::value_t>);
-static_assert(value_codec<codec<nk::f16_t>, procrustes_fixture_t::value_t>);
+static_assert(value_codec<codec<chamfer_fixture_t::kit_t>, chamfer_fixture_t::value_t>);
+static_assert(value_codec<codec<procrustes_fixture_t::kit_t>, procrustes_fixture_t::value_t>);
 
 /** One round of @p metric: the first pack as the query, the rest staged, drained within @p radius
  *  into @p distances. */
@@ -321,7 +321,7 @@ std::size_t check_shapes_codec(u64_t seed) {
     allocation_ledger_t ledger;
     {
         counting_allocator_t const allocator {ledger};
-        codec<scalar_t> const shapes_codec = fixture_type_::make_codec();
+        auto const shapes_codec = fixture_type_::make_codec();
         std::vector<std::vector<scalar_t>> const clouds = make_clouds<scalar_t>(clouds_k, stream_key(seed, "codec"));
         std::vector<value_t> packs, reloaded;
         f64_t extent = 0;
@@ -368,7 +368,7 @@ std::size_t check_shapes_packing(u64_t seed) {
     allocation_ledger_t ledger;
     {
         counting_allocator_t const allocator {ledger};
-        codec<scalar_t> const shapes_codec = fixture_type_::make_codec();
+        auto const shapes_codec = fixture_type_::make_codec();
         for (std::vector<scalar_t> const& cloud : make_clouds<scalar_t>(4, stream_key(seed, "packing"))) {
             value_t first(allocator), second(allocator);
             failures += expect_eq(shapes_codec.load(std::as_bytes(std::span {cloud}), first), status_t::success_k);
@@ -404,8 +404,8 @@ std::size_t check_shapes_nvme(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = shapes_metric<fixture_t::kit_t, scratch_t>;
     using query_t = nk::shapes_packed<scalar_t, std::allocator_traits<scratch_t>::rebind_alloc<char>>;
-    using nvme_index_t =
-        us::basic::nvme_index<codec<scalar_t>, us::utilities::uuid_t, fixture_t::distance_t, blocking_files_engine<>>;
+    using nvme_index_t = us::basic::nvme_index<codec<fixture_t::kit_t>, us::utilities::uuid_t, fixture_t::distance_t,
+                                               blocking_files_engine<>>;
     std::vector<std::vector<scalar_t>> const clouds = make_clouds<scalar_t>(32, stream_key(seed, "nvme"));
 
     auto make_cloud = [&](std::size_t entry, counting_allocator_t const& allocator) {

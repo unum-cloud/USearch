@@ -11,10 +11,11 @@ None of it is a public header: the C libraries, the C test and every binding lin
 - `dense_index.cpp` compiles that header with the host compiler for every build, the VRAM arms joining the variant for each vendor built.
 - `dense_specializations.cuh` spells one arm: the scalar and capability tables, the GPU classes, and the `specialized_index` view every class unit instantiates.
 - `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.{cu,hip,cpp}` are the class units, each instantiating `specialized_index` over its class's arms, one per storage dtype the class advances.
-- `basic_specializations.cuh` spells the basic modalities' arms, `sequence_ram_variant<cpu_class>` and `shapes_ram_variant<scalar, cpu_class>` with their NVMe and NVIDIA siblings, and the fan-outs that insert and search through an executor.
-- `sequence_index.cpp` and `shapes_index.cpp` implement `sequence_index.h` and `shapes_index.h` as the dense unit does, one variant over the compiled arms and one visit per verb.
-- `basic/ram_variants_<class>.cpp` are their class units, each instantiating whichever sequence and shapes arms its class advances.
-  So far `geospatial_index.h` is answered only by the brute-force stand-in in `src_stub/`.
+- `basic_specializations.cuh` holds what the basic modalities' arms share: the fan-outs that insert and search through an executor, and the base of every arm on an NVIDIA GPU.
+- `sequence_specializations.cuh`, `shapes_specializations.cuh` and `geospatial_specializations.cuh` spell each modality's arms, such as `sequence_ram_variant<cpu_class>` and `shapes_ram_variant<scalar, cpu_class>`, with their NVMe and NVIDIA siblings and the geometry they freeze.
+- `basic_index.cuh` holds the one handle over a modality's variant, the CPU-class ladder, and every verb once, each modality's traits supplying only what differs.
+- `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp` implement `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`: one variant over the compiled arms, the traits, and one forward per verb.
+- `<modality>/ram_variants_<class>.cpp` are their class units, each instantiating its modality's arms for the class, and `<modality>/vram_variants_nvidia.cu` embeds the modality's NVIDIA fatbin.
 
 ## From a Verb to an Engine Template
 
@@ -82,8 +83,9 @@ The dispatch unit visits every arm yet compiles at the baseline instruction set.
   Nothing links `libamdhip64`: `hip_api` opens it at first use through entry points it declares itself, so host units need no ROCm headers.
 - `usearch_dense_vram_variants_apple` compiles the Apple arms as plain C++, their kernels compiled from embedded source at first use.
   Nothing links Metal, Foundation or `libobjc`: `metal_api` opens them at first use.
-- `usearch_basic_ram_variants` collects the sequence and shapes class units, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
-- `usearch_punned` - `types.cpp` & the dispatch units, `dense_index.cpp`, `sequence_index.cpp` and `shapes_index.cpp`.
+- `usearch_sequence_ram_variants`, `usearch_shapes_ram_variants` and `usearch_geospatial_ram_variants` collect each modality's class units, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
+- `usearch_<modality>_vram_variants_nvidia` embeds one basic modality's NVIDIA fatbin, every kit compiled past the Ampere floor.
+- `usearch_punned` - `types.cpp` & the dispatch units, `dense_index.cpp`, `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp`.
 
 `USEARCH_PUNNED_LIBRARIES` and `USEARCH_PUNNED_OBJECTS` hand all of them to `usearch_shared`, `usearch_static` and `usearch_test_c`, and the static archive carries the yyjson, NumKong and ForkUnion objects too, so a binding links one library.
 `USEARCH_DENSE_DTYPES` trims every unit's arms from the front of `bf16`, `u1`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4`, `u4`, `e3m2` and `e2m3`, keeping four by default.

@@ -197,20 +197,26 @@ foreach (
 endforeach ()
 
 # The sequence, shapes and geospatial arms compile per CPU class with the flags the dense rows above computed, one unit
-# set for every basic modality, over the classes where any of their StringZilla or NumKong kits advance. Each unit
-# instantiates every modality's arms, and a modality whose kits stay put at the class falls back down its kit chain.
-add_library(usearch_basic_ram_variants OBJECT basic/ram_variants_serial.cpp)
-usearch_setup_target(usearch_basic_ram_variants)
-target_include_directories(usearch_basic_ram_variants PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(usearch_basic_ram_variants PRIVATE "USEARCH_ARCH_CUDA_=0")
-target_link_libraries(usearch_basic_ram_variants PRIVATE yyjson forkunion::static stringzilla::header)
-foreach (class_ intel_haswell intel_skylake aws_g2 apple_m2 alibaba_c930 wasm64_extended)
-    if (usearch_variant_${class_}_exists_)
-        target_sources(usearch_basic_ram_variants PRIVATE basic/ram_variants_${class_}.cpp)
-        set_source_files_properties(
-            basic/ram_variants_${class_}.cpp PROPERTIES COMPILE_OPTIONS "${usearch_variant_${class_}_flags_}"
-        )
-    endif ()
+# set per basic modality, over the classes where any of their StringZilla or NumKong kits advance. Each unit
+# instantiates its own modality's arms, and a modality whose kits stay put at the class falls back down its kit chain.
+set(usearch_basic_ram_variants_)
+foreach (modality_ sequence shapes geospatial)
+    set(target_ usearch_${modality_}_ram_variants)
+    add_library(${target_} OBJECT ${modality_}/ram_variants_serial.cpp)
+    usearch_setup_target(${target_})
+    target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_CUDA_=0")
+    target_link_libraries(${target_} PRIVATE yyjson forkunion::static stringzilla::header)
+    foreach (class_ intel_haswell intel_skylake aws_g2 apple_m2 alibaba_c930 wasm64_extended)
+        if (usearch_variant_${class_}_exists_)
+            target_sources(${target_} PRIVATE ${modality_}/ram_variants_${class_}.cpp)
+            set_source_files_properties(
+                ${modality_}/ram_variants_${class_}.cpp PROPERTIES COMPILE_OPTIONS
+                                                                   "${usearch_variant_${class_}_flags_}"
+            )
+        endif ()
+    endforeach ()
+    list(APPEND usearch_basic_ram_variants_ ${target_})
 endforeach ()
 
 # The type-erased implementations behind the C interface: the dispatch units visit the arms through their explicitly
@@ -222,7 +228,7 @@ target_include_directories(usearch_punned PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_punned PRIVATE yyjson forkunion::static stringzilla::header)
 target_compile_definitions(usearch_punned PRIVATE ${usearch_variant_targets_})
 set(USEARCH_PUNNED_LIBRARIES usearch_punned usearch_dense_ram_variants usearch_dense_nvme_variants
-                             usearch_basic_ram_variants
+                             ${usearch_basic_ram_variants_}
 )
 
 # Every NVIDIA or AMD unit with kernels compiles twice. Host-only, through Clang's CUDA or HIP mode, it names its
@@ -343,16 +349,16 @@ if (USEARCH_BUILD_CUDA)
 
     # The sequence kits need nothing past the Ampere floor, so one unit carries a cubin for each class
     # `USEARCH_CUDA_ARCHITECTURES` names, every one under "native", and the floor's PTX with Ampere's.
-    set(sequence_nvidia_source_ ${CMAKE_CURRENT_SOURCE_DIR}/basic/vram_variants_nvidia_sequence.cu)
-    add_library(usearch_basic_vram_variants_nvidia_sequence OBJECT ${sequence_nvidia_source_})
-    usearch_setup_target(usearch_basic_vram_variants_nvidia_sequence)
-    target_include_directories(usearch_basic_vram_variants_nvidia_sequence PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    set(sequence_nvidia_source_ ${CMAKE_CURRENT_SOURCE_DIR}/sequence/vram_variants_nvidia.cu)
+    add_library(usearch_sequence_vram_variants_nvidia OBJECT ${sequence_nvidia_source_})
+    usearch_setup_target(usearch_sequence_vram_variants_nvidia)
+    target_include_directories(usearch_sequence_vram_variants_nvidia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(
-        usearch_basic_vram_variants_nvidia_sequence PRIVATE "USEARCH_ARCH_CUDA_=1" "NUMKONG_TARGET_AMPERE=1"
-                                                            "STRINGZILLA_HEADER_ONLY=1"
+        usearch_sequence_vram_variants_nvidia PRIVATE "USEARCH_ARCH_CUDA_=1" "NUMKONG_TARGET_AMPERE=1"
+                                                      "STRINGZILLA_HEADER_ONLY=1"
     )
     target_link_libraries(
-        usearch_basic_vram_variants_nvidia_sequence
+        usearch_sequence_vram_variants_nvidia
         PRIVATE yyjson forkunion::static stringzilla::header
         PUBLIC ${CMAKE_DL_LIBS}
     )
@@ -383,22 +389,22 @@ if (USEARCH_BUILD_CUDA)
     endif ()
     usearch_cuda_codes(sequence_nvidia_codes_ "${sequence_nvidia_architectures_}")
     usearch_gpu_bundle(
-        usearch_basic_vram_variants_nvidia_sequence nvidia sequence_nvidia ${sequence_nvidia_source_}
+        usearch_sequence_vram_variants_nvidia nvidia sequence_nvidia ${sequence_nvidia_source_}
         ${sequence_nvidia_codes_}
     )
-    list(APPEND USEARCH_PUNNED_LIBRARIES usearch_basic_vram_variants_nvidia_sequence)
+    list(APPEND USEARCH_PUNNED_LIBRARIES usearch_sequence_vram_variants_nvidia)
 
     # The shapes kits need nothing past the Ampere floor either, in a unit and a fatbin of their own, carrying a cubin
     # for each class `USEARCH_CUDA_ARCHITECTURES` names, every one under "native", and the floor's PTX with Ampere's.
-    set(shapes_nvidia_source_ ${CMAKE_CURRENT_SOURCE_DIR}/basic/vram_variants_nvidia_shapes.cu)
-    add_library(usearch_basic_vram_variants_nvidia_shapes OBJECT ${shapes_nvidia_source_})
-    usearch_setup_target(usearch_basic_vram_variants_nvidia_shapes)
-    target_include_directories(usearch_basic_vram_variants_nvidia_shapes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    set(shapes_nvidia_source_ ${CMAKE_CURRENT_SOURCE_DIR}/shapes/vram_variants_nvidia.cu)
+    add_library(usearch_shapes_vram_variants_nvidia OBJECT ${shapes_nvidia_source_})
+    usearch_setup_target(usearch_shapes_vram_variants_nvidia)
+    target_include_directories(usearch_shapes_vram_variants_nvidia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(
-        usearch_basic_vram_variants_nvidia_shapes PRIVATE "USEARCH_ARCH_CUDA_=1" "NUMKONG_TARGET_AMPERE=1"
+        usearch_shapes_vram_variants_nvidia PRIVATE "USEARCH_ARCH_CUDA_=1" "NUMKONG_TARGET_AMPERE=1"
     )
     target_link_libraries(
-        usearch_basic_vram_variants_nvidia_shapes
+        usearch_shapes_vram_variants_nvidia
         PRIVATE yyjson forkunion::static
         PUBLIC ${CMAKE_DL_LIBS}
     )
@@ -429,22 +435,22 @@ if (USEARCH_BUILD_CUDA)
     endif ()
     usearch_cuda_codes(shapes_nvidia_codes_ "${shapes_nvidia_architectures_}")
     usearch_gpu_bundle(
-        usearch_basic_vram_variants_nvidia_shapes nvidia shapes_nvidia ${shapes_nvidia_source_} ${shapes_nvidia_codes_}
+        usearch_shapes_vram_variants_nvidia nvidia shapes_nvidia ${shapes_nvidia_source_} ${shapes_nvidia_codes_}
     )
-    list(APPEND USEARCH_PUNNED_LIBRARIES usearch_basic_vram_variants_nvidia_shapes)
+    list(APPEND USEARCH_PUNNED_LIBRARIES usearch_shapes_vram_variants_nvidia)
 
     # The geospatial kit needs nothing past the Ampere floor either, in a unit and a fatbin of their own, carrying a
     # cubin for each class `USEARCH_CUDA_ARCHITECTURES` names, every one under "native", and the floor's PTX with
     # Ampere's.
-    set(geospatial_nvidia_source_ ${CMAKE_CURRENT_SOURCE_DIR}/basic/vram_variants_nvidia_geospatial.cu)
-    add_library(usearch_basic_vram_variants_nvidia_geospatial OBJECT ${geospatial_nvidia_source_})
-    usearch_setup_target(usearch_basic_vram_variants_nvidia_geospatial)
-    target_include_directories(usearch_basic_vram_variants_nvidia_geospatial PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    set(geospatial_nvidia_source_ ${CMAKE_CURRENT_SOURCE_DIR}/geospatial/vram_variants_nvidia.cu)
+    add_library(usearch_geospatial_vram_variants_nvidia OBJECT ${geospatial_nvidia_source_})
+    usearch_setup_target(usearch_geospatial_vram_variants_nvidia)
+    target_include_directories(usearch_geospatial_vram_variants_nvidia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(
-        usearch_basic_vram_variants_nvidia_geospatial PRIVATE "USEARCH_ARCH_CUDA_=1" "NUMKONG_TARGET_AMPERE=1"
+        usearch_geospatial_vram_variants_nvidia PRIVATE "USEARCH_ARCH_CUDA_=1" "NUMKONG_TARGET_AMPERE=1"
     )
     target_link_libraries(
-        usearch_basic_vram_variants_nvidia_geospatial
+        usearch_geospatial_vram_variants_nvidia
         PRIVATE yyjson forkunion::static
         PUBLIC ${CMAKE_DL_LIBS}
     )
@@ -475,10 +481,10 @@ if (USEARCH_BUILD_CUDA)
     endif ()
     usearch_cuda_codes(geospatial_nvidia_codes_ "${geospatial_nvidia_architectures_}")
     usearch_gpu_bundle(
-        usearch_basic_vram_variants_nvidia_geospatial nvidia geospatial_nvidia ${geospatial_nvidia_source_}
+        usearch_geospatial_vram_variants_nvidia nvidia geospatial_nvidia ${geospatial_nvidia_source_}
         ${geospatial_nvidia_codes_}
     )
-    list(APPEND USEARCH_PUNNED_LIBRARIES usearch_basic_vram_variants_nvidia_geospatial)
+    list(APPEND USEARCH_PUNNED_LIBRARIES usearch_geospatial_vram_variants_nvidia)
 
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=1")
 else ()

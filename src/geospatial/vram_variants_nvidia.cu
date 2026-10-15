@@ -1,5 +1,5 @@
 /**
- *  @file src/basic/vram_variants_nvidia_geospatial.cu
+ *  @file src/geospatial/vram_variants_nvidia.cu
  *  @author Ash Vardanian
  *  @date October 15, 2026
  *  @brief The NVIDIA unit of the geospatial kit: squared chords need nothing past the Ampere floor,

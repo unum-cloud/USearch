@@ -29,7 +29,7 @@
 #include <type_traits> // `std::is_same_v` - the codec's dtype
 #include <utility>     // `std::move`
 
-#include <numkong/shapes.hpp> // `nk::shapes_packed`, `nk::shapes_unpack`
+#include <numkong/shapes.hpp> // `nk::shapes_packed`
 #include <numkong/tensor.hpp> // `nk::matrix_view` - a row's borrowed cloud
 
 #include "usearch/utilities/types.hpp"
@@ -46,31 +46,32 @@ using value = nk::shapes_packed<scalar_type_, allocator_type_>;
 
 static_assert(default_alignment_k >= nk_default_alignment_k, "Values would start packs off NumKong's boundary");
 
-/** Clouds out in their inserted pose; clouds in packed again, through the record's own
- *  allocator. */
-template <nk::shapes_dtype scalar_type_>
+/** Clouds out in their inserted pose; clouds in packed again by @p kit_type_ 's kernels, through
+ *  the record's own allocator. */
+template <typename kit_type_>
 struct codec {
-    inline static constexpr dtype_t value_dtype_k = std::is_same_v<scalar_type_, nk::f16_t> ? dtype_t::f16_k
-                                                                                            : dtype_t::f32_k;
+    using scalar_t = typename kit_type_::scalar_t;
+    inline static constexpr dtype_t value_dtype_k = std::is_same_v<scalar_t, nk::f16_t> ? dtype_t::f16_k
+                                                                                        : dtype_t::f32_k;
     inline static constexpr column_shape_t value_shape_k = matrix_shape_t {0, 3};
 
     template <typename value_type_>
     std::size_t storage_requirements(value_type_ const& value) const noexcept {
-        return value.max_points() * 3 * sizeof(scalar_type_);
+        return value.max_points() * 3 * sizeof(scalar_t);
     }
 
     template <typename value_type_>
     status_t save(value_type_ const& value, bytes_span_t output) const noexcept {
         if (output.size() < storage_requirements(value)) return status_t::overflow_k;
         if (value.empty()) return status_t::success_k;
-        std::span<typename scalar_type_::raw_t> const points = elements_of<typename scalar_type_::raw_t>(output);
-        return status_of(nk::shapes_unpack<scalar_type_>(value[0], points.data(), 0));
+        std::span<typename scalar_t::raw_t> const points = elements_of<typename scalar_t::raw_t>(output);
+        return status_of(kit_type_::unpack(value[0], points.data(), nullptr));
     }
 
     template <typename value_type_>
     status_t load(bytes_view_t input, value_type_& value) const noexcept {
-        std::array const clouds {elements_of<scalar_type_>(input)};
-        auto [packed, status] = value_type_::make(clouds, value.get_allocator(), 0);
+        std::array const clouds {elements_of<scalar_t>(input)};
+        auto [packed, status] = value_type_::make(clouds, value.get_allocator(), kit_type_::pack_size, kit_type_::pack);
         if (nk::failed(status)) return status_of(status);
         value = std::move(packed);
         return status_t::success_k;
@@ -78,9 +79,9 @@ struct codec {
 
     /** The @b [points,3] cloud a stored @p row holds, borrowed: every whole point its bytes
      *  hold. */
-    nk::matrix_view<scalar_type_> view(bytes_view_t row) const noexcept {
-        std::span<scalar_type_ const> const coordinates = elements_of<scalar_type_>(row);
-        return nk::matrix_view<scalar_type_>(coordinates.data(), coordinates.size() / 3, 3);
+    nk::matrix_view<scalar_t> view(bytes_view_t row) const noexcept {
+        std::span<scalar_t const> const coordinates = elements_of<scalar_t>(row);
+        return nk::matrix_view<scalar_t>(coordinates.data(), coordinates.size() / 3, 3);
     }
 };
 

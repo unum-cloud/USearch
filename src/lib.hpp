@@ -794,7 +794,8 @@ inline executor_type_* residency_executor(usearch_executor_handle_t& executor) n
 
 /** The typed executor behind the C handle, or null with @c usearch_status_device_k on a kind
  *  mismatch. A null handle builds @p call_executor for this call alone, through the overload of
- *  @c call_executor_for its residency names, the VRAM one defined beside the dense arms. */
+ *  @c call_executor_for its residency names, the VRAM ones defined beside the dense and the basic
+ *  GPU arms. */
 template <typename multi_type_>
 inline typename multi_type_::executor_t* executor_of(multi_type_& variant, usearch_executor_t executor,
                                                      usearch_executor_handle_t& call_executor,

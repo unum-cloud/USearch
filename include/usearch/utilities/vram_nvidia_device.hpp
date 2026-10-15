@@ -1087,6 +1087,13 @@ struct cuda_executor_t {
     /** The device stream @p index drives - what a caller pairs its shards against. */
     int device(std::size_t index) const noexcept { return streams_[index].device; }
 
+    /** The first stream on @p device, or null when the executor drives none there. */
+    stream_t* stream_on(int device) noexcept {
+        for (stream_t& opened : streams_)
+            if (opened.device == device) return &opened;
+        return nullptr;
+    }
+
     /** Streams this executor drives, one per device. */
     std::size_t size() const noexcept { return streams_.size(); }
 

@@ -1,5 +1,5 @@
 /**
- *  @file src/basic/vram_variants_nvidia_sequence.cu
+ *  @file src/sequence/vram_variants_nvidia.cu
  *  @author Ash Vardanian
  *  @date October 15, 2026
  *  @brief The NVIDIA unit of the sequence kits: Levenshtein over bytes and UTF-8 runes needs

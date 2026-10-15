@@ -3,24 +3,21 @@
  *  @author Ash Vardanian
  *  @date October 14, 2026
  *  @brief The geospatial modality's C surface: the variant over every compiled geospatial arm, the
- *      handle owning the chosen one, and every exported entry point as one visit apiece.
+ *      traits its verbs differ in, every exported entry point as one forward apiece, and the
+ *      containment walk only this modality takes.
  *
  *  Arms are ordered newest class first, the serial floor last. Their bodies compile in the basic
  *  class units, never here: the @c extern declarations below keep them out, as the dense dispatch
  *  unit keeps its own.
  */
-#include <cmath>   // `std::isnan`
-#include <cstdio>  // `std::snprintf` - the capability string
-#include <cstring> // `std::memcpy`
+#include <cmath> // `std::isnan`
 
-#include <atomic>      // `std::atomic_flag` - a cursor's one pull at a time
 #include <bit>         // `std::bit_ceil` - a GPU row's connectivity
-#include <new>         // `std::nothrow`
-#include <span>        // `std::span` - the listed devices
 #include <string_view> // `std::string_view` - checkpoint paths
-#include <variant>     // `std::variant`, `std::visit`
+#include <variant>     // `std::variant`
 
-#include "basic_specializations.cuh"
+#include "basic_index.cuh"
+#include "geospatial_specializations.cuh"
 
 #if USEARCH_TARGET_INTEL_SKYLAKE
 extern template struct geospatial_terrain<cpu_class_t::intel_skylake_k>;
@@ -58,105 +55,39 @@ extern template struct geospatial_nvme_variant<cpu_class_t::serial_k>;
 
 #pragma region Handles
 
-/** The one dynamically-typed geospatial index every binding consumes: a variant over the arms this
- *  build compiled, each the basic index over observations scored with one class's kit, or a
- *  read-only view of a checkpoint on storage scored and judged with the same. */
-struct usearch_geospatial_index_handle_t {
-
-    using geospatial_variant_t = std::variant< //
+/** Every geospatial arm this build compiled: the basic index over observations scored with one
+ *  class's kit, a read-only view of a checkpoint on storage scored and judged with the same, or the
+ *  basic index on a GPU. */
+using geospatial_variant_t = std::variant< //
 #if USEARCH_ARCH_CUDA_
-        geospatial_vram_nvidia_variant, //
+    geospatial_vram_nvidia_variant, //
 #endif
 #if USEARCH_TARGET_INTEL_SKYLAKE
-        geospatial_ram_variant<cpu_class_t::intel_skylake_k>,  //
-        geospatial_nvme_variant<cpu_class_t::intel_skylake_k>, //
+    geospatial_ram_variant<cpu_class_t::intel_skylake_k>,  //
+    geospatial_nvme_variant<cpu_class_t::intel_skylake_k>, //
 #endif
 #if USEARCH_TARGET_INTEL_HASWELL
-        geospatial_ram_variant<cpu_class_t::intel_haswell_k>,  //
-        geospatial_nvme_variant<cpu_class_t::intel_haswell_k>, //
+    geospatial_ram_variant<cpu_class_t::intel_haswell_k>,  //
+    geospatial_nvme_variant<cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_TARGET_APPLE_M2
-        geospatial_ram_variant<cpu_class_t::apple_m2_k>,  //
-        geospatial_nvme_variant<cpu_class_t::apple_m2_k>, //
+    geospatial_ram_variant<cpu_class_t::apple_m2_k>,  //
+    geospatial_nvme_variant<cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_TARGET_AWS_G2
-        geospatial_ram_variant<cpu_class_t::aws_g2_k>,  //
-        geospatial_nvme_variant<cpu_class_t::aws_g2_k>, //
+    geospatial_ram_variant<cpu_class_t::aws_g2_k>,  //
+    geospatial_nvme_variant<cpu_class_t::aws_g2_k>, //
 #endif
 #if USEARCH_TARGET_ALIBABA_C930
-        geospatial_ram_variant<cpu_class_t::alibaba_c930_k>,  //
-        geospatial_nvme_variant<cpu_class_t::alibaba_c930_k>, //
+    geospatial_ram_variant<cpu_class_t::alibaba_c930_k>,  //
+    geospatial_nvme_variant<cpu_class_t::alibaba_c930_k>, //
 #endif
 #if USEARCH_TARGET_WASM64_EXTENDED
-        geospatial_ram_variant<cpu_class_t::wasm64_extended_k>,  //
-        geospatial_nvme_variant<cpu_class_t::wasm64_extended_k>, //
+    geospatial_ram_variant<cpu_class_t::wasm64_extended_k>,  //
+    geospatial_nvme_variant<cpu_class_t::wasm64_extended_k>, //
 #endif
-        geospatial_ram_variant<cpu_class_t::serial_k>, geospatial_nvme_variant<cpu_class_t::serial_k>>;
-
-    geospatial_variant_t variants;
-
-    /** The class whose kit the arm scores with, named once at construction. */
-    char capabilities_string[32] {};
-
-    /** Builds the arm @p arm_type_ over @p placement: a RAM arm's allocator, or a GPU arm's
-     *  device. */
-    template <typename arm_type_, typename placement_type_>
-    usearch_geospatial_index_handle_t(std::in_place_type_t<arm_type_> tag, placement_type_ const& placement) noexcept
-        : variants(tag, placement) {}
-};
-
-/** Visits the arm of @p index with @p visitor when it lives in RAM; a GPU arm serves the
- *  reservation, insertion, search and description verbs alone, and refuses the rest, and an NVMe
- *  view refuses as read-only whatever its verbs don't serve first. */
-template <typename visitor_type_>
-static void visit_ram_variant(usearch_geospatial_index_handle_t& index, usearch_outcome_t* outcome,
-                              visitor_type_&& visitor) noexcept {
-    std::visit(
-        [&]<typename arm_type_>(arm_type_& arm) noexcept {
-            if constexpr (is_ram_index<arm_type_>) visitor(arm);
-            else if constexpr (is_nvme_index<arm_type_>)
-                propagate_error(usearch_status_read_only_k, outcome, "An NVMe view never mutates");
-            else
-                propagate_error(usearch_status_unsupported_k, outcome,
-                                "A GPU geospatial index serves no such verb yet");
-        },
-        index.variants);
-}
-
-/** Visits the arm of @p index with @p visitor when it is an NVMe view, answering whether it was. */
-template <typename visitor_type_>
-static bool visit_nvme_variant(usearch_geospatial_index_handle_t& index, visitor_type_&& visitor) noexcept {
-    return std::visit(
-        [&]<typename arm_type_>(arm_type_& arm) noexcept {
-            if constexpr (is_nvme_index<arm_type_>) return visitor(arm), true;
-            else return false;
-        },
-        index.variants);
-}
-
-/** The GPU ordinal @p arm computes on, where a call's arena must live, or the host's. */
-template <typename arm_type_>
-static int device_of(arm_type_ const& arm) noexcept {
-    if constexpr (is_vram_index<arm_type_>) return arm.index.device_specs().ordinal;
-    else return host_device_k;
-}
-
-/** The basic cursor over the index, whose type no class changes - only the kit a metric scores
- *  with. */
-using geospatial_cursor_t = basic::ram_cursor<typename geospatial_ram_variant<cpu_class_t::serial_k>::index_t,
-                                              synchronization_t::concurrent_k, forkunion_allocator_t>;
-
-struct usearch_geospatial_cursor_handle_t {
-
-    /** A RAM arm's snapshot cursor, or the next row of an NVMe view, whose rows never change. */
-    std::variant<std::monostate, geospatial_cursor_t, std::size_t> cursor;
-
-    /** The handle the cursor was opened on, which every pull names again. */
-    usearch_geospatial_index_t index = nullptr;
-
-    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    std::atomic_flag busy;
-};
+    geospatial_ram_variant<cpu_class_t::serial_k>, //
+    geospatial_nvme_variant<cpu_class_t::serial_k>>;
 
 /** The engine's form of a C terrain; a path is refused before it gets here. */
 static us::geospatial::terrain_t terrain_of(usearch_geospatial_terrain_t const& terrain) noexcept {
@@ -182,117 +113,6 @@ static bool accepts_terrain(usearch_geospatial_terrain_t const& terrain, usearch
                                "A terrain is either borrowed or filled, never both");
     return true;
 }
-
-/** Allocates the handle holding @p arm_type_ with @p connectivity and @p terrain; null once
- *  @p outcome records why not. */
-template <typename arm_type_>
-static usearch_geospatial_index_t make_geospatial_handle(std::size_t connectivity,
-                                                         usearch_geospatial_terrain_t const& terrain,
-                                                         usearch_outcome_t* outcome) noexcept {
-    usearch_geospatial_index_t const handle = new (std::nothrow)
-        usearch_geospatial_index_handle_t(std::in_place_type<arm_type_>, forkunion_allocator_t {no_memory_domain_k});
-    if (!handle)
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
-    arm_type_& arm = std::get<arm_type_>(handle->variants);
-    if (connectivity) arm.connectivity = connectivity;
-    if (status_t const adopted = arm.adopt_terrain(terrain_of(terrain)); failed(adopted)) {
-        delete handle;
-        return propagate_error(adopted, outcome, "The terrain could not be adopted"), nullptr;
-    }
-    std::snprintf(handle->capabilities_string, sizeof(handle->capabilities_string), "%s",
-                  usearch_cpu_class_name(static_cast<usearch_cpu_class_t>(arm_type_::cpu_class_k)));
-    return handle;
-}
-
-/** One rung of the arms @p arm_template_ names: taken when the build compiled the class and the
- *  machine reports it, else falls through; the serial floor ends every ladder. */
-template <template <cpu_class_t> class arm_template_, cpu_class_t cpu_class_ = cpu_class_t::serial_k,
-          cpu_class_t... lower_classes_>
-static usearch_geospatial_index_t descend_geospatial_ladder(std::size_t connectivity,
-                                                            usearch_geospatial_terrain_t const& terrain,
-                                                            nk_capability_t available,
-                                                            usearch_outcome_t* outcome) noexcept {
-    using arm_t = arm_template_<cpu_class_>;
-    if constexpr (cpu_class_ == cpu_class_t::serial_k)
-        return make_geospatial_handle<arm_t>(connectivity, terrain, outcome);
-    else {
-        if constexpr (cpu_class_compiled(cpu_class_))
-            if (numkong_admits(available, cpu_class_))
-                return make_geospatial_handle<arm_t>(connectivity, terrain, outcome);
-        return descend_geospatial_ladder<arm_template_, lower_classes_...>(connectivity, terrain, available, outcome);
-    }
-}
-
-/** Picks the arm of @p arm_template_: CPU classes newest first, the serial floor last; null once
- *  @p outcome records why not. */
-template <template <cpu_class_t> class arm_template_>
-static usearch_geospatial_index_t make_geospatial_index(std::size_t connectivity,
-                                                        usearch_geospatial_terrain_t const& terrain,
-                                                        usearch_ram_options_t const& ram,
-                                                        usearch_outcome_t* outcome) noexcept {
-    // One basic index per handle, so one memory domain at most.
-    if (ram.memory_domains && ram.memory_domains_count > 1)
-        return propagate_error(usearch_status_unsupported_k, outcome, "A geospatial index places one shard"), nullptr;
-    if (!accepts_terrain(terrain, outcome)) return nullptr;
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-#if NUMKONG_ARCH_X8664_
-    return descend_geospatial_ladder<arm_template_, cpu_class_t::intel_skylake_k, cpu_class_t::intel_haswell_k>(
-        connectivity, terrain, available, outcome);
-#elif NUMKONG_ARCH_ARM64_
-    return descend_geospatial_ladder<arm_template_, cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k>(
-        connectivity, terrain, available, outcome);
-#elif NUMKONG_ARCH_RISCV64_
-    return descend_geospatial_ladder<arm_template_, cpu_class_t::alibaba_c930_k>(connectivity, terrain, available,
-                                                                                 outcome);
-#elif NUMKONG_ARCH_WASM_
-    return descend_geospatial_ladder<arm_template_, cpu_class_t::wasm64_extended_k>(connectivity, terrain, available,
-                                                                                    outcome);
-#else
-    return descend_geospatial_ladder<arm_template_>(connectivity, terrain, available, outcome);
-#endif
-}
-
-#if USEARCH_ARCH_CUDA_
-
-/** Places a GPU geospatial index on the one device @p arguments name, refusing a terrain, whose
- *  lines of sight no device tests yet; null once @p outcome records why not. */
-static usearch_geospatial_index_t make_geospatial_vram_index(usearch_geospatial_init_vram_t const& arguments,
-                                                             usearch_outcome_t* outcome) noexcept {
-    if (!accepts_terrain(arguments.terrain, outcome)) return nullptr;
-    if (!terrain_of(arguments.terrain).empty())
-        return propagate_error(usearch_status_unsupported_k, outcome, "A GPU geospatial index tests no lines of sight"),
-               nullptr;
-    if (arguments.values_per_key)
-        return propagate_error(usearch_status_unsupported_k, outcome, "A GPU geospatial index bounds no key's entries"),
-               nullptr;
-    usearch_vram_options_t const& vram = arguments.vram;
-    if (vram.devices_count > 1)
-        return propagate_error(usearch_status_unsupported_k, outcome, "A geospatial index places one shard"), nullptr;
-    std::size_t const ordinal = vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[0]) : 0;
-    std::span<gpu_device_t const> const listed = gpu_devices();
-    if (ordinal >= listed.size())
-        return propagate_error(usearch_status_device_k, outcome, "A device ordinal is past the listing"), nullptr;
-    gpu_device_t const& device = listed[ordinal];
-    if (device.vendor != gpu_vendor_t::nvidia_k)
-        return propagate_error(usearch_status_device_k, outcome, "No GPU kernels serve geospatial on this vendor yet"),
-               nullptr;
-    usearch_geospatial_index_t const handle = new (std::nothrow) usearch_geospatial_index_handle_t(
-        std::in_place_type<geospatial_vram_nvidia_variant>, static_cast<int>(device.vendor_ordinal));
-    if (!handle)
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
-    geospatial_vram_nvidia_variant& arm = std::get<geospatial_vram_nvidia_variant>(handle->variants);
-    if (arguments.connectivity) arm.connectivity = std::bit_ceil(arguments.connectivity);
-    if (status_t const loaded = arm.load_admit(); failed(loaded)) {
-        delete handle;
-        return propagate_error(loaded, outcome, "The GPU kernels could not be loaded"), nullptr;
-    }
-    std::snprintf(handle->capabilities_string, sizeof(handle->capabilities_string), "%s",
-                  usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)));
-    return handle;
-}
-
-#endif
 
 /** Whether @p observations names storage for @p count entries, each with a position and an interval
  *  in order; false once @p outcome records why not. */
@@ -327,273 +147,165 @@ static bool accepts_relation(arm_type_ const& arm, usearch_geospatial_relation_t
     return true;
 }
 
-/** Reads a checkpoint's connectivity, the one field it records beside its observations. */
-static std::size_t checkpoint_connectivity(std::string_view path, status_t& status) noexcept {
-    std::size_t connectivity = 0;
-    auto per_field = [&](safegraphs_custom_field_t field) noexcept {
-        if (field.key == "connectivity") connectivity = decimal_in(field.value);
-    };
-    auto const [metadata, read_status] = safegraphs_read_index_metadata(path, std::allocator<byte_t> {}, per_field);
-    status = read_status;
-    return connectivity;
-}
+/** What the geospatial verbs differ in: observations in time over a terrain, under one kind. */
+struct geospatial_traits_t {
+    using geometry_t = geospatial_geometry_t;
+
+    /** What a view keeps of an observation it read: the stored form, decoded as it lands. */
+    using kept_t = us::geospatial::earth_observation_t;
+
+    template <typename arguments_type_>
+    static bool state(arguments_type_ const& arguments, geometry_t& geometry, usearch_outcome_t*) noexcept {
+        geometry.connectivity = arguments.connectivity;
+        return true;
+    }
+
+    /** Reads the connectivity a checkpoint at @p path recorded, the one field beside its
+     *  observations. */
+    static status_t recall(std::string_view path, geometry_t& geometry) noexcept {
+        auto per_field = [&](safegraphs_custom_field_t field) noexcept {
+            if (field.key == "connectivity") geometry.connectivity = decimal_in(field.value);
+        };
+        auto const [metadata, status] = safegraphs_read_index_metadata(path, std::allocator<byte_t> {}, per_field);
+        return status;
+    }
+
+    template <typename arguments_type_>
+    static bool admits(geometry_t const&, arguments_type_ const& arguments, usearch_outcome_t* outcome) noexcept {
+        return accepts_terrain(arguments.terrain, outcome);
+    }
+
+    /** Refuses a terrain, whose lines of sight no device tests yet. */
+    static bool admits(geometry_t const&, usearch_geospatial_init_vram_t const& arguments,
+                       usearch_outcome_t* outcome) noexcept {
+        if (!accepts_terrain(arguments.terrain, outcome)) return false;
+        if (terrain_of(arguments.terrain).empty()) return true;
+        return propagate_error(usearch_status_unsupported_k, outcome, "A GPU geospatial index tests no lines of sight");
+    }
+
+    /** Takes @p geometry into @p arm, a zero connectivity taking the cone winners and long links of
+     *  the default, rounded up to the power of two a GPU row takes; a CPU arm adopts the terrain,
+     *  and a GPU arm loads its judging kernel. */
+    template <typename arm_type_, typename arguments_type_>
+    static bool freeze(arm_type_& arm, geometry_t const& geometry, arguments_type_ const& arguments,
+                       usearch_outcome_t* outcome) noexcept {
+        std::size_t const connectivity = geometry.connectivity ? geometry.connectivity
+                                                               : us::geospatial::surface_keep_octants_t {}.connectivity;
+        if constexpr (is_vram_index<arm_type_>) {
+            arm.geometry.connectivity = std::bit_ceil(connectivity);
+            if (status_t const loaded = arm.load_admit(); failed(loaded))
+                return propagate_error(loaded, outcome, "The GPU kernels could not be loaded");
+        }
+        else {
+            arm.geometry.connectivity = connectivity;
+            if (status_t const adopted = arm.adopt_terrain(terrain_of(arguments.terrain)); failed(adopted))
+                return propagate_error(adopted, outcome, "The terrain could not be adopted");
+        }
+        return true;
+    }
+
+#if USEARCH_ARCH_CUDA_
+    template <typename make_type_>
+    static void with_vram_arm(geometry_t const&, make_type_&& make) noexcept {
+        make(std::type_identity<geospatial_vram_nvidia_variant> {});
+    }
+#endif
+
+    static usearch_geospatial_metadata_t metadata_of(geometry_t const& geometry) noexcept {
+        return {geometry.connectivity};
+    }
+
+    template <typename arm_type_>
+    static void describe(arm_type_ const& arm, usearch_geospatial_index_description_t& description) noexcept {
+        description.metadata = metadata_of(arm.geometry);
+        if constexpr (!is_vram_index<arm_type_>) description.memory_usage += arm.terrain_pack.memory_usage();
+    }
+
+    static bool accepts(usearch_geospatial_insert_t const& arguments, usearch_outcome_t* outcome) noexcept {
+        return accepts_observations(arguments.observations, arguments.count, outcome);
+    }
+
+    template <typename arm_type_>
+    static bool accepts(arm_type_ const& arm, usearch_geospatial_search_t const& arguments,
+                        usearch_outcome_t* outcome) noexcept {
+        return accepts_observations(arguments.queries, arguments.count, outcome) &&
+               accepts_relation(arm, arguments.relation, outcome);
+    }
+
+    /** Where a get or a pull hands its observations out, null when a pull wants none. */
+    template <typename arguments_type_>
+    static usearch_geospatial_observation_t const** output_of(arguments_type_ const& arguments) noexcept {
+        return arguments.observations;
+    }
+
+    static status_t keep(nvme_executor_t&, std::size_t, kept_t const& stored, kept_t& kept) noexcept {
+        kept = stored;
+        return status_t::success_k;
+    }
+
+    /** Lands @p count observations, the @c i th as @p value_at hands it, in @p memory. */
+    template <typename arm_type_, typename value_at_type_, typename arguments_type_>
+    static bool land(arm_type_ const&, std::size_t count, value_at_type_&& value_at,
+                     growing_arena<forkunion_allocator_t>& memory, arguments_type_ const& arguments,
+                     usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_observation_t* const observations = carve<usearch_geospatial_observation_t>(memory, count);
+        if (count && !observations)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+        for (std::size_t entry = 0; entry != count; ++entry)
+            observations[entry] = observation_of(us::geospatial::to_geodetic_observation(value_at(entry)));
+        *arguments.observations = observations;
+        return true;
+    }
+};
+
+struct usearch_geospatial_index_handle_t : basic_handle<geospatial_variant_t, geospatial_traits_t> {
+    using basic_handle::basic_handle;
+};
+
+struct usearch_geospatial_cursor_handle_t
+    : basic_cursor<usearch_geospatial_index_handle_t, ram_cursor_of<geospatial_ram_variant<cpu_class_t::serial_k>>> {};
 
 #pragma endregion Handles
 
 extern "C" {
 
-#pragma region Lifetime
-
-USEARCH_EXPORT void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
-    *arguments->index = nullptr;
-    usearch_geospatial_index_t const index = make_geospatial_index<geospatial_ram_variant>(
-        arguments->connectivity, arguments->terrain, arguments->ram, outcome);
-    if (!index) return;
-    *arguments->index = index;
-    propagate_error(usearch_status_success_k, outcome, nullptr);
-}
-
-#if USEARCH_ARCH_CUDA_
+USEARCH_EXPORT void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments) { basic_init_ram(arguments); }
 USEARCH_EXPORT void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
-    *arguments->index = nullptr;
-    usearch_geospatial_index_t const index = make_geospatial_vram_index(*arguments, outcome);
-    if (!index) return;
-    *arguments->index = index;
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    basic_init_vram(arguments);
 }
-#else
-USEARCH_EXPORT void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
-    *arguments->index = nullptr;
-    propagate_error(usearch_status_device_k, outcome, "This build compiled no GPU kernels for geospatial");
-}
-#endif
-
 USEARCH_EXPORT void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
-    if (submitted<usearch_geospatial_load_ram>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    *arguments->index = nullptr;
-    std::string_view const path = as_text(arguments->path);
-    status_t described = status_t::success_k;
-    std::size_t const connectivity = checkpoint_connectivity(path, described);
-    if (failed(described)) return propagate_error(described, outcome), void();
-    usearch_geospatial_index_t const index = make_geospatial_index<geospatial_ram_variant>(
-        connectivity, arguments->terrain, arguments->ram, outcome);
-    if (!index) return;
-    bool loaded = false;
-    visit_ram_variant(*index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
-        if (!executor) return;
-        progress_ticks_t ticks {arguments->progress, executor->size()};
-        loaded = propagate_error(arm.load(path, *executor, ticks), outcome);
-    });
-    if (!loaded) return delete index, void();
-    *arguments->index = index;
+    basic_load_ram<usearch_geospatial_load_ram>(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments) {
-    if (submitted<usearch_geospatial_load_vram>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    *arguments->index = nullptr;
-    propagate_error(usearch_status_unsupported_k, outcome, "A GPU geospatial index loads no checkpoint yet");
+    basic_unserved<usearch_geospatial_load_vram>(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
-    *arguments->index = nullptr;
-    propagate_error(usearch_status_unsupported_k, outcome, "No basic residency serves a view yet, so load instead");
+    basic_unserved<usearch_geospatial_view_ram>(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_view_nvme(usearch_geospatial_view_nvme_t* arguments) {
-    if (submitted<usearch_geospatial_view_nvme>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    usearch_nvme_options_t const& nvme = arguments->nvme;
-    *arguments->index = nullptr;
-    if (arguments->executor && !std::holds_alternative<nvme_executor_t>(arguments->executor->executor))
-        return propagate_error(usearch_status_device_k, outcome,
-                               "The executor's kind must match the handle's residency"),
-               void();
-    if (!arguments->path.data || !arguments->path.length || (nvme.paths_count && !nvme.paths))
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The paths must name storage"), void();
-    std::size_t const paths_count = nvme.paths ? nvme.paths_count : 0;
-    growing_buffer<std::string_view> paths {global_allocator};
-    if (failed(paths.resize(paths_count)))
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the paths"), void();
-    for (std::size_t path = 0; path != paths_count; ++path) paths[path] = as_text(nvme.paths[path]);
-
-    std::string_view const path = as_text(arguments->path);
-    status_t described = status_t::success_k;
-    std::size_t const connectivity = checkpoint_connectivity(path, described);
-    if (failed(described)) return propagate_error(described, outcome), void();
-    usearch_geospatial_index_t const index = make_geospatial_index<geospatial_nvme_variant>(
-        connectivity, arguments->terrain, usearch_ram_options_t {}, outcome);
-    if (!index) return;
-    bool viewed = false;
-    visit_nvme_variant(*index, [&](auto& arm) noexcept {
-        usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
-        viewed = executor && propagate_error(arm.view(path, to_span(paths), *executor), outcome);
-    });
-    if (!viewed) return delete index, void();
-    *arguments->index = index;
+    basic_view_nvme<usearch_geospatial_view_nvme>(arguments);
 }
-
-USEARCH_EXPORT void usearch_geospatial_free(usearch_geospatial_index_t index) {
-    finish_calls_using(index);
-    delete index;
-}
-
+USEARCH_EXPORT void usearch_geospatial_free(usearch_geospatial_index_t index) { basic_free(index); }
 USEARCH_EXPORT void usearch_geospatial_reserve(usearch_geospatial_reserve_t* arguments) {
-    if (submitted<usearch_geospatial_reserve>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    visit_writable(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        if constexpr (is_vram_index<arm_type_>) {
-            status_t reserved = arm.index
-                                    .reserve({arguments->entries, static_cast<connectivity_t>(arm.connectivity),
-                                              arguments->entries * sizeof(typename arm_type_::value_t)})
-                                    .status;
-            if (succeeded(reserved)) reserved = arm.keys.cover(arguments->entries);
-            propagate_error(reserved, outcome);
-        }
-        else propagate_error(arm.index.reserve(arguments->entries).status, outcome);
-    });
+    basic_reserve<usearch_geospatial_reserve>(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_clear(usearch_geospatial_clear_t* arguments) {
-    if (submitted<usearch_geospatial_clear>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    visit_ram_variant(*arguments->index, outcome, [&](auto& arm) noexcept {
-        status_t const cleared = arm.index.clear();
-        if (succeeded(cleared))
-            standard_atomic_ref<u32_t>(arm.largest_deviation_metres).store(0, std::memory_order_relaxed);
-        propagate_error(cleared, outcome);
-    });
+    basic_clear<usearch_geospatial_clear>(arguments);
 }
-
-#pragma endregion Lifetime
-
-#pragma region Introspection
-
 USEARCH_EXPORT void usearch_geospatial_describe(usearch_geospatial_describe_t* arguments) {
-    if (submitted<usearch_geospatial_describe>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    usearch_geospatial_index_t const index = arguments->index;
-    std::visit(
-        [&]<typename arm_type_>(arm_type_& arm) noexcept {
-            usearch_geospatial_index_description_t& description = *arguments->description;
-            description.metadata = {arm.connectivity};
-            description.size = arm.index.size();
-            description.capacity = arm.index.capacity();
-            description.memory_usage = sizeof(*index) + arm.index.memory_usage();
-            if constexpr (!is_vram_index<arm_type_>) description.memory_usage += arm.terrain_pack.memory_usage();
-            description.capabilities = index->capabilities_string;
-        },
-        index->variants);
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    basic_describe<usearch_geospatial_describe>(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_count(usearch_geospatial_count_t* arguments) {
-    if (submitted<usearch_geospatial_count>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    *arguments->key_stats = {};
-    auto count_nvme = [&](auto& arm) noexcept {
-        usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
-        if (!executor) return;
-        std::array<us::utilities::uuid_t, 1> const identities {uuid_of(arguments->key)};
-        std::array<std::size_t, 1> entries {};
-        status_t const counted = arm.index.count(identities, entries, *executor);
-        arguments->key_stats->entries = entries[0];
-        propagate_error(counted, outcome);
-    };
-    if (visit_nvme_variant(*arguments->index, count_nvme)) return;
-    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        arm.index.find_each(uuid_of(arguments->key),
-                            [&](typename arm_type_::node_id_t) noexcept { ++arguments->key_stats->entries; });
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    basic_count<usearch_geospatial_count>(arguments);
 }
-
-#pragma endregion Introspection
-
-#pragma region Insertion and Search
-
 USEARCH_EXPORT void usearch_geospatial_insert(usearch_geospatial_insert_t* arguments) {
-    if (submitted<usearch_geospatial_insert>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    if (arguments->stats) *arguments->stats = {};
-    std::size_t const count = arguments->count;
-    if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-    if (!arguments->keys.data)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The keys must not be null"), void();
-    if (arguments->keys.stride && arguments->keys.stride < sizeof(usearch_key_t))
-        return propagate_error(usearch_status_unsupported_layout_k, outcome, "The key stride is shorter than a key"),
-               void();
-    if (!accepts_observations(arguments->observations, count, outcome)) return;
-    visit_writable(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
-        if (!executor) return;
-        progress_ticks_t ticks {arguments->progress, count};
-        if (crossed(arm.insert(arguments->keys, arguments->observations, count, arguments->expansion_factor, ticks,
-                               *executor),
-                    arguments->stats, outcome))
-            propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    basic_insert<usearch_geospatial_insert>(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
-    if (submitted<usearch_geospatial_refine>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    if (arguments->stats) *arguments->stats = {};
-    propagate_error(usearch_status_unsupported_k, outcome, "No basic residency refines yet");
+    basic_unserved<usearch_geospatial_refine>(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
-    if (submitted<usearch_geospatial_search>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
-    std::size_t const count = arguments->count, wanted = arguments->wanted;
-    if (arguments->stats) *arguments->stats = {};
-    *arguments->matches = {};
-    std::visit(
-        [&]<typename arm_type_>(arm_type_& arm) noexcept {
-            if (is_vram_index<arm_type_> && arguments->predicate.callback)
-                return propagate_error(usearch_status_device_k, outcome,
-                                       "A host predicate cannot narrow a device walk"),
-                       void();
-            // Matches land on host pages, which a device arena takes over and a host one keeps.
-            bool const host_landing = arguments->arena && arguments->arena->device == host_device_k;
-            usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                              host_landing ? host_device_k : device_of(arm),
-                                                              {arguments->queries}, outcome);
-            if (!arena) return;
-            if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-            if (!accepts_observations(arguments->queries, count, outcome)) return;
-            if (!accepts_relation(arm, arguments->relation, outcome)) return;
-            matches_landing_t landing;
-            if (!carve_matches(arena->memory, count, wanted, landing, outcome)) return;
-            usearch_executor_handle_t call_executor;
-            typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor,
-                                                                         outcome);
-            if (!executor) return;
-            progress_ticks_t ticks {arguments->progress, count};
-            us::geospatial::relation_t const relation = static_cast<us::geospatial::relation_t>(arguments->relation);
-            expected<traversal_telemetry_t> searched {};
-            if constexpr (is_vram_index<arm_type_>)
-                searched = arm.search(arguments->queries, count, relation, arguments->tolerance, wanted,
-                                      arguments->expansion_factor, arena->memory, landing, ticks, *executor);
-            else
-                searched = arm.search(arguments->queries, count, relation, arguments->tolerance, wanted,
-                                      arguments->expansion_factor, arguments->predicate, landing, ticks, *executor);
-            if (!crossed(searched, arguments->stats, outcome) || !publish_matches(*arena, count, landing, outcome))
-                return;
-            *arguments->matches = landing.view();
-            propagate_error(usearch_status_success_k, outcome, nullptr);
-        },
-        arguments->index->variants);
+    basic_search<usearch_geospatial_search>(arguments);
 }
 
 USEARCH_EXPORT void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
@@ -636,207 +348,26 @@ USEARCH_EXPORT void usearch_geospatial_within(usearch_geospatial_within_t* argum
 }
 
 USEARCH_EXPORT void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
-    if (submitted<usearch_geospatial_get>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
-    *arguments->observations = nullptr;
-    if (arguments->written) *arguments->written = 0;
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                      host_device_k, {}, outcome);
-    if (!arena) return;
-    // A view's observations decode straight into the arena, as their count is known before any is
-    // read.
-    auto get_nvme = [&](auto& arm) noexcept {
-        usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
-        if (!executor) return;
-        usearch_geospatial_observation_t* observations = nullptr;
-        std::size_t held = 0;
-        auto carve_entries = [&](std::size_t entries) noexcept {
-            held = entries;
-            if (held) observations = carve<usearch_geospatial_observation_t>(arena->memory, held);
-            return !held || observations ? status_t::success_k : status_t::bad_alloc_k;
-        };
-        auto decode = [&](std::size_t, std::size_t rank, std::size_t,
-                          us::geospatial::earth_observation_t const& stored) noexcept {
-            observations[rank] = observation_of(us::geospatial::to_geodetic_observation(stored));
-        };
-        if (status_t const read = values_under(arm.index, arguments->key, *executor, carve_entries, decode);
-            failed(read))
-            return propagate_error(read, outcome), void();
-        *arguments->observations = observations;
-        if (arguments->written) *arguments->written = held;
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    };
-    if (visit_nvme_variant(*arguments->index, get_nvme)) return;
-    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
-        if (!executor) return;
-        if (status_t const rewound = executor->reserve(0); failed(rewound))
-            return propagate_error(rewound, outcome), void();
-        thread_allocator_t const scratch {executor->arena(0)};
-        auto const ids = ids_under(arm.index, arguments->key, scratch);
-        if (ids.empty()) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        usearch_geospatial_observation_t* const observations = carve<usearch_geospatial_observation_t>(arena->memory,
-                                                                                                       ids.size());
-        if (!observations)
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-        for (std::size_t entry = 0; entry != ids.size(); ++entry)
-            observations[entry] = observation_of(
-                us::geospatial::to_geodetic_observation(arm.index.published_value_of(ids[entry])));
-        *arguments->observations = observations;
-        if (arguments->written) *arguments->written = ids.size();
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    basic_get<usearch_geospatial_get>(arguments);
 }
-
-#pragma endregion Insertion and Search
-
-#pragma region Cursors Absorbing and Serialization
-
 USEARCH_EXPORT void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
-    *arguments->cursor = nullptr;
-    if (arguments->start)
-        return propagate_error(usearch_status_unsupported_k, outcome, "No residency steps through graph links yet"),
-               void();
-    usearch_geospatial_cursor_t const cursor = new (std::nothrow) usearch_geospatial_cursor_handle_t {};
-    if (!cursor)
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor"), void();
-    cursor->index = arguments->index;
-    auto open_nvme = [&](auto&) noexcept { cursor->cursor.emplace<std::size_t>(0); };
-    if (!visit_nvme_variant(*arguments->index, open_nvme))
-        visit_ram_variant(*arguments->index, outcome, [&](auto& arm) noexcept {
-            geospatial_cursor_t& opened = cursor->cursor.emplace<geospatial_cursor_t>(
-                arm.index, forkunion_allocator_t {no_memory_domain_k});
-            // Stands on the first entry, so every pull copies from where it stands; an empty
-            // snapshot stays past the end.
-            if (opened.visible_count()) [[maybe_unused]]
-                status_t const entered = opened.seek(0);
-        });
-    // A GPU arm opened nothing, and the outcome says why.
-    if (std::holds_alternative<std::monostate>(cursor->cursor)) return delete cursor, void();
-    *arguments->cursor = cursor;
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    basic_cursor_init(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments) {
-    if (submitted<usearch_geospatial_cursor_next>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
-    *arguments->keys = {};
-    if (arguments->observations) *arguments->observations = nullptr;
-    *arguments->written = 0;
-    usearch_geospatial_cursor_t const cursor = arguments->cursor;
-    if (cursor->index != arguments->index)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
-               void();
-    if (cursor->busy.test_and_set(std::memory_order_acquire))
-        return propagate_error(usearch_status_contended_k, outcome, "Another pull holds the cursor"), void();
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                      host_device_k, {}, outcome);
-    // A view reads its rows through the executor, decoding observations straight into the arena.
-    auto next_nvme = [&](auto& arm) noexcept {
-        std::size_t* const row = std::get_if<std::size_t>(&cursor->cursor);
-        if (!row) return propagate_error(usearch_status_internal_k, outcome, "The cursor lost its arm"), void();
-        usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
-        if (!executor) return;
-        std::size_t const taking = min_of(arm.index.size() - *row, arguments->wanted);
-        if (!taking) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, taking);
-        usearch_geospatial_observation_t* const observations =
-            arguments->observations ? carve<usearch_geospatial_observation_t>(arena->memory, taking) : nullptr;
-        if (!keys || (arguments->observations && !observations))
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-        auto decode = [&](std::size_t entry, std::size_t, us::geospatial::earth_observation_t const& stored) noexcept {
-            if (observations) observations[entry] = observation_of(us::geospatial::to_geodetic_observation(stored));
-        };
-        std::span<us::utilities::uuid_t> const identities {reinterpret_cast<us::utilities::uuid_t*>(keys), taking};
-        if (status_t const read = arm.index.read_rows(*row, identities, *executor, decode); failed(read))
-            return propagate_error(read, outcome), void();
-        *row += taking;
-        *arguments->keys = {keys, sizeof(usearch_key_t)};
-        if (arguments->observations) *arguments->observations = observations;
-        *arguments->written = taking;
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    };
-    if (arena && !visit_nvme_variant(*arguments->index, next_nvme))
-        visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-            geospatial_cursor_t* const typed = std::get_if<geospatial_cursor_t>(&cursor->cursor);
-            if (!typed) return propagate_error(usearch_status_internal_k, outcome, "The cursor lost its arm"), void();
-            std::size_t const remaining = *typed ? typed->visible_count() - typed->id() : 0;
-            std::size_t const taking = min_of(remaining, arguments->wanted);
-            usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, taking);
-            usearch_geospatial_observation_t* const observations =
-                arguments->observations ? carve<usearch_geospatial_observation_t>(arena->memory, taking) : nullptr;
-            if (taking && (!keys || (arguments->observations && !observations)))
-                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-            typename arm_type_::node_id_t const first = typed->id();
-            for (std::size_t entry = 0; entry != taking; ++entry) {
-                auto const node = static_cast<typename arm_type_::node_id_t>(first + entry);
-                keys[entry] = std::bit_cast<usearch_key_t>(arm.index.key_of(node).value);
-                if (observations)
-                    observations[entry] = observation_of(
-                        us::geospatial::to_geodetic_observation(arm.index.published_value_of(node)));
-            }
-            for (std::size_t step = 0; step != taking; ++step) ++*typed;
-            *arguments->keys = {keys, sizeof(usearch_key_t)};
-            if (arguments->observations) *arguments->observations = observations;
-            *arguments->written = taking;
-            propagate_error(usearch_status_success_k, outcome, nullptr);
-        });
-    cursor->busy.clear(std::memory_order_release);
+    basic_cursor_next<usearch_geospatial_cursor_next>(arguments);
 }
-
-USEARCH_EXPORT void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t cursor) {
-    finish_calls_using(cursor);
-    delete cursor;
-}
-
+USEARCH_EXPORT void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t cursor) { basic_free(cursor); }
 USEARCH_EXPORT void usearch_geospatial_sample(usearch_geospatial_sample_t* arguments) {
-    if (submitted<usearch_geospatial_sample>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
-    if (arguments->stats) *arguments->stats = {};
-    propagate_error(usearch_status_unsupported_k, outcome, "No residency samples yet");
+    basic_unserved<usearch_geospatial_sample>(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_absorb(usearch_geospatial_absorb_t* arguments) {
-    if (submitted<usearch_geospatial_absorb>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    propagate_error(usearch_status_unsupported_k, outcome, "No basic residency absorbs donor handles yet");
+    basic_unserved<usearch_geospatial_absorb>(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
-    if (submitted<usearch_geospatial_save>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    std::string_view const path = as_text(arguments->path);
-    if (path.empty()) return propagate_error(usearch_status_invalid_argument_k, outcome, "The path is empty"), void();
-    if (path.ends_with(".json"))
-        return propagate_error(usearch_status_unsupported_k, outcome, "A geospatial index saves one monolith"), void();
-    auto refuse_nvme = [&](auto&) noexcept {
-        propagate_error(usearch_status_unsupported_k, outcome, "An NVMe view already is its checkpoint");
-    };
-    if (visit_nvme_variant(*arguments->index, refuse_nvme)) return;
-    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
-        if (!executor) return;
-        progress_ticks_t ticks {arguments->progress, executor->size()};
-        propagate_error(arm.save(path, *executor, ticks), outcome);
-    });
+    basic_save<usearch_geospatial_save>(arguments);
 }
-
 USEARCH_EXPORT void usearch_geospatial_metadata_read(usearch_geospatial_metadata_read_t* arguments) {
-    if (submitted<usearch_geospatial_metadata_read>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
-    *arguments->metadata = {};
-    status_t described = status_t::success_k;
-    std::size_t const connectivity = checkpoint_connectivity(as_text(arguments->path), described);
-    if (failed(described)) return propagate_error(described, outcome), void();
-    *arguments->metadata = {connectivity};
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    basic_metadata_read<usearch_geospatial_metadata_read, geospatial_traits_t>(arguments);
 }
-
-#pragma endregion Cursors Absorbing and Serialization
 
 } // extern "C"

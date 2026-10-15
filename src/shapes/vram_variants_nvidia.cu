@@ -1,5 +1,5 @@
 /**
- *  @file src/basic/vram_variants_nvidia_shapes.cu
+ *  @file src/shapes/vram_variants_nvidia.cu
  *  @author Ash Vardanian
  *  @date October 15, 2026
  *  @brief The NVIDIA unit of the shapes kits: Chamfer and Hausdorff need nothing past the Ampere

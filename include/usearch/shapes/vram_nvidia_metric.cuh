@@ -17,20 +17,20 @@
  *  larger ones, so each form serves every cloud and the index picks its form. The index takes the
  *  warp form, a block walking each query while its four warps score a candidate each.
  *
- *  Any compiler reads a kit's host facts, the rows it serves and the span a row prepares into, so
- *  the host index picks kits and sizes spans from the kits themselves; the device members compile
- *  only where CUDA does.
+ *  Any compiler reads a kit's host facts, the rows it serves, the span a row prepares into and the
+ *  host kernels that pack a row before upload, so the host index picks kits, sizes spans and packs
+ *  rows from the kits themselves; the device members compile only where CUDA does.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
 
 #include <numkong/capabilities.h> // `nk_kernel_chamfers_packed_k` & kin - the kits' names in the kernels
+#include <numkong/shapes.h>       // `nk_shapes_pack_f16_serial` & kin, which `shapes/serial.h` expects declared ahead
 
 #include "usearch/utilities/types.hpp"
 
 #if defined(__CUDACC__)
-#include <numkong/shapes.h>        // the CPU kernels `shapes/serial.h` expects declared ahead of it
 #include <numkong/shapes/cuda.cuh> // `nk_chamfer_warp_packed_f16_cuda_` & kin, and the lane bodies of `simt.cuh`
 
 #include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t` - the NVIDIA warp policy
@@ -73,6 +73,8 @@ template <u32_t lanes_per_row_>
 struct f16_ampere_chamfer_kit {
     inline static constexpr u32_t kit_k = vram_kit_name(nk_f16_k, nk_kernel_chamfers_packed_k, lanes_per_row_);
     inline static constexpr u32_t lanes_per_row_k = lanes_per_row_;
+    static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_serial;
 
     static constexpr bool serves(std::size_t) noexcept { return true; }
 
@@ -105,6 +107,8 @@ template <u32_t lanes_per_row_>
 struct f16_ampere_hausdorff_kit {
     inline static constexpr u32_t kit_k = vram_kit_name(nk_f16_k, nk_kernel_hausdorffs_packed_k, lanes_per_row_);
     inline static constexpr u32_t lanes_per_row_k = lanes_per_row_;
+    static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_serial;
 
     static constexpr bool serves(std::size_t) noexcept { return true; }
     static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
@@ -137,6 +141,8 @@ template <u32_t lanes_per_row_>
 struct f32_ampere_chamfer_kit {
     inline static constexpr u32_t kit_k = vram_kit_name(nk_f32_k, nk_kernel_chamfers_packed_k, lanes_per_row_);
     inline static constexpr u32_t lanes_per_row_k = lanes_per_row_;
+    static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_serial;
 
     static constexpr bool serves(std::size_t) noexcept { return true; }
     static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
@@ -165,6 +171,8 @@ template <u32_t lanes_per_row_>
 struct f32_ampere_hausdorff_kit {
     inline static constexpr u32_t kit_k = vram_kit_name(nk_f32_k, nk_kernel_hausdorffs_packed_k, lanes_per_row_);
     inline static constexpr u32_t lanes_per_row_k = lanes_per_row_;
+    static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_serial;
 
     static constexpr bool serves(std::size_t) noexcept { return true; }
     static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
