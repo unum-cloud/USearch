@@ -698,6 +698,8 @@ struct ram_index {
     // The sharded index walks every shard under one token's attention heads, so one running state spans them.
     template <typename, nk_dtype_t, nk_capability_t, typename, template <typename> class, typename, typename>
     friend struct ram_indexes;
+    template <typename, typename, typename, typename, typename, template <typename> class>
+    friend struct sharded_indexes;
 
     /** The capability bit of the distance kit the chain actually picked - lower than
      *  @c capability_ when no SIMD kit is adapted for this dtype yet. */

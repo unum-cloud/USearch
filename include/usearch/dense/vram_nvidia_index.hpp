@@ -2082,6 +2082,8 @@ struct vram_nvidia_index {
      *  attends on its first device, and publishes or fails their batches together. */
     template <typename, nk_dtype_t, nk_capability_t, typename>
     friend struct vram_nvidia_indexes;
+    template <typename, typename, typename, typename, typename, template <typename> class>
+    friend struct sharded_indexes;
 
 #pragma region Insertion
 

@@ -1227,6 +1227,8 @@ struct vram_apple_index {
      *  snapshot. */
     template <typename, nk_dtype_t, nk_capability_t, typename>
     friend struct vram_apple_indexes;
+    template <typename, typename, typename, typename, typename, template <typename> class>
+    friend struct sharded_indexes;
 
   private:
 
