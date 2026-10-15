@@ -2983,9 +2983,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     key_predicate_t keyed {arguments->predicate};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if (is_vram_index<variant_type_> && arguments->traversal != usearch_traversal_walk_k)
-                propagate_error(usearch_status_unsupported_k, outcome, "Scans run on RAM and NVMe handles");
-            else if (is_vram_index<variant_type_> && keyed.predicate.callback)
+            if (is_vram_index<variant_type_> && keyed.predicate.callback)
                 propagate_error(usearch_status_device_k, outcome, "A host predicate cannot narrow a device walk");
             else {
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
@@ -3016,8 +3014,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                         variant, arguments->executor, count, arguments->queries, 1, landing,
                         arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
                         [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
-                            if constexpr (!is_vram_index<variant_type_>)
-                                config.traversal = static_cast<traversal_t>(arguments->traversal);
+                            config.traversal = static_cast<traversal_t>(arguments->traversal);
                             return view.search(rows, executor, config, keys, distances, counts, predicate);
                         });
                 };

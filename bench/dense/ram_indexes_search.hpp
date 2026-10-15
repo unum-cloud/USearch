@@ -382,6 +382,7 @@ bool run_search(streamed_dataset_type_& streamed) {
     config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_search.value);
     // The search phase runs strictly after ingestion, so the mutation-free contract holds.
     config.synchronization = synchronization_t::immutable_k;
+    if (bench.settings.scan == switch_t::present_k) config.traversal = traversal_t::scan_k;
 
     std::size_t const batch_rows = query_batch_rows(bench.settings, search_count);
     std::vector<std::size_t> counts(batch_rows);

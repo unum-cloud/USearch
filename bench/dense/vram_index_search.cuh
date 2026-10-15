@@ -399,6 +399,7 @@ bool run_search(streamed_dataset_type_& streamed) {
     config.expansion_factor = static_cast<small_size_t>(settings.expansion_search.value);
     config.count = static_cast<small_size_t>(top_k);
     config.synchronization = synchronization_t::immutable_k;
+    if (settings.scan == switch_t::present_k) config.traversal = traversal_t::scan_k;
     std::size_t const batch_rows = query_batch_rows(settings, query_count);
     auto found_ids = nk::matrix<node_id_t>::zeros({batch_rows, top_k}).value;
     auto found_distances = nk::matrix<distance_t>::zeros({batch_rows, top_k}).value;

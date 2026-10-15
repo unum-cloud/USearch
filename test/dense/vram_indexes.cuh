@@ -399,6 +399,8 @@ std::size_t test_vram_indexes_configuration(char const* name, u64_t seed, execut
     failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_vram_indexes_search_race<indexes_t, kernel_>(seed, executor);
+    if constexpr (executor_type_::vendor_k == gpu_vendor_t::nvidia_k)
+        failures_count += test_dense_indexes_scan<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_planned_insert<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_absorb<indexes_t, kernel_>(seed, executor);

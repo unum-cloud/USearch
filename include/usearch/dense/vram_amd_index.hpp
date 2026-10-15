@@ -1094,6 +1094,10 @@ struct vram_amd_index {
         /** The caller's mutation contract; every level shares one code path, since the walk is
          *  insert-safe by protocol, so the field only documents intent. */
         synchronization_t synchronization = synchronization_t::concurrent_k;
+
+        /** How rows are reached; only @c walk_k is implemented, and a scan refuses with
+         *  @c unsupported_k. */
+        traversal_t traversal = traversal_t::walk_k;
     };
 
     /** Telemetry of one @c search() batch. */
@@ -2466,6 +2470,7 @@ struct vram_amd_index {
                                              search_config_t config, std::size_t visible,
                                              heads_type_ const& heads = {}) noexcept {
         std::size_t const queries_count = queries.rows;
+        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
         if (!queries_count) return {{}, status_t::success_k};
         bool const wants_distances = result_distances.extent(0) != 0;
         if (result_ids.extent(0) != queries_count || result_ids.extent(1) < config.count ||

@@ -712,24 +712,27 @@ std::size_t test_dense_predicated_search(make_index_type_ const& make_index, u64
 /** Single-index scans against the one-to-one oracle of @ref test_dense_indexes_scan: over a store
  *  spanning two chunks, each query ranks its true nearest at their own distances, a predicate of
  *  either shape narrows the ranking to the nodes it admits, and a breadth wider than the store
- *  returns every row. */
+ *  returns every row. A device index takes no predicate, and the serial kit judges its ranking. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_scan(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using vector_view_t = typename index_type_::vector_view_t;
     using search_config_t = typename index_type_::search_config_t;
     using small_size_t = typename index_type_::small_size_t;
-    constexpr nk_capability_t caps_k = index_type_::picked_quads_capability_k;
+    constexpr bool device_k = requires { make_index.context(); };
+    constexpr nk_capability_t caps_k = device_k ? nk_cap_serial_k : index_type_::picked_quads_capability_k;
     constexpr std::size_t rows_count = dense_growth_nodes_k, wanted = 10, wide = rows_count + 5;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
     std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
     index_type_& index = *index_ptr;
-    typename index_type_::traversal_context_t context {{}};
+    typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
     auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "scan"));
     failures += expect(succeeded(index.reserve({rows_count, connectivity_16_k, dimensions}).status));
     auto assigned_ids = nk::vector<node_id_t>::zeros(rows_count).value;
     failures += expect(succeeded(index.insert(vectors.view(), assigned_ids.span(), context).status));
+    std::vector<std::size_t> row_of_node(rows_count);
+    for (std::size_t row = 0; row != rows_count; ++row) row_of_node[assigned_ids[row]] = row;
 
     auto all = [](node_id_t) noexcept { return true; };
     auto even = [](node_id_t node) noexcept { return node % 2 == 0; };
@@ -744,8 +747,14 @@ std::size_t dense_expect_scan(make_index_type_ const& make_index, allocation_led
     auto expect_ranking = [&](vector_view_t query, std::size_t breadth, auto admits) {
         auto const query_norms = norms<caps_k, scalar_t>(query);
         auto oracle = [&](node_id_t node) noexcept {
-            vector_view_t const row = index.vector(node);
-            return distance<caps_k, scalar_t>(kernel_, query, query_norms, row, norms<caps_k, scalar_t>(row));
+            vector_view_t const row = vectors.view().row(row_of_node[node]).as_vector();
+            // The serial kits have no squared Euclidean, so the oracle squares their Euclidean.
+            if constexpr (kernel_ == nk_kernel_sqeuclidean_k) {
+                distance_t const root = distance<caps_k, scalar_t>(nk_kernel_euclidean_k, query, query_norms, row,
+                                                                   norms<caps_k, scalar_t>(row));
+                return root * root;
+            }
+            else return distance<caps_k, scalar_t>(kernel_, query, query_norms, row, norms<caps_k, scalar_t>(row));
         };
         std::vector<distance_t> admitted;
         for (node_id_t node = 0; node != rows_count; ++node)
@@ -771,10 +780,12 @@ std::size_t dense_expect_scan(make_index_type_ const& make_index, allocation_led
         failures += expect_eq(found.count, context.results.size());
         failures += expect_eq(found.computed_distances, rows_count);
         failures += expect_ranking(query, wanted, all);
-        failures += expect(succeeded(index.search_if(query, admit_even, context, scan).status));
-        failures += expect_ranking(query, wanted, even);
-        failures += expect(succeeded(index.search_if(query, admit_even_batched, context, scan).status));
-        failures += expect_ranking(query, wanted, even);
+        if constexpr (!device_k) {
+            failures += expect(succeeded(index.search_if(query, admit_even, context, scan).status));
+            failures += expect_ranking(query, wanted, even);
+            failures += expect(succeeded(index.search_if(query, admit_even_batched, context, scan).status));
+            failures += expect_ranking(query, wanted, even);
+        }
     }
     search_config_t const wide_scan {.expansion_factor = static_cast<small_size_t>(wide),
                                      .traversal = traversal_t::scan_k};
@@ -1013,23 +1024,26 @@ std::size_t test_dense_indexes_indexer_search(u64_t seed) {
  *  Two shards hold more rows than one first chunk, and the queries outnumber one packed block, so
  *  the scan crosses both seams. Each query - a stored row - ranks its true nearest at their own
  *  distances, a NaN for a self-match included; a predicate narrows the same ranking to the keys it
- *  admits; and a request wider than the store returns every row. RAM and NVMe only: device scans
- *  are not wired yet.
+ *  admits where the residency takes one; and a request wider than the store returns every row. The
+ *  serial kit judges a device's ranking.
  */
-template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_scan(u64_t seed) {
+template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
+std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) {
     using scalar_t = typename indexes_type_::scalar_t;
     using key_t = typename indexes_type_::key_t;
     using distance_t = typename indexes_type_::distance_t;
-    constexpr nk_capability_t caps_k = indexes_type_::index_t::picked_quads_capability_k;
+    constexpr bool device_k = !ram_collection<indexes_type_>;
+    constexpr nk_capability_t caps_k = device_k ? nk_cap_serial_k : indexes_type_::index_t::picked_quads_capability_k;
     constexpr std::size_t rows_count = 2100, queries_count = 260, wanted = 10, wide_queries_count = 3;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
 
-    dense_indexes_executor<indexes_type_> driver;
+    dense_indexes_executor<indexes_type_> driver {placement...};
     if (failed(driver.status)) return failures + expect(false);
     indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(place_shards(indexes, placement...)));
+    // A device placement takes one shard a call.
+    if constexpr (device_k) failures += expect(succeeded(place_shards(indexes, placement...)));
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
     auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_scan"));
     std::vector<key_t> keys(rows_count);
@@ -1084,13 +1098,15 @@ std::size_t test_dense_indexes_scan(u64_t seed) {
     for (std::size_t query = 0; query != queries_count; ++query)
         failures += expect_ranking(found_keys.view(), found_distances.view(), query, all);
 
-    auto const filtered_status = indexes
-                                     .search_if(queries, driver.executor, scan, found_keys.span(),
-                                                found_distances.span(), std::span {counts}, admit_even)
-                                     .status;
-    failures += expect(succeeded(filtered_status));
-    for (std::size_t query = 0; query != queries_count; ++query)
-        failures += expect_ranking(found_keys.view(), found_distances.view(), query, even);
+    if constexpr (!device_k) {
+        auto const filtered_status = indexes
+                                         .search_if(queries, driver.executor, scan, found_keys.span(),
+                                                    found_distances.span(), std::span {counts}, admit_even)
+                                         .status;
+        failures += expect(succeeded(filtered_status));
+        for (std::size_t query = 0; query != queries_count; ++query)
+            failures += expect_ranking(found_keys.view(), found_distances.view(), query, even);
+    }
 
     auto const wide_queries = vectors(nk::range(std::size_t {0}, wide_queries_count), nk::slice);
     auto const wide_status = indexes

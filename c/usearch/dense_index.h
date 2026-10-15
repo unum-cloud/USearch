@@ -114,8 +114,8 @@
  *  through the stream of the call's own executor.
  *
  *  A VRAM handle refuses a search with a @c predicate with @c usearch_status_device_k, since a host
- *  predicate cannot narrow a device walk, and one with @c usearch_traversal_scan_k with
- *  @c usearch_status_unsupported_k until devices scan; RAM and NVMe answer both.
+ *  predicate cannot narrow a device walk, and an AMD or Apple one refuses a
+ *  @c usearch_traversal_scan_k scan with @c usearch_status_unsupported_k; RAM and NVMe answer both.
  *  @c usearch_dense_cursor_init answers on RAM, while VRAM rows are read back by key or by search.
  *  @c usearch_dense_search_stream_init and @c usearch_dense_sample are unsupported on both, and so
  *  is a cursor opened at a @c start key.
@@ -769,7 +769,8 @@ typedef struct usearch_dense_search_t {
     /** The @b optional candidate-pool breadth a walk explores; zero derives, a scan ignores it. */
     size_t expansion_factor;
 
-    /** How rows are reached: a walk, the default, or an exact scan of every row on RAM and NVMe. */
+    /** How rows are reached: a walk, the default, or an exact scan of every row, on all but AMD and
+     *  Apple VRAM. */
     usearch_traversal_t traversal;
 
     /** The @b optional admission filter, asked about a scored quad of candidates at a time. */
@@ -786,7 +787,8 @@ typedef struct usearch_dense_search_t {
  *  @brief Performs k-Nearest Neighbors Search for a run of queries, approximate by walking the
  *      graph or exact by scanning every row - the native batch operation, parallelized internally.
  *  @retval usearch_status_device_k A @c predicate on a VRAM handle.
- *  @retval usearch_status_unsupported_k A @c usearch_traversal_scan_k scan of a VRAM handle.
+ *  @retval usearch_status_unsupported_k A @c usearch_traversal_scan_k scan of an AMD or Apple VRAM
+ *      handle.
  *
  *  One query is a count of one. Never writes to the index, so any number may overlap with
  *  insertions. @ref dense_index_concurrency
@@ -796,9 +798,11 @@ typedef struct usearch_dense_search_t {
  *  and streams every stored row against the pack where it lies, while a lone query takes the walk's
  *  own 4-way kernels. On NVMe the queries pack once and the threads split the value column instead,
  *  each run landing beside its keys, so the column is read once and in order. Either way each
- *  query's matches merge into its output row as the pass advances. A @c predicate is asked only
- *  about rows closer than the worst match the query already holds, which makes the scan the
- *  fallback for filters too selective for a walk to cross.
+ *  query's matches merge into its output row as the pass advances. On NVIDIA VRAM the batch scans
+ *  every shard's rows on the device, where the shards' matches merge too. Every residency ranks by
+ *  the distances its walk reports. A @c predicate is asked only about rows closer than the worst
+ *  match the query already holds, which makes the scan the fallback for filters too selective for a
+ *  walk to cross.
  *
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the

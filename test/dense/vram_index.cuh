@@ -128,6 +128,27 @@ std::size_t test_dense_vram_attend_refused(make_index_type_ const& make_index) {
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
+/** An index without device scans refuses one with @c unsupported_k, over rows a walk answers. */
+template <typename index_type_, typename make_index_type_>
+std::size_t test_dense_vram_scan_refused(make_index_type_ const& make_index, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    allocation_ledger_t ledger;
+    std::size_t failures = 0;
+    {
+        std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+        index_type_& index = *index_ptr;
+        typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        auto const vectors = make_vectors<scalar_t>(dense_thread_nodes_k, dimensions, stream_key(seed, "scan"));
+        failures += expect(succeeded(index.reserve({dense_thread_nodes_k, connectivity_16_k, dimensions}).status));
+        failures += expect(succeeded(index.insert(vectors.view(), {}, context).status));
+        typename index_type_::search_config_t const scan {.traversal = traversal_t::scan_k};
+        failures += expect_eq(index.search(vectors.view().row(0).as_vector(), context, scan).status,
+                              status_t::unsupported_k);
+    }
+    return failures + expect_eq(ledger.live_bytes.load(), 0);
+}
+
 /** Device attention against exact full attention, value rows looked up by node ID in a device table
  *  the vendor's @c value_table_type_ uploads: an exhaustive walk scores every node, so each head's
  *  output and carry match the @c f64 oracle over every key, with one head per token and with four
@@ -363,6 +384,9 @@ std::size_t test_vram_configuration(char const* name, u64_t seed, executor_type_
     failures_count += test_dense_health_audits<index_t, kernel_>(cell, seed);
     failures_count += test_dense_heal_islands<index_t>(cell, seed);
     failures_count += test_dense_vram_multiply<index_t, kernel_>(cell, seed);
+    if constexpr (executor_type_::vendor_k == gpu_vendor_t::nvidia_k)
+        failures_count += test_dense_scan<index_t, kernel_>(cell, seed);
+    else failures_count += test_dense_vram_scan_refused<index_t>(cell, seed);
     if constexpr (!requires { cell_t::attends_k; }) failures_count += test_dense_vram_attend_refused<index_t>(cell);
     failures_count += test_dense_vram_indexer_search<index_t, kernel_>(cell, seed);
     failures_count += test_dense_vram_wide_build<index_t, kernel_>(cell, seed);

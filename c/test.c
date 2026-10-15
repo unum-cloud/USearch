@@ -1400,6 +1400,95 @@ void test_shapes_round_trip(void) {
     printf("Test: Shapes Round Trip - PASSED\n");
 }
 
+/** A GPU shapes index takes Chamfer and Hausdorff alone, inserts and describes its clouds, and
+ *  lands a search's matches in its executor's device arena; the verbs it lacks refuse. Skipped
+ *  without a GPU. */
+void test_shapes_vram(void) {
+    usearch_outcome_t outcome = {0};
+    size_t devices_count = 0;
+    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome, .devices_count = &devices_count});
+    if (!devices_count) return;
+    printf("Test: Shapes VRAM\n");
+    int32_t const devices[1] = {0};
+    usearch_vram_options_t const vram = {.devices = devices, .devices_count = 1};
+
+    usearch_shapes_index_t refused = NULL;
+    usearch_shapes_init_vram(&(usearch_shapes_init_vram_t) {.index = &refused,
+                                                            .outcome = &outcome,
+                                                            .metric = usearch_shapes_metric_wasserstein_procrustes_k,
+                                                            .quantization = usearch_scalar_f16_k,
+                                                            .vram = vram});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "Only Chamfer and Hausdorff serve a GPU");
+    expect(refused == NULL, "A refused initialization returns no handle");
+
+    usearch_shapes_index_t index = NULL;
+    usearch_shapes_init_vram(&(usearch_shapes_init_vram_t) {.index = &index,
+                                                            .outcome = &outcome,
+                                                            .metric = usearch_shapes_metric_hausdorff_k,
+                                                            .quantization = usearch_scalar_f16_k,
+                                                            .vram = vram});
+    if (outcome.status == usearch_status_device_k) {
+        printf("Test: Shapes VRAM - SKIPPED: %s\n", outcome.message);
+        return;
+    }
+    expect(!outcome.message, outcome.message);
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_vram(
+        &(usearch_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = vram});
+    expect(!outcome.message, outcome.message);
+
+    // Clouds arrive in f32 and are stored in f16, so every batch casts before it packs.
+    float const points[] = {
+        0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1,          // a tetrahedron's corners
+        0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2,          // the same, twice the size
+        0, 0, 0, 1, 1, 0, 2, 3, 0, 4, 5, 1, 6, 6, 2, // a bent chain, one point longer
+    };
+    size_t const offsets[] = {0, 4, 8, 13};
+    usearch_key_t const keys[] = {key_of(0), key_of(1), key_of(2)};
+    usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .count = 3,
+                                                      .keys = {keys, sizeof(usearch_key_t)},
+                                                      .shapes = {points, offsets, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    usearch_shapes_index_description_t description = {0};
+    usearch_shapes_describe(&(usearch_shapes_describe_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect(description.size == 3 && description.total_points == 13 &&
+               description.metadata.metric == usearch_shapes_metric_hausdorff_k,
+           "A GPU index describes the clouds it holds");
+
+    // The matches land in device memory, which plain C cannot read; the C++ VRAM suite checks them.
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_matches_view_t matches = {0};
+    usearch_shapes_search(&(usearch_shapes_search_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .count = 3,
+                                                      .queries = {points, offsets, usearch_scalar_f32_k},
+                                                      .matches = &matches,
+                                                      .arena = arena,
+                                                      .wanted = 2});
+    expect(!outcome.message, outcome.message);
+    expect(matches.keys && matches.scores && matches.counts, "A GPU search lands its matches in the arena");
+
+    char const path[] = "usearch-test-c-shapes-vram.safegraphs";
+    usearch_shapes_save(&(usearch_shapes_save_t) {.index = index,
+                                                  .executor = executor,
+                                                  .outcome = &outcome,
+                                                  .path = {(uint8_t const*)path, sizeof(path) - 1}});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU shapes index saves no checkpoint yet");
+
+    usearch_arena_free(arena);
+    usearch_shapes_free(index);
+    usearch_executor_free(executor);
+    printf("Test: Shapes VRAM - PASSED\n");
+}
+
 /** An observation of a position alone, every other field unrecorded. */
 usearch_geospatial_observation_t observed_at(double latitude_degrees, double longitude_degrees,
                                              double altitude_metres) {
@@ -2465,6 +2554,7 @@ int main(int argc, char* argv[]) {
     if (selected("cursor_steps")) test_cursor_steps();
     if (selected("sequence_round_trip")) test_sequence_round_trip();
     if (selected("shapes_round_trip")) test_shapes_round_trip();
+    if (selected("shapes_vram")) test_shapes_vram();
     if (selected("geospatial_round_trip")) test_geospatial_round_trip();
 #if USEARCH_DENSE_DTYPES >= 2
     if (selected("multiply_packed")) test_multiply_packed();
@@ -2475,6 +2565,7 @@ int main(int argc, char* argv[]) {
     if (selected("nvme_view")) test_nvme_view(dimension_counts[0]);
     if (selected("nvme_view_narrow_keys")) test_nvme_view_narrow_keys();
     if (selected("vram_parts_share_a_device")) test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]);
+    if (selected("vram_scan")) test_vram_scan(collection_sizes[1], dimension_counts[1]);
     if (selected("deferred_search")) test_deferred_search();
     if (selected("deferred_limit")) test_deferred_limit();
     if (selected("free_finishes_deferred")) test_free_finishes_deferred();

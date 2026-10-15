@@ -1739,13 +1739,13 @@ enum class vram_ties_t : bool { excluded_k, included_k };
 
 /** How many of the ascending @p count values @p value_of yields lie below @p value, or at most at
  *  it when @p ties are included: one binary search. */
-template <typename value_of_type_>
-__device__ __forceinline__ u32_t vram_rank_below(u32_t count, f64_t value, vram_ties_t ties,
+template <typename value_type_, typename value_of_type_>
+__device__ __forceinline__ u32_t vram_rank_below(u32_t count, value_type_ value, vram_ties_t ties,
                                                  value_of_type_&& value_of) noexcept {
     u32_t first = 0;
     while (count) {
         u32_t const half = count / 2;
-        f64_t const probe = value_of(first + half);
+        value_type_ const probe = value_of(first + half);
         if (ties == vram_ties_t::included_k ? probe <= value : probe < value) first += half + 1, count -= half + 1;
         else count = half;
     }

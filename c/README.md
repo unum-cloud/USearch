@@ -238,7 +238,8 @@ Callers lend memory, never a way to allocate it: no allocator callback crosses t
 Every dense verb is exported for every residency, and the engine answers what a residency lacks with `usearch_status_unsupported_k`:
 
 - RAM answers every verb but `usearch_dense_view_ram`, `usearch_dense_search_stream_init` and `usearch_dense_sample`.
-- VRAM answers insertion, refinement, absorbing, counting, `get`, search, `multiply`, `maxsim`, attention and the serialization family, `save_buffer` included, while cursors and exact scans answer `usearch_status_unsupported_k`, as [GPUs](#gpus) explains.
+- VRAM answers insertion, refinement, absorbing, counting, `get`, search, `multiply`, `maxsim`, attention and the serialization family, `save_buffer` included, while cursors answer `usearch_status_unsupported_k`, as [GPUs](#gpus) explains.
+  NVIDIA devices answer exact scans, while AMD and Apple ones refuse them with `usearch_status_unsupported_k`.
   Apple's Metal answers attention `usearch_status_unsupported_k` too, since its kernels cannot call the caller's value lookup.
 - NVMe answers every read verb as RAM does, refuses every mutating one with `usearch_status_read_only_k`, and refuses saving, since a view already is its checkpoint.
 
@@ -396,7 +397,8 @@ usearch_dense_search(&(usearch_dense_search_t) {.index = index,
                                                 .stats = &stats});
 ```
 
-`.traversal = usearch_traversal_scan_k` scores every published row instead of walking, the exact ground truth a walk approximates, on RAM and NVMe.
+`.traversal = usearch_traversal_scan_k` scores every published row instead of walking, the exact ground truth a walk approximates, on RAM, NVMe and NVIDIA VRAM.
+AMD and Apple VRAM handles refuse scans with `usearch_status_unsupported_k`.
 Every verb that walks the graph fills the optional `stats` with the members it visited, the distances it computed, and its restarts, a connectivity health signal rather than a cost.
 
 ### Filtering & Progress

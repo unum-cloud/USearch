@@ -146,6 +146,30 @@ inline constexpr u32_t cuda_static_scratch_limit_k = 48 * 1024;
  *  file holds the walk and its selection without spilling. */
 inline constexpr u32_t cuda_insert_blocks_per_multiprocessor_k = 2;
 
+/** Queries and rows a scanning block multiplies per step, the edge of its square tile, which four
+ *  warps split into 32 by 32. */
+inline constexpr u32_t cuda_scan_tile_k = 64;
+
+/** Scanning blocks per multiprocessor: as many as the shared memory of the widest parts holds the
+ *  staged candidates of, and the register budget the launch bounds set. */
+inline constexpr u32_t cuda_scan_blocks_per_multiprocessor_k = 3;
+
+/** Bytes of one scanning block's staged candidates, two tiles of rows for each of its queries. */
+inline constexpr u32_t cuda_scan_staged_bytes_k = 2 * cuda_scan_tile_k * cuda_scan_tile_k *
+                                                  static_cast<u32_t>(cuda_scored_node_bytes_k);
+
+/** Row ranges a scan of @p blocks blocks of queries over @p visible rows splits into on a
+ *  persistent grid of @p grid blocks: enough work items for every block to claim one per block its
+ *  multiprocessor seats, none narrower than a tile of rows, and no more than the merge's heads and
+ *  their taken counts fit in the staged candidates' shared memory. */
+constexpr u32_t cuda_scan_ranges(u32_t grid, u32_t blocks, u32_t visible) noexcept {
+    u32_t const claimed = divide_round_up(grid * cuda_scan_blocks_per_multiprocessor_k, blocks);
+    u32_t const tiles = max_of(divide_round_up(visible, cuda_scan_tile_k), 1u);
+    u32_t const merged = cuda_scan_staged_bytes_k /
+                         (vram_warps_per_block_k * static_cast<u32_t>(cuda_scored_node_bytes_k + sizeof(u32_t)));
+    return min_of(min_of(claimed, tiles), merged);
+}
+
 /** One bit per row over device-resident words, marked concurrently by a whole grid. */
 struct cuda_bitset_t {
     u32_t* words = nullptr;
@@ -333,6 +357,7 @@ enum class cuda_kernel_t : u32_t {
     refine_k,
     search_k,
     search_indexer_k,
+    scan_k,
     multiply_k,
     attend_k,
     merge_back_links_k,
@@ -382,6 +407,7 @@ inline constexpr cuda_rung_t cuda_rungs[] = {
     {cuda_kernel_t::search_indexer_k, 4},
     {cuda_kernel_t::search_indexer_k, 8},
     {cuda_kernel_t::search_indexer_k, 16},
+    {cuda_kernel_t::scan_k, 0},
     {cuda_kernel_t::multiply_k, 0},
     {cuda_kernel_t::multiply_k, 2},
     {cuda_kernel_t::multiply_k, 4},
@@ -1122,6 +1148,10 @@ struct vram_nvidia_index {
         /** The caller's mutation contract; every level shares one code path, since the walk is
          *  insert-safe by protocol, so the field only documents intent. */
         synchronization_t synchronization = synchronization_t::concurrent_k;
+
+        /** How rows are reached; @c scan_k scores every visible row exactly on the kits' tile
+         *  steps, keeping each query's @c count nearest, and only @c search implements it. */
+        traversal_t traversal = traversal_t::walk_k;
     };
 
     /** Telemetry of one @c search() batch. */
@@ -1154,10 +1184,14 @@ struct vram_nvidia_index {
         cuda_arena_shape_t const arena_shape = arena_shape_for(
             wide ? expansion : pool_slots * 32,
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
-        std::size_t const arena_warps = std::size_t {walk_blocks_(rows)} * vram_warps_per_block_k;
+        // A scan walks no arena, and keeps its matches past the outputs on a fragment boundary.
+        bool const scans = config.traversal == traversal_t::scan_k;
+        std::size_t const arena_warps = scans ? 0 : std::size_t {walk_blocks_(rows)} * vram_warps_per_block_k;
+        std::size_t const scan_bytes =
+            scans ? sizeof(fragment_t) + scan_scratch_bytes_(rows, config.count, max_node_count_k) : 0;
         std::size_t const staging_bytes = rows * row_bytes() + import_bytes_(rows, nk_f64_k) +
                                           rows * config.count * (sizeof(node_id_t) + sizeof(distance_t)) +
-                                          rows * sizeof(u32_t);
+                                          rows * sizeof(u32_t) + scan_bytes;
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
                aligned(arena_warps * arena_shape.slice_bytes()) + aligned(staging_bytes);
     }
@@ -2187,13 +2221,14 @@ struct vram_nvidia_index {
     };
 
     /** Validates and uploads @p queries, then any indexer or attend @p heads and the indexer's
-     *  weights, sizes the arena for @p expansion, and reserves @p outputs_bytes of staging past
-     *  them: everything a walking verb stages before its sink, the walks bound below the @p visible
-     *  rows. Until the context drains, the queries, the heads and the context stay live. */
+     *  weights, sizes the arena for @p expansion unless the @p traversal scans, and reserves
+     *  @p outputs_bytes of staging past them: everything a walking or scanning verb stages before
+     *  its sink, bound below the @p visible rows. Until the context drains, the queries, the heads
+     *  and the context stay live. */
     template <typename heads_type_>
     expected<walk_launch_t> stage_walk_(rows_view_t queries, [[maybe_unused]] heads_type_ const& heads,
-                                        traversal_context_t& context, u32_t expansion, u32_t minimum_slots,
-                                        std::size_t outputs_bytes, std::size_t visible) noexcept {
+                                        traversal_context_t& context, traversal_t traversal, u32_t expansion,
+                                        u32_t minimum_slots, std::size_t outputs_bytes, std::size_t visible) noexcept {
         constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         constexpr bool attend_k = std::is_same_v<heads_type_, attend_heads_t>;
         std::size_t const queries_count = queries.rows;
@@ -2220,10 +2255,12 @@ struct vram_nvidia_index {
         u32_t const pool_slots = pool_slots_for_(expansion, minimum_slots);
         cuda_arena_shape_t const arena_shape = arena_shape_for(
             frontier == frontier_kind_t::wide_arena_k ? expansion : pool_slots * 32, frontier);
+        // A scan walks nothing, so it neither sizes nor zeroes an arena.
+        bool const walks = traversal == traversal_t::walk_k;
         std::size_t const arena_warps = std::size_t {walk_blocks_(queries_count)} * vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
-        byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
-        if (!arena) return {{}, status_t::bad_alloc_k};
+        byte_t* const arena = walks ? context.ensure_arena(arena_warps * arena_shape.slice_bytes()) : nullptr;
+        if (walks && !arena) return {{}, status_t::bad_alloc_k};
         // The staging holds the query rows and any head rows first, since they carry the widest
         // alignment, then the window importing them, the heads' weights, then the outputs; stream
         // order serializes its reuse across calls.
@@ -2235,7 +2272,8 @@ struct vram_nvidia_index {
         byte_t* const window = staging + rows_bytes;
         // Only a fresh allocation or a wrapped 32-bit epoch space warrants zeroing, never a warm
         // arena.
-        if (context.arena_bytes_ != arena_bytes_before || context.epoch_floor_ + queries_count > 0xFFFFFFFEull) {
+        if (walks &&
+            (context.arena_bytes_ != arena_bytes_before || context.epoch_floor_ + queries_count > 0xFFFFFFFEull)) {
             if (cuda_fill_async(arena, 0, context.arena_bytes_, stream) != cuda_success_k) {
                 context.arena_bytes_ = 0; // Spent: a retry must re-zero, never walk epoch garbage.
                 return {{}, status_t::device_error_k};
@@ -2463,15 +2501,18 @@ struct vram_nvidia_index {
     }
 
     /** The submission half of @c search: stages the queries and @p heads, launches walks over the
-     *  @p visible rows, and queues the pitched writeback. Until the context drains, the queries,
-     *  the heads, both outputs and the context stay live; across contexts they must not share a
-     *  buffer at all. */
+     *  @p visible rows, or a scan of them past its outputs, and queues the pitched writeback. Until
+     *  the context drains, the queries, the heads, both outputs and the context stay live; across
+     *  contexts they must not share a buffer at all. */
     template <typename heads_type_ = dummy_heads_t>
     expected<search_result_t> submit_search_(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
                                              nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                              search_config_t config, std::size_t visible,
                                              heads_type_ const& heads = {}) noexcept {
         std::size_t const queries_count = queries.rows;
+        bool const scans = config.traversal == traversal_t::scan_k;
+        // Indexer heads rescore the batches a walk gathers, and a scan gathers none.
+        if (scans && !std::is_same_v<heads_type_, dummy_heads_t>) return {{}, status_t::unsupported_k};
         if (!queries_count) return {{}, status_t::success_k};
         bool const wants_distances = result_distances.extent(0) != 0;
         if (result_ids.extent(0) != queries_count || result_ids.extent(1) < config.count ||
@@ -2491,17 +2532,25 @@ struct vram_nvidia_index {
         std::size_t const results_count = queries_count * config.count;
         std::size_t const ids_bytes = results_count * sizeof(node_id_t);
         std::size_t const distances_bytes = wants_distances ? results_count * sizeof(distance_t) : 0;
-        auto const staged = stage_walk_(queries, heads, context, expansion, count_slots > 2 ? count_slots : 2,
-                                        ids_bytes + distances_bytes, visible);
+        // A scan's matches follow the outputs on the next fragment boundary.
+        std::size_t const scratch_offset = round_up_to_multiple<std::size_t>(ids_bytes + distances_bytes,
+                                                                             sizeof(fragment_t));
+        std::size_t const outputs_bytes = scans ? scratch_offset +
+                                                      scan_scratch_bytes_(queries_count, config.count, visible)
+                                                : ids_bytes + distances_bytes;
+        auto const staged = stage_walk_(queries, heads, context, config.traversal, expansion,
+                                        count_slots > 2 ? count_slots : 2, outputs_bytes, visible);
         if (!staged) return {{}, staged.status};
         node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
         distance_t* const device_distances = wants_distances
                                                  ? reinterpret_cast<distance_t*>(staged.value.outputs + ids_bytes)
                                                  : nullptr;
         cuda_stream_handle_t const stream = context.stream();
-        if (status_t const launched = launch_search_(staged.value, device_ids, device_distances, config.count, context);
-            failed(launched))
-            return {{}, launched};
+        status_t const launched = scans ? launch_scan_(staged.value, staged.value.outputs + scratch_offset, device_ids,
+                                                       device_distances, config.count, context)
+                                        : launch_search_(staged.value, device_ids, device_distances, config.count,
+                                                         context);
+        if (failed(launched)) return {{}, launched};
         // The landing may be wider than the count, so a multi-index can hand every shard its own
         // columns of one results matrix.
         if (cuda_copy_2d_async(result_ids.data(), result_ids.stride_bytes(0), device_ids,
@@ -2524,6 +2573,7 @@ struct vram_nvidia_index {
                                                std::size_t visible) noexcept {
         std::size_t const rows_count = left.rows;
         std::size_t const wanted = node_ids.extent(1);
+        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
         if (node_ids.extent(0) != rows_count || products.extent(0) != rows_count || products.extent(1) != wanted ||
             counts.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
@@ -2533,7 +2583,8 @@ struct vram_nvidia_index {
             return {{}, status_t::unsupported_layout_k};
         std::size_t const ids_bytes = rows_count * wanted * sizeof(node_id_t);
         std::size_t const products_bytes = rows_count * wanted * sizeof(dot_t);
-        auto const staged = stage_walk_(left, dummy_heads_t {}, context, non_zero_expansion_factor(config), 2,
+        auto const staged = stage_walk_(left, dummy_heads_t {}, context, config.traversal,
+                                        non_zero_expansion_factor(config), 2,
                                         ids_bytes + products_bytes + rows_count * sizeof(u32_t), visible);
         if (!staged) return {{}, staged.status};
         node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
@@ -2565,6 +2616,7 @@ struct vram_nvidia_index {
                                     f32_t score_scale, traversal_context_t& context, search_config_t config,
                                     std::size_t blocks, std::size_t exported_bytes, std::size_t visible) noexcept {
         std::size_t const rows_count = queries.rows;
+        if (config.traversal != traversal_t::walk_k) return {nullptr, status_t::unsupported_k};
         if (!head_count || rows_count % head_count) return {nullptr, status_t::shape_mismatch_k};
         if (!rows_count) return {nullptr, status_t::success_k};
         std::size_t const scratch_bytes = cuda_attend_scratch_bytes(head_count, dimensions());
@@ -2572,9 +2624,10 @@ struct vram_nvidia_index {
         std::size_t const outputs_bytes = rows_count * dimensions() * sizeof(f32_t);
         rows_view_t const first_heads {queries.data, rows_count / head_count, queries.columns,
                                        queries.stride * head_count, queries.dtype};
-        auto staged = stage_walk_(
-            first_heads, attend_heads_t {queries, head_count}, context, non_zero_expansion_factor(config), 2,
-            blocks * (outputs_bytes + rows_count * sizeof(softmax_state_t)) + exported_bytes, visible);
+        auto staged = stage_walk_(first_heads, attend_heads_t {queries, head_count}, context, config.traversal,
+                                  non_zero_expansion_factor(config), 2,
+                                  blocks * (outputs_bytes + rows_count * sizeof(softmax_state_t)) + exported_bytes,
+                                  visible);
         if (!staged) return {nullptr, staged.status};
         staged.value.scratch_bytes_per_warp += static_cast<u32_t>(scratch_bytes);
         if (cuda_fill_async(context.missed_.get(), 0, sizeof(u32_t), context.stream()) != cuda_success_k)
@@ -2863,6 +2916,17 @@ struct vram_nvidia_index {
         return static_cast<u32_t>(
             min_of<std::size_t>(divide_round_up<std::size_t>(queries, vram_warps_per_block_k),
                                 device_.multiprocessor_count * search_blocks_per_multiprocessor_k));
+    }
+
+    /** Bytes of a scan's scratch over @p queries queries keeping @p count matches apiece among
+     *  @p visible rows: every block of queries' count of finished ranges, then each query's matches
+     *  in every range @ref cuda_scan_ranges splits the rows into. */
+    std::size_t scan_scratch_bytes_(std::size_t queries, std::size_t count, std::size_t visible) const noexcept {
+        u32_t const blocks = divide_round_up<u32_t>(static_cast<u32_t>(queries), cuda_scan_tile_k);
+        u32_t const ranges = cuda_scan_ranges(device_.multiprocessor_count * cuda_scan_blocks_per_multiprocessor_k,
+                                              blocks, static_cast<u32_t>(visible));
+        return round_up_to_multiple<std::size_t>(blocks, 4) * sizeof(u32_t) +
+               queries * ranges * count * cuda_scored_node_bytes_k;
     }
 
     /** Threads per block, one warp's worth per resident warp. */
@@ -3169,6 +3233,26 @@ struct vram_nvidia_index {
                 kernel = cuda_kernel_t::search_indexer_k;
             }
         return launch_walk_(kernel_function_(kernel, walk_slots_(walk)), walk, arguments, context);
+    }
+
+    /** Scans every query of @p walk against every visible row on a persistent grid of every block
+     *  the device seats, claiming the work items @ref cuda_scan_ranges splits it into and keeping
+     *  their matches in @p scratch, and lands each query's nearest @p count IDs and, unless null,
+     *  their distances. */
+    status_t launch_scan_(walk_launch_t const& walk, byte_t* scratch, node_id_t* ids, distance_t* distances,
+                          u32_t count, traversal_context_t& context) noexcept {
+        u32_t const blocks = divide_round_up<u32_t>(walk.queries_count, cuda_scan_tile_k);
+        // The finished counts start at zero, so the last range of each block to finish merges it.
+        if (cuda_fill_async(scratch, 0, round_up_to_multiple<std::size_t>(blocks, 4) * sizeof(u32_t),
+                            context.stream()) != cuda_success_k)
+            return status_t::device_error_k;
+        cuda_arguments_t arguments {};
+        arguments.search = search_view_(walk, context);
+        arguments.search.arena = scratch;
+        arguments.search_sink = {ids, distances, count, kernel_};
+        return launch_(kernel_function_(cuda_kernel_t::scan_k, 0),
+                       device_.multiprocessor_count * cuda_scan_blocks_per_multiprocessor_k, cuda_scan_staged_bytes_k,
+                       context.stream(), arguments);
     }
 
     /** Walks every row of @p walk, landing up to @p wanted kept pairs per row and the pairs each

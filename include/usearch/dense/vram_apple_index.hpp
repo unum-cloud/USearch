@@ -605,6 +605,7 @@ struct vram_apple_index {
         small_size_t expansion_factor = 0;
         small_size_t count = 10;
         synchronization_t synchronization = synchronization_t::concurrent_k;
+        traversal_t traversal = traversal_t::walk_k;
     };
 
     /** Telemetry of one @c search() batch. */
@@ -1440,6 +1441,7 @@ struct vram_apple_index {
         constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         std::size_t const queries_count = queries.rows;
         context.landing_ = {};
+        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
         if (!queries_count) return {{}, status_t::success_k};
         std::size_t heads_count = 0;
         if constexpr (indexer_k) {

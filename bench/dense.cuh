@@ -341,6 +341,9 @@ struct settings_t {
      *  calibration-free navigability probe, with a search phase as long as the ingestion. */
     switch_t self_search = switch_t::absent_k;
 
+    /** Answer every query by an exact scan of every stored row instead of a walk. */
+    switch_t scan = switch_t::absent_k;
+
     /** Checkpoint name to serialize every domain index into after ingestion, resolved through
      *  @ref checkpoint_path_of. */
     std::string_view save_name;
@@ -395,7 +398,7 @@ struct settings_t {
 
 /** The flags every binary takes: the dataset, the stored dtype and metric, the graph and its refinement, the
  *  judged depth, the view, and the checkpoints. */
-inline std::array<flag_t, 19> common_flags(settings_t& settings) noexcept {
+inline std::array<flag_t, 20> common_flags(settings_t& settings) noexcept {
     return {{
         {"--base-vectors", "path", "base vectors, `.fbin` family", &settings.base_vectors_path},
         {"--query-vectors", "path", "query vectors, same dtype; the first 1000 base vectors by default",
@@ -414,6 +417,7 @@ inline std::array<flag_t, 19> common_flags(settings_t& settings) noexcept {
         {"--top-k", "count", "matches per query to judge; 10 by default", &settings.top_k},
         {"--max-base-vectors", "count", "cap on ingested rows; the whole file by default", &settings.max_base_vectors},
         {"--self-search", "", "query every stored vector for itself instead of the query file", &settings.self_search},
+        {"--scan", "", "answer every query by an exact scan of every stored row instead of a walk", &settings.scan},
         {"--save", "name", "checkpoint name to serialize every index into after ingestion", &settings.save_name},
         {"--load", "name", "checkpoint name to restore, then insert the rows past --skip-vectors", &settings.load_name},
         {"--checkpoints-dir", "dir", "directory for checkpoint blobs; the temporary directory by default",
@@ -591,6 +595,7 @@ inline void print(settings_t const& settings) {
     fmt::println("- Max base vectors: {}", count_or_else(settings.max_base_vectors, "the whole file"));
     fmt::println("- First vector: {}", settings.first_vector.value);
     fmt::println("- Self search: {}", settings.self_search == switch_t::present_k);
+    fmt::println("- Scan: {}", settings.scan == switch_t::present_k);
     fmt::println("- Save: {}", or_else(settings.save_name, "none"));
     fmt::println("- Load: {}", or_else(settings.load_name, "none"));
     fmt::println("- Checkpoints dir: {}", or_else(settings.checkpoints_dir, "the temporary directory"));

@@ -1384,6 +1384,17 @@ __device__ __forceinline__ std::array<f32_t, 128> cuda_weighted_u1x128_ampere( /
     return sums;
 }
 
+/** One @c mma.sync m16n8k256 step over packed bits into s32, each product the popcount of an
+ *  intersection, laid out as @ref cuda_mma_f16_ampere's. */
+__device__ __forceinline__ std::array<u32_t, 4> cuda_mma_u1_ampere(uint4 a, uint2 b,
+                                                                   std::array<u32_t, 4> tile) noexcept {
+    asm volatile("mma.sync.aligned.m16n8k256.row.col.s32.b1.b1.s32.and.popc {%0, %1, %2, %3}, {%4, %5, %6, %7}, " //
+                 "{%8, %9}, {%0, %1, %2, %3};"
+                 : "+r"(tile[0]), "+r"(tile[1]), "+r"(tile[2]), "+r"(tile[3])
+                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y));
+    return tile;
+}
+
 /** u1x8 kit - the sm_80 floor: the "dot" is the intersection popcount, and the norms store each
  *  row's set-bit count, the currency of Jaccard's union, mirrored into both fields. */
 struct u1x8_ampere_quads_kit_t {
@@ -1398,6 +1409,10 @@ struct u1x8_ampere_quads_kit_t {
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return sum + cuda_intersect_u1x128_ampere(a, b);
+    }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_u1_ampere(a, b, tile);
     }
     static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
         moments.x += cuda_intersect_u1x128_ampere(a, a);
@@ -1568,7 +1583,8 @@ __device__ __forceinline__ vram_scored_node_t cuda_score_batch( //
 
 /** A walk's batch under a kit with a tensor-core step: tiles of 256-byte requests from 256-byte
  *  rows up and of 128-byte ones under them, and the scalar dots for rows of an odd fragment count,
- *  which split into no whole 32-byte pieces. */
+ *  which split into no whole 32-byte pieces. Binary rows keep their scalar popcounts, which score
+ *  one query's batch faster than the bit tile. */
 template <vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_>
     requires requires(typename kit_::fragment_t a, uint2 b, std::array<typename kit_::dot_t, 4> tile) {
         kit_::accumulate_tile(a, b, tile);
@@ -1576,12 +1592,13 @@ template <vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_
 __device__ __forceinline__ vram_scored_node_t cuda_score_batch( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
-    if (storage.row_fragments % 2)
-        return vram_score_batch<kit_, resident_blocks_, fragments_per_load_>( //
-            storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
-    if (storage.row_fragments >= 16)
-        return cuda_score_tiles<kit_, 8>(storage, query_span, query_state, gathered, gathered_count, lane);
-    return cuda_score_tiles<kit_, 4>(storage, query_span, query_state, gathered, gathered_count, lane);
+    if constexpr (!std::is_same_v<typename kit_::scalar_t, nk::u1x8_t>)
+        if (storage.row_fragments % 2 == 0)
+            return storage.row_fragments >= 16
+                       ? cuda_score_tiles<kit_, 8>(storage, query_span, query_state, gathered, gathered_count, lane)
+                       : cuda_score_tiles<kit_, 4>(storage, query_span, query_state, gathered, gathered_count, lane);
+    return vram_score_batch<kit_, resident_blocks_, fragments_per_load_>( //
+        storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
 }
 
 /**
