@@ -757,7 +757,7 @@ struct vram_sorted_buffer {
             moved[batch] = active ? entries_[index] : vram_scored_node_t::sentinel();
             u32_t shift = 0;
             for (u32_t source = 0; source != count; ++source) // Warp-uniform: shuffles inside.
-                shift += active && shuffle_from<warp_t>(value, source).distance_bits() < moved[batch].distance_bits();
+                shift += (shuffle_from<warp_t>(value, source).distance_bits() < moved[batch].distance_bits()) && active;
             moved_to[batch] = index + shift;
         }
         warp_t::sync(); // Every displaced entry is staged in registers before any write lands.
