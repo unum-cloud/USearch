@@ -3712,8 +3712,8 @@ struct ram_index {
             ++context.visited_members;
 
             // Slot 0 comes from the acquiring load above - never re-read it, a writer may have
-            // locked the node since. The remaining slots are relaxed reads, so the worst case is
-            // a stale-but-valid mix of neighbors, never a torn read.
+            // locked the node since. The remaining slots are relaxed reads of a row a back-link may
+            // rewrite meanwhile, so they mix old and new neighbors and may name one node twice.
             small_size_t const slots_count = candidate_neighbors.capacity();
             small_size_t neighbor_slot = 0;
             bool list_ended = false;
@@ -3735,6 +3735,11 @@ struct ram_index {
                     // happens-before edge to its hosting chunk yet, so skip it; a later traversal meets it.
                     if (!admission.admits(neighbor_id)) continue;
                     if (visited.contains(neighbor_id)) continue;
+                    // A row rewritten mid-read may repeat a node inside one quad.
+                    bool repeated = false;
+                    for (small_size_t lane = 0; lane != gathered_count; ++lane)
+                        repeated |= gathered_ids[lane] == neighbor_id;
+                    if (repeated) continue;
                     location_t const neighbor_location = chunk_schedule_t::locate(neighbor_id);
                     gathered_ids[gathered_count] = neighbor_id;
                     gathered_vectors[gathered_count] = vector_for(neighbor_location);
