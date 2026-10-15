@@ -295,9 +295,11 @@ if (USEARCH_BUILD_CUDA)
     endfunction ()
 
     # One unit per GPU class, its fatbin compiled for its own architectures alone - the device twin of the CPU classes'
-    # per-unit ISA flags - so no cubin carries another generation's kernels. Each unit sees only its own NumKong GPU
-    # target, as an AMD unit does, since NumKong's own kernels compile under every target a unit names.
-    function (usearch_dense_vram_nvidia_variant class target_macro)
+    # per-unit ISA flags - so no cubin carries another generation's kernels, and only once `USEARCH_CUDA_ARCHITECTURES`
+    # names one of its @p selectors or "native", which keeps a one-generation tree to that generation's kernels. Each
+    # unit sees only its own NumKong GPU target, as an AMD unit does, since NumKong's own kernels compile under every
+    # target a unit names.
+    function (usearch_dense_vram_nvidia_variant class target_macro selectors)
         set(target_ usearch_dense_vram_variants_${class})
         set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_variants_${class}.cu)
         add_library(${target_} OBJECT ${source_})
@@ -309,18 +311,23 @@ if (USEARCH_BUILD_CUDA)
             PRIVATE yyjson forkunion::static
             PUBLIC ${CMAKE_DL_LIBS}
         )
-        usearch_cuda_codes(codes_ "${ARGN}")
+        set(codes_)
+        foreach (selector_ IN ITEMS native ${selectors})
+            if (selector_ IN_LIST USEARCH_CUDA_ARCHITECTURES)
+                usearch_cuda_codes(codes_ "${ARGN}")
+            endif ()
+        endforeach ()
         usearch_gpu_bundle(${target_} nvidia dense_${class} ${source_} ${codes_})
         set(USEARCH_PUNNED_LIBRARIES
             ${USEARCH_PUNNED_LIBRARIES} ${target_}
             PARENT_SCOPE
         )
     endfunction ()
-    usearch_dense_vram_nvidia_variant(nvidia_ampere AMPERE 80)
-    usearch_dense_vram_nvidia_variant(nvidia_ada ADA 89-real)
-    usearch_dense_vram_nvidia_variant(nvidia_hopper HOPPER 90a-real)
-    usearch_dense_vram_nvidia_variant(nvidia_blackwell BLACKWELL 100f-real)
-    usearch_dense_vram_nvidia_variant(nvidia_blackwellrtx BLACKWELLRTX 120f-real)
+    usearch_dense_vram_nvidia_variant(nvidia_ampere AMPERE "80;80-real" 80)
+    usearch_dense_vram_nvidia_variant(nvidia_ada ADA "89;89-real" 89-real)
+    usearch_dense_vram_nvidia_variant(nvidia_hopper HOPPER "90a;90a-real" 90a-real)
+    usearch_dense_vram_nvidia_variant(nvidia_blackwell BLACKWELL "100f;100f-real" 100f-real)
+    usearch_dense_vram_nvidia_variant(nvidia_blackwellrtx BLACKWELLRTX "120f;120f-real" 120f-real)
 
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=1")
 else ()

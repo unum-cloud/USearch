@@ -84,12 +84,13 @@ if (USEARCH_BUILD_SPDK)
 endif ()
 
 # The library compiles one unit per GPU class, each for its own architecture alone - "80" with its PTX for every GPU
-# without a class, "89", "90a", "100f" and "120f" - and ignores this list. The CUDA tests, benchmarks and the dispatch
+# without a class, "89", "90a", "100f" and "120f" - and only the classes this list names, with or without "-real", so
+# "100f-real" builds the Blackwell kernels alone and "native" builds every class. The CUDA tests, benchmarks and the dispatch
 # unit compile one pass per entry, and a NumKong GPU capability turns on in them only when every entry runs it, so
 # iterate on one GPU with its family code, like "100f-real", to test that generation's kits. The "-real" entries skip
 # the PTX, which would triple the objects of builds that never meet an unknown GPU.
 set(USEARCH_CUDA_ARCHITECTURES
-    "80-real;90a-real;100f-real;120f-real"
+    "80-real;89-real;90a-real;100f-real;120f-real"
     CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"
 )
 
