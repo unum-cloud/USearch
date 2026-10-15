@@ -734,14 +734,17 @@ struct [[nodiscard]] radius_result_t {
  *  cone graph's spanner property makes complete; under @c none_k the pool stops at the radius
  *  itself. The pool doubles from the searcher's default breadth to the index size, and a doubling
  *  that finds nothing new ends it. Each round scores as many rows as the metric's staging holds at
- *  @c connectivity_32_k neighbors each, so no round is ever refused, and a staging under one row
- *  reports @c config_mismatch_k.
+ *  @p widest_row neighbors each, so no round is ever refused, and a staging under one row reports
+ *  @c config_mismatch_k.
+ *
+ *  @param[in] widest_row The most neighbors any row holds: the selector's budget plus the long
+ *      links drawn past it.
  */
 template <typename index_type_, typename metric_type_, typename query_type_, typename context_type_>
 radius_result_t within(index_type_& index, query_type_ const& query, i64_t radius_centimetres, radius_margin_t margin,
-                       metric_type_& metric, context_type_& context) noexcept {
+                       std::size_t widest_row, metric_type_& metric, context_type_& context) noexcept {
     using search_config_t = typename index_type_::search_config_t;
-    std::size_t const rows_per_round = metric.staging_limit() / connectivity_32_k;
+    std::size_t const rows_per_round = metric.staging_limit() / widest_row;
     if (!rows_per_round) return {status_t::config_mismatch_k, 0, 0};
     f64_t const radius = static_cast<f64_t>(radius_centimetres);
     f64_t const widened = margin == radius_margin_t::spanner_k ? radius * (1.0 + 2.0 * cone_graph_stretch_k) : radius;

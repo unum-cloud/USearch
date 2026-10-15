@@ -339,6 +339,7 @@ static std::size_t check_positions_radius(u64_t seed) {
         failures += basic_build<positions_fixture_t>(index, metric, values, assigned_ids, context,
                                                      surface_keep_octants_t {});
 
+        std::size_t const widest_row = surface_keep_octants_t {}.connectivity;
         std::array<i64_t, 3> const radii_centimetres {200'000, 800'000, 2'500'000}; // 2 km, 8 km, 25 km.
         for (std::size_t probe = 0; probe != probes_k; ++probe) {
             earth_fixed_t const query = stored[probe * (nodes_k / probes_k)].position;
@@ -346,14 +347,15 @@ static std::size_t check_positions_radius(u64_t seed) {
                 std::size_t expected = 0;
                 for (earth_observation_t const& candidate : stored)
                     expected += chord_squared(query, candidate.position) <= radius * radius;
-                radius_result_t const complete = within(index, query, radius, radius_margin_t::spanner_k, metric,
-                                                        context);
+                radius_result_t const complete = within(index, query, radius, radius_margin_t::spanner_k, widest_row,
+                                                        metric, context);
                 failures += expect(bool(complete));
                 failures += expect_eq(complete.count, expected);
                 failures += expect(complete.pool >= complete.count);
                 for (std::size_t position = 0; position != complete.count; ++position)
                     failures += expect(context.results[position].distance <= radius * radius);
-                radius_result_t const plain = within(index, query, radius, radius_margin_t::none_k, metric, context);
+                radius_result_t const plain = within(index, query, radius, radius_margin_t::none_k, widest_row, metric,
+                                                     context);
                 failures += expect(bool(plain));
                 failures += expect(plain.count <= expected);
             }

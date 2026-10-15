@@ -1322,6 +1322,15 @@ struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
 
     explicit geospatial_ram_variant(forkunion_allocator_t const& allocator) noexcept : index(allocator) {}
 
+    /** Long links every insertion draws, appended past the selector's budget. */
+    std::size_t long_links() const noexcept {
+        constexpr std::size_t cones_k = us::geospatial::surface_keep_octants_t::cones_k;
+        return connectivity > cones_k ? connectivity - cones_k : 0;
+    }
+
+    /** The widest row a walk copies, which sizes every round's staging. */
+    std::size_t widest_row() const noexcept { return connectivity + long_links(); }
+
     expected<traversal_telemetry_t> insert(usearch_keys_view_t keys,
                                            usearch_geospatial_observation_t const* observations, std::size_t count,
                                            std::size_t expansion, progress_ticks_t& ticks,
@@ -1540,10 +1549,8 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::insert(
     using key_t = typename index_t::key_t;
     // Exact cone winners need a pool of at least 128, as the selector documents.
     std::size_t const breadth = expansion ? expansion : 128;
-    // Long links append past the selector's budget, and a walk's round stages whole rows.
-    constexpr std::size_t cones_k = us::geospatial::surface_keep_octants_t::cones_k;
-    std::size_t const draws = connectivity > cones_k ? connectivity - cones_k : 0;
-    std::size_t const row_width = connectivity + draws;
+    std::size_t const draws = long_links();
+    std::size_t const row_width = widest_row();
     thread_scratch<index_t, metric_t> scratch;
     if (status_t const prepared = scratch.prepare(executor, row_width, breadth, index.size(), this->metric_factory_());
         failed(prepared))
@@ -1600,7 +1607,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::search(
     // Pools narrower than the row they fill would short every row.
     std::size_t const breadth = max_of(expansion ? expansion : std::size_t(connectivity_32_k) * 2, wanted);
     thread_scratch<index_t, metric_t> scratch;
-    if (status_t const prepared = scratch.prepare(executor, connectivity, breadth, index.size(),
+    if (status_t const prepared = scratch.prepare(executor, widest_row(), breadth, index.size(),
                                                   this->metric_factory_());
         failed(prepared))
         return {{}, prepared};
@@ -1647,7 +1654,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::within(
     using found_t = growing_buffer<geospatial_within_match_t, thread_allocator_t>;
     thread_scratch<index_t, metric_t> scratch;
     std::size_t const breadth = std::size_t(connectivity_32_k) * 2;
-    if (status_t const prepared = scratch.prepare(executor, connectivity, breadth, index.size(),
+    if (status_t const prepared = scratch.prepare(executor, widest_row(), breadth, index.size(),
                                                   this->metric_factory_());
         failed(prepared))
         return {{}, prepared};
@@ -1672,7 +1679,8 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::within(
             std::ceil((tolerance.metres + 3 * deviations) * us::geospatial::centimetres_per_metre_k));
         auto& context = scratch.contexts[thread];
         us::geospatial::radius_result_t const ball = us::geospatial::within(
-            index, query.position, reach, us::geospatial::radius_margin_t::spanner_k, scratch.metrics[thread], context);
+            index, query.position, reach, us::geospatial::radius_margin_t::spanner_k, widest_row(),
+            scratch.metrics[thread], context);
         if (!ball) return keep_first_failure(walked, ball.status);
         for (std::size_t first = 0; first < ball.count; first += 4) {
             std::size_t const quad = min_of<std::size_t>(4, ball.count - first);

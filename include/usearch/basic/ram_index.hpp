@@ -186,10 +186,10 @@ struct keep_closest_t {
     }
 };
 
-/** Relative-neighborhood pruning: a candidate survives only if closer to the
- *  query than to every already-kept neighbor - pair distances drawn through the same
- *  metric in shrinking rounds, exiting each candidate on its first violation. The slots
- *  the rule leaves empty take the nearest rejected candidates, after the diverse picks. */
+/** Relative-neighborhood pruning: a candidate survives only if closer to the query than to every
+ *  already-kept neighbor, measured from the kept side so asymmetric metrics compare like with like:
+ *  one round per kept neighbor scores every later candidate. The slots the rule leaves empty take
+ *  the nearest rejected candidates, after the diverse picks. */
 struct keep_diverse_t {
 
     /** The neighbors-per-node budget this selector prunes to. */
@@ -199,26 +199,34 @@ struct keep_diverse_t {
     void operator()(index_type_ const& index, metric_type_& metric, context_type_& context) const noexcept {
         auto& selected = context.selected_neighbors;
         selected.clear();
-        for (std::size_t position = 0; position != context.results.size() && selected.size() != connectivity;
-             ++position) {
+        // First half: each candidate's distance from its nearest kept neighbor; second: the round.
+        auto& nearest_kept = context.staged_distances;
+        std::size_t const pool_size = context.results.size();
+        // A refused growth leaves the backfill alone to fill the row.
+        bool const scored = succeeded(nearest_kept.reserve(pool_size * 2));
+        if (scored) {
+            nearest_kept.resize_reserved(pool_size * 2);
+            for (std::size_t position = 0; position != pool_size; ++position)
+                nearest_kept[position] = context.results[position].distance;
+        }
+        for (std::size_t position = 0; scored && position != pool_size && selected.size() != connectivity; ++position) {
             auto const candidate = context.results[position];
-            std::size_t const kept_count = selected.size();
-            bool diverse = true;
-            if (kept_count) {
-                // One round per candidate: its own value queries the kept neighbors, and only pairs
-                // closer than the candidate itself can disqualify it.
-                metric.reset(index.published_value_of(candidate.node_id));
-                std::size_t staged_count = 0;
-                for (; staged_count != kept_count; ++staged_count)
-                    if (metric.push(index.published_value_of(selected[staged_count].node_id)) ==
-                        metric_staging_t::refused_k)
-                        break;
-                drain_round(metric, staged_count, context, candidate.distance);
-                if (staged_count != kept_count) break; // Staging refused: the backfill completes it.
-                for (std::size_t pair = 0; pair != staged_count && diverse; ++pair)
-                    diverse = !(context.staged_distances[pair] < candidate.distance);
-            }
-            if (diverse) selected.push_back_reserved(candidate);
+            if (nearest_kept[position] < candidate.distance) continue;
+            selected.push_back_reserved(candidate);
+            if (selected.size() == connectivity) break;
+            // The kept neighbor queries the later candidates, as the node queried them all: an
+            // asymmetric distance compares only like with like.
+            metric.reset(index.published_value_of(candidate.node_id));
+            std::size_t staged_count = 0;
+            while (position + 1 + staged_count != pool_size &&
+                   metric.push(index.published_value_of(context.results[position + 1 + staged_count].node_id)) ==
+                       metric_staging_t::staged_k)
+                ++staged_count;
+            metric.drain({nearest_kept.data() + pool_size, staged_count}, context.results.top().distance);
+            context.telemetry.computed_distances += staged_count;
+            for (std::size_t later = 0; later != staged_count; ++later)
+                nearest_kept[position + 1 + later] = min_of(nearest_kept[position + 1 + later],
+                                                            nearest_kept[pool_size + later]);
         }
 
         // The kept picks are a subsequence of the ascending pool, so one merge-walk tells a kept
@@ -941,13 +949,15 @@ struct ram_index {
         if (!connectivity) return status_t::config_mismatch_k;
         insert_config_t const walk = resolved_config_(config, connectivity);
         std::size_t const round_capacity = max_of(walk.fan_out * connectivity, connectivity + 1);
-        if (status_t const sized = context.results.reserve(max_of(walk.expansion_factor, connectivity + 1));
-            failed(sized))
-            return sized;
+        std::size_t const pool_capacity = max_of(walk.expansion_factor, connectivity + 1);
+        if (status_t const sized = context.results.reserve(pool_capacity); failed(sized)) return sized;
         if (status_t const sized = context.frontier.reserve(walk.expansion_factor * 4); failed(sized)) return sized;
         if (status_t const sized = context.visited.reserve(walk.expansion_factor * 4); failed(sized)) return sized;
         if (status_t const sized = context.staged_ids.reserve(round_capacity); failed(sized)) return sized;
-        if (status_t const sized = context.staged_distances.reserve(round_capacity); failed(sized)) return sized;
+        // A diversity selector keeps a distance per pooled candidate beside the round it drains.
+        if (status_t const sized = context.staged_distances.reserve(max_of(round_capacity, pool_capacity * 2));
+            failed(sized))
+            return sized;
         if (status_t const sized = context.selected_neighbors.reserve(connectivity + 1); failed(sized)) return sized;
         return context.reverse_ids.reserve(connectivity);
     }
