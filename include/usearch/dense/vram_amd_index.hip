@@ -206,7 +206,7 @@ struct amd_heads_rescoring {
 };
 
 /** One wavefront inserts one node, as the NVIDIA insertion kernel does. */
-template <vram_quads_kit kit_, vram_schedule schedule_, u32_t pool_slots_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t pool_slots_>
 __device__ __forceinline__ void amd_insert(vram_build_view<kit_> const& view) {
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename kit_::norms_t cache_norms[vram_warps_per_block_k][vram_cache_rows_k];
@@ -245,7 +245,7 @@ __device__ __forceinline__ void amd_insert(vram_build_view<kit_> const& view) {
 }
 
 /** One wavefront refines one node, assigning itself node IDs from the pass counter. */
-template <vram_quads_kit kit_, vram_schedule schedule_, u32_t pool_slots_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t pool_slots_>
 __device__ __forceinline__ void amd_refine(vram_refine_view<kit_> const& view) {
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename kit_::norms_t cache_norms[vram_warps_per_block_k][vram_cache_rows_k];
@@ -494,10 +494,10 @@ struct amd_attend_sink {
     }
 };
 
-/** One wavefront per query over the register frontier, each walk scored under @p rescorings and
- *  written out through @p sink; wavefronts take queries from the batch counter, as builders take
- *  rows. */
-template <vram_quads_kit kit_, u32_t pool_slots_, typename sink_, typename rescoring_>
+/** One wavefront per query over the register frontier, each walk scored through the schedule under
+ *  @p rescorings and written out through @p sink; wavefronts take queries from the batch counter, as
+ *  builders take rows. */
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t pool_slots_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void amd_walk(vram_search_view<kit_> const& view, sink_ const& sink,
                                          rescoring_ const& rescorings) {
     extern __shared__ byte_t dynamic_scratch[];
@@ -511,14 +511,14 @@ __device__ __forceinline__ void amd_walk(vram_search_view<kit_> const& view, sin
         if (query_index >= view.queries_count) return;
         vram_visited_set<hip_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                               view.epoch_base + query_index + 1};
-        vram_walk_one<kit_, (pool_slots_ <= 4 ? 4u : 3u)>( //
+        vram_walk_one<kit_, schedule_, (pool_slots_ <= 4 ? 4u : 3u)>( //
             view, sink, rescorings, query_index, query_span, visited,
             vram_register_frontier<pool_slots_, hip_warp_t> {}, gathered[slice.warp], slice.lane);
     }
 }
 
 /** One wavefront per query past the register ladder, over the arena frontier. */
-template <vram_quads_kit kit_, typename sink_, typename rescoring_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void amd_walk_wide(vram_search_view<kit_> const& view, sink_ const& sink,
                                               rescoring_ const& rescorings) {
     extern __shared__ byte_t dynamic_scratch[];
@@ -536,14 +536,14 @@ __device__ __forceinline__ void amd_walk_wide(vram_search_view<kit_> const& view
         if (query_index >= view.queries_count) return;
         vram_visited_set<hip_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                               view.epoch_base + query_index + 1};
-        vram_walk_one<kit_, 4u>(view, sink, rescorings, query_index, query_span, visited, frontier,
-                                gathered[slice.warp], slice.lane);
+        vram_walk_one<kit_, schedule_, 4u>(view, sink, rescorings, query_index, query_span, visited, frontier,
+                                           gathered[slice.warp], slice.lane);
     }
 }
 
 /** One wavefront merges one touched node's forward and reverse candidates into its final
  *  neighbors. */
-template <vram_quads_kit kit_, vram_schedule schedule_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_>
 __device__ __forceinline__ void amd_merge_back_links(vram_refine_view<kit_> const& view, u32_t const* bucket_ids,
                                                      u32_t const* bucket_counts, u32_t bucket_width,
                                                      hip_bitset_t touched) {
@@ -754,15 +754,15 @@ __device__ __forceinline__ void amd_merge_attention(byte_t* blocks, u32_t rows, 
 #pragma region Kernels
 
 /** Runs one walk family on its rung, the arena frontier at slot zero. */
-template <vram_quads_kit kit_, u32_t slots_, typename sink_, typename rescoring_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t slots_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void amd_walk_rung(vram_search_view<kit_> const& view, sink_ const& sink,
                                               rescoring_ const& rescorings) {
-    if constexpr (slots_ == 0) amd_walk_wide<kit_>(view, sink, rescorings);
-    else amd_walk<kit_, slots_>(view, sink, rescorings);
+    if constexpr (slots_ == 0) amd_walk_wide<kit_, schedule_>(view, sink, rescorings);
+    else amd_walk<kit_, schedule_, slots_>(view, sink, rescorings);
 }
 
 /** Every AMD kernel: @p kernel_ picks the body, @p gpu_class_ and @p dtype_ the kit, @p gpu_class_
- *  alone the staging schedule, @p slots_ the rung, and @p lookup_ an attend's value lookup through
+ *  alone the schedule, @p slots_ the rung, and @p lookup_ an attend's value lookup through
  *  @ref amd_value_lookup_of. */
 template <u32_t kernel_, u32_t gpu_class_, u32_t dtype_, u32_t slots_, u32_t lookup_>
 __global__ void __launch_bounds__(vram_warps_per_block_k* hip_warp_t::width_k) amd_kernel(amd_arguments_t arguments) {
@@ -775,21 +775,22 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_warp_t::width_k) a
     else if constexpr (kernel == amd_kernel_t::refine_k)
         amd_refine<kit_t, schedule_t, slots_>(amd_view<kit_t>(arguments.refine));
     else if constexpr (kernel == amd_kernel_t::search_k)
-        amd_walk_rung<kit_t, slots_>(amd_view<kit_t>(arguments.search), amd_view<kit_t>(arguments.search_sink),
-                                     vram_no_rescoring {});
+        amd_walk_rung<kit_t, schedule_t, slots_>(amd_view<kit_t>(arguments.search),
+                                                 amd_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
     else if constexpr (kernel == amd_kernel_t::search_indexer_k)
-        amd_walk_rung<kit_t, slots_>(amd_view<kit_t>(arguments.search), amd_view<kit_t>(arguments.search_sink),
-                                     amd_view<kit_t>(arguments.rescoring));
+        amd_walk_rung<kit_t, schedule_t, slots_>(amd_view<kit_t>(arguments.search),
+                                                 amd_view<kit_t>(arguments.search_sink),
+                                                 amd_view<kit_t>(arguments.rescoring));
     else if constexpr (kernel == amd_kernel_t::multiply_k)
-        amd_walk_rung<kit_t, slots_>(amd_view<kit_t>(arguments.search), amd_view<kit_t>(arguments.multiply_sink),
-                                     vram_no_rescoring {});
+        amd_walk_rung<kit_t, schedule_t, slots_>(amd_view<kit_t>(arguments.search),
+                                                 amd_view<kit_t>(arguments.multiply_sink), vram_no_rescoring {});
     else if constexpr (kernel == amd_kernel_t::attend_k) {
         using value_lookup_t = typename amd_value_lookup_of<lookup_>::type;
         amd_attend_t const& attend = arguments.attend;
         amd_rescoring_t const& heads = arguments.rescoring;
         value_lookup_t value_lookup;
         amd_copy_bytes(&value_lookup, attend.value_lookup, sizeof(value_lookup_t));
-        amd_walk_rung<kit_t, slots_>(
+        amd_walk_rung<kit_t, schedule_t, slots_>(
             amd_view<kit_t>(arguments.search),
             amd_attend_sink<kit_t, value_lookup_t> {value_lookup, attend.outputs, attend.states, attend.missed,
                                                     attend.logit_scale, attend.heads_count, attend.columns},

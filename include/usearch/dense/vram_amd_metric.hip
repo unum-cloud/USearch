@@ -34,6 +34,7 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/dense/types.hpp"
+#include "usearch/dense/vram_index.cuh"
 
 #if NUMKONG_ARCH_ROCM_
 
@@ -1017,6 +1018,15 @@ struct rocm_registers_schedule_t {
 
     __device__ __forceinline__ rocm_registers_schedule_t(shared_t&, u32_t) noexcept {}
 
+    /** Scores a walk's batch through the kit's scalar dots, one fragment a load. */
+    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    static __device__ __forceinline__ vram_scored_node_t score_batch( //
+        vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+        typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+        return vram_score_batch<kit_, resident_blocks_>( //
+            storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
+    }
+
     template <typename storage_, typename cache_>
     static __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids,
                                                       u32_t rows, u32_t lane) noexcept {
@@ -1058,6 +1068,15 @@ struct hip_lds_schedule {
     struct shared_t {};
 
     __device__ __forceinline__ hip_lds_schedule(shared_t&, u32_t) noexcept {}
+
+    /** Scores a walk's batch as @ref rocm_registers_schedule_t does. */
+    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    static __device__ __forceinline__ vram_scored_node_t score_batch( //
+        vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+        typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+        return vram_score_batch<kit_, resident_blocks_>( //
+            storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
+    }
 
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,

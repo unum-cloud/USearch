@@ -156,7 +156,7 @@ struct cuda_heads_rescoring {
  *  past it, a whole batch at a time and in claim order, and follow no neighbor at or past the
  *  watermark they launched under.
  */
-template <vram_quads_kit kit_, vram_schedule schedule_, u32_t pool_slots_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t pool_slots_>
 __device__ __forceinline__ void cuda_insert(vram_build_view<kit_> const& view) {
     // The scratch slice hosts the query span while traversing, then the candidate cache while
     // selecting; the exact visited set lives in the warp's arena slice, not in shared memory.
@@ -198,7 +198,7 @@ __device__ __forceinline__ void cuda_insert(vram_build_view<kit_> const& view) {
 
 /** One warp refines one node, assigning itself node IDs from the pass counter; warps only read the
  *  live storage and write disjoint shadow neighbors. */
-template <vram_quads_kit kit_, vram_schedule schedule_, u32_t pool_slots_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t pool_slots_>
 __device__ __forceinline__ void cuda_refine(vram_refine_view<kit_> const& view) {
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename kit_::norms_t cache_norms[vram_warps_per_block_k][vram_cache_rows_k];
@@ -264,7 +264,7 @@ __device__ __forceinline__ void cuda_scatter_back_links(u32_t const* shadow_neig
 
 /** One warp merges one node's forward & reverse candidates into its final neighbors, assigning
  *  itself node IDs from the pass counter. */
-template <vram_quads_kit kit_, vram_schedule schedule_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_>
 __device__ __forceinline__ void cuda_merge_back_links(vram_refine_view<kit_> const& view, u32_t const* bucket_ids,
                                                       u32_t const* bucket_counts, u32_t bucket_width,
                                                       cuda_bitset_t touched) {
@@ -498,10 +498,10 @@ struct cuda_attend_sink {
     }
 };
 
-/** One warp per query over the register frontier - expansions within the ladder - each walk scored
- *  under @p rescorings at the schedule's load width and written out through @p sink; warps take
+/** One warp per query over the register frontier - expansions within the ladder - each walk
+ *  scored through the schedule under @p rescorings and written out through @p sink; warps take
  *  queries from the batch counter, as builders take rows. */
-template <vram_quads_kit kit_, vram_schedule schedule_, u32_t pool_slots_, typename sink_, typename rescoring_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t pool_slots_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void cuda_walk(vram_search_view<kit_> const& view, sink_ const& sink,
                                           rescoring_ const& rescorings) {
     extern __shared__ byte_t dynamic_scratch[];
@@ -515,7 +515,7 @@ __device__ __forceinline__ void cuda_walk(vram_search_view<kit_> const& view, si
         if (query_index >= view.queries_count) return;
         vram_visited_set<cuda_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                                view.epoch_base + query_index + 1};
-        vram_walk_one<kit_, (pool_slots_ <= 4 ? 4u : 3u), schedule_::fragments_per_load_k>( //
+        vram_walk_one<kit_, schedule_, (pool_slots_ <= 4 ? 4u : 3u)>( //
             view, sink, rescorings, query_index, query_span, visited,
             vram_register_frontier<pool_slots_, cuda_warp_t> {}, gathered[slice.warp], slice.lane);
     }
@@ -523,7 +523,7 @@ __device__ __forceinline__ void cuda_walk(vram_search_view<kit_> const& view, si
 
 /** One warp per query past the register ladder's width: the same walk over the arena frontier,
  *  whose budget is the requested expansion itself, ranking everything it kept at the end. */
-template <vram_quads_kit kit_, vram_schedule schedule_, typename sink_, typename rescoring_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void cuda_walk_wide(vram_search_view<kit_> const& view, sink_ const& sink,
                                                rescoring_ const& rescorings) {
     extern __shared__ byte_t dynamic_scratch[];
@@ -541,8 +541,8 @@ __device__ __forceinline__ void cuda_walk_wide(vram_search_view<kit_> const& vie
         if (query_index >= view.queries_count) return;
         vram_visited_set<cuda_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                                view.epoch_base + query_index + 1};
-        vram_walk_one<kit_, 4u, schedule_::fragments_per_load_k>(view, sink, rescorings, query_index, query_span,
-                                                                 visited, frontier, gathered[slice.warp], slice.lane);
+        vram_walk_one<kit_, schedule_, 4u>(view, sink, rescorings, query_index, query_span, visited, frontier,
+                                           gathered[slice.warp], slice.lane);
     }
 }
 
@@ -840,7 +840,7 @@ __device__ __forceinline__ vram_ranking_view cuda_view(cuda_ranking_t const& ran
 #pragma region Kernels
 
 /** Runs one walk family on its rung, the arena frontier at slot zero. */
-template <vram_quads_kit kit_, vram_schedule schedule_, u32_t slots_, typename sink_, typename rescoring_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t slots_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void cuda_walk_rung(vram_search_view<kit_> const& view, sink_ const& sink,
                                                rescoring_ const& rescorings) {
     if constexpr (slots_ == 0) cuda_walk_wide<kit_, schedule_>(view, sink, rescorings);
@@ -864,7 +864,7 @@ constexpr u32_t cuda_resident_blocks(cuda_kernel_t kernel, u32_t slots) noexcept
 }
 
 /** Every NVIDIA kernel: @p kernel_ picks the body, @p capabilities_ and @p dtype_ the kit,
- *  @p capabilities_ alone the staging schedule, @p slots_ the rung, and @p lookup_ an attend's
+ *  @p capabilities_ alone the schedule, @p slots_ the rung, and @p lookup_ an attend's
  *  value lookup through @ref cuda_value_lookup_of. */
 template <u32_t kernel_, u32_t capabilities_, u32_t dtype_, u32_t slots_, u32_t lookup_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32,

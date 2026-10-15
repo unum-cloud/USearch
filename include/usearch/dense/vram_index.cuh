@@ -7,11 +7,12 @@
  *      sharded search's rankings.
  *
  *  Every body here is templated on a quads kit, which names its vendor's warp policy as
- *  @c kit_::warp_t; see @c vram_queue.cuh for what a warp policy provides. The builders also take
- *  a staging schedule, which moves candidate rows into the warp's cache. The host classes, the
- *  kernels that launch these bodies, the launch bounds, the attention fold and the reachability
- *  audits stay in each vendor's own @c vram_<vendor>_index file, beside the kits in
- *  @c vram_<vendor>_metric - the split @c utilities/vram_device.hpp keeps beside its vendor twins.
+ *  @c kit_::warp_t; see @c vram_queue.cuh for what a warp policy provides. Walks and builders also
+ *  take a schedule, which scores a walk's batch and moves candidate rows into the warp's cache. The
+ *  host classes, the kernels that launch these bodies, the launch bounds, the attention fold and
+ *  the reachability audits stay in each vendor's own @c vram_<vendor>_index file, beside the kits
+ *  in @c vram_<vendor>_metric - the split @c utilities/vram_device.hpp keeps beside its vendor
+ *  twins.
  */
 #pragma once
 
@@ -45,19 +46,6 @@ concept vram_quads_kit = requires(typename kit_::fragment_t fragment, typename k
     { kit_::partials_to_norms(norms_accumulator) } -> std::same_as<typename kit_::norms_t>;
     { kit_::distance(kernel, dot, norms, norms) } -> std::same_as<distance_t>;
     { kit_::convert_to_distance(kernel, ranked) } -> std::same_as<distance_t>;
-};
-
-/** What a vendor's staging schedule binds: how one warp's candidate rows reach its vector cache, in
- *  shared memory or its arena slice, apart from the kit's arithmetic. @c stage_rows queues the rows
- *  an ID span names into the cache's leading rows over @c stages_k stages, and @c await_rows lands
- *  at least that many leading rows for every lane; every staged row lands before the next staging.
- *  A schedule is one warp's state over its @c shared_t in static shared memory, picked by the class
- *  like the kit. */
-template <typename schedule_>
-concept vram_schedule = requires(schedule_& schedule, u32_t rows) {
-    typename schedule_::shared_t;
-    requires std::is_convertible_v<decltype(schedule_::stages_k), u32_t>;
-    schedule.await_rows(rows);
 };
 
 /** Row @p row of a @b [rows,stride] matrix at @p base - the one place a row offset widens past 32
@@ -440,6 +428,27 @@ __device__ __forceinline__ vram_scored_node_t vram_score_batch( //
     return scored;
 }
 
+/** What a vendor's schedule binds for one kit: how a walk scores its gathered batch, and how one
+ *  warp's candidate rows reach its vector cache, in shared memory or its arena slice, apart from
+ *  the kit's arithmetic. @c score_batch lands what @ref vram_score_batch lands for the batch's
+ *  IDs, its load window sized for @c resident_blocks_ blocks per multiprocessor. @c stage_rows
+ *  queues the rows an ID span names into the cache's leading rows over @c stages_k stages, and
+ *  @c await_rows lands at least that many leading rows for every lane; every staged row lands
+ *  before the next staging. A schedule is one warp's state over its @c shared_t in static shared
+ *  memory, picked by the class like the kit. */
+template <typename schedule_, typename kit_>
+concept vram_schedule = requires(schedule_& schedule, u32_t rows, vram_flat_view<kit_> const& storage,
+                                 typename kit_::fragment_t const* query_span, typename kit_::norms_t query_state,
+                                 vram_gathered<kit_>& gathered, u32_t lane) {
+    typename schedule_::shared_t;
+    requires std::is_convertible_v<decltype(schedule_::stages_k), u32_t>;
+    schedule.await_rows(rows);
+    {
+        schedule_::template score_batch<kit_, vram_resident_blocks_per_multiprocessor_k>(
+            storage, query_span, query_state, gathered, rows, lane)
+    } -> std::same_as<vram_scored_node_t>;
+};
+
 /** The plain walk's rescoring: none, so every batch lands as the kit scored it. */
 struct vram_no_rescoring {
 
@@ -497,10 +506,12 @@ struct vram_indexer_rescoring {
     }
 };
 
-/** Scores one gathered batch against the query, lets @p rescoring rewrite the scores, folds it into the pool, and
- *  hands it to @p fold - whose answer says whether the walk goes on. */
-template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k,
-          u32_t fragments_per_load_ = 1, typename frontier_, typename fold_, typename rescoring_ = vram_no_rescoring>
+/** Scores one gathered batch against the query through @p schedule_, lets @p rescoring rewrite
+ *  the scores, folds it into the pool, and hands it to @p fold - whose answer says whether the
+ *  walk goes on. */
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_,
+          u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k, typename frontier_, typename fold_,
+          typename rescoring_ = vram_no_rescoring>
 __device__ __forceinline__ walk_demand_t vram_score_into_frontier( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count,
@@ -516,8 +527,8 @@ __device__ __forceinline__ walk_demand_t vram_score_into_frontier( //
         context.telemetry.local_scored += warp_t::count(local_mask);
         context.telemetry.remote_scored += gathered_count - warp_t::count(local_mask);
     }
-    vram_scored_node_t staged = vram_score_batch<kit_, resident_blocks_, fragments_per_load_>( //
-        storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
+    vram_scored_node_t staged = schedule_::template score_batch<kit_, resident_blocks_>( //
+        storage, query_span, query_state, gathered, gathered_count, lane);
     // Even a call that changes nothing reorders the register-capped wide walk, so the plain walk makes none.
     if constexpr (!std::is_same_v<rescoring_, vram_no_rescoring>)
         staged = rescoring.rescore(storage, gathered, gathered_count, lane, staged);
@@ -583,9 +594,9 @@ __device__ __forceinline__ u32_t vram_sample_landmarks( //
  *  expansion and dropped if still locked then, and no neighbor at or past @p first_invisible_id
  *  followed, since a batch's back-links splice its IDs into visible rows before the host turns its
  *  watermark. */
-template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k,
-          u32_t fragments_per_load_ = 1, typename frontier_, typename fold_ = dummy_fold_t,
-          typename rescoring_ = vram_no_rescoring>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_,
+          u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k, typename frontier_,
+          typename fold_ = dummy_fold_t, typename rescoring_ = vram_no_rescoring>
 __device__ __forceinline__ void vram_search_ahead( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, node_id_t sampling_first, node_id_t sampling_bound,
@@ -608,7 +619,7 @@ __device__ __forceinline__ void vram_search_ahead( //
             u32_t const gathered_count = vram_sample_landmarks<kit_>( //
                 storage, sampling_first, sampling_bound, visited, context.random_generator, gathered.ids, lane);
             if (!gathered_count) break; // Every published row of the range is already visited.
-            if (vram_score_into_frontier<kit_, resident_blocks_, fragments_per_load_>( //
+            if (vram_score_into_frontier<kit_, schedule_, resident_blocks_>( //
                     storage, query_span, query_state, gathered, gathered_count, context, lane, fold, rescoring) ==
                 walk_demand_t::sated_k)
                 return;
@@ -660,7 +671,7 @@ __device__ __forceinline__ void vram_search_ahead( //
             if (fresh) gathered.ids[ordinal] = neighbor_id;
             warp_t::sync();
             u32_t const gathered_count = warp_t::count(fresh_mask);
-            if (gathered_count && vram_score_into_frontier<kit_, resident_blocks_, fragments_per_load_>( //
+            if (gathered_count && vram_score_into_frontier<kit_, schedule_, resident_blocks_>( //
                                       storage, query_span, query_state, gathered, gathered_count, context, lane, fold,
                                       rescoring) == walk_demand_t::sated_k)
                 return;
@@ -675,7 +686,7 @@ __device__ __forceinline__ void vram_search_ahead( //
                 if (wide_fresh) gathered.ids[wide_ordinal] = wide_id;
                 warp_t::sync();
                 u32_t const wide_count = warp_t::count(wide_mask);
-                if (wide_count && vram_score_into_frontier<kit_, resident_blocks_, fragments_per_load_>( //
+                if (wide_count && vram_score_into_frontier<kit_, schedule_, resident_blocks_>( //
                                       storage, query_span, query_state, gathered, wide_count, context, lane, fold,
                                       rescoring) == walk_demand_t::sated_k)
                     return;
@@ -687,9 +698,9 @@ __device__ __forceinline__ void vram_search_ahead( //
 
 /** Greedy best-first walk from random published landmarks toward the query: a fresh frontier
  *  handed to @ref vram_search_ahead. */
-template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k,
-          u32_t fragments_per_load_ = 1, typename frontier_, typename fold_ = dummy_fold_t,
-          typename rescoring_ = vram_no_rescoring>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_,
+          u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k, typename frontier_,
+          typename fold_ = dummy_fold_t, typename rescoring_ = vram_no_rescoring>
 __device__ __forceinline__ void vram_search_around( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, node_id_t sampling_bound, node_id_t first_invisible_id,
@@ -697,7 +708,7 @@ __device__ __forceinline__ void vram_search_around( //
     vram_warp_context<frontier_>& context, u32_t lane, fold_&& fold = fold_ {},
     rescoring_ const& rescoring = rescoring_ {}) noexcept {
     context.frontier.reset(lane);
-    vram_search_ahead<kit_, resident_blocks_, fragments_per_load_>( //
+    vram_search_ahead<kit_, schedule_, resident_blocks_>( //
         storage, query_span, query_state, 0, sampling_bound, first_invisible_id, visited, gathered, context, lane, fold,
         rescoring);
 }
@@ -789,7 +800,7 @@ struct vram_selection_scratch_t {
  *      directions; the kept neighbors are ascending by construction.
  *  @return The kept count; @p selection.selected_ids holds that many node IDs on return.
  */
-template <vram_quads_kit kit_, vram_schedule schedule_, typename frontier_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, typename frontier_>
 __device__ __forceinline__ u32_t vram_select_diverse( //
     vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
     typename kit_::norms_t (&cache_norms)[vram_cache_rows_k], u32_t (&candidate_ids)[vram_cache_rows_k],
@@ -881,7 +892,7 @@ __device__ __forceinline__ u32_t vram_select_diverse( //
  *  newcomer under the lock. At most one lock is held at a time, only after this node's own
  *  publication. A held neighbor is never waited on: it is deferred past the others, every round
  *  retries the deferred ones once, and the ones still held after the last round are skipped. */
-template <vram_quads_kit kit_, vram_schedule schedule_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_>
 __device__ __forceinline__ void vram_back_link_neighbors( //
     vram_flat_view<kit_> const& storage, node_id_t new_node_id, typename kit_::norms_t new_norms,
     vram_selection_scratch_t selection, u32_t selected_count, vram_vector_cache<typename kit_::fragment_t> cache,
@@ -1211,7 +1222,7 @@ struct vram_search_view {
 /** Inserts the node identified by @p new_node_id: lands the payload and norms, walks the published
  *  graph, selects diverse neighbors, publishes with one release store, then back-links them - one
  *  warp per node. */
-template <vram_quads_kit kit_, vram_schedule schedule_, typename frontier_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, typename frontier_>
 __device__ __forceinline__ void vram_insert_one( //
     vram_build_view<kit_> const& view, node_id_t new_node_id, vram_visited_set<typename kit_::warp_t>& visited,
     typename kit_::fragment_t* query_span, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
@@ -1241,7 +1252,7 @@ __device__ __forceinline__ void vram_insert_one( //
 
     // Walk the watermark - a virgin index publishes an empty node instead.
     if (new_node_id != 0)
-        vram_search_around<kit_>( //
+        vram_search_around<kit_, schedule_>( //
             storage, query_span, query_state, new_node_id, view.end_id, visited, gathered, context, lane);
     else context.frontier.reset(lane);
 
@@ -1319,7 +1330,7 @@ struct vram_refine_view {
  *  selection lands in the shadow slots. Under an appended part the node first walks across into the
  *  other part from an empty pool, so that part's nearest compete too. Read-only on the live
  *  storage. */
-template <vram_quads_kit kit_, vram_schedule schedule_, typename frontier_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, typename frontier_>
 __device__ __forceinline__ void vram_refine_one( //
     vram_refine_view<kit_> const& view, node_id_t node_id, vram_visited_set<typename kit_::warp_t>& visited,
     typename kit_::fragment_t* query_span, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
@@ -1370,11 +1381,11 @@ __device__ __forceinline__ void vram_refine_one( //
                     warp_t::sync();
                     u32_t const gathered_count = warp_t::count(fresh_mask);
                     if (gathered_count)
-                        vram_score_into_frontier<kit_>( //
+                        vram_score_into_frontier<kit_, schedule_>( //
                             storage, query_span, query_state, gathered, gathered_count, context, lane, dummy_fold_t {});
                 }
         }
-        vram_search_ahead<kit_>( //
+        vram_search_ahead<kit_, schedule_>( //
             storage, query_span, query_state, sampling_first, sampling_bound, view.sampling_bound, visited, gathered,
             context, lane);
     }
@@ -1407,7 +1418,7 @@ __device__ __forceinline__ void vram_for_each_link(u32_t const* neighbors, u32_t
  *  heuristic over the union ascending by distance to the node, backfilled with the nearest pruned
  *  ones. The neighbors land in the live matrix with plain stores, since the pass owns the graph
  *  exclusively. The ascending scores and the kept cache positions lie past the cache's last row. */
-template <vram_quads_kit kit_, vram_schedule schedule_>
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_>
 __device__ __forceinline__ void vram_merge_back_links_one( //
     vram_refine_view<kit_> const& view, u32_t const* bucket_ids, u32_t const* bucket_counts, u32_t bucket_width,
     node_id_t node_id, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
@@ -1616,7 +1627,7 @@ struct vram_multiply_sink {
 /** One query's full walk: stages the query into its shared span, walks the graph under the fold the
  *  sink opens and the query's slice of @p rescorings, and lets the sink close the query. Safe against
  *  concurrent insertions: the walk gates on every slot-0 word and never writes the graph. */
-template <vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_ = 1, typename sink_,
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, typename sink_,
           typename rescoring_, typename frontier_>
 __device__ __forceinline__ void vram_walk_one( //
     vram_search_view<kit_> const& view, sink_ const& sink, rescoring_ const& rescorings, u32_t query_index,
@@ -1642,7 +1653,7 @@ __device__ __forceinline__ void vram_walk_one( //
     context.scratch = reinterpret_cast<byte_t*>(query_span + view.storage.row_fragments);
     typename sink_::fold_t fold = sink.open(query_index, context, lane);
     rescoring_ const rescoring = rescorings.for_query(query_index, context);
-    vram_search_around<kit_, resident_blocks_, fragments_per_load_>( //
+    vram_search_around<kit_, schedule_, resident_blocks_>( //
         view.storage, query_span, query_state, view.sampling_bound, view.sampling_bound, visited, gathered, context,
         lane, fold, rescoring);
     sink.close(fold, context, query_index, lane);

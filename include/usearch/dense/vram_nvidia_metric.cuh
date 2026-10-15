@@ -14,9 +14,10 @@
  *
  *  Kits stay pure arithmetic. How a warp's candidate rows reach shared memory is a separate
  *  @b schedule, picked under the same ceiling: @c cp.async commit groups through Ada, whole-row
- *  Tensor Memory Accelerator copies from Hopper on. The schedule also names how many fragments a
- *  walking lane loads at once: one through Hopper, two from Blackwell on, whose 256-bit loads
- *  serve the random row gathers better.
+ *  Tensor Memory Accelerator copies from Hopper on. The schedule also scores a walk's batch:
+ *  through the kit's @c mma.sync step from registers where the kit has one, and otherwise through
+ *  its scalar dots, a lane loading one fragment at once through Hopper and two from Blackwell on,
+ *  whose 256-bit loads serve the random row gathers better.
  *
  *  Fragments are 16 bytes of scalars held in registers, and metrics with precomputable norms
  *  finalize "through the dot". Row geometry - how many fragments span one vector, how many lanes
@@ -46,6 +47,7 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/dense/types.hpp"
+#include "usearch/dense/vram_index.cuh"
 
 namespace unum::usearch::dense {
 
@@ -255,6 +257,27 @@ __device__ __forceinline__ std::array<f32_t, 8> cuda_weighted_bf16x8_ampere( //
     return sums;
 }
 
+/** One @c mma.sync m16n8k16 step over @c f16 pairs into f32: @p a is a lane's A fragment, @p b
+ *  its B pair, and @p tile its D fragment. */
+__device__ __forceinline__ std::array<f32_t, 4> cuda_mma_f16_ampere(uint4 a, uint2 b,
+                                                                    std::array<f32_t, 4> tile) noexcept {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, " //
+                 "{%0, %1, %2, %3};"
+                 : "+f"(tile[0]), "+f"(tile[1]), "+f"(tile[2]), "+f"(tile[3])
+                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y));
+    return tile;
+}
+
+/** The @c bf16 twin of @ref cuda_mma_f16_ampere. */
+__device__ __forceinline__ std::array<f32_t, 4> cuda_mma_bf16_ampere(uint4 a, uint2 b,
+                                                                     std::array<f32_t, 4> tile) noexcept {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, " //
+                 "{%0, %1, %2, %3};"
+                 : "+f"(tile[0]), "+f"(tile[1]), "+f"(tile[2]), "+f"(tile[3])
+                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y));
+    return tile;
+}
+
 /** f16 kit - the sm_80 floor. */
 struct f16_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
@@ -268,6 +291,10 @@ struct f16_ampere_quads_kit_t {
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return cuda_dot_f16x8_ampere(a, b, sum);
+    }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_f16_ampere(a, b, tile);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return cuda_moments_f16x8_ampere(a, moments);
@@ -302,6 +329,10 @@ struct bf16_ampere_quads_kit_t {
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return cuda_dot_bf16x8_ampere(a, b, sum);
+    }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_bf16_ampere(a, b, tile);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return cuda_moments_bf16x8_ampere(a, moments);
@@ -378,6 +409,10 @@ struct f16_blackwell_quads_kit_t {
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return cuda_dot_f16x8_blackwell(a, b, sum);
     }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_f16_ampere(a, b, tile);
+    }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return cuda_moments_f16x8_ampere(a, moments);
     }
@@ -411,6 +446,10 @@ struct bf16_blackwell_quads_kit_t {
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return cuda_dot_bf16x8_blackwell(a, b, sum);
+    }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_bf16_ampere(a, b, tile);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return cuda_moments_bf16x8_ampere(a, moments);
@@ -500,6 +539,26 @@ __device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_u8x16_ampere( //
     return sums;
 }
 
+/** One @c mma.sync m16n8k32 step over signed bytes into s32, laid out as
+ *  @ref cuda_mma_f16_ampere's. */
+__device__ __forceinline__ std::array<int, 4> cuda_mma_i8_ampere(uint4 a, uint2 b, std::array<int, 4> tile) noexcept {
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, " //
+                 "{%0, %1, %2, %3};"
+                 : "+r"(tile[0]), "+r"(tile[1]), "+r"(tile[2]), "+r"(tile[3])
+                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y));
+    return tile;
+}
+
+/** The unsigned twin of @ref cuda_mma_i8_ampere, wrapping like the @c dp4a sums. */
+__device__ __forceinline__ std::array<u32_t, 4> cuda_mma_u8_ampere(uint4 a, uint2 b,
+                                                                   std::array<u32_t, 4> tile) noexcept {
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, " //
+                 "{%0, %1, %2, %3};"
+                 : "+r"(tile[0]), "+r"(tile[1]), "+r"(tile[2]), "+r"(tile[3])
+                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y));
+    return tile;
+}
+
 /** i8 kit - the sm_80 floor. */
 struct i8_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
@@ -513,6 +572,10 @@ struct i8_ampere_quads_kit_t {
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return cuda_dot_i8x16_ampere(a, b, sum);
+    }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_i8_ampere(a, b, tile);
     }
     static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
         return cuda_moments_i8x16_ampere(a, moments);
@@ -547,6 +610,10 @@ struct u8_ampere_quads_kit_t {
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return cuda_dot_u8x16_ampere(a, b, sum);
+    }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_u8_ampere(a, b, tile);
     }
     static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
         return cuda_moments_u8x16_ampere(a, moments);
@@ -839,6 +906,27 @@ struct e5m2_ada_widening_t {
     }
 };
 
+/** One @c mma.sync m16n8k32 step over @c e5m2 bytes into f32, laid out as
+ *  @ref cuda_mma_f16_ampere's. */
+__device__ __forceinline__ std::array<f32_t, 4> cuda_mma_e5m2_ada(uint4 a, uint2 b,
+                                                                  std::array<f32_t, 4> tile) noexcept {
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, " //
+                 "{%0, %1, %2, %3};"
+                 : "+f"(tile[0]), "+f"(tile[1]), "+f"(tile[2]), "+f"(tile[3])
+                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y));
+    return tile;
+}
+
+/** The @c e4m3 twin of @ref cuda_mma_e5m2_ada. */
+__device__ __forceinline__ std::array<f32_t, 4> cuda_mma_e4m3_ada(uint4 a, uint2 b,
+                                                                  std::array<f32_t, 4> tile) noexcept {
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, " //
+                 "{%0, %1, %2, %3};"
+                 : "+f"(tile[0]), "+f"(tile[1]), "+f"(tile[2]), "+f"(tile[3])
+                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y));
+    return tile;
+}
+
 /** e5m2 kit - Ada, widening through the conversion. */
 struct e5m2_ada_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
@@ -852,6 +940,10 @@ struct e5m2_ada_quads_kit_t {
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return cuda_dot_minifloats_ampere<e5m2_ada_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_e5m2_ada(a, b, tile);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return cuda_moments_minifloats_ampere<e5m2_ada_widening_t>(a, moments);
@@ -886,6 +978,10 @@ struct e4m3_ada_quads_kit_t {
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return cuda_dot_minifloats_ampere<e4m3_ada_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_e4m3_ada(a, b, tile);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return cuda_moments_minifloats_ampere<e4m3_ada_widening_t>(a, moments);
@@ -963,6 +1059,10 @@ struct e5m2_blackwell_quads_kit_t {
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return cuda_dot_minifloats_blackwell<e5m2_ada_widening_t>(a, b, sum);
     }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_e5m2_ada(a, b, tile);
+    }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return cuda_moments_minifloats_ampere<e5m2_ada_widening_t>(a, moments);
     }
@@ -996,6 +1096,10 @@ struct e4m3_blackwell_quads_kit_t {
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
         return cuda_dot_minifloats_blackwell<e4m3_ada_widening_t>(a, b, sum);
+    }
+    static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
+                                                                           std::array<dot_t, 4> tile) noexcept {
+        return cuda_mma_e4m3_ada(a, b, tile);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return cuda_moments_minifloats_ampere<e4m3_ada_widening_t>(a, moments);
@@ -1343,6 +1447,144 @@ __device__ __forceinline__ void cuda_stage_rows_through_registers(storage_ const
 }
 
 /**
+ *  @brief Scores a walk's batch through the kit's @c mma.sync step, fed straight from its loads.
+ *
+ *  A lane's 16-byte chunk is one tile's A fragment as loaded: words 0 and 2 land in row g, words 1
+ *  and 3 in row g + 8, and the B columns carry the query's matching words by column parity, so the
+ *  query takes the rows' permutation of the dimensions and row g's candidate scores D[g][even] +
+ *  D[g + 8][odd]. Each lane loads 32 bytes of a row a step, so @p lanes_per_row_ lanes make one
+ *  request of 32 × @p lanes_per_row_ bytes per row: under 4, every group of 4 lanes owns one
+ *  candidate; under 8, a candidate's pieces split over two groups and its word halves over their D
+ *  entries, which a reduce-scatter folds once per pass of 16 candidates. Rows past a short batch
+ *  re-read its first row, and rows split into whole 32-byte pieces.
+ */
+template <vram_quads_kit kit_, u32_t lanes_per_row_>
+__device__ __forceinline__ vram_scored_node_t cuda_score_tiles( //
+    vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+    typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+
+    using fragment_t = typename kit_::fragment_t;
+    using dot_t = typename kit_::dot_t;
+    using tile_t = std::array<dot_t, 4>;
+    // Aligned to its own size, so the compiler issues each lane's piece as one request.
+    struct alignas(2 * sizeof(fragment_t)) piece_t {
+        fragment_t low, high;
+    };
+    constexpr u32_t rows_per_load_k = cuda_warp_t::width_k / lanes_per_row_;
+    // A pass keeps four pieces in flight per lane, one per tile, the window the scalar batch keeps.
+    constexpr u32_t passes_k = lanes_per_row_ / 4, rows_per_pass_k = 4 * rows_per_load_k;
+    u32_t const piece = lane % lanes_per_row_, slot = lane / lanes_per_row_;
+    u32_t const row_pieces = storage.row_fragments / 2;
+    bool const odd_column = slot & 1;
+    bool const live = lane < gathered_count;
+    typename kit_::norms_t const target_state = live ? storage.norm_for(gathered.ids[lane]) : typename kit_::norms_t {};
+
+    dot_t pass_dots[passes_k] = {};
+#pragma unroll
+    for (u32_t pass = 0; pass != passes_k; ++pass) {
+        // Warp-uniform, as most of a walk's batches fill only the first pass.
+        if (pass * rows_per_pass_k >= gathered_count) break;
+        piece_t const* rows[4];
+#pragma unroll
+        for (u32_t load = 0; load != 4; ++load) {
+            u32_t const row = (4 * pass + load) * rows_per_load_k + slot;
+            rows[load] = reinterpret_cast<piece_t const*>(
+                storage.vector_span_for(gathered.ids[row < gathered_count ? row : 0]));
+        }
+        tile_t tiles[4] = {};
+#pragma unroll 1
+        for (u32_t first_piece = 0; first_piece < row_pieces; first_piece += lanes_per_row_) {
+            // A lane past the row's end re-reads the row's first piece against a zero query.
+            u32_t const index = first_piece + piece;
+            bool const in_row = index < row_pieces;
+            u32_t const loaded_index = in_row ? index : 0;
+            fragment_t const query_low = in_row ? query_span[2 * index] : fragment_t {};
+            fragment_t const query_high = in_row ? query_span[2 * index + 1] : fragment_t {};
+            uint2 const pairs_low = odd_column ? uint2 {query_low.y, query_low.w} : uint2 {query_low.x, query_low.z};
+            uint2 const pairs_high = odd_column ? uint2 {query_high.y, query_high.w}
+                                                : uint2 {query_high.x, query_high.z};
+            piece_t loaded[4];
+#pragma unroll
+            for (u32_t load = 0; load != 4; ++load) loaded[load] = rows[load][loaded_index];
+#pragma unroll
+            for (u32_t load = 0; load != 4; ++load) {
+                tiles[load] = kit_::accumulate_tile(loaded[load].low, pairs_low, tiles[load]);
+                tiles[load] = kit_::accumulate_tile(loaded[load].high, pairs_high, tiles[load]);
+            }
+        }
+        if constexpr (lanes_per_row_ == 4) {
+            // Lane (g, c) holds candidates 8t + g and keeps candidate 8c + g.
+            dot_t sums[4];
+#pragma unroll
+            for (u32_t load = 0; load != 4; ++load) sums[load] = tiles[load][0] + tiles[load][3];
+            dot_t const low = lane & 1 ? sums[1] : sums[0], high = lane & 1 ? sums[3] : sums[2];
+            pass_dots[pass] = lane & 2 ? high : low;
+        }
+        else {
+            // One of a lane's D entries meets its rows' piece half and word half with the matching
+            // query column.
+            dot_t partials[4];
+#pragma unroll
+            for (u32_t load = 0; load != 4; ++load) {
+                dot_t const row_low = piece >= 4 ? tiles[load][1] : tiles[load][0];
+                dot_t const row_high = piece >= 4 ? tiles[load][3] : tiles[load][2];
+                partials[load] = lane & 1 ? row_high : row_low;
+            }
+            bool const odd = lane & 1, upper = lane & 4;
+            dot_t halves[2];
+#pragma unroll
+            for (u32_t half = 0; half != 2; ++half)
+                halves[half] = (odd ? partials[half + 2] : partials[half]) +
+                               cuda_warp_t::shuffle_xor(odd ? partials[half] : partials[half + 2], 1u);
+            pass_dots[pass] = (upper ? halves[1] : halves[0]) +
+                              cuda_warp_t::shuffle_xor(upper ? halves[0] : halves[1], 4u);
+        }
+    }
+    // Lane l of the 4-lane form holds candidate 8 (l % 4) + l / 4; of the 8-lane form, candidate
+    // 16p + 4i + l / 8 for p = (l >> 1) & 1 and i = ((l >> 2) & 1) + 2 (l & 1).
+    dot_t const held = lane & 2 ? pass_dots[passes_k - 1] : pass_dots[0];
+    u32_t const holder = lanes_per_row_ == 4
+                             ? 4 * (lane & 7) + (lane >> 3)
+                             : 8 * (lane & 3) + 4 * ((lane >> 2) & 1) + 2 * ((lane >> 4) & 1) + ((lane >> 3) & 1);
+    dot_t const dot = cuda_warp_t::shuffle(held, holder);
+    cuda_warp_t::sync();
+    if (!live) return vram_scored_node_t::sentinel();
+    gathered.dots[lane] = dot;
+    vram_scored_node_t const scored = vram_scored_node_t::make(
+        kit_::distance(storage.kernel, dot, query_state, target_state), gathered.ids[lane]);
+    gathered.scored[lane] = scored;
+    return scored;
+}
+
+/** A walk's batch under a kit without a tensor-core step: its scalar dots, @p fragments_per_load_
+ *  adjacent fragments a load. */
+template <vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_>
+__device__ __forceinline__ vram_scored_node_t cuda_score_batch( //
+    vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+    typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+    return vram_score_batch<kit_, resident_blocks_, fragments_per_load_>( //
+        storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
+}
+
+/** A walk's batch under a kit with a tensor-core step: tiles of 256-byte requests from 256-byte
+ *  rows up and of 128-byte ones under them, and the scalar dots for rows of an odd fragment count,
+ *  which split into no whole 32-byte pieces. */
+template <vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_>
+    requires requires(typename kit_::fragment_t a, uint2 b, std::array<typename kit_::dot_t, 4> tile) {
+        kit_::accumulate_tile(a, b, tile);
+    }
+__device__ __forceinline__ vram_scored_node_t cuda_score_batch( //
+    vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+    typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+    if (storage.row_fragments % 2)
+        return vram_score_batch<kit_, resident_blocks_, fragments_per_load_>( //
+            storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
+    if (storage.row_fragments >= 16)
+        return cuda_score_tiles<kit_, 8>(storage, query_span, query_state, gathered, gathered_count, lane);
+    return cuda_score_tiles<kit_, 4>(storage, query_span, query_state, gathered, gathered_count, lane);
+}
+
+/**
  *  @brief The Ampere and Ada staging: every lane queues register-free @c cp.async copies of the
  *      fragments it strides over, one commit group per stage, so a consumer walking the rows in
  *      order starts on the first stage while the later ones land.
@@ -1360,6 +1602,15 @@ struct ampere_cp_async_schedule_t {
     u32_t rows_per_stage_ = 0, landed_rows_ = 0;
 
     __device__ __forceinline__ ampere_cp_async_schedule_t(shared_t&, u32_t) noexcept {}
+
+    /** Scores a walk's batch as @ref cuda_score_batch does at this schedule's load width. */
+    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    static __device__ __forceinline__ vram_scored_node_t score_batch( //
+        vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+        typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+        return cuda_score_batch<kit_, resident_blocks_, fragments_per_load_k>( //
+            storage, query_span, query_state, gathered, gathered_count, lane);
+    }
 
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
@@ -1438,6 +1689,15 @@ struct cuda_tma_schedule {
             asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
         }
         __syncwarp();
+    }
+
+    /** Scores a walk's batch as @ref cuda_score_batch does at this schedule's load width. */
+    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    static __device__ __forceinline__ vram_scored_node_t score_batch( //
+        vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+        typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+        return cuda_score_batch<kit_, resident_blocks_, fragments_per_load_k>( //
+            storage, query_span, query_state, gathered, gathered_count, lane);
     }
 
     template <typename storage_, typename cache_>
