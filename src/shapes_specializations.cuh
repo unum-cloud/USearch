@@ -95,6 +95,7 @@ struct shapes_ram_variant {
     using value_t = typename index_t::value_t;
     using codec_t = us::shapes::codec<kit_t>;
     using metric_t = us::shapes::shapes_metric<kit_t, thread_allocator_t>;
+    using refine_plan_t = typename index_t::refine_plan_t;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
 
@@ -117,6 +118,20 @@ struct shapes_ram_variant {
                                            executor_t& executor) noexcept;
     expected<traversal_telemetry_t> search(usearch_shapes_search_t const& arguments, matches_landing_t& landing,
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
+
+    /** Opens a refinement once @p donors land, its walks as wide as @p expansion or twice the
+     *  connectivity, as an insertion's. */
+    expected<refine_plan_t> plan_refine(std::span<index_t*> donors, std::size_t expansion) noexcept {
+        typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
+        return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion, 0});
+    }
+    status_t refine(refine_plan_t& plan, refine_cursor_t& cursor, progress_ticks_t& ticks,
+                    executor_t& executor) noexcept;
+
+    /** Adds the points of a landed @p donor, whose rows this index now holds. */
+    void absorbed(shapes_ram_variant const& donor) noexcept {
+        standard_atomic_ref<std::size_t>(total_points).fetch_add(donor.total_points, std::memory_order_relaxed);
+    }
 
     /** Writes the @p entries points of one stored value into @p output in @p dtype, through
      *  @p scratch when the dtype is not the stored one. */
@@ -194,6 +209,14 @@ expected<traversal_telemetry_t> shapes_ram_variant<scalar_type_, cpu_class_>::se
     return search_entries(index, arguments.count, arguments.wanted, geometry.connectivity, arguments.expansion_factor,
                           arguments.predicate, shapes_metric_factory<metric_t>(geometry.metric), query_of, landing,
                           ticks, executor);
+}
+
+template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+status_t shapes_ram_variant<scalar_type_, cpu_class_>::refine(refine_plan_t& plan, refine_cursor_t& cursor,
+                                                              progress_ticks_t& ticks, executor_t& executor) noexcept {
+    return drive_refinement<index_t>(plan, cursor, shapes_metric_factory<metric_t>(geometry.metric),
+                                     basic::keep_diverse_t {geometry.connectivity}, geometry.connectivity, ticks,
+                                     executor);
 }
 
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>

@@ -28,9 +28,11 @@
 #include <algorithm> // `std::min`, `std::max`
 #include <array>     // `std::array`
 #include <limits>    // `std::numeric_limits`
+#include <memory>    // `std::unique_ptr` - a finished refinement's handle
 #include <numbers>   // `std::numbers::pi`
 #include <optional>  // `std::optional`
 #include <span>      // `std::span`
+#include <utility>   // `std::exchange` - a landed donor's slot
 #include <vector>    // `std::vector`
 
 #include "usearch/types.h"
@@ -478,10 +480,13 @@ void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
     // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
-    // Cancelling is not an error here, the header having made a stopped sweep merely less improved.
-    for (std::size_t row = 0; row != rows; ++row)
-        if (!keep_going(arguments->progress, row + 1, rows)) break;
+    bool cancelled = false;
+    for (std::size_t row = 0; row != rows && !cancelled; ++row)
+        cancelled = !keep_going(arguments->progress, row + 1, rows);
     if (arguments->stats) arguments->stats->visited_members = rows;
+    // An exact scan reaches every entry it holds in one level.
+    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
 void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
@@ -604,33 +609,124 @@ void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
 void usearch_geospatial_absorb(usearch_geospatial_absorb_t* arguments) {
     if (through_executor<usearch_geospatial_absorb>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    if (arguments->changed) *arguments->changed = 0;
     usearch_geospatial_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
 
     std::size_t const donors_count = arguments->count;
     usearch_geospatial_index_t* const donors = arguments->donors;
-    usearch_progress_t const progress = arguments->progress;
-    std::size_t absorbed = 0;
     bool accommodated = true;
-    while (accommodated && absorbed != donors_count) {
-        usearch_geospatial_index_handle_t& donor = *donors[absorbed];
-        std::unique_lock writers(index.mutex);
+    std::unique_lock writers(index.mutex);
+    // Each donor lands whole and is consumed at once, its slot nulled, so a failure leaves it and
+    // every later one live handles the caller still owns and must free.
+    for (std::size_t position = 0; accommodated && position != donors_count; ++position) {
+        usearch_geospatial_index_handle_t& donor = *donors[position];
         accommodated = index.accommodate(index.entries.size() + donor.entries.size());
         if (!accommodated) break;
         for (geospatial_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
-        ++absorbed;
-        if (!keep_going(progress, absorbed, donors_count)) break;
-    }
-    // Only an absorbed donor is consumed, and its slot is nulled as it goes, so a stopped absorb
-    // leaves the rest live handles the caller still owns and must free.
-    for (std::size_t position = 0; position != absorbed; ++position) {
-        delete donors[position];
-        donors[position] = nullptr;
+        delete std::exchange(donors[position], nullptr);
     }
     if (reject_if(!accommodated, usearch_status_out_of_memory_k, "The donor's entries could not be accommodated",
                   outcome))
         return;
-    reject_cancelled(absorbed, donors_count, outcome);
+    // An exact scan keeps no edges, so the closing refine re-selects nothing; a cancel stops only
+    // it.
+    std::size_t const rows = index.entries.size();
+    bool cancelled = false;
+    for (std::size_t row = 0; row != rows && !cancelled; ++row)
+        cancelled = !keep_going(arguments->progress, row + 1, rows);
+    if (arguments->stats) arguments->stats->visited_members = rows;
+    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
+}
+
+/** The stand-in's refinement: the donors it still lands, and how far its sweep got. It closes
+ *  nothing, so insertions and saves meanwhile proceed. */
+struct usearch_geospatial_refinement_handle_t {
+
+    /** The handle the refinement was opened on, only ever compared with the one each call
+     *  passes. */
+    usearch_geospatial_index_handle_t const* opened_on;
+
+    /** The caller's donor slots, each nulled once landed. */
+    usearch_geospatial_index_t* donors;
+    std::size_t count;
+
+    /** Donors landed so far, and entries the sweep visited so far. */
+    std::size_t landed;
+    std::size_t swept;
+};
+
+void usearch_geospatial_refinement_init(usearch_geospatial_refinement_init_t* arguments) {
+    if (through_executor<usearch_geospatial_refinement_init>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->refinement = nullptr;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    if (reject_read_only(index, outcome)) return;
+    if (reject_if(arguments->count && !arguments->donors, usearch_status_invalid_argument_k,
+                  "The donors must name handles", outcome))
+        return;
+    for (std::size_t position = 0; position != arguments->count; ++position) {
+        if (reject_if(!arguments->donors[position], usearch_status_invalid_argument_k, "A donor must not be null",
+                      outcome) ||
+            reject_if(arguments->donors[position] == arguments->index, usearch_status_config_mismatch_k,
+                      "An index cannot absorb itself", outcome))
+            return;
+    }
+    usearch_geospatial_refinement_t const refinement = new (std::nothrow)
+        usearch_geospatial_refinement_handle_t {&index, arguments->donors, arguments->count, 0, 0};
+    if (reject_if(!refinement, usearch_status_out_of_memory_k, "The refinement could not be allocated", outcome))
+        return;
+    *arguments->refinement = refinement;
+}
+
+void usearch_geospatial_refinement_next(usearch_geospatial_refinement_next_t* arguments) {
+    if (through_executor<usearch_geospatial_refinement_next>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    if (arguments->visited) *arguments->visited = 0;
+    if (arguments->changed) *arguments->changed = 0;
+    usearch_geospatial_refinement_handle_t& refinement = *arguments->refinement;
+    if (reject_if(arguments->index != refinement.opened_on, usearch_status_invalid_argument_k,
+                  "The refinement was opened on another index", outcome))
+        return;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    std::unique_lock writers(index.mutex);
+    for (; refinement.landed != refinement.count; ++refinement.landed) {
+        usearch_geospatial_index_handle_t& donor = *refinement.donors[refinement.landed];
+        if (reject_if(!index.accommodate(index.entries.size() + donor.entries.size()), usearch_status_out_of_memory_k,
+                      "The donor's entries could not be accommodated", outcome))
+            return;
+        for (geospatial_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
+        delete std::exchange(refinement.donors[refinement.landed], nullptr);
+    }
+    // Each call continues the sweep where the last one stopped.
+    std::size_t const rows = index.entries.size();
+    bool cancelled = false;
+    while (refinement.swept < rows && !cancelled)
+        cancelled = !keep_going(arguments->progress, ++refinement.swept, rows);
+    // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
+    if (arguments->visited) *arguments->visited = refinement.swept;
+    if (arguments->stats) arguments->stats->visited_members = refinement.swept;
+    reject_if(cancelled && refinement.swept != rows, usearch_status_cancelled_k,
+              "The caller's handler stopped the sweep", outcome);
+}
+
+void usearch_geospatial_refinement_finish(usearch_geospatial_refinement_finish_t* arguments) {
+    if (through_executor<usearch_geospatial_refinement_finish>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    if (arguments->changed) *arguments->changed = 0;
+    std::unique_ptr<usearch_geospatial_refinement_handle_t> const refinement {arguments->refinement};
+    if (reject_if(arguments->index != refinement->opened_on, usearch_status_invalid_argument_k,
+                  "The refinement was opened on another index", outcome))
+        return;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    std::shared_lock readers(index.mutex);
+    std::size_t const rows = index.entries.size();
+    if (arguments->stats) arguments->stats->visited_members = rows;
+    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
 }
 
 void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments) {

@@ -188,6 +188,17 @@ struct sequence_traits_t {
         return true;
     }
 
+    /** Whether a donor of @p donor geometry lands in an index of @p index geometry: the same kind,
+     *  window widths and connectivity. */
+    static bool matches(geometry_t const& index, geometry_t const& donor) noexcept {
+        if (index.metric != donor.metric || index.connectivity != donor.connectivity ||
+            index.window_widths.size() != donor.window_widths.size())
+            return false;
+        for (std::size_t window = 0; window != index.window_widths.size(); ++window)
+            if (index.window_widths[window] != donor.window_widths[window]) return false;
+        return true;
+    }
+
     /** Moves @p geometry into @p arm, a zero connectivity taking the default. */
     template <typename arm_type_, typename arguments_type_>
     static bool freeze(arm_type_& arm, geometry_t& geometry, arguments_type_ const&, usearch_outcome_t*) noexcept {
@@ -271,6 +282,8 @@ struct usearch_sequence_index_handle_t : basic_handle<sequence_variant_t, sequen
 struct usearch_sequence_cursor_handle_t
     : basic_cursor<usearch_sequence_index_handle_t, ram_cursor_of<sequence_ram_variant<cpu_class_t::serial_k>>> {};
 
+struct usearch_sequence_refinement_handle_t : basic_refinement<usearch_sequence_index_handle_t> {};
+
 #pragma endregion Handles
 
 extern "C" {
@@ -303,7 +316,7 @@ USEARCH_EXPORT void usearch_sequence_insert(usearch_sequence_insert_t* arguments
     basic_insert<usearch_sequence_insert>(arguments);
 }
 USEARCH_EXPORT void usearch_sequence_refine(usearch_sequence_refine_t* arguments) {
-    basic_unserved<usearch_sequence_refine>(arguments);
+    basic_refine<usearch_sequence_refine>(arguments);
 }
 USEARCH_EXPORT void usearch_sequence_search(usearch_sequence_search_t* arguments) {
     basic_search<usearch_sequence_search>(arguments);
@@ -322,7 +335,16 @@ USEARCH_EXPORT void usearch_sequence_sample(usearch_sequence_sample_t* arguments
     basic_unserved<usearch_sequence_sample>(arguments);
 }
 USEARCH_EXPORT void usearch_sequence_absorb(usearch_sequence_absorb_t* arguments) {
-    basic_unserved<usearch_sequence_absorb>(arguments);
+    basic_absorb<usearch_sequence_absorb>(arguments);
+}
+USEARCH_EXPORT void usearch_sequence_refinement_init(usearch_sequence_refinement_init_t* arguments) {
+    basic_refinement_init<usearch_sequence_refinement_init>(arguments);
+}
+USEARCH_EXPORT void usearch_sequence_refinement_next(usearch_sequence_refinement_next_t* arguments) {
+    basic_refinement_next<usearch_sequence_refinement_next>(arguments);
+}
+USEARCH_EXPORT void usearch_sequence_refinement_finish(usearch_sequence_refinement_finish_t* arguments) {
+    basic_refinement_finish<usearch_sequence_refinement_finish>(arguments);
 }
 USEARCH_EXPORT void usearch_sequence_save(usearch_sequence_save_t* arguments) {
     basic_save<usearch_sequence_save>(arguments);

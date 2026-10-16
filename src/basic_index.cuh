@@ -16,10 +16,13 @@
 
 #include <array>       // `std::array` - the one key a count scans the key columns for
 #include <atomic>      // `std::atomic_flag` - a cursor's one pull at a time
+#include <memory>      // `std::unique_ptr` - a finished refinement's handle
 #include <new>         // `std::nothrow`
+#include <optional>    // `std::optional` - a refinement opened or refused
 #include <span>        // `std::span` - the listed devices, a view's paths and rows
 #include <string_view> // `std::string_view` - checkpoint paths
 #include <type_traits> // `std::type_identity`, `std::remove_pointer_t`
+#include <utility>     // `std::exchange` - a landed donor's slot
 #include <variant>     // `std::variant`, `std::visit`
 
 #include "basic_specializations.cuh"
@@ -322,6 +325,256 @@ void basic_unserved(arguments_type_* arguments) noexcept {
 }
 
 #pragma endregion Lifetime
+
+#pragma region Refinement
+
+/** The plan of a RAM arm with the donors it lands: their arms, whose handles a call frees once
+ *  landed, their indexes, which the plan nulls as it lands them, and where the calls stand. Every
+ *  other arm refines nothing. */
+template <typename arm_type_>
+struct basic_refinement_of {
+    using type = std::monostate;
+};
+template <typename arm_type_>
+    requires is_ram_index<arm_type_>
+struct basic_refinement_of<arm_type_> {
+    struct type {
+        growing_buffer<arm_type_*, forkunion_allocator_t> donors;
+        growing_buffer<typename arm_type_::index_t*, forkunion_allocator_t> landing;
+        typename arm_type_::refine_plan_t plan;
+        refine_cursor_t cursor {};
+    };
+};
+
+/** The refinements of every arm of @p variant_type_, as one variant of their own. */
+template <typename variant_type_>
+struct basic_refinements_of;
+template <typename... arm_types_>
+struct basic_refinements_of<std::variant<arm_types_...>> {
+    using type = std::variant<std::monostate, typename basic_refinement_of<arm_types_>::type...>;
+};
+
+/** What a modality's refinement handle owns: one RAM arm's plan, which keeps its index closed until
+ *  it dies, and the caller's donor slots it nulls. */
+template <typename handle_type_>
+struct basic_refinement {
+    typename basic_refinements_of<typename handle_type_::variant_t>::type refining;
+
+    /** The handle and executor the refinement was opened with, only ever compared with the ones
+     *  each call passes. */
+    handle_type_ const* opened_on = nullptr;
+    usearch_executor_t opened_with = nullptr;
+
+    /** The caller's donor array, @c count slots. */
+    handle_type_** donors = nullptr;
+    std::size_t count = 0;
+};
+
+/** Opens @p arm 's refinement of @p index after the @p count @p donors land, each checked against
+ *  the arm's type and geometry once no deferred call names it; empty once @p outcome records why
+ *  not. */
+template <typename handle_type_, typename arm_type_>
+std::optional<typename basic_refinement_of<arm_type_>::type> basic_open_refinement(
+    handle_type_ const* index, arm_type_& arm, handle_type_** donors, std::size_t count, std::size_t expansion,
+    usearch_outcome_t* outcome) noexcept {
+    using traits_t = typename handle_type_::traits_t;
+    using refining_t = typename basic_refinement_of<arm_type_>::type;
+    forkunion_allocator_t const allocator {no_memory_domain_k};
+    decltype(refining_t::donors) typed_donors {allocator};
+    decltype(refining_t::landing) landing {allocator};
+    if (failed(typed_donors.reserve_exactly(count)) || failed(landing.reserve_exactly(count)))
+        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the donors"), std::nullopt;
+    for (std::size_t position = 0; position != count; ++position) {
+        handle_type_* const donor = donors[position];
+        if (!donor)
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "A donor must not be null"),
+                   std::nullopt;
+        if (donor == index)
+            return propagate_error(usearch_status_config_mismatch_k, outcome, "An index cannot absorb itself"),
+                   std::nullopt;
+        arm_type_* const typed = std::get_if<arm_type_>(&donor->variants);
+        if (!typed || !traits_t::matches(arm.geometry, typed->geometry))
+            return propagate_error(usearch_status_config_mismatch_k, outcome,
+                                   "A donor must share the index's residency, class and geometry"),
+                   std::nullopt;
+        finish_calls_using(donor);
+        typed_donors.push_back_reserved(typed);
+        landing.push_back_reserved(&typed->index);
+    }
+    // The plan borrows the landing slots, whose storage moves along with the buffer.
+    auto [plan, status] = arm.plan_refine(to_writable_span(landing), expansion);
+    if (failed(status)) return propagate_error(status, outcome), std::nullopt;
+    return refining_t {std::move(typed_donors), std::move(landing), std::move(plan)};
+}
+
+/** Frees the handles of the donors @p refining landed, folding what their arms count into @p arm
+ *  first, and nulls the caller's slots. */
+template <typename handle_type_, typename arm_type_, typename refining_type_>
+void basic_free_landed(arm_type_& arm, refining_type_& refining, handle_type_** donors) noexcept {
+    for (std::size_t position = 0; position != refining.landing.size(); ++position) {
+        if (refining.landing[position] || !donors[position]) continue;
+        if constexpr (requires { arm.absorbed(*refining.donors[position]); }) arm.absorbed(*refining.donors[position]);
+        delete std::exchange(donors[position], nullptr);
+    }
+}
+
+/** Writes what a refinement's @p refined result reports into the outputs @p arguments name. */
+template <typename arguments_type_>
+void basic_report_refined(us::basic::refine_result_t const& refined, arguments_type_ const& arguments) noexcept {
+    accumulate_stats(arguments.stats, refined.telemetry);
+    if (arguments.changed) *arguments.changed = refined.changed_nodes;
+    if constexpr (requires { arguments.reachability; })
+        if (arguments.reachability)
+            *arguments.reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
+                                       refined.health.sweeps};
+    if constexpr (requires { arguments.visited; })
+        if (arguments.visited) *arguments.visited = refined.visited_nodes;
+}
+
+/** Skips the re-selection @p refining left, heals what it strands, and reports; a refinement whose
+ *  donors have not all landed heals nothing and reports zeros. */
+template <typename arm_type_, typename refining_type_, typename arguments_type_>
+status_t basic_finish_refinement(arm_type_& arm, refining_type_& refining, arguments_type_ const& arguments,
+                                 forkunion_executor_t& executor) noexcept {
+    auto& plan = refining.plan;
+    if (plan.landing()) return status_t::success_k;
+    // The re-selection a cancel left is skipped rather than finished.
+    plan.stop();
+    if (plan.reselecting()) refining.cursor.taken = plan.steps().size();
+    progress_ticks_t heal_alone {{}, 0};
+    if (status_t const healed = arm.refine(plan, refining.cursor, heal_alone, executor); failed(healed)) return healed;
+    auto const [refined, status] = plan.finish();
+    if (succeeded(status)) basic_report_refined(refined, arguments);
+    return status;
+}
+
+/** The one-shot over a refinement, for @c refine and @c absorb alike: opens it with the call's
+ *  donors, runs it once under the call's handler, then heals and reports; a cancel still heals and
+ *  answers @c cancelled_k. */
+template <auto verb_, typename arguments_type_>
+void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** donors, std::size_t count) noexcept {
+    if (submitted<verb_>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    if (arguments->stats) *arguments->stats = {};
+    if (count && !donors)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
+    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
+        if (!executor) return;
+        auto refining = basic_open_refinement(arguments->index, arm, donors, count, arguments->expansion_factor,
+                                              outcome);
+        if (!refining) return;
+        progress_ticks_t ticks {arguments->progress, refining->plan.audit.visible};
+        status_t const ran = arm.refine(refining->plan, refining->cursor, ticks, *executor);
+        basic_free_landed(arm, *refining, donors);
+        if (failed(ran) && ran != status_t::cancelled_k) return propagate_error(ran, outcome), void();
+        // A stopped pass still heals, so its report stands beside the cancel.
+        if (status_t const finished = basic_finish_refinement(arm, *refining, *arguments, *executor); failed(finished))
+            return propagate_error(finished, outcome), void();
+        propagate_error(ran, outcome);
+    });
+}
+
+template <auto verb_, typename arguments_type_>
+void basic_refine(arguments_type_* arguments) noexcept {
+    basic_refine_once<verb_>(arguments, nullptr, 0);
+}
+
+template <auto verb_, typename arguments_type_>
+void basic_absorb(arguments_type_* arguments) noexcept {
+    basic_refine_once<verb_>(arguments, arguments->donors, arguments->count);
+}
+
+template <auto verb_, typename arguments_type_>
+void basic_refinement_init(arguments_type_* arguments) noexcept {
+    using refinement_t = std::remove_pointer_t<std::remove_pointer_t<decltype(arguments->refinement)>>;
+    if (submitted<verb_>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    *arguments->refinement = nullptr;
+    if (!arguments->executor)
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "A refinement needs an executor that outlives it"),
+               void();
+    if (arguments->count && !arguments->donors)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
+    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
+        using refining_t = typename basic_refinement_of<arm_type_>::type;
+        usearch_executor_handle_t call_executor;
+        if (!executor_of(arm, arguments->executor, call_executor, outcome)) return;
+        auto refining = basic_open_refinement(arguments->index, arm, arguments->donors, arguments->count,
+                                              arguments->expansion_factor, outcome);
+        if (!refining) return;
+        refinement_t* const refinement = new (std::nothrow) refinement_t {};
+        if (!refinement)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the refinement"),
+                   void();
+        refinement->refining.template emplace<refining_t>(std::move(*refining));
+        refinement->opened_on = arguments->index;
+        refinement->opened_with = arguments->executor;
+        refinement->donors = arguments->donors;
+        refinement->count = arguments->count;
+        *arguments->refinement = refinement;
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
+}
+
+/** Visits the arm the refinement @p arguments name was opened on with its plan, refusing a call
+ *  naming another index or executor; the refinement serves one arm, so any other is refused too. */
+template <typename arguments_type_, typename visitor_type_>
+void visit_refinement(arguments_type_ const& arguments, usearch_outcome_t* outcome, visitor_type_&& visitor) noexcept {
+    auto* const refinement = arguments.refinement;
+    if (!refinement)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement must not be null"), void();
+    if (arguments.index != refinement->opened_on || arguments.executor != refinement->opened_with)
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "The refinement was opened on another index or executor"),
+               void();
+    visit_ram_variant(*arguments.index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
+        auto* const refining = std::get_if<typename basic_refinement_of<arm_type_>::type>(&refinement->refining);
+        if (!refining)
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another arm"),
+                   void();
+        usearch_executor_handle_t call_executor;
+        typename arm_type_::executor_t* const executor = executor_of(arm, arguments.executor, call_executor, outcome);
+        if (!executor) return;
+        visitor(arm, *refining, *executor);
+    });
+}
+
+template <auto verb_, typename arguments_type_>
+void basic_refinement_next(arguments_type_* arguments) noexcept {
+    if (submitted<verb_>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    if (arguments->visited) *arguments->visited = 0;
+    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->stats) *arguments->stats = {};
+    visit_refinement(*arguments, outcome, [&](auto& arm, auto& refining, auto& executor) noexcept {
+        progress_ticks_t ticks {arguments->progress, refining.plan.audit.visible};
+        status_t const ran = arm.refine(refining.plan, refining.cursor, ticks, executor);
+        basic_free_landed(arm, refining, arguments->refinement->donors);
+        // Running totals, so a cancelled or failed call still says how far the pass got.
+        basic_report_refined(refining.plan.finish().value, *arguments);
+        propagate_error(ran, outcome);
+    });
+}
+
+template <auto verb_, typename arguments_type_>
+void basic_refinement_finish(arguments_type_* arguments) noexcept {
+    using refinement_t = std::remove_pointer_t<decltype(arguments->refinement)>;
+    if (submitted<verb_>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    if (arguments->stats) *arguments->stats = {};
+    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->reachability) *arguments->reachability = {};
+    // Freed whatever the call answers; a plan dying unfinished reopens its index.
+    std::unique_ptr<refinement_t> const refinement {arguments->refinement};
+    visit_refinement(*arguments, outcome, [&](auto& arm, auto& refining, auto& executor) noexcept {
+        propagate_error(basic_finish_refinement(arm, refining, *arguments, executor), outcome);
+    });
+}
+
+#pragma endregion Refinement
 
 #pragma region Introspection
 

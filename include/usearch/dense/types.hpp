@@ -95,19 +95,6 @@ struct further_scored_node_t {
     }
 };
 
-/** Outcome of one reachability audit, the same on every dense layer and residency. */
-struct health_result_t {
-
-    /** Nodes published when the audit started - the population it judges; later insertions are not counted. */
-    std::size_t audited_nodes = 0;
-
-    /** Of those, the nodes forward-reachable from the landmark seeds - the searcher's view. */
-    std::size_t reachable_nodes = 0;
-
-    /** Level-synchronous sweeps to convergence - a diameter proxy. */
-    std::size_t sweeps = 0;
-};
-
 /** Outcome of one refinement or heal pass: every count means the same on every dense layer and residency. */
 struct [[nodiscard]] refine_result_t {
 
@@ -145,15 +132,6 @@ struct [[nodiscard]] refine_result_t {
     std::size_t saturated_walks = 0;
 };
 
-/** Folds another shard's audit in: populations add, and the depth is the deepest shard's, since a
- *  searcher waits for the last one. */
-inline health_result_t& operator+=(health_result_t& into, health_result_t const& other) noexcept {
-    into.audited_nodes += other.audited_nodes;
-    into.reachable_nodes += other.reachable_nodes;
-    into.sweeps = max_of(into.sweeps, other.sweeps);
-    return into;
-}
-
 /** Folds another pass or shard in: every count is a population or a spend and adds, and the audits
  *  fold as @c health_result_t does. */
 inline refine_result_t& operator+=(refine_result_t& into, refine_result_t const& other) noexcept {
@@ -169,27 +147,6 @@ inline refine_result_t& operator+=(refine_result_t& into, refine_result_t const&
     into.restarts += other.restarts;
     into.saturated_walks += other.saturated_walks;
     return into;
-}
-
-/** The tail slots of a full row a heal may give up to islands, which spread over them by ID so
- *  islands sharing a row land apart: the farther half, keeping the nearer half that carries search
- *  and slot 0, and nothing in a single-neighbor row. */
-template <typename size_type_>
-constexpr size_type_ heal_spread(size_type_ connectivity) noexcept {
-    return connectivity / 2;
-}
-
-/** The rows that @p node_id walks across first in round @p round of merging @p parts parts, whose
- *  ascending @p part_bases start below @p rows: the neighboring group of `2^round` parts, or none
- *  when no group neighbors its own. */
-template <typename node_id_type_>
-constexpr iota_view<node_id_type_> part_across(node_id_type_ const* part_bases, std::size_t parts, std::size_t round,
-                                               node_id_type_ rows, node_id_type_ node_id) noexcept {
-    std::size_t part = 0;
-    while (part + 1 < parts && part_bases[part + 1] <= node_id) ++part;
-    std::size_t const first = ((part >> round) ^ 1u) << round, bound = first + (std::size_t {1} << round);
-    if (first >= parts) return {};
-    return {part_bases[first], bound < parts ? part_bases[bound] : rows};
 }
 
 /** The online-softmax carry of one attended row, in natural-log units - the C++ face of

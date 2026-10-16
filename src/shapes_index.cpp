@@ -174,6 +174,13 @@ struct shapes_traits_t {
         return true;
     }
 
+    /** Whether a donor of @p donor geometry lands in an index of @p index geometry: the same kind,
+     *  scalar, point count and connectivity. */
+    static bool matches(geometry_t const& index, geometry_t const& donor) noexcept {
+        return index.metric == donor.metric && index.quantization == donor.quantization &&
+               index.points == donor.points && index.connectivity == donor.connectivity;
+    }
+
     /** Copies @p geometry into @p arm, a zero connectivity taking the default. */
     template <typename arm_type_, typename arguments_type_>
     static bool freeze(arm_type_& arm, geometry_t& geometry, arguments_type_ const&, usearch_outcome_t*) noexcept {
@@ -295,6 +302,8 @@ struct usearch_shapes_cursor_handle_t
     : basic_cursor<usearch_shapes_index_handle_t, ram_cursor_of<shapes_ram_variant<nk::f32_t, cpu_class_t::serial_k>>,
                    ram_cursor_of<shapes_ram_variant<nk::f16_t, cpu_class_t::serial_k>>> {};
 
+struct usearch_shapes_refinement_handle_t : basic_refinement<usearch_shapes_index_handle_t> {};
+
 #pragma endregion Handles
 
 extern "C" {
@@ -330,7 +339,7 @@ USEARCH_EXPORT void usearch_shapes_insert(usearch_shapes_insert_t* arguments) {
     basic_insert<usearch_shapes_insert>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_refine(usearch_shapes_refine_t* arguments) {
-    basic_unserved<usearch_shapes_refine>(arguments);
+    basic_refine<usearch_shapes_refine>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_search(usearch_shapes_search_t* arguments) {
     basic_search<usearch_shapes_search>(arguments);
@@ -347,7 +356,16 @@ USEARCH_EXPORT void usearch_shapes_sample(usearch_shapes_sample_t* arguments) {
     basic_unserved<usearch_shapes_sample>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_absorb(usearch_shapes_absorb_t* arguments) {
-    basic_unserved<usearch_shapes_absorb>(arguments);
+    basic_absorb<usearch_shapes_absorb>(arguments);
+}
+USEARCH_EXPORT void usearch_shapes_refinement_init(usearch_shapes_refinement_init_t* arguments) {
+    basic_refinement_init<usearch_shapes_refinement_init>(arguments);
+}
+USEARCH_EXPORT void usearch_shapes_refinement_next(usearch_shapes_refinement_next_t* arguments) {
+    basic_refinement_next<usearch_shapes_refinement_next>(arguments);
+}
+USEARCH_EXPORT void usearch_shapes_refinement_finish(usearch_shapes_refinement_finish_t* arguments) {
+    basic_refinement_finish<usearch_shapes_refinement_finish>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_save(usearch_shapes_save_t* arguments) {
     basic_save<usearch_shapes_save>(arguments);

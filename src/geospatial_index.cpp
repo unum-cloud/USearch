@@ -183,6 +183,12 @@ struct geospatial_traits_t {
         return propagate_error(usearch_status_unsupported_k, outcome, "A GPU geospatial index tests no lines of sight");
     }
 
+    /** Whether a donor of @p donor geometry lands in an index of @p index geometry: the same
+     *  connectivity, since every observation is scored alike. */
+    static bool matches(geometry_t const& index, geometry_t const& donor) noexcept {
+        return index.connectivity == donor.connectivity;
+    }
+
     /** Takes @p geometry into @p arm, a zero connectivity taking the cone winners and long links of
      *  the default, rounded up to the power of two a GPU row takes; a CPU arm adopts the terrain,
      *  and a GPU arm loads its judging kernel. */
@@ -265,6 +271,8 @@ struct usearch_geospatial_index_handle_t : basic_handle<geospatial_variant_t, ge
 struct usearch_geospatial_cursor_handle_t
     : basic_cursor<usearch_geospatial_index_handle_t, ram_cursor_of<geospatial_ram_variant<cpu_class_t::serial_k>>> {};
 
+struct usearch_geospatial_refinement_handle_t : basic_refinement<usearch_geospatial_index_handle_t> {};
+
 #pragma endregion Handles
 
 extern "C" {
@@ -302,7 +310,7 @@ USEARCH_EXPORT void usearch_geospatial_insert(usearch_geospatial_insert_t* argum
     basic_insert<usearch_geospatial_insert>(arguments);
 }
 USEARCH_EXPORT void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
-    basic_unserved<usearch_geospatial_refine>(arguments);
+    basic_refine<usearch_geospatial_refine>(arguments);
 }
 USEARCH_EXPORT void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
     basic_search<usearch_geospatial_search>(arguments);
@@ -361,7 +369,16 @@ USEARCH_EXPORT void usearch_geospatial_sample(usearch_geospatial_sample_t* argum
     basic_unserved<usearch_geospatial_sample>(arguments);
 }
 USEARCH_EXPORT void usearch_geospatial_absorb(usearch_geospatial_absorb_t* arguments) {
-    basic_unserved<usearch_geospatial_absorb>(arguments);
+    basic_absorb<usearch_geospatial_absorb>(arguments);
+}
+USEARCH_EXPORT void usearch_geospatial_refinement_init(usearch_geospatial_refinement_init_t* arguments) {
+    basic_refinement_init<usearch_geospatial_refinement_init>(arguments);
+}
+USEARCH_EXPORT void usearch_geospatial_refinement_next(usearch_geospatial_refinement_next_t* arguments) {
+    basic_refinement_next<usearch_geospatial_refinement_next>(arguments);
+}
+USEARCH_EXPORT void usearch_geospatial_refinement_finish(usearch_geospatial_refinement_finish_t* arguments) {
+    basic_refinement_finish<usearch_geospatial_refinement_finish>(arguments);
 }
 USEARCH_EXPORT void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
     basic_save<usearch_geospatial_save>(arguments);

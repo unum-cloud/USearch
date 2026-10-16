@@ -148,6 +148,7 @@ struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
     using node_id_t = typename index_t::node_id_t;
     using metric_t = us::geospatial::chord_metric<kit_t, thread_allocator_t>;
     using relation_t = us::geospatial::relation_t;
+    using refine_plan_t = typename index_t::refine_plan_t;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
 
     index_t index;
@@ -180,6 +181,25 @@ struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
                                            executor_t& executor) noexcept;
     expected<traversal_telemetry_t> search(usearch_geospatial_search_t const& arguments, matches_landing_t& landing,
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
+
+    /** Opens a refinement once @p donors land, its walks as wide as @p expansion or the 128 exact
+     *  cone winners need, as an insertion's; the cone selector keeps the connectivity, and the long
+     *  links past it give way. */
+    expected<refine_plan_t> plan_refine(std::span<index_t*> donors, std::size_t expansion) noexcept {
+        typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
+        std::size_t const breadth = expansion ? expansion : 128;
+        return index.plan_absorb(donors, planning, us::geospatial::surface_keep_octants_t {geometry.connectivity},
+                                 {breadth, divide_round_up(breadth, widest_row())});
+    }
+    status_t refine(refine_plan_t& plan, refine_cursor_t& cursor, progress_ticks_t& ticks,
+                    executor_t& executor) noexcept;
+
+    /** Widens the largest deviation to a landed @p donor 's, whose rows this index now holds. */
+    void absorbed(geospatial_ram_variant const& donor) noexcept {
+        raise_to(largest_deviation_metres,
+                 standard_atomic_ref<u32_t const>(donor.largest_deviation_metres).load(std::memory_order_relaxed));
+    }
+
     expected<traversal_telemetry_t> within(usearch_geospatial_observation_t const* queries, std::size_t count,
                                            relation_t relation, usearch_geospatial_tolerance_t tolerance,
                                            usearch_predicate_t predicate, growing_arena<forkunion_allocator_t>& staging,
@@ -431,6 +451,14 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::insert(usear
     });
     if (failed(linked)) return {{}, linked};
     return {scratch.telemetry(), status_t::success_k};
+}
+
+template <cpu_class_t cpu_class_>
+status_t geospatial_ram_variant<cpu_class_>::refine(refine_plan_t& plan, refine_cursor_t& cursor,
+                                                    progress_ticks_t& ticks, executor_t& executor) noexcept {
+    return drive_refinement<index_t>(plan, cursor, this->metric_factory_(),
+                                     us::geospatial::surface_keep_octants_t {geometry.connectivity}, widest_row(),
+                                     ticks, executor);
 }
 
 template <cpu_class_t cpu_class_>

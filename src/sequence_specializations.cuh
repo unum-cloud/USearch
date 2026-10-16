@@ -108,6 +108,7 @@ struct sequence_ram_variant {
     using index_t = us::sequence::ram_index<us::utilities::uuid_t, u32_t, dummy_waiter_t, standard_atomic_ref,
                                             forkunion_allocator_t>;
     using value_t = typename index_t::value_t;
+    using refine_plan_t = typename index_t::refine_plan_t;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr sz_capability_t capability_k = stringzilla_capabilities_of(cpu_class_);
 
@@ -121,6 +122,15 @@ struct sequence_ram_variant {
                                            executor_t& executor) noexcept;
     expected<traversal_telemetry_t> search(usearch_sequence_search_t const& arguments, matches_landing_t& landing,
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
+
+    /** Opens a refinement once @p donors land, its walks as wide as @p expansion or twice the
+     *  connectivity, as an insertion's. */
+    expected<refine_plan_t> plan_refine(std::span<index_t*> donors, std::size_t expansion) noexcept {
+        typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
+        return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion, 0});
+    }
+    status_t refine(refine_plan_t& plan, refine_cursor_t& cursor, progress_ticks_t& ticks,
+                    executor_t& executor) noexcept;
     status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
 };
@@ -152,6 +162,16 @@ expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::search(usearch
         return search_entries(index, arguments.count, arguments.wanted, geometry.connectivity,
                               arguments.expansion_factor, arguments.predicate, make_metric, query_of, landing, ticks,
                               executor);
+    };
+    return with_sequence_metric<capability_k>(geometry.metric, to_span(geometry.window_widths), with_metric);
+}
+
+template <cpu_class_t cpu_class_>
+status_t sequence_ram_variant<cpu_class_>::refine(refine_plan_t& plan, refine_cursor_t& cursor, progress_ticks_t& ticks,
+                                                  executor_t& executor) noexcept {
+    auto with_metric = [&](auto make_metric) noexcept {
+        return drive_refinement<index_t>(plan, cursor, make_metric, basic::keep_diverse_t {geometry.connectivity},
+                                         geometry.connectivity, ticks, executor);
     };
     return with_sequence_metric<capability_k>(geometry.metric, to_span(geometry.window_widths), with_metric);
 }

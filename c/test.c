@@ -579,6 +579,157 @@ void test_absorb(size_t const dimensions) {
     printf("Test: Absorb - PASSED\n");
 }
 
+/** Draws @p count random reads of 100 to 199 nucleotides, end to end around @p count + 1
+ *  @p offsets; the bytes must be @b free-ed afterwards. */
+char* create_reads(size_t const count, size_t* offsets) {
+    offsets[0] = 0;
+    for (size_t read = 0; read != count; ++read) offsets[read + 1] = offsets[read] + 100 + (size_t)rand() % 100;
+    char* const bytes = (char*)malloc(offsets[count]);
+    expect(bytes, "Failed to allocate the reads");
+    for (size_t position = 0; position != offsets[count]; ++position) bytes[position] = "ACGT"[rand() % 4];
+    return bytes;
+}
+
+/** The first of four sequence indexes over the quarters of one set of reads absorbs the rest, as
+ *  @c test_absorb drives the dense ones: a one-shot absorb cancelled in its closing refine still
+ *  consumes both its donors and answers @c usearch_status_cancelled_k, and the last donor lands
+ *  through a refinement handle, whose pulls each cancel until the pass ends while the index
+ *  refuses insertions, the running totals only growing. The finished report covers every read, a
+ *  one-shot refine after it reaches every read, and every key resolves to one read. */
+void test_sequence_absorb(void) {
+    printf("Test: Sequence Absorb\n");
+    enum { indexes_count = 4, reads_per_index = 60, reads_count = indexes_count * reads_per_index };
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_ram(&(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &outcome, .threads = 2});
+    expect(!outcome.message, outcome.message);
+    size_t offsets[reads_count + 1];
+    char* const bytes = create_reads(reads_count, offsets);
+    usearch_key_t keys[reads_count];
+    for (size_t read = 0; read != reads_count; ++read) keys[read] = key_of(read);
+    usearch_sequence_index_t indexes[indexes_count];
+    for (size_t which = 0; which != indexes_count; ++which) {
+        usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &indexes[which],
+                                                                  .outcome = &outcome,
+                                                                  .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                                  .connectivity = 8});
+        expect(!outcome.message, outcome.message);
+        // A pool of eight wires a deliberately weak graph, which the refinement then improves.
+        usearch_sequence_insert(
+            &(usearch_sequence_insert_t) {.index = indexes[which],
+                                          .executor = executor,
+                                          .outcome = &outcome,
+                                          .count = reads_per_index,
+                                          .keys = {keys + which * reads_per_index, sizeof(usearch_key_t)},
+                                          .sequences = {bytes, offsets + which * reads_per_index, usearch_scalar_u8_k},
+                                          .expansion_factor = 8});
+        expect(!outcome.message, outcome.message);
+    }
+
+    usearch_sequence_absorb(&(usearch_sequence_absorb_t) {.index = indexes[0],
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = indexes_count - 2,
+                                                          .donors = indexes + 1,
+                                                          .progress = {cancel_progress}});
+    expect_eq(outcome.status, usearch_status_cancelled_k, "A cancel must stop only the closing refine");
+    expect(indexes[1] == NULL && indexes[2] == NULL && indexes[3] != NULL,
+           "Every donor of the call must be consumed and nulled, and no other");
+    usearch_sequence_index_description_t description = {0};
+    usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = indexes[0],
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, 3 * reads_per_index, "The donors must stay absorbed past the cancel");
+
+    usearch_sequence_refinement_t refinement = NULL;
+    usearch_sequence_refinement_init(&(usearch_sequence_refinement_init_t) {.index = indexes[0],
+                                                                            .executor = executor,
+                                                                            .outcome = &outcome,
+                                                                            .refinement = &refinement,
+                                                                            .donors = indexes + 3,
+                                                                            .count = 1});
+    expect(!outcome.message, outcome.message);
+    expect(refinement && indexes[3] != NULL, "A donor lands at the first pull, not at the opening");
+    usearch_key_t const late_key = key_of(reads_count);
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = indexes[0],
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 1,
+                                                          .keys = {&late_key, sizeof(usearch_key_t)},
+                                                          .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+    expect_eq(outcome.status, usearch_status_contended_k, "A refinement must hold its index closed");
+
+    progress_reports_t reports = {0, 0, 0, true};
+    size_t visited = 0, changed = 0, pulls = 0;
+    usearch_traversal_stats_t stats = {0};
+    do {
+        size_t pulled_visited = 0, pulled_changed = 0;
+        usearch_traversal_stats_t pulled_stats = {0};
+        usearch_sequence_refinement_next(
+            &(usearch_sequence_refinement_next_t) {.index = indexes[0],
+                                                   .executor = executor,
+                                                   .outcome = &outcome,
+                                                   .refinement = refinement,
+                                                   .progress = {record_and_cancel, &reports},
+                                                   .visited = &pulled_visited,
+                                                   .changed = &pulled_changed,
+                                                   .stats = &pulled_stats});
+        bool const cancelled = outcome.status == usearch_status_cancelled_k;
+        expect(cancelled || !outcome.message, outcome.message);
+        expect(indexes[3] == NULL, "Every consumed donor slot must be nulled");
+        expect(pulled_changed <= pulled_visited, "No more reads may change than were re-selected");
+        expect(pulled_visited >= visited + cancelled && pulled_changed >= changed &&
+                   pulled_stats.computed_distances >= stats.computed_distances + cancelled,
+               "The running totals must grow from pull to pull");
+        visited = pulled_visited, changed = pulled_changed, stats = pulled_stats;
+        ++pulls;
+        if (!cancelled) break;
+    } while (pulls != reads_count);
+    expect(pulls >= 2 && outcome.status == usearch_status_success_k, "The pass must end over several pulls");
+    expect(reports.calls > 0 && reports.total == reads_count, "The handler must hear the walks over every read");
+    expect(reports.ascending, "Every pull must count on from where the last stopped");
+
+    size_t finished_changed = 0;
+    usearch_reachability_t reported = {0};
+    usearch_sequence_refinement_finish(&(usearch_sequence_refinement_finish_t) {.index = indexes[0],
+                                                                                .executor = executor,
+                                                                                .outcome = &outcome,
+                                                                                .refinement = refinement,
+                                                                                .changed = &finished_changed,
+                                                                                .reachability = &reported});
+    expect(!outcome.message, outcome.message);
+    expect(finished_changed >= changed && finished_changed > 0, "The refinement must report what its pulls changed");
+    expect_eq(reported.audited, reads_count, "The closing audit must judge every read");
+
+    // The index reopened: a one-shot refine runs to its end and leaves every read reachable.
+    usearch_reachability_t refined = {0};
+    size_t refined_changed = 0;
+    usearch_sequence_refine(&(usearch_sequence_refine_t) {.index = indexes[0],
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .changed = &refined_changed,
+                                                          .reachability = &refined});
+    expect(!outcome.message, outcome.message);
+    expect(refined.audited == reads_count && refined.reachable == reads_count, "Every read must stay reachable");
+    for (size_t read = 0; read != reads_count; ++read) {
+        usearch_sequence_key_stats_t key_stats = {0};
+        usearch_sequence_count(&(usearch_sequence_count_t) {.index = indexes[0],
+                                                            .executor = executor,
+                                                            .outcome = &outcome,
+                                                            .key = keys[read],
+                                                            .key_stats = &key_stats});
+        expect(!outcome.message, outcome.message);
+        expect_eq(key_stats.entries, 1, "Every key must resolve to one absorbed read");
+    }
+
+    free(bytes);
+    usearch_sequence_free(indexes[0]);
+    usearch_executor_free(executor);
+    printf("Test: Sequence Absorb - PASSED\n");
+}
+
 /** Reads entries back by key. `usearch_dense_get` sizes its own output, landing every row under
  *  the key in an arena and reporting how many there were. */
 void test_count_and_get(size_t const dimensions) {
@@ -1338,6 +1489,9 @@ void test_sequence_round_trip(void) {
         expect(viewed_written == 1 && viewed_got.offsets[1] - viewed_got.offsets[0] == 7 &&
                    memcmp((uint8_t const*)viewed_got.data + viewed_got.offsets[0], "sitting", 7) == 0,
                "A view from storage hands the stored bytes back");
+        usearch_sequence_refine(
+            &(usearch_sequence_refine_t) {.index = viewed, .executor = storage, .outcome = &outcome});
+        expect_eq(outcome.status, usearch_status_read_only_k, "A view from storage refines nothing");
         usearch_sequence_cursor_t cursor = NULL;
         usearch_sequence_cursor_init(
             &(usearch_sequence_cursor_init_t) {.cursor = &cursor, .index = viewed, .outcome = &outcome});
@@ -1437,6 +1591,8 @@ void test_sequence_vram(void) {
                                                           .keys = {keys, sizeof(usearch_key_t)},
                                                           .sequences = {bytes, offsets, usearch_scalar_u8_k}});
     expect(!outcome.message, outcome.message);
+    usearch_sequence_refine(&(usearch_sequence_refine_t) {.index = index, .executor = executor, .outcome = &outcome});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU index refines nothing yet");
     usearch_sequence_index_description_t description = {0};
     usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = index,
                                                               .executor = executor,
@@ -1991,6 +2147,109 @@ void test_geospatial_round_trip(void) {
     usearch_arena_free(arena);
     usearch_executor_free(executor);
     printf("Test: Geospatial Round Trip - PASSED\n");
+}
+
+/** Shapes and geospatial absorb and refine alike: one index absorbs another of its geometry and
+ *  refuses one of another, and a one-shot refine after leaves every entry reachable. */
+void test_shapes_and_geospatial_absorb(void) {
+    printf("Test: Shapes & Geospatial Absorb\n");
+    enum { entries_per_index = 120, points_per_shape = 8 };
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(0);
+    usearch_key_t keys[2 * entries_per_index];
+    for (size_t entry = 0; entry != 2 * entries_per_index; ++entry) keys[entry] = key_of(entry);
+
+    float points[2 * entries_per_index * points_per_shape * 3];
+    for (size_t coordinate = 0; coordinate != sizeof(points) / sizeof(points[0]); ++coordinate)
+        points[coordinate] = (float)rand() / (float)RAND_MAX;
+    size_t offsets[entries_per_index + 1];
+    for (size_t shape = 0; shape != entries_per_index + 1; ++shape) offsets[shape] = shape * points_per_shape;
+    usearch_shapes_index_t shapes[3];
+    for (size_t which = 0; which != 3; ++which) {
+        usearch_shapes_init_ram(&(usearch_shapes_init_ram_t) {.index = &shapes[which],
+                                                              .outcome = &outcome,
+                                                              .metric = usearch_shapes_metric_chamfer_k,
+                                                              .quantization = usearch_scalar_f32_k,
+                                                              .points = which == 2 ? 0 : points_per_shape});
+        expect(!outcome.message, outcome.message);
+        if (which == 2) break;
+        usearch_shapes_insert(&(usearch_shapes_insert_t) {
+            .index = shapes[which],
+            .executor = executor,
+            .outcome = &outcome,
+            .count = entries_per_index,
+            .keys = {keys + which * entries_per_index, sizeof(usearch_key_t)},
+            .shapes = {points + which * entries_per_index * points_per_shape * 3, offsets, usearch_scalar_f32_k},
+            .expansion_factor = 4});
+        expect(!outcome.message, outcome.message);
+    }
+    usearch_shapes_absorb(&(usearch_shapes_absorb_t) {.index = shapes[0],
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .count = 1,
+                                                      .donors = shapes + 2});
+    expect_eq(outcome.status, usearch_status_config_mismatch_k, "A donor of another point count is refused");
+    expect(shapes[2] != NULL, "A refused donor stays the caller's");
+    usearch_reachability_t reachability = {0};
+    usearch_shapes_absorb(&(usearch_shapes_absorb_t) {.index = shapes[0],
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .count = 1,
+                                                      .donors = shapes + 1,
+                                                      .reachability = &reachability});
+    expect(!outcome.message, outcome.message);
+    expect(shapes[1] == NULL && reachability.audited == 2 * entries_per_index, "The donor's shapes must land");
+    usearch_shapes_refine(&(usearch_shapes_refine_t) {.index = shapes[0],
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .reachability = &reachability});
+    expect(!outcome.message, outcome.message);
+    expect(reachability.reachable == 2 * entries_per_index, "Every absorbed shape must stay reachable");
+    usearch_shapes_index_description_t shapes_description = {0};
+    usearch_shapes_describe(&(usearch_shapes_describe_t) {.index = shapes[0],
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .description = &shapes_description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(shapes_description.size, 2 * entries_per_index, "The absorbed sizes must add up");
+    usearch_shapes_free(shapes[0]);
+    usearch_shapes_free(shapes[2]);
+
+    // Observations scattered over a city, a few hundred metres apart.
+    usearch_geospatial_observation_t observations[2 * entries_per_index];
+    for (size_t entry = 0; entry != 2 * entries_per_index; ++entry)
+        observations[entry] = observed_at(51.45 + 0.1 * rand() / RAND_MAX, -0.15 + 0.1 * rand() / RAND_MAX, NAN);
+    usearch_geospatial_index_t places[2];
+    for (size_t which = 0; which != 2; ++which) {
+        usearch_geospatial_init_ram(&(usearch_geospatial_init_ram_t) {.index = &places[which], .outcome = &outcome});
+        expect(!outcome.message, outcome.message);
+        usearch_geospatial_insert(
+            &(usearch_geospatial_insert_t) {.index = places[which],
+                                            .executor = executor,
+                                            .outcome = &outcome,
+                                            .count = entries_per_index,
+                                            .keys = {keys + which * entries_per_index, sizeof(usearch_key_t)},
+                                            .observations = observations + which * entries_per_index,
+                                            .expansion_factor = 16});
+        expect(!outcome.message, outcome.message);
+    }
+    usearch_geospatial_absorb(&(usearch_geospatial_absorb_t) {.index = places[0],
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .count = 1,
+                                                              .donors = places + 1});
+    expect(!outcome.message, outcome.message);
+    expect(places[1] == NULL, "The donor's observations must land");
+    usearch_geospatial_refine(&(usearch_geospatial_refine_t) {.index = places[0],
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .reachability = &reachability});
+    expect(!outcome.message, outcome.message);
+    expect(reachability.audited == 2 * entries_per_index && reachability.reachable == 2 * entries_per_index,
+           "Every absorbed observation must stay reachable");
+    usearch_geospatial_free(places[0]);
+    usearch_executor_free(executor);
+    printf("Test: Shapes & Geospatial Absorb - PASSED\n");
 }
 
 /** A GPU geospatial index refuses a terrain and lines of sight, inserts and describes its rows, and
@@ -3099,6 +3358,7 @@ int main(int argc, char* argv[]) {
         }
     if (selected("add_progress")) test_add_progress();
     if (selected("absorb")) test_absorb(dimension_counts[0]);
+    if (selected("sequence_absorb")) test_sequence_absorb();
     if (selected("count_and_get")) test_count_and_get(dimension_counts[0]);
     if (selected("count_and_get")) test_count_and_get(dimension_counts[1]);
     if (selected("arenas")) test_arenas(dimension_counts[0]);
@@ -3110,6 +3370,7 @@ int main(int argc, char* argv[]) {
     if (selected("shapes_round_trip")) test_shapes_round_trip();
     if (selected("shapes_vram")) test_shapes_vram();
     if (selected("geospatial_round_trip")) test_geospatial_round_trip();
+    if (selected("shapes_and_geospatial_absorb")) test_shapes_and_geospatial_absorb();
     if (selected("geospatial_vram")) test_geospatial_vram();
 #if USEARCH_DENSE_DTYPES >= 2
     if (selected("multiply_packed")) test_multiply_packed();

@@ -641,18 +641,24 @@ using deferred_arguments_t = std::variant<                                      
     usearch_sequence_load_ram_t, usearch_sequence_view_nvme_t,                                           //
     usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,                     //
     usearch_sequence_refine_t, usearch_sequence_absorb_t,                                                //
+    usearch_sequence_refinement_init_t, usearch_sequence_refinement_next_t,                              //
+    usearch_sequence_refinement_finish_t,                                                                //
     usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,                         //
     usearch_sequence_cursor_next_t, usearch_sequence_sample_t,                                           //
     usearch_sequence_save_t, usearch_sequence_metadata_read_t, usearch_sequence_describe_t,              //
     usearch_shapes_load_ram_t, usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t,                   //
     usearch_shapes_reserve_t, usearch_shapes_clear_t, usearch_shapes_insert_t,                           //
     usearch_shapes_refine_t, usearch_shapes_absorb_t,                                                    //
+    usearch_shapes_refinement_init_t, usearch_shapes_refinement_next_t,                                  //
+    usearch_shapes_refinement_finish_t,                                                                  //
     usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t,                               //
     usearch_shapes_cursor_next_t, usearch_shapes_sample_t,                                               //
     usearch_shapes_save_t, usearch_shapes_metadata_read_t, usearch_shapes_describe_t,                    //
     usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t, usearch_geospatial_view_nvme_t,       //
     usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t,               //
     usearch_geospatial_refine_t, usearch_geospatial_absorb_t,                                            //
+    usearch_geospatial_refinement_init_t, usearch_geospatial_refinement_next_t,                          //
+    usearch_geospatial_refinement_finish_t,                                                              //
     usearch_geospatial_search_t, usearch_geospatial_within_t,                                            //
     usearch_geospatial_count_t, usearch_geospatial_get_t,                                                //
     usearch_geospatial_cursor_next_t, usearch_geospatial_sample_t,                                       //

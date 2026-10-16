@@ -204,6 +204,67 @@ expected<traversal_telemetry_t> insert_entries(index_type_& index, usearch_keys_
     return {scratch.telemetry(), status_t::success_k};
 }
 
+/** Where a refinement's calls stand between them: the steps of the current phase already run, so a
+ *  cancelled call continues at the next one, and the nodes the planned phases re-selected, which
+ *  every tick reports. */
+struct refine_cursor_t {
+    std::size_t taken = 0;
+    std::size_t ticked = 0;
+};
+
+/**
+ *  @brief Runs @p plan 's pending phases on the executor's threads, each with a metric from
+ *      @p make_metric and a walk context over its arena, until no phase follows or @p ticks
+ *      cancels; @c cancelled_k means a later call has more to do.
+ *
+ *  Every step a thread takes runs, and a thread takes none once a tick cancelled, so @p cursor
+ *  says exactly where the next call starts. The scratch is this call's, sized for @p row_width,
+ *  the widest row a walk copies; the plan keeps everything the index needs between calls.
+ */
+template <typename index_type_, typename make_metric_type_, typename selector_type_>
+status_t drive_refinement(typename index_type_::refine_plan_t& plan, refine_cursor_t& cursor,
+                          make_metric_type_&& make_metric, selector_type_ const& selector, std::size_t row_width,
+                          progress_ticks_t& ticks, forkunion_executor_t& executor) noexcept {
+    using metric_t = decltype(make_metric(std::declval<thread_allocator_t const&>(), std::size_t {}).value);
+    thread_scratch<index_type_, metric_t> scratch;
+    if (status_t const prepared = scratch.prepare(executor, max_of(row_width, plan.connectivity()),
+                                                  plan.walk().expansion_factor, plan.audit.visible + cursor.ticked,
+                                                  make_metric);
+        failed(prepared))
+        return prepared;
+    std::size_t const population = plan.audit.visible;
+    // Every step bumps them, so they take their own lines, away from the locals every thread reads.
+    alignas(default_alignment_k) std::size_t ticked = cursor.ticked;
+    alignas(default_alignment_k) std::size_t taken = cursor.taken;
+    alignas(default_alignment_k) bool cancelled = false;
+    while (true) {
+        bool const reselecting = plan.reselecting();
+        auto const steps = plan.steps();
+        auto drain = [&](std::size_t thread, std::size_t) noexcept {
+            standard_atomic_ref<std::size_t> const next {taken};
+            while (!standard_atomic_ref<bool>(cancelled).load(std::memory_order_relaxed)) {
+                std::size_t const position = next.fetch_add(1, std::memory_order_relaxed);
+                if (position >= steps.size()) break;
+                auto const step = steps[position];
+                [[maybe_unused]] status_t const ran = plan.run(step, scratch.metrics[thread], scratch.contexts[thread],
+                                                               selector);
+                if (!reselecting) continue;
+                std::size_t const done = standard_atomic_ref<std::size_t>(ticked).fetch_add(step.nodes.size(),
+                                                                                            std::memory_order_relaxed) +
+                                         step.nodes.size();
+                if (ticks(done, population) == continuation_t::cancel_k)
+                    standard_atomic_ref<bool>(cancelled).store(true, std::memory_order_relaxed);
+            }
+        };
+        if (failed(executor.for_threads(drain))) drain(0, 0);
+        cursor.ticked = ticked;
+        cursor.taken = min_of(taken, steps.size());
+        if (cancelled) return status_t::cancelled_k;
+        cursor.taken = taken = 0;
+        if (!plan.advance()) return status_t::success_k;
+    }
+}
+
 /** What one unit of @p metric_type_'s distance is worth on the C scale: a fixed-point metric's full
  *  scale lands as one. */
 template <typename metric_type_>
