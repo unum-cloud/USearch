@@ -56,13 +56,18 @@ target_link_libraries(usearch_test_header_only_witness PRIVATE forkunion::header
 add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_witness)
 
 # The VRAM test shards compile once per vendor, so each unit sees the SDK facts of the one vendor it composes over: the
-# per-dtype shards, the sharded suite and, for the vendors that have them, the modalities' units, each instantiated for
-# the executor of @p vendor alone, whose `USEARCH_ARCH_<VENDOR>_` is @p architecture_macro and the others' are zero.
-# NVIDIA and AMD shards compile host-only through Clang's CUDA or HIP mode, as the vendor's entry does, so the vendor's
-# headers define the index members and NumKong keeps the vendor's `NUMKONG_TARGET_*`; the caller adds the entry and the
-# flags. Each carried vendor's entry registers with the runner, which names none of them.
+# per-dtype shards, the sharded suite and, for the vendors that have them, the modalities' units after `SOURCES`, each
+# instantiated for the executor of @p vendor alone, whose `USEARCH_ARCH_<VENDOR>_` is @p architecture_macro and the
+# others' are zero, with the `DEFINITIONS` the vendor's kits read. The vendor's `ENTRY` registers with the runner, which
+# names none of them. NVIDIA and AMD shards compile host-only through Clang's CUDA or HIP mode, as the vendor's entry
+# does, so the vendor's headers define the index members and NumKong keeps the vendor's `NUMKONG_TARGET_*`; the entry,
+# or its `DEVICE` entry, compiles once more device-only into the suite's own bundle of the `CODES`, holding the shards'
+# kernels and the attends over its device value lookups. Apple's kernels compile from embedded source at first use, so
+# its entry is a plain C++ unit.
 function (usearch_test_vram_shards vendor architecture_macro)
+    cmake_parse_arguments(arg "" "ENTRY;DEVICE" "SOURCES;DEFINITIONS;CODES" ${ARGN})
     set(target_ usearch_test_vram_shards_${vendor})
+    set(entry_ ${CMAKE_CURRENT_SOURCE_DIR}/${arg_ENTRY})
     add_library(${target_} OBJECT dense/vram_indexes.cpp)
     usearch_dense_dtype_sources(
         ${target_}
@@ -78,6 +83,7 @@ function (usearch_test_vram_shards vendor architecture_macro)
         U4 dense/vram_index_u4.cpp
         U1 dense/vram_index_u1.cpp
     )
+    target_sources(${target_} PRIVATE ${arg_SOURCES} ${entry_})
     usearch_setup_target(${target_} HOST)
     target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     foreach (macro_ IN ITEMS USEARCH_ARCH_CUDA_ USEARCH_ARCH_ROCM_ USEARCH_ARCH_METAL_)
@@ -87,64 +93,48 @@ function (usearch_test_vram_shards vendor architecture_macro)
             target_compile_definitions(${target_} PRIVATE ${macro_}=0)
         endif ()
     endforeach ()
+    target_compile_definitions(${target_} PRIVATE ${arg_DEFINITIONS})
     target_link_libraries(${target_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header)
+    if (vendor STREQUAL "nvidia" OR vendor STREQUAL "amd")
+        set(device_)
+        if (arg_DEVICE)
+            set(device_ DEVICE ${CMAKE_CURRENT_SOURCE_DIR}/${arg_DEVICE})
+        endif ()
+        usearch_gpu_bundle(${target_} ${vendor} test_vram_${vendor} ${entry_} ${arg_CODES} ${device_})
+        usearch_gpu_host_only(${target_} ${entry_})
+    endif ()
+    set(usearch_test_vram_shards_
+        ${usearch_test_vram_shards_} ${target_}
+        PARENT_SCOPE
+    )
 endfunction ()
 
+# One row per vendor: NVIDIA tests a generation's kits only when every listed architecture runs them, and AMD compiles
+# for the listed processors of the CDNA3 class, which CDNA3 and CDNA4 run.
 set(usearch_test_vram_shards_)
-
-# NVIDIA's entry compiles once more with NVCC device-only, into the suite's own fatbin of the shards' kernels and the
-# attends over its device value lookups, testing a generation's kits only when every listed architecture runs them.
 if (USEARCH_BUILD_CUDA)
-    find_package(CUDAToolkit REQUIRED)
-    enable_language(ASM)
-    set(usearch_test_vram_nvidia_entry_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_nvidia.cu)
-    usearch_test_vram_shards(nvidia USEARCH_ARCH_CUDA_)
-    target_sources(
-        usearch_test_vram_shards_nvidia PRIVATE sequence/vram_index.cpp shapes/vram_index.cpp geospatial/vram_index.cpp
-                                                ${usearch_test_vram_nvidia_entry_}
+    usearch_cuda_capabilities(usearch_test_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
+    usearch_cuda_codes(usearch_test_cuda_codes_ "${USEARCH_CUDA_ARCHITECTURES}")
+    usearch_test_vram_shards(
+        nvidia USEARCH_ARCH_CUDA_
+        ENTRY dense/vram_nvidia.cu
+        SOURCES sequence/vram_index.cpp shapes/vram_index.cpp geospatial/vram_index.cpp
+        DEFINITIONS ${usearch_test_cuda_capabilities_}
+        CODES ${usearch_test_cuda_codes_}
     )
-    usearch_cuda_capabilities(test_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
-    target_compile_definitions(usearch_test_vram_shards_nvidia PRIVATE ${test_cuda_capabilities_})
-    usearch_cuda_codes(test_cuda_codes_ "${USEARCH_CUDA_ARCHITECTURES}")
-    usearch_gpu_bundle(
-        usearch_test_vram_shards_nvidia nvidia test_vram_nvidia ${usearch_test_vram_nvidia_entry_} ${test_cuda_codes_}
-    )
-    usearch_gpu_host_only(usearch_test_vram_shards_nvidia ${usearch_test_vram_nvidia_entry_})
-    list(APPEND usearch_test_vram_shards_ usearch_test_vram_shards_nvidia)
 endif ()
-
-# AMD's entry compiles host-only, and its device entry, which includes it, with ROCm's Clang device-only, into the
-# suite's own code object of the shards' kernels and the attends over its device value lookups, for the listed
-# processors of the CDNA3 class, which CDNA3 and CDNA4 run. The Apple kernels compile from embedded source at first use.
 if (USEARCH_BUILD_ROCM)
-    enable_language(ASM)
-    set(usearch_test_vram_amd_entry_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_amd.hip)
-    usearch_test_vram_shards(amd USEARCH_ARCH_ROCM_)
-    target_sources(usearch_test_vram_shards_amd PRIVATE ${usearch_test_vram_amd_entry_})
-    target_compile_definitions(usearch_test_vram_shards_amd PRIVATE "NUMKONG_TARGET_CDNA3=1")
-    set(test_rocm_processors_)
-    foreach (processor_ IN ITEMS gfx942 gfx950)
-        if (processor_ IN_LIST USEARCH_ROCM_ARCHITECTURES)
-            list(APPEND test_rocm_processors_ --offload-arch=${processor_})
-        endif ()
-    endforeach ()
-    usearch_gpu_bundle(
-        usearch_test_vram_shards_amd
-        amd
-        test_vram_amd
-        ${usearch_test_vram_amd_entry_}
-        ${test_rocm_processors_}
-        DEVICE
-        ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_kernels_amd.hip
+    usearch_rocm_codes(usearch_test_rocm_codes_ gfx942 gfx950)
+    usearch_test_vram_shards(
+        amd USEARCH_ARCH_ROCM_
+        ENTRY dense/vram_amd.hip
+        DEVICE dense/vram_kernels_amd.hip
+        DEFINITIONS "NUMKONG_TARGET_CDNA3=1"
+        CODES ${usearch_test_rocm_codes_}
     )
-    usearch_gpu_host_only(usearch_test_vram_shards_amd ${usearch_test_vram_amd_entry_})
-    list(APPEND usearch_test_vram_shards_ usearch_test_vram_shards_amd)
 endif ()
-
 if (USEARCH_BUILD_METAL)
-    usearch_test_vram_shards(apple USEARCH_ARCH_METAL_)
-    target_sources(usearch_test_vram_shards_apple PRIVATE dense/vram_apple.cpp)
-    list(APPEND usearch_test_vram_shards_ usearch_test_vram_shards_apple)
+    usearch_test_vram_shards(apple USEARCH_ARCH_METAL_ ENTRY dense/vram_apple.cpp)
 endif ()
 
 # The one VRAM runner links the library too, so it reaches every class variant it compiled through the C interface.

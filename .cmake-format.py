@@ -18,7 +18,7 @@ with section("format"):
     # parenthesis on its own line.
     dangle_parens = True
 
-# The project's own functions, so a dtype keyword stays on the line of the shards it brings.
+# The project's own functions, so a dtype or other keyword stays on the line of the items it brings.
 with section("parse"):
     additional_commands = {
         name: {
@@ -27,5 +27,21 @@ with section("parse"):
                 dtype: "*" for dtype in ("BF16", "U1", "I8", "E4M3", "F16", "U8", "E5M2", "I4", "U4", "E3M2", "E2M3")
             },
         }
-        for name, positional in (("usearch_dense_dtype_sources", 1), ("usearch_dense_vram_bench", 2))
+        for name, positional in (("usearch_dense_dtype_sources", 1),)
+    }
+    additional_commands["usearch_dense_bench"] = {
+        "pargs": 2,
+        "kwargs": {
+            "ENTRY": 1,
+            "UNITS": "*",
+            "SHARDS": {"kwargs": additional_commands["usearch_dense_dtype_sources"]["kwargs"]},
+        },
+    }
+    additional_commands |= {
+        "usearch_object_library": {"pargs": 1, "kwargs": {"SOURCES": "*", "DEFINITIONS": "*", "LIBRARIES": "*"}},
+        "usearch_variants": {"pargs": "3+", "kwargs": {"DEFINITIONS": "*", "LIBRARIES": "*"}},
+        "usearch_test_vram_shards": {
+            "pargs": 2,
+            "kwargs": {"ENTRY": 1, "DEVICE": 1, "SOURCES": "*", "DEFINITIONS": "*", "CODES": "*"},
+        },
     }

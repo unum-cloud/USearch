@@ -1,18 +1,21 @@
+# The file runs top to bottom: the classes of every backend - the CPU classes, then one block per GPU vendor - the
+# variant libraries, one row per modality, residency and backend, and the dispatch unit over all of them. Every class
+# leaves the same three variables, read by the rows: `usearch_class_<class>_exists_`, `usearch_class_<class>_flags_`,
+# the ISA flags of a CPU class or the device codes of a GPU class, and `usearch_class_<class>_definitions_`. Every
+# backend leaves `usearch_<backend>_classes_`, the classes it declared, and `usearch_<backend>_definitions_`, which its
+# libraries compile with.
+
 # The RAM variants compile per CPU class. A variant inlines its class's kits and runs on nothing older, so its unit
 # takes the class's instruction set outright and the compiler may use it anywhere inside. A class is its parent plus a
 # delta - the kits and the ForkUnion bits `parent_class_of`, `numkong_capabilities_of`, `waiter_for_cpu_class` and
-# `atomic_ref_for_cpu_class` add over the parent - restated here row for row. A unit inherits its parent's flags, adds
+# `atomic_ref_for_cpu_class` add over the parent - restated here row for row. A class inherits its parent's flags, adds
 # the flags of each delta kit that compiled, and exists only when the parent does and some delta entry compiled: the
-# rung oracle at unit granularity, which the dispatch units read as `USEARCH_TARGET_<CLASS>`, the one gate every variant
-# list carries per class.
-add_library(usearch_dense_ram_variants OBJECT dense/ram_variants_serial.cpp)
-usearch_setup_target(usearch_dense_ram_variants)
-target_include_directories(usearch_dense_ram_variants PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(usearch_dense_ram_variants PRIVATE "USEARCH_ARCH_CUDA_=0")
-target_link_libraries(usearch_dense_ram_variants PRIVATE yyjson forkunion::static)
-set(usearch_variant_serial_exists_ TRUE)
-set(usearch_variant_serial_flags_)
-set(usearch_variant_targets_)
+# rung oracle at unit granularity, which the dispatch unit reads as `USEARCH_TARGET_<CLASS>`, the one gate every variant
+# list carries per class, collected in `usearch_cpu_gates_`. The `serial` class is the floor every CPU runs.
+set(usearch_class_serial_exists_ TRUE)
+set(usearch_cpu_classes_ serial)
+set(usearch_cpu_gates_)
+set(usearch_cpu_definitions_ "USEARCH_ARCH_CUDA_=0")
 
 # Unions the kits' flags: x86 `-m<feature>` flags collect, an Arm or RISC-V `-march=` string merges to the newest base
 # with every extension once, and MSVC's `/arch:` keeps the last, which the lineage lists highest.
@@ -60,12 +63,14 @@ function (usearch_union_isa_flags out_)
     )
 endfunction ()
 
-function (usearch_dense_ram_variant class target_macro)
+# Declares the CPU class @p class, gated as `USEARCH_TARGET_<target_macro>`, over the class named after `OVER` and the
+# delta entries after it.
+function (usearch_cpu_class class target_macro)
     cmake_parse_arguments(arg "" "OVER" "" ${ARGN})
-    if (NOT usearch_variant_${arg_OVER}_exists_)
+    if (NOT usearch_class_${arg_OVER}_exists_)
         return()
     endif ()
-    set(flags_ ${usearch_variant_${arg_OVER}_flags_})
+    set(flags_ ${usearch_class_${arg_OVER}_flags_})
     set(advances_ FALSE)
     foreach (entry_ IN LISTS arg_UNPARSED_ARGUMENTS)
         if (nk_target_${entry_}_compiles)
@@ -79,7 +84,7 @@ function (usearch_dense_ram_variant class target_macro)
             list(APPEND flags_ ${sz_target_${entry_}_flags})
         endif ()
     endforeach ()
-    set(usearch_variant_${class}_exists_
+    set(usearch_class_${class}_exists_
         ${advances_}
         PARENT_SCOPE
     )
@@ -87,70 +92,20 @@ function (usearch_dense_ram_variant class target_macro)
         return()
     endif ()
     usearch_union_isa_flags(flags_ ${flags_})
-    set(usearch_variant_${class}_flags_
+    set(usearch_class_${class}_flags_
         "${flags_}"
         PARENT_SCOPE
     )
-    set(usearch_variant_targets_
-        ${usearch_variant_targets_} "USEARCH_TARGET_${target_macro}=1"
+    set(usearch_cpu_classes_
+        ${usearch_cpu_classes_} ${class}
         PARENT_SCOPE
     )
-    target_sources(usearch_dense_ram_variants PRIVATE dense/ram_variants_${class}.cpp)
-    set_source_files_properties(dense/ram_variants_${class}.cpp PROPERTIES COMPILE_OPTIONS "${flags_}")
+    set(usearch_cpu_gates_
+        ${usearch_cpu_gates_} "USEARCH_TARGET_${target_macro}=1"
+        PARENT_SCOPE
+    )
 endfunction ()
 
-usearch_dense_ram_variant(intel_haswell INTEL_HASWELL OVER serial haswell)
-usearch_dense_ram_variant(
-    intel_sierra
-    INTEL_SIERRA
-    OVER
-    intel_haswell
-    alder
-    sierra
-    x86_tpause
-    x86_cmpccxadd
-)
-usearch_dense_ram_variant(intel_skylake INTEL_SKYLAKE OVER intel_haswell skylake)
-usearch_dense_ram_variant(intel_icelake INTEL_ICELAKE OVER intel_skylake icelake)
-usearch_dense_ram_variant(amd_genoa AMD_GENOA OVER intel_icelake genoa)
-usearch_dense_ram_variant(intel_sapphire INTEL_SAPPHIRE OVER amd_genoa sapphire sapphireamx)
-usearch_dense_ram_variant(intel_granite INTEL_GRANITE OVER intel_sapphire graniteamx)
-usearch_dense_ram_variant(
-    intel_diamond
-    INTEL_DIAMOND
-    OVER
-    intel_granite
-    alder
-    sierra
-    diamond
-    x86_tpause
-    x86_cmpccxadd
-)
-usearch_dense_ram_variant(aws_g2 AWS_G2 OVER serial neon)
-usearch_dense_ram_variant(
-    apple_m2
-    APPLE_M2
-    OVER
-    aws_g2
-    neonsdot
-    neonbfdot
-    neonfhm
-    arm64_lse
-    arm64_rcpc
-)
-usearch_dense_ram_variant(apple_m4 APPLE_M4 OVER apple_m2 sme smebi32)
-usearch_dense_ram_variant(aws_g5 AWS_G5 OVER apple_m2 arm64_wfet)
-usearch_dense_ram_variant(nvidia_vera NVIDIA_VERA OVER aws_g5 neonfp8)
-usearch_dense_ram_variant(
-    alibaba_c930
-    ALIBABA_C930
-    OVER
-    serial
-    rvv
-    rvvbb
-    risc5_wrs
-    risc5_zacas
-)
 # A WebAssembly module carries the one SIMD capability its toolchain declares, so its verdicts read the compiler's own
 # macros rather than a probe that would pass the capability's flags itself.
 if (CMAKE_SYSTEM_NAME STREQUAL "Emscripten" OR CMAKE_SYSTEM_NAME STREQUAL "WASI")
@@ -162,75 +117,61 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Emscripten" OR CMAKE_SYSTEM_NAME STREQUAL "WASI"
         "#if !defined(__wasm_relaxed_simd__)\n#error\n#endif\nint main() { return 0; }" nk_target_v128relaxed_compiles
     )
 endif ()
-usearch_dense_ram_variant(wasm32_v128 WASM32_V128 OVER serial v128)
-usearch_dense_ram_variant(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed)
 
-# The NVMe variants compile per CPU class with the RAM unit's flags, for the classes whose 4-way or tiles kits a storage
-# walk or scan tells apart: it carries no waiter or atomic reference, so aws_g5 and alibaba_c930, which advance only by
-# those, take none, and a WebAssembly module reads no storage directly.
-add_library(usearch_dense_nvme_variants OBJECT dense/nvme_variants_serial.cpp)
-usearch_setup_target(usearch_dense_nvme_variants)
-target_include_directories(usearch_dense_nvme_variants PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(usearch_dense_nvme_variants PRIVATE "USEARCH_ARCH_CUDA_=0")
-target_link_libraries(usearch_dense_nvme_variants PRIVATE yyjson forkunion::static)
-foreach (
-    class_
-    intel_haswell
+usearch_cpu_class(intel_haswell INTEL_HASWELL OVER serial haswell)
+usearch_cpu_class(
     intel_sierra
-    intel_skylake
-    intel_icelake
-    amd_genoa
-    intel_sapphire
-    intel_granite
+    INTEL_SIERRA
+    OVER
+    intel_haswell
+    alder
+    sierra
+    x86_tpause
+    x86_cmpccxadd
+)
+usearch_cpu_class(intel_skylake INTEL_SKYLAKE OVER intel_haswell skylake)
+usearch_cpu_class(intel_icelake INTEL_ICELAKE OVER intel_skylake icelake)
+usearch_cpu_class(amd_genoa AMD_GENOA OVER intel_icelake genoa)
+usearch_cpu_class(intel_sapphire INTEL_SAPPHIRE OVER amd_genoa sapphire sapphireamx)
+usearch_cpu_class(intel_granite INTEL_GRANITE OVER intel_sapphire graniteamx)
+usearch_cpu_class(
     intel_diamond
-    aws_g2
+    INTEL_DIAMOND
+    OVER
+    intel_granite
+    alder
+    sierra
+    diamond
+    x86_tpause
+    x86_cmpccxadd
+)
+usearch_cpu_class(aws_g2 AWS_G2 OVER serial neon)
+usearch_cpu_class(
     apple_m2
-    apple_m4
-    nvidia_vera
+    APPLE_M2
+    OVER
+    aws_g2
+    neonsdot
+    neonbfdot
+    neonfhm
+    arm64_lse
+    arm64_rcpc
 )
-    if (usearch_variant_${class_}_exists_)
-        target_sources(usearch_dense_nvme_variants PRIVATE dense/nvme_variants_${class_}.cpp)
-        set_source_files_properties(
-            dense/nvme_variants_${class_}.cpp PROPERTIES COMPILE_OPTIONS "${usearch_variant_${class_}_flags_}"
-        )
-    endif ()
-endforeach ()
-
-# The sequence, shapes and geospatial variants compile per CPU class with the flags the dense rows above computed, one
-# unit set per basic modality, over the classes where any of their StringZilla or NumKong kits advance. Each unit
-# instantiates its own modality's variants, and a modality whose kits stay put at the class falls back down its kit
-# chain.
-set(usearch_basic_ram_variants_)
-foreach (modality_ sequence shapes geospatial)
-    set(target_ usearch_${modality_}_ram_variants)
-    add_library(${target_} OBJECT ${modality_}/ram_variants_serial.cpp)
-    usearch_setup_target(${target_})
-    target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_CUDA_=0")
-    target_link_libraries(${target_} PRIVATE yyjson forkunion::static stringzilla::header)
-    foreach (class_ intel_haswell intel_skylake aws_g2 apple_m2 alibaba_c930 wasm64_extended)
-        if (usearch_variant_${class_}_exists_)
-            target_sources(${target_} PRIVATE ${modality_}/ram_variants_${class_}.cpp)
-            set_source_files_properties(
-                ${modality_}/ram_variants_${class_}.cpp PROPERTIES COMPILE_OPTIONS
-                                                                   "${usearch_variant_${class_}_flags_}"
-            )
-        endif ()
-    endforeach ()
-    list(APPEND usearch_basic_ram_variants_ ${target_})
-endforeach ()
-
-# The type-erased implementations behind the C interface: the dispatch units visit the variants through their explicitly
-# instantiated views and compile at the baseline, since they inline no kernel. Under CUDA the device variants join, so
-# the C libraries carry them too.
-add_library(usearch_punned OBJECT types.cpp dense_index.cpp sequence_index.cpp shapes_index.cpp geospatial_index.cpp)
-usearch_setup_target(usearch_punned)
-target_include_directories(usearch_punned PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(usearch_punned PRIVATE yyjson forkunion::static stringzilla::header)
-target_compile_definitions(usearch_punned PRIVATE ${usearch_variant_targets_})
-set(USEARCH_PUNNED_LIBRARIES usearch_punned usearch_dense_ram_variants usearch_dense_nvme_variants
-                             ${usearch_basic_ram_variants_}
+usearch_cpu_class(apple_m4 APPLE_M4 OVER apple_m2 sme smebi32)
+usearch_cpu_class(aws_g5 AWS_G5 OVER apple_m2 arm64_wfet)
+usearch_cpu_class(nvidia_vera NVIDIA_VERA OVER aws_g5 neonfp8)
+usearch_cpu_class(
+    alibaba_c930
+    ALIBABA_C930
+    OVER
+    serial
+    rvv
+    rvvbb
+    risc5_wrs
+    risc5_zacas
 )
+usearch_cpu_class(wasm32_v128 WASM32_V128 OVER serial v128)
+usearch_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed)
 
 # Every NVIDIA or AMD unit with kernels compiles twice. Host-only, through Clang's CUDA or HIP mode, it names its
 # kernels from device code alone, so nothing registers with or links a GPU runtime, which opens at first use.
@@ -241,9 +182,10 @@ set(USEARCH_PUNNED_LIBRARIES usearch_punned usearch_dense_ram_variants usearch_d
 # `CMAKE_CUDA_HOST_COMPILER` when set, splits its optimizations across every CPU, and `CMAKE_CUDA_FLAGS` reach its pass.
 # The device pass compiles @p source, or the `DEVICE` source when the unit keeps its kernels apart, as an AMD unit must:
 # HIP-Clang refuses a kernel's address in device code, so a host function takes it, which the host pass may never
-# compile, or it would emit launch stubs and a fat-binary registration. The tests and benchmarks bundle theirs through
-# it too. Device passes run one at a time, each spreading its own work across every CPU: NVCC's split assemblers take
-# about 9 GB on the largest units, so two at once would exhaust a laptop.
+# compile, or it would emit launch stubs and a fat-binary registration. Device passes run one at a time, each spreading
+# its own work across every CPU: NVCC's split assemblers take about 9 GB on the largest units, so two at once would
+# exhaust a laptop. The GPU helpers here serve the tests and benchmarks too, which bundle their own kernels through
+# them.
 set_property(GLOBAL APPEND PROPERTY JOB_POOLS usearch_gpu_device_pass=1)
 function (usearch_gpu_bundle target vendor name source)
     cmake_parse_arguments(arg "" "DEVICE" "" ${ARGN})
@@ -252,6 +194,9 @@ function (usearch_gpu_bundle target vendor name source)
         set(device_source_ ${arg_DEVICE})
     endif ()
     set(bundle_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${target}/${name}.bundle)
+    # Debug trees compile device code unoptimized, as their host code: NVCC's `-O` reaches only its host compiler, so
+    # its debug pass also takes its device compiler and assembler down to `-O0`, without `-G`'s device debug
+    # information.
     if (vendor STREQUAL "nvidia")
         set(host_compiler_ ${CMAKE_CXX_COMPILER})
         if (CMAKE_CUDA_HOST_COMPILER)
@@ -262,24 +207,18 @@ function (usearch_gpu_bundle target vendor name source)
             -split-compile=0
         )
         separate_arguments(device_flags_ UNIX_COMMAND "${CMAKE_CUDA_FLAGS}")
+        set(optimization_ "$<$<CONFIG:Debug>:-O0$<SEMICOLON>-Xcicc$<SEMICOLON>-O0$<SEMICOLON>-Xptxas$<SEMICOLON>-O0>"
+                          "$<$<NOT:$<CONFIG:Debug>>:-O3>"
+        )
         set(host_only_ "-xcuda;--cuda-host-only;-nocudalib;--cuda-path=${CUDAToolkit_LIBRARY_ROOT}")
         # Clang's CUDA mode adds the toolkit's `include` alone, while CUDA 13 keeps `cuda/atomic` in CCCL's own.
         target_include_directories(${target} SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     else ()
         set(device_only_ "${CMAKE_CXX_COMPILER};-x;hip;--cuda-device-only;-c")
+        set(optimization_ "$<$<CONFIG:Debug>:-O0>" "$<$<NOT:$<CONFIG:Debug>>:-O3>")
         set(host_only_ "-xhip;--cuda-host-only;-nogpulib")
     endif ()
     set_source_files_properties(${source} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "${host_only_}")
-    # Debug trees compile device code unoptimized, as their host code: NVCC's `-O` reaches only its host compiler, so
-    # its debug pass also takes its device compiler and assembler down to `-O0`, without `-G`'s device debug
-    # information.
-    if (vendor STREQUAL "nvidia")
-        set(optimization_ "$<$<CONFIG:Debug>:-O0$<SEMICOLON>-Xcicc$<SEMICOLON>-O0$<SEMICOLON>-Xptxas$<SEMICOLON>-O0>"
-                          "$<$<NOT:$<CONFIG:Debug>>:-O3>"
-        )
-    else ()
-        set(optimization_ "$<$<CONFIG:Debug>:-O0>" "$<$<NOT:$<CONFIG:Debug>>:-O3>")
-    endif ()
     if (arg_UNPARSED_ARGUMENTS)
         add_custom_command(
             OUTPUT ${bundle_}
@@ -318,200 +257,356 @@ function (usearch_gpu_host_only target entry)
     set_source_files_properties(${entry} PROPERTIES COMPILE_OPTIONS "")
 endfunction ()
 
-# NVCC is only a device compiler here, and NVIDIA's units, tests and benchmarks bundle their kernels as above.
+# Sets @p output to NVCC's codes for CMake-style @p architectures: a "-real" entry keeps its cubin alone, a "-virtual"
+# one its PTX alone, a bare one both, and "native" the visible GPUs'.
+function (usearch_cuda_codes output architectures)
+    set(codes_)
+    foreach (architecture_ IN LISTS architectures)
+        if (architecture_ STREQUAL "native")
+            list(APPEND codes_ -arch=native)
+        elseif (architecture_ MATCHES "^([0-9]+[af]?)-real$")
+            list(APPEND codes_ --generate-code=arch=compute_${CMAKE_MATCH_1},code=sm_${CMAKE_MATCH_1})
+        elseif (architecture_ MATCHES "^([0-9]+[af]?)-virtual$")
+            list(APPEND codes_ --generate-code=arch=compute_${CMAKE_MATCH_1},code=compute_${CMAKE_MATCH_1})
+        else ()
+            list(APPEND codes_ --generate-code=arch=compute_${architecture_},code=sm_${architecture_}
+                 --generate-code=arch=compute_${architecture_},code=compute_${architecture_}
+            )
+        endif ()
+    endforeach ()
+    set(${output}
+        "${codes_}"
+        PARENT_SCOPE
+    )
+endfunction ()
+
+# Sets @p output to whether `USEARCH_CUDA_ARCHITECTURES` names "native" or any of the remaining selectors.
+function (usearch_cuda_names output)
+    set(named_ FALSE)
+    foreach (selector_ IN ITEMS native ${ARGN})
+        if (selector_ IN_LIST USEARCH_CUDA_ARCHITECTURES)
+            set(named_ TRUE)
+        endif ()
+    endforeach ()
+    set(${output}
+        ${named_}
+        PARENT_SCOPE
+    )
+endfunction ()
+
+# Sets @p output to `capability_macro=1` where every one of the architectures is one of NumKong's cached
+# `nk_target_<capability>_architectures`, with or without CMake's "-real" or "-virtual", and to `capability_macro=0`
+# otherwise. NumKong's one-code units need any of them; a unit here compiles every listed code, and a kit compiled into
+# one pass is compiled into all.
+function (usearch_cuda_capability capability_name capability_macro architectures output)
+    set(enabled_ 1)
+    foreach (architecture_ IN LISTS architectures)
+        set(supported_ 0)
+        foreach (supported_architecture_ IN LISTS nk_target_${capability_name}_architectures)
+            if (architecture_ MATCHES "^${supported_architecture_}(-real|-virtual)?$")
+                set(supported_ 1)
+            endif ()
+        endforeach ()
+        if (NOT supported_)
+            set(enabled_ 0)
+        endif ()
+    endforeach ()
+    set(${output}
+        ${capability_macro}=${enabled_}
+        PARENT_SCOPE
+    )
+endfunction ()
+
+# The NumKong GPU capabilities the CUDA codes run, as the definitions a target compiles with.
+function (usearch_cuda_capabilities output architectures)
+    usearch_cuda_capability(ampere NUMKONG_TARGET_AMPERE "${architectures}" ampere_)
+    usearch_cuda_capability(ada NUMKONG_TARGET_ADA "${architectures}" ada_)
+    usearch_cuda_capability(hopper NUMKONG_TARGET_HOPPER "${architectures}" hopper_)
+    usearch_cuda_capability(blackwell NUMKONG_TARGET_BLACKWELL "${architectures}" blackwell_)
+    usearch_cuda_capability(blackwellrtx NUMKONG_TARGET_BLACKWELLRTX "${architectures}" blackwellrtx_)
+    set(${output}
+        ${ampere_} ${ada_} ${hopper_} ${blackwell_} ${blackwellrtx_}
+        PARENT_SCOPE
+    )
+endfunction ()
+
+# Sets @p output to the `--offload-arch` codes of the processors after it that `USEARCH_ROCM_ARCHITECTURES` lists.
+function (usearch_rocm_codes output)
+    set(codes_)
+    foreach (processor_ IN LISTS ARGN)
+        if (processor_ IN_LIST USEARCH_ROCM_ARCHITECTURES)
+            list(APPEND codes_ --offload-arch=${processor_})
+        endif ()
+    endforeach ()
+    set(${output}
+        "${codes_}"
+        PARENT_SCOPE
+    )
+endfunction ()
+
+# The NVIDIA classes: one per GPU generation, its fatbin compiled for its own architectures alone - the device twin of
+# the CPU classes' per-unit ISA flags - so no cubin carries another generation's kernels, and only once
+# `USEARCH_CUDA_ARCHITECTURES` names one of its @p selectors or "native", which keeps a one-generation tree to that
+# generation's kernels; an unnamed class still exists, over an empty bundle. Each class sees only its own NumKong GPU
+# target, as an AMD class does, since NumKong's own kernels compile under every target a unit names. NVCC is only a
+# device compiler here; the dispatch unit sees `USEARCH_ARCH_CUDA_` either way.
 if (USEARCH_BUILD_CUDA)
-    find_package(CUDAToolkit REQUIRED)
-    enable_language(ASM)
-
-    # Sets @p output to NVCC's codes for CMake-style @p architectures: a "-real" entry keeps its cubin alone, a
-    # "-virtual" one its PTX alone, a bare one both, and "native" the visible GPUs'.
-    function (usearch_cuda_codes output architectures)
+    set(usearch_nvidia_classes_)
+    set(usearch_nvidia_definitions_ "USEARCH_ARCH_CUDA_=1")
+    function (usearch_nvidia_class class target_macro selectors)
+        usearch_cuda_names(named_ ${selectors})
         set(codes_)
-        foreach (architecture_ IN LISTS architectures)
-            if (architecture_ STREQUAL "native")
-                list(APPEND codes_ -arch=native)
-            elseif (architecture_ MATCHES "^([0-9]+[af]?)-real$")
-                list(APPEND codes_ --generate-code=arch=compute_${CMAKE_MATCH_1},code=sm_${CMAKE_MATCH_1})
-            elseif (architecture_ MATCHES "^([0-9]+[af]?)-virtual$")
-                list(APPEND codes_ --generate-code=arch=compute_${CMAKE_MATCH_1},code=compute_${CMAKE_MATCH_1})
-            else ()
-                list(APPEND codes_ --generate-code=arch=compute_${architecture_},code=sm_${architecture_}
-                     --generate-code=arch=compute_${architecture_},code=compute_${architecture_}
-                )
-            endif ()
-        endforeach ()
-        set(${output}
-            "${codes_}"
+        if (named_)
+            usearch_cuda_codes(codes_ "${ARGN}")
+        endif ()
+        set(usearch_class_${class}_exists_
+            TRUE
             PARENT_SCOPE
         )
-    endfunction ()
-
-    # One unit per GPU class, its fatbin compiled for its own architectures alone - the device twin of the CPU classes'
-    # per-unit ISA flags - so no cubin carries another generation's kernels, and only once `USEARCH_CUDA_ARCHITECTURES`
-    # names one of its @p selectors or "native", which keeps a one-generation tree to that generation's kernels. Each
-    # unit sees only its own NumKong GPU target, as an AMD unit does, since NumKong's own kernels compile under every
-    # target a unit names.
-    function (usearch_dense_vram_nvidia_variant class target_macro selectors)
-        set(target_ usearch_dense_vram_variants_${class})
-        set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_variants_${class}.cu)
-        add_library(${target_} OBJECT ${source_})
-        usearch_setup_target(${target_})
-        target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-        target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_CUDA_=1" "NUMKONG_TARGET_${target_macro}=1")
-        target_link_libraries(
-            ${target_}
-            PRIVATE yyjson forkunion::static
-            PUBLIC ${CMAKE_DL_LIBS}
-        )
-        set(codes_)
-        foreach (selector_ IN ITEMS native ${selectors})
-            if (selector_ IN_LIST USEARCH_CUDA_ARCHITECTURES)
-                usearch_cuda_codes(codes_ "${ARGN}")
-            endif ()
-        endforeach ()
-        usearch_gpu_bundle(${target_} nvidia dense_${class} ${source_} ${codes_})
-        set(USEARCH_PUNNED_LIBRARIES
-            ${USEARCH_PUNNED_LIBRARIES} ${target_}
-            PARENT_SCOPE
-        )
-    endfunction ()
-    usearch_dense_vram_nvidia_variant(nvidia_ampere AMPERE "80;80-real" 80)
-    usearch_dense_vram_nvidia_variant(nvidia_ada ADA "89;89-real" 89-real)
-    usearch_dense_vram_nvidia_variant(nvidia_hopper HOPPER "90a;90a-real" 90a-real)
-    usearch_dense_vram_nvidia_variant(nvidia_blackwell BLACKWELL "100f;100f-real" 100f-real)
-    usearch_dense_vram_nvidia_variant(nvidia_blackwellrtx BLACKWELLRTX "120f;120f-real" 120f-real)
-
-    # Sets @p output to whether `USEARCH_CUDA_ARCHITECTURES` names "native" or any of the remaining selectors.
-    function (usearch_cuda_names output)
-        set(named_ FALSE)
-        foreach (selector_ IN ITEMS native ${ARGN})
-            if (selector_ IN_LIST USEARCH_CUDA_ARCHITECTURES)
-                set(named_ TRUE)
-            endif ()
-        endforeach ()
-        set(${output}
+        set(usearch_class_${class}_named_
             ${named_}
             PARENT_SCOPE
         )
-    endfunction ()
-
-    # The modality kits need nothing past the Ampere floor, so each modality's unit carries a cubin for each class
-    # `USEARCH_CUDA_ARCHITECTURES` names, every one under "native", and the floor's PTX with Ampere's. Ada runs the
-    # Ampere cubin, so an Ada build bundles the floor too.
-    function (usearch_basic_vram_nvidia_variant modality)
-        cmake_parse_arguments(arg "" "" "DEFINITIONS;LIBRARIES" ${ARGN})
-        set(target_ usearch_${modality}_vram_variants_nvidia)
-        set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/${modality}/vram_variants_nvidia.cu)
-        add_library(${target_} OBJECT ${source_})
-        usearch_setup_target(${target_})
-        target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-        target_compile_definitions(
-            ${target_} PRIVATE "USEARCH_ARCH_CUDA_=1" "NUMKONG_TARGET_AMPERE=1" ${arg_DEFINITIONS}
+        set(usearch_class_${class}_flags_
+            "${codes_}"
+            PARENT_SCOPE
         )
-        target_link_libraries(
-            ${target_}
-            PRIVATE yyjson forkunion::static ${arg_LIBRARIES}
-            PUBLIC ${CMAKE_DL_LIBS}
+        set(usearch_class_${class}_definitions_
+            "NUMKONG_TARGET_${target_macro}=1"
+            PARENT_SCOPE
         )
-        set(architectures_)
-        usearch_cuda_names(ampere_ 80 80-real 89 89-real)
-        usearch_cuda_names(hopper_ 90a 90a-real)
-        usearch_cuda_names(blackwell_ 100f 100f-real)
-        usearch_cuda_names(blackwellrtx_ 120f 120f-real)
-        if (ampere_)
-            list(APPEND architectures_ 80)
-        endif ()
-        if (hopper_)
-            list(APPEND architectures_ 90-real)
-        endif ()
-        if (blackwell_)
-            list(APPEND architectures_ 100f-real)
-        endif ()
-        if (blackwellrtx_)
-            list(APPEND architectures_ 120f-real)
-        endif ()
-        usearch_cuda_codes(codes_ "${architectures_}")
-        usearch_gpu_bundle(${target_} nvidia ${modality}_nvidia ${source_} ${codes_})
-        set(USEARCH_PUNNED_LIBRARIES
-            ${USEARCH_PUNNED_LIBRARIES} ${target_}
+        set(usearch_nvidia_classes_
+            ${usearch_nvidia_classes_} ${class}
             PARENT_SCOPE
         )
     endfunction ()
-    usearch_basic_vram_nvidia_variant(sequence DEFINITIONS "STRINGZILLA_HEADER_ONLY=1" LIBRARIES stringzilla::header)
-    usearch_basic_vram_nvidia_variant(shapes)
-    usearch_basic_vram_nvidia_variant(geospatial)
+    usearch_nvidia_class(nvidia_ampere AMPERE "80;80-real" 80)
+    usearch_nvidia_class(nvidia_ada ADA "89;89-real" 89-real)
+    usearch_nvidia_class(nvidia_hopper HOPPER "90a;90a-real" 90a-real)
+    usearch_nvidia_class(nvidia_blackwell BLACKWELL "100f;100f-real" 100f-real)
+    usearch_nvidia_class(nvidia_blackwellrtx BLACKWELLRTX "120f;120f-real" 120f-real)
 
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=1")
+    # The vendor-wide class `nvidia`, for kits that need nothing past the Ampere floor: one unit carrying a cubin for
+    # each generation named above, every one under "native", and the floor's PTX with Ampere's. Ada runs the Ampere
+    # cubin, so an Ada build bundles the floor too.
+    set(usearch_nvidia_architectures_)
+    if (usearch_class_nvidia_ampere_named_ OR usearch_class_nvidia_ada_named_)
+        list(APPEND usearch_nvidia_architectures_ 80)
+    endif ()
+    if (usearch_class_nvidia_hopper_named_)
+        list(APPEND usearch_nvidia_architectures_ 90-real)
+    endif ()
+    if (usearch_class_nvidia_blackwell_named_)
+        list(APPEND usearch_nvidia_architectures_ 100f-real)
+    endif ()
+    if (usearch_class_nvidia_blackwellrtx_named_)
+        list(APPEND usearch_nvidia_architectures_ 120f-real)
+    endif ()
+    set(usearch_class_nvidia_exists_ TRUE)
+    usearch_cuda_codes(usearch_class_nvidia_flags_ "${usearch_nvidia_architectures_}")
+    set(usearch_class_nvidia_definitions_ "NUMKONG_TARGET_AMPERE=1")
 else ()
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=0")
+    set(usearch_nvidia_definitions_ "USEARCH_ARCH_CUDA_=0")
 endif ()
 
-# The AMD variants join beside the NVIDIA ones, so one dispatch unit carries both vendors. Each class unit bundles its
-# kernels as above, through ROCm's Clang, never through CMake's HIP language, whose fat binaries would register with
-# `libamdhip64`, for the class's processors `USEARCH_ROCM_ARCHITECTURES` lists. The kernels sit in a device entry beside
-# the class's host unit, which names none of them.
+# The AMD classes, each embedding a code object for each of its processors `USEARCH_ROCM_ARCHITECTURES` lists, through
+# ROCm's Clang, never through CMake's HIP language, whose fat binaries would register with `libamdhip64`. A class none
+# of whose processors is listed still exists, over an empty code object, so the dispatch unit lists every class whatever
+# the toolchain compiles for.
 if (USEARCH_BUILD_ROCM)
-    enable_language(ASM)
-    function (usearch_dense_vram_amd_variant class target_macro)
-        set(processors_)
-        foreach (processor_ IN LISTS ARGN)
-            if (processor_ IN_LIST USEARCH_ROCM_ARCHITECTURES)
-                list(APPEND processors_ --offload-arch=${processor_})
-            endif ()
-        endforeach ()
-        set(target_ usearch_dense_vram_variants_${class})
-        set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_variants_${class}.hip)
-        set(kernels_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_kernels_${class}.hip)
-        add_library(${target_} OBJECT ${source_})
-        usearch_setup_target(${target_})
-        target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-        target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_ROCM_=1" "NUMKONG_TARGET_${target_macro}=1")
-        target_link_libraries(
-            ${target_}
-            PRIVATE yyjson forkunion::static
-            PUBLIC ${CMAKE_DL_LIBS}
+    set(usearch_amd_classes_)
+    set(usearch_amd_definitions_ "USEARCH_ARCH_ROCM_=1")
+    function (usearch_amd_class class target_macro)
+        usearch_rocm_codes(codes_ ${ARGN})
+        set(usearch_class_${class}_exists_
+            TRUE
+            PARENT_SCOPE
         )
-        # A class none of whose processors is listed still links its variants, over an empty code object, so the
-        # dispatch unit lists every class whatever the toolchain compiles for.
-        usearch_gpu_bundle(
-            ${target_}
-            amd
-            dense_${class}
-            ${source_}
-            ${processors_}
-            DEVICE
-            ${kernels_}
+        set(usearch_class_${class}_flags_
+            "${codes_}"
+            PARENT_SCOPE
         )
-        set(USEARCH_PUNNED_LIBRARIES
-            ${USEARCH_PUNNED_LIBRARIES} ${target_}
+        set(usearch_class_${class}_definitions_
+            "NUMKONG_TARGET_${target_macro}=1"
+            PARENT_SCOPE
+        )
+        set(usearch_amd_classes_
+            ${usearch_amd_classes_} ${class}
             PARENT_SCOPE
         )
     endfunction ()
-    usearch_dense_vram_amd_variant(amd_cdna3 CDNA3 gfx942 gfx950)
-    usearch_dense_vram_amd_variant(amd_cdna4 CDNA4 gfx950)
-    usearch_dense_vram_amd_variant(amd_cdna5 CDNA5 gfx1250 gfx1251)
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_ROCM_=1")
+    usearch_amd_class(amd_cdna3 CDNA3 gfx942 gfx950)
+    usearch_amd_class(amd_cdna4 CDNA4 gfx950)
+    usearch_amd_class(amd_cdna5 CDNA5 gfx1250 gfx1251)
 endif ()
 
-# The Apple variants: one plain C++ unit per Apple class, as NVIDIA and AMD have one per class, whose kernels compile
-# from embedded source at first use, one library per dtype and class, so no Metal toolchain is needed to build them. The
-# dispatch unit and the Apple unit see `USEARCH_ARCH_METAL_=1`, and nothing links Metal, Foundation or `libobjc`, which
-# `metal_api` opens at first use.
+# The Apple classes, one per Metal generation, whose kernels compile from embedded source at first use, one library per
+# dtype and class, so no Metal toolchain is needed to build them and a class carries no flags. Nothing links Metal,
+# Foundation or `libobjc`, which `metal_api` opens at first use.
 if (USEARCH_BUILD_METAL)
-    add_library(
-        usearch_dense_vram_variants_apple OBJECT
-        dense/vram_variants_apple_metal7.cpp dense/vram_variants_apple_metal9.cpp dense/vram_variants_apple_metal10.cpp
-    )
-    usearch_setup_target(usearch_dense_vram_variants_apple)
-    target_include_directories(usearch_dense_vram_variants_apple PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_compile_definitions(usearch_dense_vram_variants_apple PRIVATE "USEARCH_ARCH_METAL_=1")
-    target_link_libraries(usearch_dense_vram_variants_apple PRIVATE yyjson forkunion::static)
-    set(USEARCH_PUNNED_LIBRARIES ${USEARCH_PUNNED_LIBRARIES} usearch_dense_vram_variants_apple)
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_METAL_=1")
+    set(usearch_apple_classes_)
+    set(usearch_apple_definitions_ "USEARCH_ARCH_METAL_=1")
+    function (usearch_apple_class class)
+        set(usearch_class_${class}_exists_
+            TRUE
+            PARENT_SCOPE
+        )
+        set(usearch_apple_classes_
+            ${usearch_apple_classes_} ${class}
+            PARENT_SCOPE
+        )
+    endfunction ()
+    usearch_apple_class(apple_metal7)
+    usearch_apple_class(apple_metal9)
+    usearch_apple_class(apple_metal10)
 endif ()
+
+# Declares the object library @p target of the units after `SOURCES`, wired as every library here is: the shared setup,
+# this directory's includes, yyjson and ForkUnion, and the `DEFINITIONS` and `LIBRARIES` it adds.
+function (usearch_object_library target)
+    cmake_parse_arguments(arg "" "" "SOURCES;DEFINITIONS;LIBRARIES" ${ARGN})
+    add_library(${target} OBJECT ${arg_SOURCES})
+    usearch_setup_target(${target})
+    target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(${target} PRIVATE ${arg_DEFINITIONS})
+    target_link_libraries(${target} PRIVATE yyjson forkunion::static ${arg_LIBRARIES})
+endfunction ()
+
+# Declares the @p modality variants resident in @p residency on @p backend, over the classes after it that exist, and
+# adds the libraries to `usearch_<backend>_variants_`. Each class's unit is `<modality>/<residency>_variants_<class>`. A
+# CPU or Apple backend builds one library, `usearch_<modality>_<residency>_variants`, with `_apple` for Apple, of a unit
+# per class compiled with its class's flags. An NVIDIA or AMD backend builds one library per class,
+# `usearch_<modality>_<residency>_variants_<class>`, since each bundles its own device codes under its own NumKong
+# target, and links the dynamic loader its runtime opens through; an AMD class keeps its kernels in the device entry
+# `<modality>/<residency>_kernels_<class>.hip` beside the host unit, which names none of them.
+function (usearch_variants modality residency backend)
+    cmake_parse_arguments(arg "" "" "DEFINITIONS;LIBRARIES" ${ARGN})
+    set(library_ usearch_${modality}_${residency}_variants)
+    set(unit_ ${modality}/${residency}_variants)
+    set(classes_)
+    foreach (class_ IN LISTS arg_UNPARSED_ARGUMENTS)
+        if (usearch_class_${class_}_exists_)
+            list(APPEND classes_ ${class_})
+        endif ()
+    endforeach ()
+    if (NOT classes_)
+        return()
+    endif ()
+    set(libraries_)
+    if (backend STREQUAL "cpu" OR backend STREQUAL "apple")
+        if (backend STREQUAL "apple")
+            set(library_ ${library_}_apple)
+        endif ()
+        usearch_object_library(
+            ${library_}
+            DEFINITIONS ${usearch_${backend}_definitions_} ${arg_DEFINITIONS}
+            LIBRARIES ${arg_LIBRARIES}
+        )
+        foreach (class_ IN LISTS classes_)
+            target_sources(${library_} PRIVATE ${unit_}_${class_}.cpp)
+            set_source_files_properties(
+                ${unit_}_${class_}.cpp PROPERTIES COMPILE_OPTIONS "${usearch_class_${class_}_flags_}"
+            )
+        endforeach ()
+        list(APPEND libraries_ ${library_})
+    else ()
+        foreach (class_ IN LISTS classes_)
+            set(target_ ${library_}_${class_})
+            if (backend STREQUAL "nvidia")
+                set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${class_}.cu)
+                set(device_)
+            else ()
+                set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${class_}.hip)
+                set(device_ DEVICE ${CMAKE_CURRENT_SOURCE_DIR}/${modality}/${residency}_kernels_${class_}.hip)
+            endif ()
+            usearch_object_library(
+                ${target_}
+                SOURCES ${source_}
+                DEFINITIONS ${usearch_${backend}_definitions_} ${usearch_class_${class_}_definitions_}
+                            ${arg_DEFINITIONS}
+                LIBRARIES ${arg_LIBRARIES}
+            )
+            target_link_libraries(${target_} PUBLIC ${CMAKE_DL_LIBS})
+            usearch_gpu_bundle(
+                ${target_} ${backend} ${modality}_${class_} ${source_} ${usearch_class_${class_}_flags_} ${device_}
+            )
+            list(APPEND libraries_ ${target_})
+        endforeach ()
+    endif ()
+    set(usearch_${backend}_variants_
+        ${usearch_${backend}_variants_} ${libraries_}
+        PARENT_SCOPE
+    )
+endfunction ()
+
+# The NVMe variants compile for the CPU classes whose 4-way or tiles kits a storage walk or scan tells apart: they carry
+# no waiter or atomic reference, so aws_g5 and alibaba_c930, which advance only by those, take none, and a WebAssembly
+# module reads no storage directly. The sequence, shapes and geospatial variants compile for the CPU classes where any
+# of their StringZilla or NumKong kits advance, and a modality whose kits stay put at a class falls back down its kit
+# chain; on NVIDIA they need nothing past the Ampere floor, so they compile for the vendor-wide class.
+set(usearch_dense_nvme_classes_
+    serial
+    intel_haswell
+    intel_sierra
+    intel_skylake
+    intel_icelake
+    amd_genoa
+    intel_sapphire
+    intel_granite
+    intel_diamond
+    aws_g2
+    apple_m2
+    apple_m4
+    nvidia_vera
+)
+set(usearch_basic_cpu_classes_
+    serial
+    intel_haswell
+    intel_skylake
+    aws_g2
+    apple_m2
+    alibaba_c930
+    wasm64_extended
+)
+
+# The variant libraries: one row per modality, residency and backend. A backend a modality lacks is a missing row, and a
+# row over the classes of a vendor this tree does not build declares nothing.
+usearch_variants(dense ram cpu ${usearch_cpu_classes_})
+usearch_variants(dense nvme cpu ${usearch_dense_nvme_classes_})
+usearch_variants(dense vram nvidia ${usearch_nvidia_classes_})
+usearch_variants(dense vram amd ${usearch_amd_classes_})
+usearch_variants(dense vram apple ${usearch_apple_classes_})
+usearch_variants(
+    sequence ram cpu ${usearch_basic_cpu_classes_}
+    DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
+    LIBRARIES stringzilla::header
+)
+usearch_variants(
+    sequence vram nvidia nvidia
+    DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
+    LIBRARIES stringzilla::header
+)
+usearch_variants(shapes ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
+usearch_variants(shapes vram nvidia nvidia)
+usearch_variants(geospatial ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
+usearch_variants(geospatial vram nvidia nvidia)
+
+# The type-erased implementations behind the C interface: the dispatch units visit the variants through their explicitly
+# instantiated views and compile at the baseline, since they inline no kernel, gated per CPU class and told which GPU
+# vendors joined.
+usearch_object_library(
+    usearch_punned
+    SOURCES types.cpp dense_index.cpp sequence_index.cpp shapes_index.cpp geospatial_index.cpp
+    DEFINITIONS ${usearch_cpu_gates_} ${usearch_nvidia_definitions_} ${usearch_amd_definitions_}
+                ${usearch_apple_definitions_}
+    LIBRARIES stringzilla::header
+)
 
 # Objects never travel through another object library, so every consumer names the whole set: executables and shared
 # libraries link the targets and inherit their dependencies, an archive takes the objects themselves.
+set(USEARCH_PUNNED_LIBRARIES usearch_punned ${usearch_cpu_variants_} ${usearch_nvidia_variants_}
+                             ${usearch_amd_variants_} ${usearch_apple_variants_}
+)
 set(USEARCH_PUNNED_OBJECTS)
 foreach (library_ IN LISTS USEARCH_PUNNED_LIBRARIES)
     list(APPEND USEARCH_PUNNED_OBJECTS $<TARGET_OBJECTS:${library_}>)

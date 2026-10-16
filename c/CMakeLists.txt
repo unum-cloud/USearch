@@ -44,6 +44,12 @@ if (USEARCH_BUILD_LIB_C)
     usearch_setup_target(usearch_shared)
     usearch_setup_target(usearch_static)
 
+    # The shared flavor brings JeMalloc into the processes that load it, as `usearch_setup_target` does for executables;
+    # an archive links nothing.
+    if (USEARCH_USE_JEMALLOC)
+        target_link_libraries(usearch_shared PRIVATE ${JEMALLOC_LIBRARIES})
+    endif ()
+
     # Outside the export set, and unconditional: `USEARCH_INSTALL` governs the CMake config, not whether a built library
     # lands in the prefix. One component per flavor, so a packager can take either.
     install(

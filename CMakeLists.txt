@@ -1,5 +1,3 @@
-# This CMake file is heavily inspired by following `usearch` CMake:
-# https://github.com/nlohmann/json/blob/develop/CMakeLists.txt
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 project(
     usearch
@@ -9,9 +7,12 @@ project(
     HOMEPAGE_URL "https://github.com/unum-cloud/USearch"
 )
 
+# The file runs top to bottom: the options and the settings they validate, the defaults every target is created under,
+# the header-only targets, the dependencies, one `cmake/<dependency>.cmake` each, the install and export rules, the
+# wiring every compiled target shares, and the subdirectories.
+
 # Determine if USearch is built as a subproject (using `add_subdirectory`) or if it is the main project
 set(USEARCH_IS_MAIN_PROJECT OFF)
-
 if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     set(USEARCH_IS_MAIN_PROJECT ON)
 endif ()
@@ -77,12 +78,6 @@ if ((USEARCH_BUILD_CUDA
     )
 endif ()
 
-if (USEARCH_BUILD_SPDK)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(USEARCH_SPDK REQUIRED spdk_nvme spdk_env_dpdk)
-    pkg_check_modules(USEARCH_SPDK_SYSTEM REQUIRED spdk_syslibs)
-endif ()
-
 # The library compiles one unit per GPU class, each for its own architecture alone - "80" with its PTX for every GPU
 # without a class, "89", "90a", "100f" and "120f" - and only the classes this list names, with or without "-real", so
 # "100f-real" builds the Blackwell kernels alone and "native" builds every class. The CUDA tests, benchmarks and the
@@ -93,6 +88,19 @@ set(USEARCH_CUDA_ARCHITECTURES
     "80-real;89-real;90a-real;100f-real;120f-real"
     CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"
 )
+
+# Three-digit "a" & "f" entries are only understood from CMake 3.31 onward, while the CPU-only build stays on the 3.28
+# floor that stock Ubuntu 24.04 ships. The floor follows the architectures actually asked for, so a single-architecture
+# build on a distribution CMake is never refused for a capability it does not use.
+if (USEARCH_BUILD_CUDA
+    AND CMAKE_VERSION VERSION_LESS 3.31
+    AND USEARCH_CUDA_ARCHITECTURES MATCHES "1[0-9][0-9][af]"
+)
+    message(
+        FATAL_ERROR
+            "USEARCH_CUDA_ARCHITECTURES \"${USEARCH_CUDA_ARCHITECTURES}\" names a three-digit \"a\" or \"f\" architecture, which needs CMake 3.31 or newer, found ${CMAKE_VERSION} - override with a single architecture or \"native\""
+    )
+endif ()
 
 # The AMD units embed one code object per listed processor of their class, and the CDNA3 floor also for CDNA4, which
 # keeps every instruction its kits use; CDNA5 drops `v_dot4_i32_i8` and `v_dot2_f32_f16`, so only its own unit runs it.
@@ -112,91 +120,22 @@ set(USEARCH_DENSE_DTYPES
 if (NOT USEARCH_DENSE_DTYPES MATCHES "^([1-9]|1[01])$")
     message(FATAL_ERROR "USEARCH_DENSE_DTYPES must be an integer from 1 to 11, found \"${USEARCH_DENSE_DTYPES}\"")
 endif ()
-set(usearch_dense_dtypes_ladder_
-    BF16
-    U1
-    I8
-    E4M3
-    F16
-    U8
-    E5M2
-    I4
-    U4
-    E3M2
-    E2M3
-)
-
-# Adds to @p target the per-dtype units listed after each dtype's keyword, for the dtypes the ladder compiles:
-# `usearch_dense_dtype_sources(target BF16 a_bf16.cpp F16 a_f16.cpp ...)`. The f32 and f64 units are the suites' own
-# references, outside the ladder, so their targets list them directly.
-function (usearch_dense_dtype_sources target)
-    cmake_parse_arguments(PARSE_ARGV 1 shards "" "" "${usearch_dense_dtypes_ladder_}")
-    if (shards_UNPARSED_ARGUMENTS)
-        message(FATAL_ERROR "${target} lists \"${shards_UNPARSED_ARGUMENTS}\" under no dense dtype of the ladder")
-    endif ()
-    set(position_ 0)
-    foreach (dtype_ IN LISTS usearch_dense_dtypes_ladder_)
-        if (position_ LESS USEARCH_DENSE_DTYPES)
-            target_sources(${target} PRIVATE ${shards_${dtype_}})
-        endif ()
-        math(EXPR position_ "${position_} + 1")
-    endforeach ()
-endfunction ()
-
-# Sets @p output to `capability_macro=1` where every one of the architectures is one of NumKong's cached
-# `nk_target_<capability>_architectures`, with or without CMake's "-real" or "-virtual", and to `capability_macro=0`
-# otherwise. NumKong's one-code units need any of them; a unit here compiles every listed code, and a kit compiled into
-# one pass is compiled into all.
-function (usearch_cuda_capability capability_name capability_macro architectures output)
-    set(enabled_ 1)
-    foreach (architecture_ IN LISTS architectures)
-        set(supported_ 0)
-        foreach (supported_architecture_ IN LISTS nk_target_${capability_name}_architectures)
-            if (architecture_ MATCHES "^${supported_architecture_}(-real|-virtual)?$")
-                set(supported_ 1)
-            endif ()
-        endforeach ()
-        if (NOT supported_)
-            set(enabled_ 0)
-        endif ()
-    endforeach ()
-    set(${output}
-        ${capability_macro}=${enabled_}
-        PARENT_SCOPE
-    )
-endfunction ()
-
-# The NumKong GPU capabilities the CUDA codes run, as the definitions a target compiles with.
-function (usearch_cuda_capabilities output architectures)
-    usearch_cuda_capability(ampere NUMKONG_TARGET_AMPERE "${architectures}" ampere_)
-    usearch_cuda_capability(ada NUMKONG_TARGET_ADA "${architectures}" ada_)
-    usearch_cuda_capability(hopper NUMKONG_TARGET_HOPPER "${architectures}" hopper_)
-    usearch_cuda_capability(blackwell NUMKONG_TARGET_BLACKWELL "${architectures}" blackwell_)
-    usearch_cuda_capability(blackwellrtx NUMKONG_TARGET_BLACKWELLRTX "${architectures}" blackwellrtx_)
-    set(${output}
-        ${ampere_} ${ada_} ${hopper_} ${blackwell_} ${blackwellrtx_}
-        PARENT_SCOPE
-    )
-endfunction ()
-
-# Three-digit "a" & "f" entries are only understood from CMake 3.31 onward, while the CPU-only build stays on the 3.28
-# floor that stock Ubuntu 24.04 ships. The floor follows the architectures actually asked for, so a single-architecture
-# build on a distribution CMake is never refused for a capability it does not use.
-if (USEARCH_BUILD_CUDA
-    AND CMAKE_VERSION VERSION_LESS 3.31
-    AND USEARCH_CUDA_ARCHITECTURES MATCHES "1[0-9][0-9][af]"
-)
-    message(
-        FATAL_ERROR
-            "USEARCH_CUDA_ARCHITECTURES \"${USEARCH_CUDA_ARCHITECTURES}\" names a three-digit \"a\" or \"f\" architecture, which needs CMake 3.31 or newer, found ${CMAKE_VERSION} - override with a single architecture or \"native\""
-    )
-endif ()
 
 # One diagnostic is what an iteration wants; surveying a tree that has drifted wants the whole list at once.
 set(USEARCH_MAX_ERRORS
     "1"
     CACHE STRING "Diagnostics a compiler emits before giving up on a translation unit"
 )
+
+# Every consumer of the pre-instantiated library builds `src/`, the C interface included - its implementation is
+# `src/dense_index.cpp` and the per-dtype shards beside it - and acquires yyjson for it.
+set(usearch_build_punned_ OFF)
+if (USEARCH_BUILD_TEST
+    OR USEARCH_BUILD_BENCH
+    OR USEARCH_BUILD_LIB_C
+)
+    set(usearch_build_punned_ ON)
+endif ()
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
 # execute code), so point `core.hooksPath` at `.githooks` here - configuring the build arms the `pre-commit` checks.
@@ -205,33 +144,34 @@ if (USEARCH_IS_MAIN_PROJECT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     execute_process(
         COMMAND git config core.hooksPath .githooks
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        RESULT_VARIABLE _usearch_hooks_status
+        RESULT_VARIABLE usearch_hooks_status_
         OUTPUT_QUIET ERROR_QUIET
     )
-    if (_usearch_hooks_status EQUAL 0)
+    if (usearch_hooks_status_ EQUAL 0)
         message(STATUS "usearch: Git hooks enabled (core.hooksPath -> .githooks)")
     endif ()
 endif ()
 
-# Includes
-set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
-include(ExternalProject)
+# The build type when the caller names none.
+if (NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo)
+endif ()
 
-# Configuration
-include(GNUInstallDirs)
-set(USEARCH_TARGET_NAME usearch_header)
-set(USEARCH_CONFIG_INSTALL_DIR
-    "${CMAKE_INSTALL_DATADIR}/cmake/${PROJECT_NAME}"
-    CACHE INTERNAL ""
-)
-set(USEARCH_INCLUDE_INSTALL_DIR "${CMAKE_INSTALL_INCLUDEDIR}")
-set(USEARCH_TARGETS_EXPORT_NAME "${PROJECT_NAME}Targets")
-set(USEARCH_CMAKE_CONFIG_TEMPLATE "cmake/config.cmake.in")
-set(USEARCH_CMAKE_CONFIG_DIR "${CMAKE_CURRENT_BINARY_DIR}")
-set(USEARCH_CMAKE_VERSION_CONFIG_FILE "${USEARCH_CMAKE_CONFIG_DIR}/${PROJECT_NAME}ConfigVersion.cmake")
-set(USEARCH_CMAKE_PROJECT_CONFIG_FILE "${USEARCH_CMAKE_CONFIG_DIR}/${PROJECT_NAME}Config.cmake")
-set(USEARCH_CMAKE_PROJECT_TARGETS_FILE "${USEARCH_CMAKE_CONFIG_DIR}/${PROJECT_NAME}Targets.cmake")
-set(USEARCH_PKGCONFIG_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/pkgconfig")
+# Every artifact lands at the top of the build tree, however deep the directory that declares it - one `-L`, one path to
+# a binary, no guessing which subdirectory a target chose. Multi-configuration generators would nest a second level,
+# `build_debug\Debug` on Windows, so each configuration is pinned to the same place as the default. Set before any
+# target exists, since these seed a target's properties at creation.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach (configuration_ DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${configuration_} "${CMAKE_BINARY_DIR}")
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${configuration_} "${CMAKE_BINARY_DIR}")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${configuration_} "${CMAKE_BINARY_DIR}")
+endforeach ()
+
+# The compiled siblings land as archives inside our shared objects, so every one is position-independent.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Include roots that add no path component: the C interface in `c/`, the templates in `include/`, and the C++ wrappers
 # over the C interface in `cpp/`, which only the compiled libraries carry.
@@ -262,45 +202,39 @@ target_sources(
 target_compile_features(usearch_core INTERFACE cxx_std_20)
 
 # The whole header-only library: every header, the siblings it reaches into, and the type verdicts below.
-add_library(${USEARCH_TARGET_NAME} INTERFACE)
-add_library(${PROJECT_NAME}::header ALIAS ${USEARCH_TARGET_NAME})
-set_target_properties(${USEARCH_TARGET_NAME} PROPERTIES EXPORT_NAME header)
-target_link_libraries(${USEARCH_TARGET_NAME} INTERFACE usearch_core)
-
+add_library(usearch_header INTERFACE)
+add_library(${PROJECT_NAME}::header ALIAS usearch_header)
+set_target_properties(usearch_header PROPERTIES EXPORT_NAME header)
+target_link_libraries(usearch_header INTERFACE usearch_core)
 target_include_directories(
-    ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE "$<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIRS}>"
-                                                               $<INSTALL_INTERFACE:include>
+    usearch_header INTERFACE "$<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIRS}>" $<INSTALL_INTERFACE:include>
 )
-# Install a pkg-config file, so other tools can find this
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc")
 
-# A header-only package fits any architecture, and `ARCH_INDEPENDENT` declares exactly that - no hand-written version
+# The package files: a pkg-config file, so other tools can find this, and the CMake config with its version file. A
+# header-only package fits any architecture, and `ARCH_INDEPENDENT` declares exactly that - no hand-written version
 # template needed.
+include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+set(USEARCH_CONFIG_INSTALL_DIR
+    "${CMAKE_INSTALL_DATADIR}/cmake/${PROJECT_NAME}"
+    CACHE INTERNAL ""
+)
+set(USEARCH_TARGETS_EXPORT_NAME "${PROJECT_NAME}Targets")
+set(USEARCH_CMAKE_VERSION_CONFIG_FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake")
+set(USEARCH_CMAKE_PROJECT_CONFIG_FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc")
 write_basic_package_version_file(
     ${USEARCH_CMAKE_VERSION_CONFIG_FILE}
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY AnyNewerVersion ARCH_INDEPENDENT
 )
-configure_file(${USEARCH_CMAKE_CONFIG_TEMPLATE} ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} @ONLY)
+configure_file(cmake/config.cmake.in ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} @ONLY)
 
-if (USEARCH_INSTALL)
-    install(DIRECTORY c/usearch include/usearch cpp/usearch DESTINATION ${USEARCH_INCLUDE_INSTALL_DIR})
-    install(FILES ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} ${USEARCH_CMAKE_VERSION_CONFIG_FILE}
-            DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
-    )
-    install(
-        TARGETS usearch_core ${USEARCH_TARGET_NAME}
-        EXPORT ${USEARCH_TARGETS_EXPORT_NAME}
-        FILE_SET HEADERS
-        DESTINATION ${USEARCH_INCLUDE_INSTALL_DIR}
-        INCLUDES
-        DESTINATION ${USEARCH_INCLUDE_INSTALL_DIR}
-    )
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc" DESTINATION ${USEARCH_PKGCONFIG_INSTALL_DIR})
-endif ()
+# Dependencies, each acquired by its own `cmake/<dependency>.cmake`, and each only for the builds that compile against
+# it.
+set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
+include(FetchContent)
 
-# Find required packages
 if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
     set(CMAKE_THREAD_LIBS_INIT "-lpthread")
     set(CMAKE_HAVE_THREADS_LIBRARY 1)
@@ -308,16 +242,103 @@ if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
     set(CMAKE_USE_PTHREADS_INIT 1)
     set(THREADS_PREFER_PTHREAD_FLAG ON)
 endif ()
-
 find_package(Threads REQUIRED)
 
+# Sibling libraries build themselves: each ships a CMakeLists.txt handling its own ISA detection and dispatch. They
+# arrive as submodules in a recursive clone, and as pinned fetches otherwise - a plain `git clone` of USearch, or a
+# `FetchContent` of it from another project, still configures. Pins match the submodule commits. The siblings are the
+# engine rather than an option: every header reaches for them unguarded, so there is no build without them and no switch
+# pretending otherwise. Include directories are copied onto the interface target, because `usearch_setup_target` reads
+# `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target declares, not what its link
+# interface would carry - to keep the C++20 feature requirement off the pure-C targets.
+function (usearch_sibling name link_target repository tag)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name}/CMakeLists.txt")
+        add_subdirectory(${name})
+    else ()
+        message(STATUS "usearch: ${name} submodule absent, fetching ${tag}")
+        FetchContent_Declare(
+            ${name}
+            GIT_REPOSITORY ${repository}
+            GIT_TAG ${tag}
+        )
+        FetchContent_MakeAvailable(${name})
+    endif ()
+
+    target_link_libraries(usearch_header INTERFACE ${link_target})
+
+    # Collected for the export set: their interfaces carry a language level and `Threads::Threads`, which the paths
+    # copied below do not.
+    get_target_property(sibling_target_ ${link_target} ALIASED_TARGET)
+    if (NOT sibling_target_)
+        set(sibling_target_ ${link_target})
+    endif ()
+    set(usearch_sibling_targets_
+        ${usearch_sibling_targets_} ${sibling_target_}
+        PARENT_SCOPE
+    )
+
+    target_include_directories(usearch_header INTERFACE $<TARGET_PROPERTY:${link_target},INTERFACE_INCLUDE_DIRECTORIES>)
+endfunction ()
+
+set(usearch_sibling_targets_)
+include(numkong)
+include(forkunion)
+include(stringzilla)
+include(smashtable)
+if (usearch_build_punned_)
+    include(yyjson)
+endif ()
+if (USEARCH_BUILD_TEST OR USEARCH_BUILD_BENCH)
+    include(fmt)
+endif ()
 if (USEARCH_USE_JEMALLOC)
     include(jemalloc)
 endif ()
+if (USEARCH_BUILD_SPDK)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(USEARCH_SPDK REQUIRED spdk_nvme spdk_env_dpdk)
+    pkg_check_modules(USEARCH_SPDK_SYSTEM REQUIRED spdk_syslibs)
+endif ()
 
-# Set default build type to Release
-if (NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE RelWithDebInfo)
+# NVCC is only a device compiler here, so the toolkit is found for its paths alone, and every NVIDIA and AMD unit links
+# its device bundle through an assembler stub. Both serve every directory below, which inherits them.
+if (USEARCH_BUILD_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif ()
+if (USEARCH_BUILD_CUDA OR USEARCH_BUILD_ROCM)
+    enable_language(ASM)
+endif ()
+
+# The headers, the package files and the export set, which records the siblings without headers - each owns its own - so
+# `usearch::header` names nothing a consumer cannot resolve. Both exports read the set as it stands when called, so they
+# trail every target that belongs to it.
+if (USEARCH_INSTALL)
+    install(DIRECTORY c/usearch include/usearch cpp/usearch DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} ${USEARCH_CMAKE_VERSION_CONFIG_FILE}
+            DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
+    )
+    install(
+        TARGETS usearch_core usearch_header
+        EXPORT ${USEARCH_TARGETS_EXPORT_NAME}
+        FILE_SET HEADERS
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        INCLUDES
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc" DESTINATION "${CMAKE_INSTALL_DATADIR}/pkgconfig")
+    if (usearch_sibling_targets_)
+        install(TARGETS ${usearch_sibling_targets_} EXPORT ${USEARCH_TARGETS_EXPORT_NAME})
+    endif ()
+    export(
+        TARGETS usearch_core usearch_header ${usearch_sibling_targets_}
+        NAMESPACE ${PROJECT_NAME}::
+        FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Targets.cmake"
+    )
+    install(
+        EXPORT ${USEARCH_TARGETS_EXPORT_NAME}
+        NAMESPACE ${PROJECT_NAME}::
+        DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
+    )
 endif ()
 
 # Host tuning for the tests & benches only - never the distributable libraries - and only where the host is the target
@@ -359,13 +380,13 @@ endif ()
 # depends on - fast math, the diagnostics, the sanitizers - is pinned here, and only for the host languages, so a unit
 # the CUDA driver compiles is not handed flags it rejects. `HOST` tunes for the machine at hand and takes no probe
 # verdict, since the compiler's own feature macros then say exactly what the host has.
-function (usearch_setup_target TARGET_NAME)
-    cmake_parse_arguments(usearch_setup "HOST" "" "" ${ARGN})
+function (usearch_setup_target target)
+    cmake_parse_arguments(arg "HOST" "" "" ${ARGN})
     # Compiler-specific options List of all possible compiler IDs:
     # https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_options(
-            ${TARGET_NAME}
+            ${target}
             PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}>
                     -ffast-math
                     -fno-finite-math-only
@@ -378,13 +399,13 @@ function (usearch_setup_target TARGET_NAME)
                     -pedantic
                     -fdiagnostics-color=always>
         )
-        target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:-g ${USEARCH_SANITIZERS}> -fPIC)
+        target_link_options(${target} PRIVATE $<$<CONFIG:DEBUG>:-g ${USEARCH_SANITIZERS}> -fPIC)
 
-        target_link_libraries(${TARGET_NAME} PRIVATE Threads::Threads)
+        target_link_libraries(${target} PRIVATE Threads::Threads)
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(
-            ${TARGET_NAME}
+            ${target}
             PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}>
                     -ffast-math
                     -fno-finite-math-only
@@ -393,202 +414,98 @@ function (usearch_setup_target TARGET_NAME)
                     -Wfatal-errors
                     -fcolor-diagnostics>
         )
-        target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:-g ${USEARCH_SANITIZERS}> -fPIC)
+        target_link_options(${target} PRIVATE $<$<CONFIG:DEBUG>:-g ${USEARCH_SANITIZERS}> -fPIC)
 
         if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
-            target_link_libraries(
-                ${TARGET_NAME} PRIVATE "-framework CoreFoundation" "-framework Security" Threads::Threads
-            )
+            target_link_libraries(${target} PRIVATE "-framework CoreFoundation" "-framework Security" Threads::Threads)
         else ()
-            target_link_libraries(${TARGET_NAME} PRIVATE Threads::Threads)
+            target_link_libraries(${target} PRIVATE Threads::Threads)
         endif ()
 
-    elseif (CMAKE_CXX_COMPILER_ID STREQUAL "NVIDIA" OR CMAKE_CXX_COMPILER_ID STREQUAL "NVHPC")
-        target_compile_options(${TARGET_NAME} PRIVATE $<$<CONFIG:RELEASE>:-O3>)
-        target_compile_definitions(${TARGET_NAME} PRIVATE --expt-relaxed-constexpr --extended-lambda)
-        set_property(SOURCE bench.cpp PROPERTY LANGUAGE CUDA)
-        set_target_properties(${TARGET_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
-        set_target_properties(${TARGET_NAME} PROPERTIES CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}")
-
     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(${TARGET_NAME} PRIVATE -w -ferror-limit=${USEARCH_MAX_ERRORS})
+        target_compile_options(${target} PRIVATE -w -ferror-limit=${USEARCH_MAX_ERRORS})
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
         # MSVC has no O3 optimization level
-        target_compile_options(${TARGET_NAME} PRIVATE /wd4068 /wd4996)
+        target_compile_options(${target} PRIVATE /wd4068 /wd4996)
         target_compile_options(
-            ${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:/DEBUG> $<$<CONFIG:RELEASE>:/O2> $<$<CONFIG:RELWITHDEBINFO>:/O2
-                                   /DEBUG>
+            ${target} PRIVATE $<$<CONFIG:DEBUG>:/DEBUG> $<$<CONFIG:RELEASE>:/O2> $<$<CONFIG:RELWITHDEBINFO>:/O2 /DEBUG>
         )
     endif ()
 
     # One source of truth for header paths: whatever the interface target advertises, including what the dependencies
     # carry, without inheriting its compile features onto pure-C targets.
-    target_include_directories(
-        ${TARGET_NAME} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
-    )
+    target_include_directories(${target} PRIVATE $<TARGET_PROPERTY:usearch_header,INTERFACE_INCLUDE_DIRECTORIES>)
     # Host-tuned units read the compiler; every other unit takes each sibling's compiled capabilities and instantiates
     # its kits per CPU class, never by a template's default capability, so the class units and the dispatch unit name
     # the same rungs.
-    if (usearch_setup_HOST)
-        target_compile_options(${TARGET_NAME} PRIVATE ${USEARCH_HOST_TUNING})
+    if (arg_HOST)
+        target_compile_options(${target} PRIVATE ${USEARCH_HOST_TUNING})
     else ()
         target_link_libraries(
-            ${TARGET_NAME}
+            ${target}
             PRIVATE $<BUILD_INTERFACE:numkong::cpu_capabilities_compiled>
                     $<BUILD_INTERFACE:stringzilla::cpu_capabilities_compiled>
                     $<BUILD_INTERFACE:forkunion::cpu_capabilities_compiled>
         )
     endif ()
-    set_target_properties(${TARGET_NAME} PROPERTIES CXX_STANDARD 20)
+    set_target_properties(${target} PROPERTIES CXX_STANDARD 20)
 
     # Every library carries the `lib` prefix, Windows included, so one file name serves every platform.
-    get_target_property(TARGET_TYPE ${TARGET_NAME} TYPE)
-
-    if (TARGET_TYPE STREQUAL "SHARED_LIBRARY" OR TARGET_TYPE STREQUAL "STATIC_LIBRARY")
-        set_target_properties(${TARGET_NAME} PROPERTIES PREFIX "lib")
+    get_target_property(target_type_ ${target} TYPE)
+    if (target_type_ STREQUAL "SHARED_LIBRARY" OR target_type_ STREQUAL "STATIC_LIBRARY")
+        set_target_properties(${target} PROPERTIES PREFIX "lib")
     endif ()
 
     # Header-only NumKong: each unit inlines the kernels its CPU class runs, and USearch dispatches by CPU class, so no
     # artifact needs NumKong's library or its dispatch points.
-    target_link_libraries(${TARGET_NAME} PRIVATE numkong::header)
+    target_link_libraries(${target} PRIVATE numkong::header)
 
     # SPDK's transports, socket layers and DPDK drivers register from static constructors, so their archives link whole.
     if (USEARCH_BUILD_SPDK)
-        target_compile_definitions(${TARGET_NAME} PRIVATE USEARCH_BUILD_SPDK=1)
-        target_include_directories(${TARGET_NAME} SYSTEM PRIVATE ${USEARCH_SPDK_INCLUDE_DIRS})
+        target_compile_definitions(${target} PRIVATE USEARCH_BUILD_SPDK=1)
+        target_include_directories(${target} SYSTEM PRIVATE ${USEARCH_SPDK_INCLUDE_DIRS})
         target_link_libraries(
-            ${TARGET_NAME} PRIVATE "-Wl,--whole-archive" "-Wl,-Bstatic" ${USEARCH_SPDK_LDFLAGS} "-Wl,-Bdynamic"
-                                   "-Wl,--no-whole-archive" ${USEARCH_SPDK_SYSTEM_STATIC_LDFLAGS}
+            ${target} PRIVATE "-Wl,--whole-archive" "-Wl,-Bstatic" ${USEARCH_SPDK_LDFLAGS} "-Wl,-Bdynamic"
+                              "-Wl,--no-whole-archive" ${USEARCH_SPDK_SYSTEM_STATIC_LDFLAGS}
         )
     endif ()
 
+    # JeMalloc serves the processes this project starts, its executables; the C library links it in `c/`.
+    if (USEARCH_USE_JEMALLOC AND target_type_ STREQUAL "EXECUTABLE")
+        target_link_libraries(${target} PRIVATE ${JEMALLOC_LIBRARIES})
+    endif ()
 endfunction ()
 
-# Sibling libraries build themselves: each ships a CMakeLists.txt handling its own ISA detection and dispatch. They
-# arrive as submodules in a recursive clone, and as pinned fetches otherwise - a plain `git clone` of USearch, or a
-# `FetchContent` of it from another project, still configures. Pins match the submodule commits.
-include(FetchContent)
-
-# The siblings are the engine rather than an option: every header reaches for them unguarded, so there is no build
-# without them and no switch pretending otherwise. Include directories are copied onto the interface target, because
-# `usearch_setup_target` reads `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target
-# declares, not what its link interface would carry - to keep the C++20 feature requirement off the pure-C targets. So
-# each sibling's paths are copied onto the interface here.
-function (usearch_sibling NAME LINK_TARGET REPOSITORY TAG)
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${NAME}/CMakeLists.txt")
-        add_subdirectory(${NAME})
-    else ()
-        message(STATUS "usearch: ${NAME} submodule absent, fetching ${TAG}")
-        FetchContent_Declare(
-            ${NAME}
-            GIT_REPOSITORY ${REPOSITORY}
-            GIT_TAG ${TAG}
-        )
-        FetchContent_MakeAvailable(${NAME})
+# Adds to @p target the per-dtype units listed after each dtype's keyword, for the dtypes the ladder compiles:
+# `usearch_dense_dtype_sources(target BF16 a_bf16.cpp F16 a_f16.cpp ...)`. The f32 and f64 units are the suites' own
+# references, outside the ladder, so their targets list them directly.
+set(usearch_dense_dtypes_ladder_
+    BF16
+    U1
+    I8
+    E4M3
+    F16
+    U8
+    E5M2
+    I4
+    U4
+    E3M2
+    E2M3
+)
+function (usearch_dense_dtype_sources target)
+    cmake_parse_arguments(PARSE_ARGV 1 shards "" "" "${usearch_dense_dtypes_ladder_}")
+    if (shards_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "${target} lists \"${shards_UNPARSED_ARGUMENTS}\" under no dense dtype of the ladder")
     endif ()
-
-    target_link_libraries(${USEARCH_TARGET_NAME} INTERFACE ${LINK_TARGET})
-
-    # Collected for the export set: their interfaces carry a language level and `Threads::Threads`, which the paths
-    # copied below do not.
-    get_target_property(SIBLING_TARGET ${LINK_TARGET} ALIASED_TARGET)
-    if (NOT SIBLING_TARGET)
-        set(SIBLING_TARGET ${LINK_TARGET})
-    endif ()
-    set(USEARCH_SIBLING_TARGETS
-        ${USEARCH_SIBLING_TARGETS} ${SIBLING_TARGET}
-        PARENT_SCOPE
-    )
-
-    target_include_directories(
-        ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
-        INTERFACE $<TARGET_PROPERTY:${LINK_TARGET},INTERFACE_INCLUDE_DIRECTORIES>
-    )
+    set(position_ 0)
+    foreach (dtype_ IN LISTS usearch_dense_dtypes_ladder_)
+        if (position_ LESS USEARCH_DENSE_DTYPES)
+            target_sources(${target} PRIVATE ${shards_${dtype_}})
+        endif ()
+        math(EXPR position_ "${position_} + 1")
+    endforeach ()
 endfunction ()
-
-# Every artifact lands at the top of the build tree, however deep the directory that declares it - one `-L`, one path to
-# a binary, no guessing which subdirectory a target chose. Multi-configuration generators would nest a second level,
-# `build_debug\Debug` on Windows, so each configuration is pinned to the same place as the default. Set before any
-# target exists, since these seed a target's properties at creation.
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-foreach (USEARCH_CONFIGURATION DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${USEARCH_CONFIGURATION} "${CMAKE_BINARY_DIR}")
-    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${USEARCH_CONFIGURATION} "${CMAKE_BINARY_DIR}")
-    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${USEARCH_CONFIGURATION} "${CMAKE_BINARY_DIR}")
-endforeach ()
-
-# The compiled siblings land as archives inside our shared objects, so every one is position-independent.
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
-usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong df1ab982a00b8aa97f39821cb5f371bd98caa43f
-)
-usearch_sibling(
-    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 075d14137420f204ff175acd2d29c22e163e241c
-)
-usearch_sibling(
-    stringzilla stringzilla::header https://github.com/ashvardanian/StringZilla
-    7826f358a51df3871fba5cc825ebab3e1163174a
-)
-usearch_sibling(
-    smashtable smashtable::header https://github.com/ashvardanian/SmashTable e5404d996b2800fe92df8e966038f1953b0875a0
-)
-
-# Recorded without headers - each sibling owns its own - so `usearch::header` names nothing a consumer cannot resolve.
-if (USEARCH_INSTALL AND USEARCH_SIBLING_TARGETS)
-    install(TARGETS ${USEARCH_SIBLING_TARGETS} EXPORT ${USEARCH_TARGETS_EXPORT_NAME})
-endif ()
-
-# Both exports read the set as it stands when called, so they trail every target that belongs to it.
-if (USEARCH_INSTALL)
-    export(
-        TARGETS usearch_core ${USEARCH_TARGET_NAME} ${USEARCH_SIBLING_TARGETS}
-        NAMESPACE ${PROJECT_NAME}::
-        FILE ${USEARCH_CMAKE_PROJECT_TARGETS_FILE}
-    )
-    install(
-        EXPORT ${USEARCH_TARGETS_EXPORT_NAME}
-        NAMESPACE ${PROJECT_NAME}::
-        DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
-    )
-endif ()
-
-# Only `safegraphs_format.hpp` reaches for yyjson, and only a compiled target ever includes it - so it is acquired under
-# the same condition as `src/`, leaving the header-only target consumable without it.
-if (USEARCH_BUILD_TEST
-    OR USEARCH_BUILD_BENCH
-    OR USEARCH_BUILD_LIB_C
-)
-    # Its objects go inside our own libraries, so a packager installing this tree must not publish yyjson's header,
-    # archive and CMake config beside ours.
-    set(YYJSON_INSTALL
-        OFF
-        CACHE BOOL "" FORCE
-    )
-    FetchContent_Declare(
-        yyjson
-        GIT_REPOSITORY https://github.com/ibireme/yyjson.git
-        GIT_TAG 0.12.0
-    )
-    FetchContent_MakeAvailable(yyjson)
-endif ()
-
-# The pin for what only the suites link: {fmt} for the C++ smoke tests and benchmarks, as libstdc++ doesn't ship
-# `std::print` yet on our toolchain. `FIND_PACKAGE_ARGS` lets a system-provided {fmt} satisfy the dependency without
-# touching the network, but only from the pinned version up - the copies distributions ship predate `fmt::println` and
-# would fail deep in the suites rather than here.
-if (USEARCH_BUILD_TEST OR USEARCH_BUILD_BENCH)
-    FetchContent_Declare(
-        fmt
-        GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-        GIT_TAG 12.2.0
-        FIND_PACKAGE_ARGS 12.2.0
-    )
-    FetchContent_MakeAvailable(fmt)
-endif ()
 
 # Must be called before "add_subdirectory()", and only when USearch runs the show - a parent project decides its own
 # testing story. See https://stackoverflow.com/questions/30250494/ctest-not-detecting-tests.
@@ -599,40 +516,28 @@ endif ()
 # The variants, their dispatch and the suites below all read one ladder length.
 add_compile_definitions(USEARCH_DENSE_DTYPES=${USEARCH_DENSE_DTYPES})
 
-# Every consumer of the pre-instantiated library needs this, the C interface included - its implementation is
-# `src/dense_index.cpp` and the per-dtype shards beside it.
-if (${USEARCH_BUILD_TEST}
-    OR ${USEARCH_BUILD_BENCH}
-    OR ${USEARCH_BUILD_LIB_C}
-)
+if (usearch_build_punned_)
     add_subdirectory(src)
 endif ()
-
-if (${USEARCH_BUILD_LIB_C_STUB})
+if (USEARCH_BUILD_LIB_C_STUB)
     add_subdirectory(src_stub)
 endif ()
-
-if (${USEARCH_BUILD_TEST})
+if (USEARCH_BUILD_TEST)
     add_subdirectory(test)
 endif ()
-
-if (${USEARCH_BUILD_BENCH})
+if (USEARCH_BUILD_BENCH)
     add_subdirectory(bench)
 endif ()
-
-if (${USEARCH_BUILD_LIB_WOLFRAM})
+if (USEARCH_BUILD_LIB_WOLFRAM)
     add_subdirectory(wolfram)
 endif ()
-
-if (${USEARCH_BUILD_LIB_C})
+if (USEARCH_BUILD_LIB_C)
     add_subdirectory(c)
     add_subdirectory(cpp)
 endif ()
-
-if (${USEARCH_BUILD_LIB_PYTHON})
+if (USEARCH_BUILD_LIB_PYTHON)
     add_subdirectory(python)
 endif ()
-
-if (${USEARCH_BUILD_LIB_NODE})
+if (USEARCH_BUILD_LIB_NODE)
     add_subdirectory(javascript)
 endif ()
