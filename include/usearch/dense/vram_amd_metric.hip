@@ -5,25 +5,26 @@
  *  @brief Device metric kits for the dense VRAM indexes on AMD GPUs - the HIP twin of
  *      @c vram_nvidia_metric.cuh.
  *
- *  A kit binds one storage dtype to one AMD generation, named @b dtype_generation_quads_kit, and
+ *  A kit binds one storage dtype to one AMD generation, named @b dtype_generation_quads_kit_t, and
  *  the generation slot names the oldest tier whose instructions the kit needs: @c rocm for what
  *  every ROCm device runs, @c cdna3 for @c v_dot4_i32_i8 and @c v_dot2_f32_f16, which MI400
  *  dropped, @c cdna4 for @c v_dot2_f32_bf16 and the OCP fp8 conversions, and @c cdna5 for
  *  @c v_dot4_i32_iu8. Each class unit compiles for its own processor with that tier's
- *  @c NUMKONG_TARGET_* alone, so a tier's kits compile only where its instructions exist, and the
- *  chains pick among them under the class's ceiling. MI300's fp8 conversions read the FNUZ
- *  encodings rather than the OCP ones the vectors matrix stores, so CDNA3 widens fp8 in software,
- *  through NumKong's converters.
+ *  @c NUMKONG_TARGET_* alone, so a tier's kits compile only where its instructions exist and are
+ *  stubs elsewhere. Every kit states its @c capability_k and @c compiled_k, and a ladder picks the
+ *  first both admit through @c highest_kit. MI300's fp8 conversions read the FNUZ encodings rather
+ *  than the OCP ones the vectors matrix stores, so CDNA3 widens fp8 in software, through NumKong's
+ *  converters.
  *
  *  Fragments are 16 bytes, rows and the metric are runtime state of the flat view, and the
- *  cross-lane reductions live in @c vram_index.cuh over the kit's @ref hip_warp, exactly as on
- *  NVIDIA. Each kit takes the warp policy of the class its chain picks it under, so the same kit
- *  runs 64-lane wavefronts on CDNA3 and CDNA4 and 32-lane ones on CDNA5. The arithmetic lives in
- *  named device primitives, and a kit binds them. Only HIP units include it: the host classes take
- *  their scalar layouts from the dtype alone.
+ *  cross-lane reductions live in @c vram_index.cuh over the schedule's @ref hip_warp, exactly as on
+ *  NVIDIA. The arithmetic lives in named device primitives, and a kit binds them. Only HIP units
+ *  include it: the host classes take their scalar layouts from the dtype alone.
  *
- *  How a wavefront's candidate rows reach shared memory is a separate @b schedule, picked under the
- *  same ceiling: LDS DMA on CDNA3 and CDNA4, register copies elsewhere.
+ *  How a wavefront's candidate rows reach shared memory is a separate @b schedule, picked by
+ *  @c schedule_ladder the same way: LDS DMA on CDNA3 and CDNA4, register copies elsewhere. Each
+ *  schedule names the warp policy of its capability, @c hip_wave_lanes, so the same kit runs
+ *  64-lane wavefronts on CDNA3 and CDNA4 and 32-lane ones on CDNA5.
  */
 #pragma once
 
@@ -40,8 +41,9 @@
 
 #include <hip/hip_fp16.h>        // `__half2` packed math
 #include <numkong/cast/simt.cuh> // `nk_e4m3_to_f32_simt_` & the other software widenings
+#include <numkong/dots/rocm.cuh> // `nk_dot_i8x4_rocm_` - the portable signed byte dot
 
-#include "usearch/utilities/vram_amd_device.hip" // `hip_warp_of`, each kit's warp policy
+#include "usearch/utilities/vram_amd_device.hip" // `hip_warp`, each schedule's warp policy
 
 namespace unum::usearch::dense {
 
@@ -84,89 +86,89 @@ __device__ __forceinline__ distance_t hip_convert_to_distance(nk_kernel_kind_t k
 
 #pragma endregion Metrics
 
-/** The kits every chain names, declared whether or not their tier is compiled in. */
-template <typename warp_type_>
-struct f16_rocm_quads_kit;
-template <typename warp_type_>
-struct f16_cdna3_quads_kit;
-template <typename warp_type_>
-struct bf16_rocm_quads_kit;
-template <typename warp_type_>
-struct bf16_cdna4_quads_kit;
-template <typename warp_type_>
-struct i8_cdna3_quads_kit;
-template <typename warp_type_>
-struct i8_cdna5_quads_kit;
-template <typename warp_type_>
-struct u8_rocm_quads_kit;
-template <typename warp_type_>
-struct e5m2_rocm_quads_kit;
-template <typename warp_type_>
-struct e5m2_cdna4_quads_kit;
-template <typename warp_type_>
-struct e4m3_rocm_quads_kit;
-template <typename warp_type_>
-struct e4m3_cdna4_quads_kit;
-template <typename warp_type_>
-struct e3m2_rocm_quads_kit;
-template <typename warp_type_>
-struct e2m3_rocm_quads_kit;
-template <typename warp_type_>
-struct i4x2_cdna3_quads_kit;
-template <typename warp_type_>
-struct i4x2_cdna5_quads_kit;
-template <typename warp_type_>
-struct u4x2_rocm_quads_kit;
-template <typename warp_type_>
-struct u1x8_rocm_quads_kit;
-
 #pragma region Half Precision Floats
 
 /** A packed @c f16 pair widened to two floats, exactly. */
-__device__ __forceinline__ float2 hip_f16x2_to_f32x2(u32_t pair) noexcept {
+__device__ __forceinline__ float2 hip_f16x2_to_f32x2_rocm(u32_t pair) noexcept {
     return __half22float2(std::bit_cast<__half2>(pair));
 }
 
 /** A packed @c bf16 pair widened to two floats, exactly: each is the high half of its float. */
-__device__ __forceinline__ float2 hip_bf16x2_to_f32x2(u32_t pair) noexcept {
+__device__ __forceinline__ float2 hip_bf16x2_to_f32x2_rocm(u32_t pair) noexcept {
     return {__uint_as_float(pair << 16), __uint_as_float(pair & 0xFFFF0000u)};
 }
 
-/** Eight 16-bit float products of a fragment pair, each pair widened by @p widen_ and fused into
- *  the f32 sum - exact products, since an 11-bit significand squared fits in a float's 24. */
-template <float2 (*widen_)(u32_t)>
-__device__ __forceinline__ f32_t hip_dot_halves_rocm(uint4 a, uint4 b, f32_t sum) noexcept {
+/** Eight @c f16 products of a fragment pair, each pair widened and fused into the f32 sum - exact
+ *  products, since an 11-bit significand squared fits in a float's 24. */
+__device__ __forceinline__ f32_t hip_dot_f16x8_rocm(uint4 a, uint4 b, f32_t sum) noexcept {
     u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
 #pragma unroll
     for (u32_t word = 0; word != 4; ++word) {
-        float2 const values_a = widen_(words_a[word]), values_b = widen_(words_b[word]);
+        float2 const values_a = hip_f16x2_to_f32x2_rocm(words_a[word]);
+        float2 const values_b = hip_f16x2_to_f32x2_rocm(words_b[word]);
         sum = fmaf(values_a.x, values_b.x, sum);
         sum = fmaf(values_a.y, values_b.y, sum);
     }
     return sum;
 }
 
-/** A 16-bit float fragment's sum & sum of squares, each pair widened by @p widen_. */
-template <float2 (*widen_)(u32_t)>
-__device__ __forceinline__ float2 hip_moments_halves_rocm(uint4 a, float2 moments) noexcept {
+/** An @c f16 fragment's sum & sum of squares, widened to f32. */
+__device__ __forceinline__ float2 hip_moments_f16x8_rocm(uint4 a, float2 moments) noexcept {
     u32_t const words[4] = {a.x, a.y, a.z, a.w};
 #pragma unroll
     for (u32_t word = 0; word != 4; ++word) {
-        float2 const values = widen_(words[word]);
+        float2 const values = hip_f16x2_to_f32x2_rocm(words[word]);
         moments.x += values.x + values.y;
         moments.y += values.x * values.x + values.y * values.y;
     }
     return moments;
 }
 
-/** Returns @p sums plus @p weight times each of a 16-bit float fragment's eight values. */
-template <float2 (*widen_)(u32_t)>
-__device__ __forceinline__ std::array<f32_t, 8> hip_weighted_halves_rocm( //
+/** Returns @p sums plus @p weight times each of an @c f16 fragment's eight values. */
+__device__ __forceinline__ std::array<f32_t, 8> hip_weighted_f16x8_rocm( //
     uint4 a, f32_t weight, std::array<f32_t, 8> sums) noexcept {
     u32_t const words[4] = {a.x, a.y, a.z, a.w};
 #pragma unroll
     for (u32_t word = 0; word != 4; ++word) {
-        float2 const values = widen_(words[word]);
+        float2 const values = hip_f16x2_to_f32x2_rocm(words[word]);
+        sums[2 * word] += weight * values.x;
+        sums[2 * word + 1] += weight * values.y;
+    }
+    return sums;
+}
+
+/** The @c bf16 twin of @ref hip_dot_f16x8_rocm. */
+__device__ __forceinline__ f32_t hip_dot_bf16x8_rocm(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const values_a = hip_bf16x2_to_f32x2_rocm(words_a[word]);
+        float2 const values_b = hip_bf16x2_to_f32x2_rocm(words_b[word]);
+        sum = fmaf(values_a.x, values_b.x, sum);
+        sum = fmaf(values_a.y, values_b.y, sum);
+    }
+    return sum;
+}
+
+/** The @c bf16 twin of @ref hip_moments_f16x8_rocm. */
+__device__ __forceinline__ float2 hip_moments_bf16x8_rocm(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const values = hip_bf16x2_to_f32x2_rocm(words[word]);
+        moments.x += values.x + values.y;
+        moments.y += values.x * values.x + values.y * values.y;
+    }
+    return moments;
+}
+
+/** The @c bf16 twin of @ref hip_weighted_f16x8_rocm. */
+__device__ __forceinline__ std::array<f32_t, 8> hip_weighted_bf16x8_rocm( //
+    uint4 a, f32_t weight, std::array<f32_t, 8> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const values = hip_bf16x2_to_f32x2_rocm(words[word]);
         sums[2 * word] += weight * values.x;
         sums[2 * word + 1] += weight * values.y;
     }
@@ -174,10 +176,9 @@ __device__ __forceinline__ std::array<f32_t, 8> hip_weighted_halves_rocm( //
 }
 
 /** f16 kit - every ROCm device, widening into f32 multiply-adds. */
-template <typename warp_type_>
-struct f16_rocm_quads_kit {
+struct f16_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = warp_type_;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -186,14 +187,14 @@ struct f16_rocm_quads_kit {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return hip_dot_halves_rocm<hip_f16x2_to_f32x2>(a, b, sum);
+        return hip_dot_f16x8_rocm(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return hip_moments_halves_rocm<hip_f16x2_to_f32x2>(a, moments);
+        return hip_moments_f16x8_rocm(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return hip_weighted_halves_rocm<hip_f16x2_to_f32x2>(a, weight, sums);
+        return hip_weighted_f16x8_rocm(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -209,10 +210,9 @@ struct f16_rocm_quads_kit {
 };
 
 /** bf16 kit - every ROCm device, widening into f32 multiply-adds. */
-template <typename warp_type_>
-struct bf16_rocm_quads_kit {
+struct bf16_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = warp_type_;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -221,14 +221,14 @@ struct bf16_rocm_quads_kit {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return hip_dot_halves_rocm<hip_bf16x2_to_f32x2>(a, b, sum);
+        return hip_dot_bf16x8_rocm(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return hip_moments_halves_rocm<hip_bf16x2_to_f32x2>(a, moments);
+        return hip_moments_bf16x8_rocm(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return hip_weighted_halves_rocm<hip_bf16x2_to_f32x2>(a, weight, sums);
+        return hip_weighted_bf16x8_rocm(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -255,11 +255,10 @@ __device__ __forceinline__ f32_t hip_dot_f16x8_cdna3(uint4 a, uint4 b, f32_t sum
     return sum;
 }
 
-/** f16 kit - CDNA3 and CDNA4, @c v_dot2_f32_f16. */
-template <typename warp_type_>
-struct f16_cdna3_quads_kit {
+/** f16 kit - CDNA3 and CDNA4, @c v_dot2_f32_f16, which MI400 dropped. */
+struct f16_cdna3_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    using warp_t = warp_type_;
+    inline static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -271,11 +270,11 @@ struct f16_cdna3_quads_kit {
         return hip_dot_f16x8_cdna3(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return hip_moments_halves_rocm<hip_f16x2_to_f32x2>(a, moments);
+        return hip_moments_f16x8_rocm(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return hip_weighted_halves_rocm<hip_f16x2_to_f32x2>(a, weight, sums);
+        return hip_weighted_f16x8_rocm(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -288,6 +287,15 @@ struct f16_cdna3_quads_kit {
                                                                      distance_t ranked) noexcept {
         return hip_convert_to_distance(kernel, ranked);
     }
+};
+
+#else
+
+/** The kit this unit cannot carry - CDNA3's half dot, absent before CDNA3 and on MI400 - kept so
+ *  its ladder names it whatever the unit compiles. */
+struct f16_cdna3_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
+    inline static constexpr bool compiled_k = false;
 };
 
 #endif // NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
@@ -305,10 +313,9 @@ __device__ __forceinline__ f32_t hip_dot_bf16x8_cdna4(uint4 a, uint4 b, f32_t su
 }
 
 /** bf16 kit - CDNA4, @c v_dot2_f32_bf16. */
-template <typename warp_type_>
-struct bf16_cdna4_quads_kit {
+struct bf16_cdna4_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
-    using warp_t = warp_type_;
+    inline static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -320,11 +327,11 @@ struct bf16_cdna4_quads_kit {
         return hip_dot_bf16x8_cdna4(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return hip_moments_halves_rocm<hip_bf16x2_to_f32x2>(a, moments);
+        return hip_moments_bf16x8_rocm(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return hip_weighted_halves_rocm<hip_bf16x2_to_f32x2>(a, weight, sums);
+        return hip_weighted_bf16x8_rocm(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -339,15 +346,24 @@ struct bf16_cdna4_quads_kit {
     }
 };
 
+#else
+
+/** The kit this unit cannot carry - CDNA4's brain-float dot, which only CDNA4 units compile - kept
+ *  so its ladder names it whatever the unit compiles. */
+struct bf16_cdna4_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
+    inline static constexpr bool compiled_k = false;
+};
+
 #endif // NUMKONG_TARGET_CDNA4
 
 #pragma endregion Half Precision Floats
 
 #pragma region Byte Sized Integers
 
-/*  The signed byte dots differ by tier: CDNA3 and CDNA4 multiply signed bytes with
- *  @c v_dot4_i32_i8, and MI400 marks each operand's signedness on @c v_dot4_i32_iu8 instead. A kit
- *  names its dot as a policy, so the moments and the nibble unpacking are written once. */
+/*  The signed byte dots differ by tier: every ROCm device has NumKong's portable byte dot, CDNA3
+ *  and CDNA4 multiply signed bytes with @c v_dot4_i32_i8, and MI400 marks each operand's signedness
+ *  on @c v_dot4_i32_iu8 instead. Each tier's kit calls its own dot, moments and nibble loops. */
 
 /** Sixteen unsigned byte products of a fragment pair, one @c v_dot4_u32_u8 per word. */
 __device__ __forceinline__ u32_t hip_dot_u8x16_rocm(uint4 a, uint4 b, u32_t sum) noexcept {
@@ -364,27 +380,6 @@ __device__ __forceinline__ uint2 hip_moments_u8x16_rocm(uint4 a, uint2 moments) 
     for (u32_t word = 0; word != 4; ++word) {
         moments.x = __builtin_amdgcn_udot4(words[word], 0x01010101u, moments.x, false);
         moments.y = __builtin_amdgcn_udot4(words[word], words[word], moments.y, false);
-    }
-    return moments;
-}
-
-/** Sixteen signed byte products of a fragment pair, four per call of @p dot_. */
-template <int (*dot_)(u32_t, u32_t, int)>
-__device__ __forceinline__ int hip_dot_i8x16(uint4 a, uint4 b, int sum) noexcept {
-    sum = dot_(a.x, b.x, sum);
-    sum = dot_(a.y, b.y, sum);
-    sum = dot_(a.z, b.z, sum);
-    return dot_(a.w, b.w, sum);
-}
-
-/** An @c i8 fragment's sum & sum of squares, through @p dot_ against splat-one and self. */
-template <int (*dot_)(u32_t, u32_t, int)>
-__device__ __forceinline__ int2 hip_moments_i8x16(uint4 a, int2 moments) noexcept {
-    u32_t const words[4] = {a.x, a.y, a.z, a.w};
-#pragma unroll
-    for (u32_t word = 0; word != 4; ++word) {
-        moments.x = dot_(words[word], 0x01010101u, moments.x);
-        moments.y = dot_(words[word], words[word], moments.y);
     }
     return moments;
 }
@@ -409,18 +404,35 @@ __device__ __forceinline__ std::array<f32_t, 16> hip_weighted_u8x16_rocm( //
     return sums;
 }
 
-#if NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
-
-/** Four signed byte products added to @p sum by @c v_dot4_i32_i8. */
-__device__ __forceinline__ int hip_dot_i8x4_cdna3(u32_t a, u32_t b, int sum) noexcept {
-    return __builtin_amdgcn_sdot4(static_cast<int>(a), static_cast<int>(b), sum, false);
+/** Four signed byte products added to @p sum by NumKong's portable byte dot. */
+__device__ __forceinline__ int hip_dot_i8x4_rocm(u32_t a, u32_t b, int sum) noexcept {
+    return nk_dot_i8x4_rocm_(a, b, sum);
 }
 
-/** i8 kit - CDNA3 and CDNA4, @c v_dot4_i32_i8. */
-template <typename warp_type_>
-struct i8_cdna3_quads_kit {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    using warp_t = warp_type_;
+/** Sixteen signed @c i8 products of a fragment pair, four per @ref hip_dot_i8x4_rocm. */
+__device__ __forceinline__ int hip_dot_i8x16_rocm(uint4 a, uint4 b, int sum) noexcept {
+    sum = hip_dot_i8x4_rocm(a.x, b.x, sum);
+    sum = hip_dot_i8x4_rocm(a.y, b.y, sum);
+    sum = hip_dot_i8x4_rocm(a.z, b.z, sum);
+    return hip_dot_i8x4_rocm(a.w, b.w, sum);
+}
+
+/** An @c i8 fragment's sum & sum of squares, through @ref hip_dot_i8x4_rocm against splat-one and
+ *  self. */
+__device__ __forceinline__ int2 hip_moments_i8x16_rocm(uint4 a, int2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        moments.x = hip_dot_i8x4_rocm(words[word], 0x01010101u, moments.x);
+        moments.y = hip_dot_i8x4_rocm(words[word], words[word], moments.y);
+    }
+    return moments;
+}
+
+/** i8 kit - every ROCm device, NumKong's portable byte dot. */
+struct i8_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -429,10 +441,10 @@ struct i8_cdna3_quads_kit {
     using norms_accumulator_t = int2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return hip_dot_i8x16<hip_dot_i8x4_cdna3>(a, b, sum);
+        return hip_dot_i8x16_rocm(a, b, sum);
     }
     static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
-        return hip_moments_i8x16<hip_dot_i8x4_cdna3>(a, moments);
+        return hip_moments_i8x16_rocm(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
@@ -449,6 +461,76 @@ struct i8_cdna3_quads_kit {
                                                                      distance_t ranked) noexcept {
         return hip_convert_to_distance(kernel, ranked);
     }
+};
+
+#if NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
+
+/** Four signed byte products added to @p sum by @c v_dot4_i32_i8. */
+__device__ __forceinline__ int hip_dot_i8x4_cdna3(u32_t a, u32_t b, int sum) noexcept {
+    return __builtin_amdgcn_sdot4(static_cast<int>(a), static_cast<int>(b), sum, false);
+}
+
+/** Sixteen signed @c i8 products of a fragment pair, four per @c v_dot4_i32_i8. */
+__device__ __forceinline__ int hip_dot_i8x16_cdna3(uint4 a, uint4 b, int sum) noexcept {
+    sum = hip_dot_i8x4_cdna3(a.x, b.x, sum);
+    sum = hip_dot_i8x4_cdna3(a.y, b.y, sum);
+    sum = hip_dot_i8x4_cdna3(a.z, b.z, sum);
+    return hip_dot_i8x4_cdna3(a.w, b.w, sum);
+}
+
+/** An @c i8 fragment's sum & sum of squares, through @c v_dot4_i32_i8 against splat-one and
+ *  self. */
+__device__ __forceinline__ int2 hip_moments_i8x16_cdna3(uint4 a, int2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        moments.x = hip_dot_i8x4_cdna3(words[word], 0x01010101u, moments.x);
+        moments.y = hip_dot_i8x4_cdna3(words[word], words[word], moments.y);
+    }
+    return moments;
+}
+
+/** i8 kit - CDNA3 and CDNA4, @c v_dot4_i32_i8. */
+struct i8_cdna3_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
+    inline static constexpr bool compiled_k = true;
+    using scalar_t = nk::i8_t;
+    using fragment_t = uint4;
+    using dot_t = int;
+    using weighted_t = std::array<f32_t, 16>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = int2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return hip_dot_i8x16_cdna3(a, b, sum);
+    }
+    static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
+        return hip_moments_i8x16_cdna3(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return hip_weighted_i8x16_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                          norms_t target) noexcept {
+        return hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                     distance_t ranked) noexcept {
+        return hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#else
+
+/** The kit this unit cannot carry - CDNA3's signed byte dot, absent before CDNA3 and on MI400 -
+ *  kept so its ladder names it whatever the unit compiles. */
+struct i8_cdna3_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
+    inline static constexpr bool compiled_k = false;
 };
 
 #endif // NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
@@ -460,11 +542,30 @@ __device__ __forceinline__ int hip_dot_i8x4_cdna5(u32_t a, u32_t b, int sum) noe
     return __builtin_amdgcn_sudot4(true, static_cast<int>(a), true, static_cast<int>(b), sum, false);
 }
 
+/** Sixteen signed @c i8 products of a fragment pair, four per @c v_dot4_i32_iu8. */
+__device__ __forceinline__ int hip_dot_i8x16_cdna5(uint4 a, uint4 b, int sum) noexcept {
+    sum = hip_dot_i8x4_cdna5(a.x, b.x, sum);
+    sum = hip_dot_i8x4_cdna5(a.y, b.y, sum);
+    sum = hip_dot_i8x4_cdna5(a.z, b.z, sum);
+    return hip_dot_i8x4_cdna5(a.w, b.w, sum);
+}
+
+/** An @c i8 fragment's sum & sum of squares, through @c v_dot4_i32_iu8 against splat-one and
+ *  self. */
+__device__ __forceinline__ int2 hip_moments_i8x16_cdna5(uint4 a, int2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        moments.x = hip_dot_i8x4_cdna5(words[word], 0x01010101u, moments.x);
+        moments.y = hip_dot_i8x4_cdna5(words[word], words[word], moments.y);
+    }
+    return moments;
+}
+
 /** i8 kit - CDNA5, @c v_dot4_i32_iu8. */
-template <typename warp_type_>
-struct i8_cdna5_quads_kit {
+struct i8_cdna5_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
-    using warp_t = warp_type_;
+    inline static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -473,10 +574,10 @@ struct i8_cdna5_quads_kit {
     using norms_accumulator_t = int2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return hip_dot_i8x16<hip_dot_i8x4_cdna5>(a, b, sum);
+        return hip_dot_i8x16_cdna5(a, b, sum);
     }
     static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
-        return hip_moments_i8x16<hip_dot_i8x4_cdna5>(a, moments);
+        return hip_moments_i8x16_cdna5(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
@@ -495,13 +596,21 @@ struct i8_cdna5_quads_kit {
     }
 };
 
+#else
+
+/** The kit this unit cannot carry - MI400's signedness-marked byte dot - kept so its ladder names
+ *  it whatever the unit compiles. */
+struct i8_cdna5_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
+    inline static constexpr bool compiled_k = false;
+};
+
 #endif // NUMKONG_TARGET_CDNA5
 
 /** u8 kit - every ROCm device, @c v_dot4_u32_u8. */
-template <typename warp_type_>
-struct u8_rocm_quads_kit {
+struct u8_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = warp_type_;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -537,81 +646,231 @@ struct u8_rocm_quads_kit {
 #pragma region Minifloats
 
 /*  No generation has fp8 or fp6 arithmetic outside the matrix cores, so every minifloat kit widens
- *  byte pairs and accumulates in f32, and the tiers' kits differ only in the widening. */
+ *  byte pairs and accumulates in f32, and the tiers' kits differ only in the conversion their loops
+ *  call. Every ROCm device widens in software, one byte at a time through NumKong's converters, so
+ *  CDNA3's FNUZ conversions never misread an OCP code. */
 
-/** Sixteen minifloat products of a fragment pair, each byte pair widened by @p widening_type_. */
-template <typename widening_type_>
-__device__ __forceinline__ f32_t hip_dot_minifloats(uint4 a, uint4 b, f32_t sum) noexcept {
+/** A packed @c e5m2 pair widened to two floats in software. */
+__device__ __forceinline__ float2 hip_e5m2x2_to_f32x2_rocm(u32_t packed_pair) noexcept {
+    unsigned char const codes[2] = {static_cast<unsigned char>(packed_pair),
+                                    static_cast<unsigned char>(packed_pair >> 8)};
+    float2 values;
+    nk_e5m2_to_f32_simt_(&codes[0], &values.x);
+    nk_e5m2_to_f32_simt_(&codes[1], &values.y);
+    return values;
+}
+
+/** A packed @c e4m3 pair widened to two floats in software. */
+__device__ __forceinline__ float2 hip_e4m3x2_to_f32x2_rocm(u32_t packed_pair) noexcept {
+    unsigned char const codes[2] = {static_cast<unsigned char>(packed_pair),
+                                    static_cast<unsigned char>(packed_pair >> 8)};
+    float2 values;
+    nk_e4m3_to_f32_simt_(&codes[0], &values.x);
+    nk_e4m3_to_f32_simt_(&codes[1], &values.y);
+    return values;
+}
+
+/** A packed @c e3m2 pair widened to two floats in software. */
+__device__ __forceinline__ float2 hip_e3m2x2_to_f32x2_rocm(u32_t packed_pair) noexcept {
+    unsigned char const codes[2] = {static_cast<unsigned char>(packed_pair),
+                                    static_cast<unsigned char>(packed_pair >> 8)};
+    float2 values;
+    nk_e3m2_to_f32_simt_(&codes[0], &values.x);
+    nk_e3m2_to_f32_simt_(&codes[1], &values.y);
+    return values;
+}
+
+/** A packed @c e2m3 pair widened to two floats in software. */
+__device__ __forceinline__ float2 hip_e2m3x2_to_f32x2_rocm(u32_t packed_pair) noexcept {
+    unsigned char const codes[2] = {static_cast<unsigned char>(packed_pair),
+                                    static_cast<unsigned char>(packed_pair >> 8)};
+    float2 values;
+    nk_e2m3_to_f32_simt_(&codes[0], &values.x);
+    nk_e2m3_to_f32_simt_(&codes[1], &values.y);
+    return values;
+}
+
+/** Sixteen @c e5m2 products of a fragment pair, each byte pair widened in software. */
+__device__ __forceinline__ f32_t hip_dot_e5m2x16_rocm(uint4 a, uint4 b, f32_t sum) noexcept {
     u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
 #pragma unroll
     for (u32_t word = 0; word != 4; ++word)
 #pragma unroll
         for (u32_t pair = 0; pair != 2; ++pair) {
-            float2 const values_a = widening_type_::pair_to_floats(words_a[word] >> (16 * pair));
-            float2 const values_b = widening_type_::pair_to_floats(words_b[word] >> (16 * pair));
+            float2 const values_a = hip_e5m2x2_to_f32x2_rocm(words_a[word] >> (16 * pair));
+            float2 const values_b = hip_e5m2x2_to_f32x2_rocm(words_b[word] >> (16 * pair));
             sum = fmaf(values_a.x, values_b.x, sum);
             sum = fmaf(values_a.y, values_b.y, sum);
         }
     return sum;
 }
 
-/** A minifloat fragment's sum & sum of squares, each byte pair widened by @p widening_type_. */
-template <typename widening_type_>
-__device__ __forceinline__ float2 hip_moments_minifloats(uint4 a, float2 moments) noexcept {
+/** An @c e5m2 fragment's sum & sum of squares, widened in software. */
+__device__ __forceinline__ float2 hip_moments_e5m2x16_rocm(uint4 a, float2 moments) noexcept {
     u32_t const words[4] = {a.x, a.y, a.z, a.w};
 #pragma unroll
     for (u32_t word = 0; word != 4; ++word)
 #pragma unroll
         for (u32_t pair = 0; pair != 2; ++pair) {
-            float2 const values = widening_type_::pair_to_floats(words[word] >> (16 * pair));
+            float2 const values = hip_e5m2x2_to_f32x2_rocm(words[word] >> (16 * pair));
             moments.x += values.x + values.y;
             moments.y += values.x * values.x + values.y * values.y;
         }
     return moments;
 }
 
-/** Returns @p sums plus @p weight times each of a minifloat fragment's sixteen values. */
-template <typename widening_type_>
-__device__ __forceinline__ std::array<f32_t, 16> hip_weighted_minifloats( //
+/** Returns @p sums plus @p weight times each of an @c e5m2 fragment's sixteen values. */
+__device__ __forceinline__ std::array<f32_t, 16> hip_weighted_e5m2x16_rocm( //
     uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
     u32_t const words[4] = {a.x, a.y, a.z, a.w};
 #pragma unroll
     for (u32_t word = 0; word != 4; ++word)
 #pragma unroll
         for (u32_t pair = 0; pair != 2; ++pair) {
-            float2 const values = widening_type_::pair_to_floats(words[word] >> (16 * pair));
+            float2 const values = hip_e5m2x2_to_f32x2_rocm(words[word] >> (16 * pair));
             sums[4 * word + 2 * pair] += weight * values.x;
             sums[4 * word + 2 * pair + 1] += weight * values.y;
         }
     return sums;
 }
 
-/** Every ROCm device widens a minifloat pair in software, one byte at a time through @p convert_, a
- *  NumKong converter, so CDNA3's FNUZ conversions never misread an OCP code. */
-template <void (*convert_)(unsigned char const*, nk_f32_t*)>
-struct hip_software_widening {
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        unsigned char const codes[2] = {static_cast<unsigned char>(packed_pair),
-                                        static_cast<unsigned char>(packed_pair >> 8)};
-        float2 values;
-        convert_(&codes[0], &values.x);
-        convert_(&codes[1], &values.y);
-        return values;
-    }
-};
+/** The @c e4m3 twin of @ref hip_dot_e5m2x16_rocm. */
+__device__ __forceinline__ f32_t hip_dot_e4m3x16_rocm(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = hip_e4m3x2_to_f32x2_rocm(words_a[word] >> (16 * pair));
+            float2 const values_b = hip_e4m3x2_to_f32x2_rocm(words_b[word] >> (16 * pair));
+            sum = fmaf(values_a.x, values_b.x, sum);
+            sum = fmaf(values_a.y, values_b.y, sum);
+        }
+    return sum;
+}
 
-using e5m2_rocm_widening_t = hip_software_widening<nk_e5m2_to_f32_simt_>;
-using e4m3_rocm_widening_t = hip_software_widening<nk_e4m3_to_f32_simt_>;
-using e3m2_rocm_widening_t = hip_software_widening<nk_e3m2_to_f32_simt_>;
-using e2m3_rocm_widening_t = hip_software_widening<nk_e2m3_to_f32_simt_>;
+/** The @c e4m3 twin of @ref hip_moments_e5m2x16_rocm. */
+__device__ __forceinline__ float2 hip_moments_e4m3x16_rocm(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = hip_e4m3x2_to_f32x2_rocm(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
 
-/** The quads kit of a minifloat scalar @p scalar_type_ widened by @p widening_type_ at
- *  @p capability_. */
-template <typename warp_type_, typename scalar_type_, typename widening_type_, nk_capability_t capability_>
-struct hip_minifloats_quads_kit {
-    inline static constexpr nk_capability_t capability_k = capability_;
-    using warp_t = warp_type_;
-    using scalar_t = scalar_type_;
+/** The @c e4m3 twin of @ref hip_weighted_e5m2x16_rocm. */
+__device__ __forceinline__ std::array<f32_t, 16> hip_weighted_e4m3x16_rocm( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = hip_e4m3x2_to_f32x2_rocm(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
+
+/** The @c e3m2 twin of @ref hip_dot_e5m2x16_rocm. */
+__device__ __forceinline__ f32_t hip_dot_e3m2x16_rocm(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = hip_e3m2x2_to_f32x2_rocm(words_a[word] >> (16 * pair));
+            float2 const values_b = hip_e3m2x2_to_f32x2_rocm(words_b[word] >> (16 * pair));
+            sum = fmaf(values_a.x, values_b.x, sum);
+            sum = fmaf(values_a.y, values_b.y, sum);
+        }
+    return sum;
+}
+
+/** The @c e3m2 twin of @ref hip_moments_e5m2x16_rocm. */
+__device__ __forceinline__ float2 hip_moments_e3m2x16_rocm(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = hip_e3m2x2_to_f32x2_rocm(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** The @c e3m2 twin of @ref hip_weighted_e5m2x16_rocm. */
+__device__ __forceinline__ std::array<f32_t, 16> hip_weighted_e3m2x16_rocm( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = hip_e3m2x2_to_f32x2_rocm(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
+
+/** The @c e2m3 twin of @ref hip_dot_e5m2x16_rocm. */
+__device__ __forceinline__ f32_t hip_dot_e2m3x16_rocm(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = hip_e2m3x2_to_f32x2_rocm(words_a[word] >> (16 * pair));
+            float2 const values_b = hip_e2m3x2_to_f32x2_rocm(words_b[word] >> (16 * pair));
+            sum = fmaf(values_a.x, values_b.x, sum);
+            sum = fmaf(values_a.y, values_b.y, sum);
+        }
+    return sum;
+}
+
+/** The @c e2m3 twin of @ref hip_moments_e5m2x16_rocm. */
+__device__ __forceinline__ float2 hip_moments_e2m3x16_rocm(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = hip_e2m3x2_to_f32x2_rocm(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** The @c e2m3 twin of @ref hip_weighted_e5m2x16_rocm. */
+__device__ __forceinline__ std::array<f32_t, 16> hip_weighted_e2m3x16_rocm( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = hip_e2m3x2_to_f32x2_rocm(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
+
+/** e5m2 kit - every ROCm device, widening in software. */
+struct e5m2_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
+    using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
     using weighted_t = std::array<f32_t, 16>;
@@ -619,14 +878,14 @@ struct hip_minifloats_quads_kit {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return hip_dot_minifloats<widening_type_>(a, b, sum);
+        return hip_dot_e5m2x16_rocm(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return hip_moments_minifloats<widening_type_>(a, moments);
+        return hip_moments_e5m2x16_rocm(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return hip_weighted_minifloats<widening_type_>(a, weight, sums);
+        return hip_weighted_e5m2x16_rocm(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -641,51 +900,296 @@ struct hip_minifloats_quads_kit {
     }
 };
 
-/** e5m2 kit - every ROCm device, widening in software. */
-template <typename warp_type_>
-struct e5m2_rocm_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e5m2_t, e5m2_rocm_widening_t, nk_cap_rocm_k> {};
-
 /** e4m3 kit - every ROCm device, widening in software. */
-template <typename warp_type_>
-struct e4m3_rocm_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e4m3_t, e4m3_rocm_widening_t, nk_cap_rocm_k> {};
+struct e4m3_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
+    using scalar_t = nk::e4m3_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return hip_dot_e4m3x16_rocm(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return hip_moments_e4m3x16_rocm(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return hip_weighted_e4m3x16_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                          norms_t target) noexcept {
+        return hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                     distance_t ranked) noexcept {
+        return hip_convert_to_distance(kernel, ranked);
+    }
+};
 
 /** e3m2 kit - every ROCm device, widening in software. */
-template <typename warp_type_>
-struct e3m2_rocm_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e3m2_t, e3m2_rocm_widening_t, nk_cap_rocm_k> {};
+struct e3m2_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
+    using scalar_t = nk::e3m2_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return hip_dot_e3m2x16_rocm(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return hip_moments_e3m2x16_rocm(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return hip_weighted_e3m2x16_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                          norms_t target) noexcept {
+        return hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                     distance_t ranked) noexcept {
+        return hip_convert_to_distance(kernel, ranked);
+    }
+};
 
 /** e2m3 kit - every ROCm device, widening in software. */
-template <typename warp_type_>
-struct e2m3_rocm_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e2m3_t, e2m3_rocm_widening_t, nk_cap_rocm_k> {};
+struct e2m3_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
+    using scalar_t = nk::e2m3_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
 
-#if NUMKONG_TARGET_CDNA4 || NUMKONG_TARGET_CDNA5
-
-/** CDNA4 and every tier since widen an OCP @c e4m3 pair in one @c v_cvt_pk_f32_fp8. */
-struct e4m3_cdna4_widening_t {
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        auto const values = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(packed_pair), false);
-        return {values[0], values[1]};
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return hip_dot_e2m3x16_rocm(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return hip_moments_e2m3x16_rocm(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return hip_weighted_e2m3x16_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                          norms_t target) noexcept {
+        return hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                     distance_t ranked) noexcept {
+        return hip_convert_to_distance(kernel, ranked);
     }
 };
 
-/** The @c e5m2 twin of @ref e4m3_cdna4_widening_t, through @c v_cvt_pk_f32_bf8. */
-struct e5m2_cdna4_widening_t {
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        auto const values = __builtin_amdgcn_cvt_pk_f32_bf8(static_cast<int>(packed_pair), false);
-        return {values[0], values[1]};
-    }
-};
+#if NUMKONG_ARCH_ROCM_CDNA4_
+
+/** A packed OCP @c e4m3 pair widened to two floats in one @c v_cvt_pk_f32_fp8, on CDNA4 and every
+ *  tier since. */
+__device__ __forceinline__ float2 hip_e4m3x2_to_f32x2_cdna4(u32_t packed_pair) noexcept {
+    auto const values = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(packed_pair), false);
+    return {values[0], values[1]};
+}
+
+/** The @c e5m2 twin of @ref hip_e4m3x2_to_f32x2_cdna4, through @c v_cvt_pk_f32_bf8. */
+__device__ __forceinline__ float2 hip_e5m2x2_to_f32x2_cdna4(u32_t packed_pair) noexcept {
+    auto const values = __builtin_amdgcn_cvt_pk_f32_bf8(static_cast<int>(packed_pair), false);
+    return {values[0], values[1]};
+}
+
+/** Sixteen @c e5m2 products of a fragment pair, each byte pair widened through the conversion. */
+__device__ __forceinline__ f32_t hip_dot_e5m2x16_cdna4(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = hip_e5m2x2_to_f32x2_cdna4(words_a[word] >> (16 * pair));
+            float2 const values_b = hip_e5m2x2_to_f32x2_cdna4(words_b[word] >> (16 * pair));
+            sum = fmaf(values_a.x, values_b.x, sum);
+            sum = fmaf(values_a.y, values_b.y, sum);
+        }
+    return sum;
+}
+
+/** An @c e5m2 fragment's sum & sum of squares, widened through the conversion. */
+__device__ __forceinline__ float2 hip_moments_e5m2x16_cdna4(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = hip_e5m2x2_to_f32x2_cdna4(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** Returns @p sums plus @p weight times each of an @c e5m2 fragment's sixteen values, widened
+ *  through the conversion. */
+__device__ __forceinline__ std::array<f32_t, 16> hip_weighted_e5m2x16_cdna4( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = hip_e5m2x2_to_f32x2_cdna4(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
+
+/** The @c e4m3 twin of @ref hip_dot_e5m2x16_cdna4. */
+__device__ __forceinline__ f32_t hip_dot_e4m3x16_cdna4(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = hip_e4m3x2_to_f32x2_cdna4(words_a[word] >> (16 * pair));
+            float2 const values_b = hip_e4m3x2_to_f32x2_cdna4(words_b[word] >> (16 * pair));
+            sum = fmaf(values_a.x, values_b.x, sum);
+            sum = fmaf(values_a.y, values_b.y, sum);
+        }
+    return sum;
+}
+
+/** The @c e4m3 twin of @ref hip_moments_e5m2x16_cdna4. */
+__device__ __forceinline__ float2 hip_moments_e4m3x16_cdna4(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = hip_e4m3x2_to_f32x2_cdna4(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** The @c e4m3 twin of @ref hip_weighted_e5m2x16_cdna4. */
+__device__ __forceinline__ std::array<f32_t, 16> hip_weighted_e4m3x16_cdna4( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = hip_e4m3x2_to_f32x2_cdna4(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
 
 /** e5m2 kit - CDNA4 and CDNA5, widening through the conversion. */
-template <typename warp_type_>
-struct e5m2_cdna4_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e5m2_t, e5m2_cdna4_widening_t, nk_cap_cdna4_k> {
+struct e5m2_cdna4_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
+    inline static constexpr bool compiled_k = true;
+    using scalar_t = nk::e5m2_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return hip_dot_e5m2x16_cdna4(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return hip_moments_e5m2x16_cdna4(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return hip_weighted_e5m2x16_cdna4(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                          norms_t target) noexcept {
+        return hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                     distance_t ranked) noexcept {
+        return hip_convert_to_distance(kernel, ranked);
+    }
 };
 
 /** e4m3 kit - CDNA4 and CDNA5, widening through the conversion. */
-template <typename warp_type_>
-struct e4m3_cdna4_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e4m3_t, e4m3_cdna4_widening_t, nk_cap_cdna4_k> {
+struct e4m3_cdna4_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
+    inline static constexpr bool compiled_k = true;
+    using scalar_t = nk::e4m3_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return hip_dot_e4m3x16_cdna4(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return hip_moments_e4m3x16_cdna4(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return hip_weighted_e4m3x16_cdna4(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                          norms_t target) noexcept {
+        return hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                     distance_t ranked) noexcept {
+        return hip_convert_to_distance(kernel, ranked);
+    }
 };
 
-#endif // NUMKONG_TARGET_CDNA4 || NUMKONG_TARGET_CDNA5
+#else
+
+/** The kit this unit cannot carry - the OCP fp8 conversions, from CDNA4 on - kept so its ladder
+ *  names it whatever the unit compiles. */
+struct e5m2_cdna4_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
+    inline static constexpr bool compiled_k = false;
+};
+
+/** The @c e4m3 twin of the @c e5m2_cdna4_quads_kit_t stub. */
+struct e4m3_cdna4_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
+    inline static constexpr bool compiled_k = false;
+};
+
+#endif // NUMKONG_ARCH_ROCM_CDNA4_
 
 #pragma endregion Minifloats
 
@@ -702,35 +1206,6 @@ __device__ __forceinline__ uint2 hip_unpack_i4x8_rocm(u32_t word) noexcept {
 /** Unpacks a word of eight unsigned nibbles into two byte-lane words. */
 __device__ __forceinline__ uint2 hip_unpack_u4x8_rocm(u32_t word) noexcept {
     return {word & 0x0F0F0F0Fu, (word >> 4) & 0x0F0F0F0Fu};
-}
-
-/** Thirty-two signed @c i4 products of a fragment pair, two calls of @p dot_ per source word. */
-template <int (*dot_)(u32_t, u32_t, int)>
-__device__ __forceinline__ int hip_dot_i4x32(uint4 a, uint4 b, int sum) noexcept {
-    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
-#pragma unroll
-    for (u32_t word = 0; word != 4; ++word) {
-        uint2 const unpacked_a = hip_unpack_i4x8_rocm(words_a[word]);
-        uint2 const unpacked_b = hip_unpack_i4x8_rocm(words_b[word]);
-        sum = dot_(unpacked_a.x, unpacked_b.x, sum);
-        sum = dot_(unpacked_a.y, unpacked_b.y, sum);
-    }
-    return sum;
-}
-
-/** An @c i4 fragment's sum & sum of squares. */
-template <int (*dot_)(u32_t, u32_t, int)>
-__device__ __forceinline__ int2 hip_moments_i4x32(uint4 a, int2 moments) noexcept {
-    u32_t const words[4] = {a.x, a.y, a.z, a.w};
-#pragma unroll
-    for (u32_t word = 0; word != 4; ++word) {
-        uint2 const unpacked = hip_unpack_i4x8_rocm(words[word]);
-        moments.x = dot_(unpacked.x, 0x01010101u, moments.x);
-        moments.x = dot_(unpacked.y, 0x01010101u, moments.x);
-        moments.y = dot_(unpacked.x, unpacked.x, moments.y);
-        moments.y = dot_(unpacked.y, unpacked.y, moments.y);
-    }
-    return moments;
 }
 
 /** Thirty-two unsigned @c u4 products of a fragment pair, two @c v_dot4_u32_u8 per source word. */
@@ -793,11 +1268,38 @@ __device__ __forceinline__ std::array<f32_t, 32> hip_weighted_u4x32_rocm( //
     return sums;
 }
 
-/** The quads kit of signed nibbles over the signed byte dot @p dot_, at @p capability_. */
-template <typename warp_type_, int (*dot_)(u32_t, u32_t, int), nk_capability_t capability_>
-struct hip_i4x2_quads_kit {
-    inline static constexpr nk_capability_t capability_k = capability_;
-    using warp_t = warp_type_;
+/** Thirty-two signed @c i4 products of a fragment pair, two @ref hip_dot_i8x4_rocm per source
+ *  word. */
+__device__ __forceinline__ int hip_dot_i4x32_rocm(uint4 a, uint4 b, int sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked_a = hip_unpack_i4x8_rocm(words_a[word]);
+        uint2 const unpacked_b = hip_unpack_i4x8_rocm(words_b[word]);
+        sum = hip_dot_i8x4_rocm(unpacked_a.x, unpacked_b.x, sum);
+        sum = hip_dot_i8x4_rocm(unpacked_a.y, unpacked_b.y, sum);
+    }
+    return sum;
+}
+
+/** An @c i4 fragment's sum & sum of squares, through @ref hip_dot_i8x4_rocm. */
+__device__ __forceinline__ int2 hip_moments_i4x32_rocm(uint4 a, int2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = hip_unpack_i4x8_rocm(words[word]);
+        moments.x = hip_dot_i8x4_rocm(unpacked.x, 0x01010101u, moments.x);
+        moments.x = hip_dot_i8x4_rocm(unpacked.y, 0x01010101u, moments.x);
+        moments.y = hip_dot_i8x4_rocm(unpacked.x, unpacked.x, moments.y);
+        moments.y = hip_dot_i8x4_rocm(unpacked.y, unpacked.y, moments.y);
+    }
+    return moments;
+}
+
+/** i4x2 kit - every ROCm device, NumKong's portable byte dot over unpacked nibbles. */
+struct i4x2_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -806,10 +1308,10 @@ struct hip_i4x2_quads_kit {
     using norms_accumulator_t = int2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return hip_dot_i4x32<dot_>(a, b, sum);
+        return hip_dot_i4x32_rocm(a, b, sum);
     }
     static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
-        return hip_moments_i4x32<dot_>(a, moments);
+        return hip_moments_i4x32_rocm(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
@@ -830,25 +1332,156 @@ struct hip_i4x2_quads_kit {
 
 #if NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
 
+/** Thirty-two signed @c i4 products of a fragment pair, two @c v_dot4_i32_i8 per source word. */
+__device__ __forceinline__ int hip_dot_i4x32_cdna3(uint4 a, uint4 b, int sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked_a = hip_unpack_i4x8_rocm(words_a[word]);
+        uint2 const unpacked_b = hip_unpack_i4x8_rocm(words_b[word]);
+        sum = hip_dot_i8x4_cdna3(unpacked_a.x, unpacked_b.x, sum);
+        sum = hip_dot_i8x4_cdna3(unpacked_a.y, unpacked_b.y, sum);
+    }
+    return sum;
+}
+
+/** An @c i4 fragment's sum & sum of squares, through @c v_dot4_i32_i8. */
+__device__ __forceinline__ int2 hip_moments_i4x32_cdna3(uint4 a, int2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = hip_unpack_i4x8_rocm(words[word]);
+        moments.x = hip_dot_i8x4_cdna3(unpacked.x, 0x01010101u, moments.x);
+        moments.x = hip_dot_i8x4_cdna3(unpacked.y, 0x01010101u, moments.x);
+        moments.y = hip_dot_i8x4_cdna3(unpacked.x, unpacked.x, moments.y);
+        moments.y = hip_dot_i8x4_cdna3(unpacked.y, unpacked.y, moments.y);
+    }
+    return moments;
+}
+
 /** i4x2 kit - CDNA3 and CDNA4, the byte engine over unpacked nibbles. */
-template <typename warp_type_>
-struct i4x2_cdna3_quads_kit : hip_i4x2_quads_kit<warp_type_, hip_dot_i8x4_cdna3, nk_cap_cdna3_k> {};
+struct i4x2_cdna3_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
+    inline static constexpr bool compiled_k = true;
+    using scalar_t = nk::i4x2_t;
+    using fragment_t = uint4;
+    using dot_t = int;
+    using weighted_t = std::array<f32_t, 32>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = int2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return hip_dot_i4x32_cdna3(a, b, sum);
+    }
+    static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
+        return hip_moments_i4x32_cdna3(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return hip_weighted_i4x32_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                          norms_t target) noexcept {
+        return hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                     distance_t ranked) noexcept {
+        return hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#else
+
+/** The kit this unit cannot carry - the nibbles over CDNA3's signed byte dot - kept so its ladder
+ *  names it whatever the unit compiles. */
+struct i4x2_cdna3_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
+    inline static constexpr bool compiled_k = false;
+};
 
 #endif // NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
 
 #if NUMKONG_TARGET_CDNA5
 
+/** Thirty-two signed @c i4 products of a fragment pair, two @c v_dot4_i32_iu8 per source word. */
+__device__ __forceinline__ int hip_dot_i4x32_cdna5(uint4 a, uint4 b, int sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked_a = hip_unpack_i4x8_rocm(words_a[word]);
+        uint2 const unpacked_b = hip_unpack_i4x8_rocm(words_b[word]);
+        sum = hip_dot_i8x4_cdna5(unpacked_a.x, unpacked_b.x, sum);
+        sum = hip_dot_i8x4_cdna5(unpacked_a.y, unpacked_b.y, sum);
+    }
+    return sum;
+}
+
+/** An @c i4 fragment's sum & sum of squares, through @c v_dot4_i32_iu8. */
+__device__ __forceinline__ int2 hip_moments_i4x32_cdna5(uint4 a, int2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = hip_unpack_i4x8_rocm(words[word]);
+        moments.x = hip_dot_i8x4_cdna5(unpacked.x, 0x01010101u, moments.x);
+        moments.x = hip_dot_i8x4_cdna5(unpacked.y, 0x01010101u, moments.x);
+        moments.y = hip_dot_i8x4_cdna5(unpacked.x, unpacked.x, moments.y);
+        moments.y = hip_dot_i8x4_cdna5(unpacked.y, unpacked.y, moments.y);
+    }
+    return moments;
+}
+
 /** i4x2 kit - CDNA5, the byte engine over unpacked nibbles. */
-template <typename warp_type_>
-struct i4x2_cdna5_quads_kit : hip_i4x2_quads_kit<warp_type_, hip_dot_i8x4_cdna5, nk_cap_cdna5_k> {};
+struct i4x2_cdna5_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
+    inline static constexpr bool compiled_k = true;
+    using scalar_t = nk::i4x2_t;
+    using fragment_t = uint4;
+    using dot_t = int;
+    using weighted_t = std::array<f32_t, 32>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = int2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return hip_dot_i4x32_cdna5(a, b, sum);
+    }
+    static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
+        return hip_moments_i4x32_cdna5(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return hip_weighted_i4x32_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                          norms_t target) noexcept {
+        return hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                     distance_t ranked) noexcept {
+        return hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#else
+
+/** The kit this unit cannot carry - the nibbles over MI400's byte dot - kept so its ladder names it
+ *  whatever the unit compiles. */
+struct i4x2_cdna5_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
+    inline static constexpr bool compiled_k = false;
+};
 
 #endif // NUMKONG_TARGET_CDNA5
 
 /** u4x2 kit - every ROCm device, the byte engine over unpacked nibbles. */
-template <typename warp_type_>
-struct u4x2_rocm_quads_kit {
+struct u4x2_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = warp_type_;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -903,10 +1536,9 @@ __device__ __forceinline__ std::array<f32_t, 128> hip_weighted_u1x128_rocm( //
 
 /** u1x8 kit - every ROCm device: the "dot" is the intersection popcount, and the norms store each
  *  row's set-bit count, the currency of Jaccard's union, mirrored into both fields. */
-template <typename warp_type_>
-struct u1x8_rocm_quads_kit {
+struct u1x8_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = warp_type_;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -951,9 +1583,23 @@ struct u1x8_rocm_quads_kit {
 
 #pragma region Schedules
 
+/** Copies the fragments a lane strides over, @p lanes apart, from the rows an ID span names into
+ *  the cache's leading rows through the lane's registers. */
+template <typename storage_, typename cache_>
+__device__ __forceinline__ void hip_copy_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
+                                              u32_t lane, u32_t lanes) noexcept {
+    for (u32_t word = lane; word < rows * storage.row_fragments; word += lanes) {
+        u32_t const row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, row);
+        cache.at(row, fragment) = storage.vector_for(ids[row], fragment);
+    }
+}
+
 /** The staging every ROCm device runs: each lane copies the fragments it strides over through its
  *  registers, and one wavefront barrier lands them before the staging returns. */
 struct rocm_registers_schedule_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
+    using warp_t = hip_warp<hip_wave_lanes(capability_k)>;
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies are plain stores. */
@@ -963,10 +1609,11 @@ struct rocm_registers_schedule_t {
 
     /** Scores a walk's batch through the kit's scalar dots, one fragment a load. */
     template <vram_quads_kit kit_, u32_t resident_blocks_>
-    static __device__ __forceinline__ vram_scored_node_t score_batch( //
+    static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
-        typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
-        return vram_score_batch<kit_, resident_blocks_>( //
+        typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
+        u32_t lane) noexcept {
+        return vram_score_batch<kit_, warp_t, resident_blocks_>( //
             storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
     }
 
@@ -974,11 +1621,41 @@ struct rocm_registers_schedule_t {
     static __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids,
                                                       u32_t rows, u32_t lane) noexcept {
         if (cache.ids_) return;
-        using warp_t = typename storage_::warp_t;
-        for (u32_t word = lane; word < rows * storage.row_fragments; word += warp_t::width_k) {
-            u32_t const row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, row);
-            cache.at(row, fragment) = storage.vector_for(ids[row], fragment);
-        }
+        hip_copy_rows(storage, cache, ids, rows, lane, warp_t::width_k);
+        warp_t::sync();
+    }
+
+    __device__ __forceinline__ void await_rows(u32_t) noexcept {}
+};
+
+/** The MI400 staging: the register copies over 32-lane wavefronts, until its asynchronous LDS loads
+ *  are wired. */
+struct cdna5_registers_schedule_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
+    inline static constexpr bool compiled_k = NUMKONG_TARGET_CDNA5;
+    using warp_t = hip_warp<hip_wave_lanes(capability_k)>;
+    inline static constexpr u32_t stages_k = 1;
+
+    /** Nothing shared: the copies are plain stores. */
+    struct shared_t {};
+
+    __device__ __forceinline__ cdna5_registers_schedule_t(shared_t&, u32_t) noexcept {}
+
+    /** Scores a walk's batch through the kit's scalar dots, one fragment a load. */
+    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
+        vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+        typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
+        u32_t lane) noexcept {
+        return vram_score_batch<kit_, warp_t, resident_blocks_>( //
+            storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
+    }
+
+    template <typename storage_, typename cache_>
+    static __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids,
+                                                      u32_t rows, u32_t lane) noexcept {
+        if (cache.ids_) return;
+        hip_copy_rows(storage, cache, ids, rows, lane, warp_t::width_k);
         warp_t::sync();
     }
 
@@ -995,31 +1672,32 @@ __device__ __forceinline__ __attribute__((address_space(3))) void* hip_shared_po
     return (__attribute__((address_space(3))) void*)pointer;
 }
 
-/**
- *  @brief The CDNA3 and CDNA4 staging: LDS DMA moves @p lane_bytes_ per lane from global memory
- *      straight into the shared cache, past the registers - a 32-bit word on CDNA3, a whole
- *      fragment on CDNA4.
- *
- *  One instruction lands a wavefront's units side by side above one wavefront-uniform base, and the
- *  cache rows lie back to back, so a unit's index in the staged rows is its offset in the cache. The
- *  copies count against @c vmcnt like loads, which one wait drains. MI400 keeps the register copies
- *  until its asynchronous LDS loads are wired.
- */
-template <u32_t lane_bytes_>
-struct rocm_lds_schedule {
+/*  The CDNA3 and CDNA4 staging: LDS DMA moves a unit per lane from global memory straight into the
+ *  shared cache, past the registers - a 32-bit word on CDNA3, a whole fragment on CDNA4. One
+ *  instruction lands a wavefront's units side by side above one wavefront-uniform base, and the
+ *  cache rows lie back to back, so a unit's index in the staged rows is its offset in the cache.
+ *  The copies count against @c vmcnt like loads, which one wait drains. A size of dependent type
+ *  defers the builtin's constant check to instantiation, where it is one. */
+
+/** The CDNA3 staging: LDS DMA of one 32-bit word per lane. */
+struct cdna3_lds_schedule_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_CDNA3_;
+    using warp_t = hip_warp<hip_wave_lanes(capability_k)>;
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies count on the wavefront's own @c vmcnt. */
     struct shared_t {};
 
-    __device__ __forceinline__ rocm_lds_schedule(shared_t&, u32_t) noexcept {}
+    __device__ __forceinline__ cdna3_lds_schedule_t(shared_t&, u32_t) noexcept {}
 
     /** Scores a walk's batch as @ref rocm_registers_schedule_t does. */
     template <vram_quads_kit kit_, u32_t resident_blocks_>
-    static __device__ __forceinline__ vram_scored_node_t score_batch( //
+    static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
-        typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
-        return vram_score_batch<kit_, resident_blocks_>( //
+        typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
+        u32_t lane) noexcept {
+        return vram_score_batch<kit_, warp_t, resident_blocks_>( //
             storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
     }
 
@@ -1027,137 +1705,196 @@ struct rocm_lds_schedule {
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
         if (cache.ids_) return;
-        constexpr u32_t units_per_fragment_k = sizeof(typename storage_::fragment_t) / lane_bytes_;
+        constexpr u32_t lane_bytes_k = sizeof(u32_t);
+        constexpr u32_t units_per_fragment_k = sizeof(typename storage_::fragment_t) / lane_bytes_k;
         u32_t const row_units = storage.row_fragments * units_per_fragment_k, units = rows * row_units;
         byte_t* const cache_bytes = reinterpret_cast<byte_t*>(cache.row(0));
-        for (u32_t base = 0; base < units; base += storage_::warp_t::width_k) {
+        for (u32_t base = 0; base < units; base += warp_t::width_k) {
             u32_t const unit = base + lane;
             if (unit >= units) break;
             u32_t const row = storage.row_of_word(unit / units_per_fragment_k);
             byte_t* const source = reinterpret_cast<byte_t*>(storage.vector_span_for(ids[row])) +
-                                   (unit - row * row_units) * lane_bytes_;
-            // A size of dependent type defers the builtin's constant check to instantiation, where it is one.
+                                   (unit - row * row_units) * lane_bytes_k;
             __builtin_amdgcn_global_load_lds(hip_global_pointer(source),
-                                             hip_shared_pointer(cache_bytes + base * lane_bytes_),
-                                             static_cast<decltype(storage.row_fragments)>(lane_bytes_), 0, 0);
+                                             hip_shared_pointer(cache_bytes + base * lane_bytes_k),
+                                             static_cast<decltype(storage.row_fragments)>(lane_bytes_k), 0, 0);
         }
     }
 
     __device__ __forceinline__ void await_rows(u32_t) noexcept { asm volatile("s_waitcnt vmcnt(0)" ::: "memory"); }
 };
 
-using cdna3_lds_schedule_t = rocm_lds_schedule<sizeof(u32_t)>;
-using cdna4_lds_schedule_t = rocm_lds_schedule<sizeof(uint4)>;
+/** The CDNA4 staging: LDS DMA of a whole fragment per lane. */
+struct cdna4_lds_schedule_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_CDNA4_;
+    using warp_t = hip_warp<hip_wave_lanes(capability_k)>;
+    inline static constexpr u32_t stages_k = 1;
+
+    /** Nothing shared: the copies count on the wavefront's own @c vmcnt. */
+    struct shared_t {};
+
+    __device__ __forceinline__ cdna4_lds_schedule_t(shared_t&, u32_t) noexcept {}
+
+    /** Scores a walk's batch as @ref rocm_registers_schedule_t does. */
+    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
+        vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+        typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
+        u32_t lane) noexcept {
+        return vram_score_batch<kit_, warp_t, resident_blocks_>( //
+            storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
+    }
+
+    template <typename storage_, typename cache_>
+    __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
+                                               u32_t lane) noexcept {
+        if (cache.ids_) return;
+        constexpr u32_t lane_bytes_k = sizeof(uint4);
+        constexpr u32_t units_per_fragment_k = sizeof(typename storage_::fragment_t) / lane_bytes_k;
+        u32_t const row_units = storage.row_fragments * units_per_fragment_k, units = rows * row_units;
+        byte_t* const cache_bytes = reinterpret_cast<byte_t*>(cache.row(0));
+        for (u32_t base = 0; base < units; base += warp_t::width_k) {
+            u32_t const unit = base + lane;
+            if (unit >= units) break;
+            u32_t const row = storage.row_of_word(unit / units_per_fragment_k);
+            byte_t* const source = reinterpret_cast<byte_t*>(storage.vector_span_for(ids[row])) +
+                                   (unit - row * row_units) * lane_bytes_k;
+            __builtin_amdgcn_global_load_lds(hip_global_pointer(source),
+                                             hip_shared_pointer(cache_bytes + base * lane_bytes_k),
+                                             static_cast<decltype(storage.row_fragments)>(lane_bytes_k), 0, 0);
+        }
+    }
+
+    __device__ __forceinline__ void await_rows(u32_t) noexcept { asm volatile("s_waitcnt vmcnt(0)" ::: "memory"); }
+};
 
 #pragma endregion Schedules
 
-#pragma region Chains
+#pragma region Ladders
 
-/*  A class's ceiling carries every older tier's bit, so each chain lists the newest tier first:
+/*  A class's ceiling carries every older tier's bit, so each ladder lists the newest tier first.
  *  MI400 keeps the CDNA4 conversions but drops CDNA3's signed byte and half dots, and its unit
- *  compiles none of CDNA3's kits. */
+ *  compiles neither those nor CDNA4's brain-float dot, so its ladders fall past them. */
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::f16_t, caps_> {
-    using kit_t = std::conditional_t<!(NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0) &&
-                                         ((NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0) ||
-                                          (NUMKONG_TARGET_CDNA3 && (caps_ & nk_cap_cdna3_k) != 0)),
-                                     f16_cdna3_quads_kit<hip_warp_of<caps_>>, f16_rocm_quads_kit<hip_warp_of<caps_>>>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
-};
-
-template <nk_capability_t caps_>
-    requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        bf16_rocm_quads_kit<hip_warp_of<caps_>>,                                                                     //
-        chain_layer<NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0, bf16_cdna4_quads_kit<hip_warp_of<caps_>>> //
+struct quads_ladder<nk::f16_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        f16_rocm_quads_kit_t,           //
+        f16_cdna3_quads_kit_t           //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                    //
-        i8_cdna3_quads_kit<hip_warp_of<caps_>>,                                                                    //
-        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, i8_cdna5_quads_kit<hip_warp_of<caps_>>> //
+struct quads_ladder<nk::bf16_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        bf16_rocm_quads_kit_t,          //
+        bf16_cdna4_quads_kit_t          //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::u8_t, caps_> {
-    using kit_t = u8_rocm_quads_kit<hip_warp_of<caps_>>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
-};
-
-template <nk_capability_t caps_>
-    requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::e5m2_t, caps_> {
-    using kit_t = std::conditional_t<(NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0) ||
-                                         (NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0),
-                                     e5m2_cdna4_quads_kit<hip_warp_of<caps_>>, e5m2_rocm_quads_kit<hip_warp_of<caps_>>>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
-};
-
-template <nk_capability_t caps_>
-    requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::e4m3_t, caps_> {
-    using kit_t = std::conditional_t<(NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0) ||
-                                         (NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0),
-                                     e4m3_cdna4_quads_kit<hip_warp_of<caps_>>, e4m3_rocm_quads_kit<hip_warp_of<caps_>>>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
-};
-
-template <nk_capability_t caps_>
-    requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::e3m2_t, caps_> {
-    using kit_t = e3m2_rocm_quads_kit<hip_warp_of<caps_>>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
-};
-
-template <nk_capability_t caps_>
-    requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::e2m3_t, caps_> {
-    using kit_t = e2m3_rocm_quads_kit<hip_warp_of<caps_>>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
-};
-
-template <nk_capability_t caps_>
-    requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::i4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        i4x2_cdna3_quads_kit<hip_warp_of<caps_>>,                                                                    //
-        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, i4x2_cdna5_quads_kit<hip_warp_of<caps_>>> //
+struct quads_ladder<nk::i8_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        i8_rocm_quads_kit_t,            //
+        i8_cdna5_quads_kit_t,           //
+        i8_cdna3_quads_kit_t            //
         >::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::u4x2_t, caps_> {
-    using kit_t = u4x2_rocm_quads_kit<hip_warp_of<caps_>>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::u8_t, caps_> {
+    using kit_t = typename highest_kit<caps_, u8_rocm_quads_kit_t>::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
-struct quads_chain<nk::u1x8_t, caps_> {
-    using kit_t = u1x8_rocm_quads_kit<hip_warp_of<caps_>>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::e5m2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e5m2_rocm_quads_kit_t,          //
+        e5m2_cdna4_quads_kit_t          //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
-/** The staging schedule under @p caps_: the LDS DMA copies on CDNA3 and CDNA4, a fragment per lane
- *  where CDNA4 allows it, and the register copies on MI400 and every other ROCm device. */
 template <nk_capability_t caps_>
-using rocm_schedule_of =
-    std::conditional_t<(caps_ & nk_cap_cdna5_k) != 0 || (caps_ & (nk_cap_cdna4_k | nk_cap_cdna3_k)) == 0,
-                       rocm_registers_schedule_t,
-                       std::conditional_t<(caps_ & nk_cap_cdna4_k) != 0, cdna4_lds_schedule_t, cdna3_lds_schedule_t>>;
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct quads_ladder<nk::e4m3_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e4m3_rocm_quads_kit_t,          //
+        e4m3_cdna4_quads_kit_t          //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
+};
 
-#pragma endregion Chains
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct quads_ladder<nk::e3m2_t, caps_> {
+    using kit_t = typename highest_kit<caps_, e3m2_rocm_quads_kit_t>::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct quads_ladder<nk::e2m3_t, caps_> {
+    using kit_t = typename highest_kit<caps_, e2m3_rocm_quads_kit_t>::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct quads_ladder<nk::i4x2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        i4x2_rocm_quads_kit_t,          //
+        i4x2_cdna5_quads_kit_t,         //
+        i4x2_cdna3_quads_kit_t          //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct quads_ladder<nk::u4x2_t, caps_> {
+    using kit_t = typename highest_kit<caps_, u4x2_rocm_quads_kit_t>::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct quads_ladder<nk::u1x8_t, caps_> {
+    using kit_t = typename highest_kit<caps_, u1x8_rocm_quads_kit_t>::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
+};
+
+/** The staging schedule under @p caps_: the register copies on MI400 and every ROCm device below
+ *  CDNA3, and the LDS DMA copies on CDNA3 and CDNA4, a fragment per lane where CDNA4 allows it. */
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct schedule_ladder<caps_> {
+    using schedule_t = typename highest_kit< //
+        caps_,                               //
+        rocm_registers_schedule_t,           //
+        cdna5_registers_schedule_t,          //
+        cdna4_lds_schedule_t,                //
+        cdna3_lds_schedule_t                 //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & schedule_t::capability_k;
+};
+
+#pragma endregion Ladders
 
 } // namespace unum::usearch::dense

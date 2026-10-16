@@ -13,10 +13,9 @@
  *  shard translation units split. The cascade ends in a workload, so one pipeline serves the search
  *  and algebra families, and the multi-device binaries reuse its streaming.
  *
- *  The shards compile with the host compiler alone; each binary's entry unit compiles host-only
- *  through Clang's CUDA mode and once more with NVCC device-only, into the binary's own fatbin of
- *  every ceiling's kernels, which every unit finds through the @c dense::cuda_fatbin
- *  specializations below.
+ *  Every unit compiles host-only through Clang's CUDA mode, and each binary's entry unit once more
+ *  with NVCC device-only, into the binary's own fatbin of every ceiling's kernels, which every
+ *  unit's indexes find through @c cuda_bench_fatbin_t.
  */
 #pragma once
 
@@ -29,6 +28,7 @@
 
 #include <fmt/format.h>
 
+#include "usearch/dense/vram_nvidia_index.cuh"
 #include "usearch/dense/vram_nvidia_indexes.hpp"
 #include "usearch/utilities/vram_device.hpp"
 
@@ -60,10 +60,12 @@ constexpr nk_capability_t cuda_ceiling_of(nk_capability_t generation) noexcept {
 }
 
 /** The binary's fatbin, which carries every ceiling's kernels. */
-inline bytes_view_t cuda_bench_fatbin() noexcept {
-    return {bench_vram_nvidia_bundle_start,
-            static_cast<std::size_t>(bench_vram_nvidia_bundle_end - bench_vram_nvidia_bundle_start)};
-}
+struct cuda_bench_fatbin_t {
+    static bytes_view_t bytes() noexcept {
+        return {bench_vram_nvidia_bundle_start,
+                static_cast<std::size_t>(bench_vram_nvidia_bundle_end - bench_vram_nvidia_bundle_start)};
+    }
+};
 
 /** The storage dtypes in the library's ladder order, of which a build compiles the first
  *  @c USEARCH_DENSE_DTYPES. */
@@ -531,8 +533,8 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability
           typename storage_allocator_, typename workload_type_>
 int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                   int device, nk_kernel_kind_t kernel, workload_type_ const& workload) {
-    using index_t =
-        vram_nvidia_index<stored_dtype_, capability_, storage_allocator_, storage_allocator_, cuda_device_allocator_t>;
+    using index_t = vram_nvidia_index<stored_dtype_, capability_, cuda_bench_fatbin_t, storage_allocator_,
+                                      storage_allocator_, cuda_device_allocator_t>;
     cuda_bench_context<index_t> bench {settings, device, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare(streamed) && run_insertion(streamed) && run_refinement(streamed) &&
@@ -692,28 +694,3 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
 #pragma endregion
 
 } // namespace unum::usearch::bench::dense
-
-template <>
-inline us::utilities::bytes_view_t
-us::dense::cuda_fatbin<us::bench::dense::cuda_ceiling_of(nk_cap_ampere_k)>() noexcept {
-    return us::bench::dense::cuda_bench_fatbin();
-}
-template <>
-inline us::utilities::bytes_view_t us::dense::cuda_fatbin<us::bench::dense::cuda_ceiling_of(nk_cap_ada_k)>() noexcept {
-    return us::bench::dense::cuda_bench_fatbin();
-}
-template <>
-inline us::utilities::bytes_view_t
-us::dense::cuda_fatbin<us::bench::dense::cuda_ceiling_of(nk_cap_hopper_k)>() noexcept {
-    return us::bench::dense::cuda_bench_fatbin();
-}
-template <>
-inline us::utilities::bytes_view_t
-us::dense::cuda_fatbin<us::bench::dense::cuda_ceiling_of(nk_cap_blackwell_k)>() noexcept {
-    return us::bench::dense::cuda_bench_fatbin();
-}
-template <>
-inline us::utilities::bytes_view_t
-us::dense::cuda_fatbin<us::bench::dense::cuda_ceiling_of(nk_cap_blackwellrtx_k)>() noexcept {
-    return us::bench::dense::cuda_bench_fatbin();
-}

@@ -58,7 +58,10 @@ struct cuda_warp_t {
     static __device__ __forceinline__ void sync() noexcept { __syncwarp(); }
 
     /** The lanes holding the same @p value as this one, this lane included. */
-    static __device__ __forceinline__ mask_t match_any(u32_t value) noexcept { return __match_any_sync(all_k, value); }
+    template <typename value_type_>
+    static __device__ __forceinline__ mask_t match_any(value_type_ value) noexcept {
+        return __match_any_sync(all_k, value);
+    }
 
     static __device__ __forceinline__ u32_t count(mask_t mask) noexcept { return __popc(mask); }
 

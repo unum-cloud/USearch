@@ -428,7 +428,7 @@ void basic_free_landed(variant_type_& variant, refining_type_& refining, handle_
 
 /** Writes what a refinement's @p refined result reports into the outputs @p arguments name. */
 template <typename arguments_type_>
-void basic_report_refined(us::basic::refine_result_t const& refined, arguments_type_ const& arguments) noexcept {
+void basic_report_refined(basic::refine_result_t const& refined, arguments_type_ const& arguments) noexcept {
     accumulate_stats(arguments.stats, refined.telemetry);
     if (arguments.changed) *arguments.changed = refined.changed_nodes;
     if constexpr (requires { arguments.reachability; })

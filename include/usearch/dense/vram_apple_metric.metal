@@ -4,32 +4,41 @@
  *  @date October 11, 2026
  *  @brief Metal metric kits for the dense Apple index - the MSL twin of @c vram_nvidia_metric.cuh.
  *
- *  A kit binds one storage dtype with the hooks the CUDA and HIP kits name: it accumulates the dot
- *  of two 16-byte fragments, a fragment's {sum, sum of squares} norms and its weighted values, and
- *  finalizes a distance "through the dot" exactly as the CUDA kits do, so a graph saved on one GPU
- *  reads back on another with the same norms. No Apple GPU this runtime reaches has fp8 or fp6
- *  arithmetic, so the minifloats widen to @c half per byte, as NumKong's @c apple10.metal does. The
- *  host prepends this file to @c vram_apple_index.metal with a @c metal_kit_t alias naming the kit,
- *  and compiles the pair at first use.
+ *  A kit binds one storage dtype to one Apple family, named like the CPU and CUDA kits -
+ *  @b dtype_metal_quads_kit_t, where @c metal is NumKong's capability of the Apple7 floor. It
+ *  accumulates the dot of two 16-byte fragments, a fragment's {sum, sum of squares} norms and its
+ *  weighted values, and finalizes a distance "through the dot" exactly as the CUDA kits do, so a
+ *  graph saved on one GPU reads back on another with the same norms. Each kit states the capability
+ *  it runs under, @c capability_k, and @c compiled_k, and @c quads_ladder picks one per dtype
+ *  through @c highest_kit, leaving room for Apple9 and Apple10 rungs above the floor. No Apple GPU
+ *  this runtime reaches has fp8 or fp6 arithmetic, so the minifloats widen to @c half per byte, as
+ *  NumKong's @c apple10.metal does.
+ *
+ *  The host compiles one library per dtype and Apple class from @c vram_apple_shared.h, a prelude
+ *  spelling NumKong's dtypes and capabilities with the @c metal_dtype_k and @c metal_capability_k
+ *  of that library, this file, then @c vram_apple_index.metal.
  */
 #include <metal_stdlib>
 using namespace metal;
 
 namespace unum::usearch::dense {
 
-/** NumKong's capability word and its Metal baseline bit, spelled out, since MSL cannot include
- *  @c numkong/capabilities.h. */
-using nk_capability_t = ulong;
-constant constexpr nk_capability_t nk_cap_metal_k = nk_capability_t(1) << 60;
+/**
+ *  @brief Picks the first of @p kits_ this library compiled and @p caps_ runs, else @p floor_ - a
+ *      ladder's one closing @c ::type, the host's @c highest_kit with a typed capability set.
+ *
+ *  Every kit states its own needs: @c capability_k, the capability it runs under, and
+ *  @c compiled_k, whether this library carries its body.
+ */
+template <nk_capability_t caps_, typename floor_, typename... kits_>
+struct highest_kit {
+    using type = floor_;
+};
 
-/** The metrics the host lowers its kernel kind onto: the walk ranks Euclidean by its square. */
-enum metal_metric_t : uint {
-    metal_dot_k = 0,
-    metal_angular_k = 1,
-    metal_sqeuclidean_k = 2,
-    metal_euclidean_k = 3,
-    metal_hamming_k = 4,
-    metal_jaccard_k = 5,
+template <nk_capability_t caps_, typename floor_, typename head_, typename... tail_>
+struct highest_kit<caps_, floor_, head_, tail_...> {
+    using type = conditional_t<head_::compiled_k && (caps_ & head_::capability_k) != 0, head_,
+                               typename highest_kit<caps_, floor_, tail_...>::type>;
 };
 
 /**
@@ -42,7 +51,7 @@ enum metal_metric_t : uint {
  */
 struct metal_warp_t {
     using mask_t = uint;
-    static constexpr constant uint width_k = 32;
+    static constexpr constant uint width_k = metal_simdgroup_width_k;
 
     static mask_t ballot(bool predicate) { return mask_t(simd_vote::vote_t(simd_ballot(predicate))); }
 
@@ -122,35 +131,65 @@ inline float metal_convert_to_distance(uint metric, float ranked) {
     return metric == metal_euclidean_k ? sqrt(max(ranked, 0.0f)) : ranked;
 }
 
-/** The shape every floating kit shares: widen each word to four floats, the first
- *  @c values_per_word_k of them live, then multiply-add. */
-template <typename widening_type_>
-struct metal_floats_quads_kit {
+/** The two brain floats of @p word, the lower first, each the high half of a @c float. */
+inline float2 metal_bf16x2_to_f32x2(uint word) {
+    return float2(as_type<float>(word << 16), as_type<float>(word & 0xFFFF0000u));
+}
+
+/** The two IEEE halves of @p word, the lower first. */
+inline float2 metal_f16x2_to_f32x2(uint word) { return float2(as_type<half2>(word)); }
+
+/** E5M2 is the top byte of an IEEE half. */
+inline float4 metal_e5m2x4_to_f32x4(uint word) { return float4(as_type<half4>(metal_bytes(word) << ushort(8))); }
+
+/** E4M3FN: bias 7, the all-ones codes NaN. */
+inline float4 metal_e4m3x4_to_f32x4(uint word) {
+    ushort4 const codes = metal_bytes(word);
+    ushort4 const bits = ((codes & ushort(0x7F)) << ushort(7)) | ((codes & ushort(0x80)) << ushort(8));
+    return float4(select(as_type<half4>(bits) * half(256), half4(NAN), (codes & ushort(0x7F)) == ushort(0x7F)));
+}
+
+/** E3M2, OCP FP6 in the low six bits of a byte: bias 3. */
+inline float4 metal_e3m2x4_to_f32x4(uint word) {
+    ushort4 const codes = metal_bytes(word);
+    ushort4 const bits = ((codes & ushort(0x1F)) << ushort(8)) | ((codes & ushort(0x20)) << ushort(10));
+    return float4(as_type<half4>(bits) * half(4096));
+}
+
+/** E2M3, OCP FP6 in the low six bits of a byte: bias 1. */
+inline float4 metal_e2m3x4_to_f32x4(uint word) {
+    ushort4 const codes = metal_bytes(word);
+    ushort4 const bits = ((codes & ushort(0x1F)) << ushort(7)) | ((codes & ushort(0x20)) << ushort(10));
+    return float4(as_type<half4>(bits) * half(16384));
+}
+
+/** Brain floats, two per word, widened to @c float by their bits. */
+struct bf16_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    using warp_t = metal_warp_t;
+    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = float;
-    using weighted_t = array<float, 4 * widening_type_::values_per_word_k>;
+    using weighted_t = array<float, 8>;
     using norms_t = float2;
     using norms_accumulator_t = float2;
 
     static float accumulate_dot(uint4 a, uint4 b, float sum) {
         for (uint word = 0; word != 4; ++word)
-            sum += metal::dot(widening_type_::widen(a[word]), widening_type_::widen(b[word]));
+            sum += metal::dot(metal_bf16x2_to_f32x2(a[word]), metal_bf16x2_to_f32x2(b[word]));
         return sum;
     }
     static float2 accumulate_norms(uint4 a, float2 moments) {
         for (uint word = 0; word != 4; ++word) {
-            float4 const values = widening_type_::widen(a[word]);
-            moments += float2(values.x + values.y + values.z + values.w, metal::dot(values, values));
+            float2 const values = metal_bf16x2_to_f32x2(a[word]);
+            moments += float2(values.x + values.y, metal::dot(values, values));
         }
         return moments;
     }
     static weighted_t accumulate_weighted(uint4 a, float weight, weighted_t sums) {
         for (uint word = 0; word != 4; ++word) {
-            float4 const values = widening_type_::widen(a[word]);
-            for (uint value = 0; value != widening_type_::values_per_word_k; ++value)
-                sums[word * widening_type_::values_per_word_k + value] += weight * values[value];
+            float2 const values = metal_bf16x2_to_f32x2(a[word]);
+            sums[word * 2] += weight * values.x;
+            sums[word * 2 + 1] += weight * values.y;
         }
         return sums;
     }
@@ -161,65 +200,191 @@ struct metal_floats_quads_kit {
     static float convert_to_distance(uint metric, float ranked) { return metal_convert_to_distance(metric, ranked); }
 };
 
-/** The values a word carries as four lanes, the 16-bit floats' two padded with zeros. */
-struct f16_metal_widening_t {
-    static constexpr constant uint values_per_word_k = 2;
-    static float4 widen(uint word) { return float4(float2(as_type<half2>(word)), 0.0f, 0.0f); }
-};
-struct bf16_metal_widening_t {
-    static constexpr constant uint values_per_word_k = 2;
-    static float4 widen(uint word) {
-        return float4(as_type<float>(word << 16), as_type<float>(word & 0xFFFF0000u), 0, 0);
+/** IEEE halves, two per word. */
+struct f16_metal_quads_kit_t {
+    static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
+    static constexpr constant bool compiled_k = true;
+    using fragment_t = uint4;
+    using dot_t = float;
+    using weighted_t = array<float, 8>;
+    using norms_t = float2;
+    using norms_accumulator_t = float2;
+
+    static float accumulate_dot(uint4 a, uint4 b, float sum) {
+        for (uint word = 0; word != 4; ++word)
+            sum += metal::dot(metal_f16x2_to_f32x2(a[word]), metal_f16x2_to_f32x2(b[word]));
+        return sum;
     }
-};
-
-/** E4M3FN: bias 7, the all-ones codes NaN. */
-struct e4m3_metal_widening_t {
-    static constexpr constant uint values_per_word_k = 4;
-    static float4 widen(uint word) {
-        ushort4 const codes = metal_bytes(word);
-        ushort4 const bits = ((codes & ushort(0x7F)) << ushort(7)) | ((codes & ushort(0x80)) << ushort(8));
-        return float4(select(as_type<half4>(bits) * half(256), half4(NAN), (codes & ushort(0x7F)) == ushort(0x7F)));
+    static float2 accumulate_norms(uint4 a, float2 moments) {
+        for (uint word = 0; word != 4; ++word) {
+            float2 const values = metal_f16x2_to_f32x2(a[word]);
+            moments += float2(values.x + values.y, metal::dot(values, values));
+        }
+        return moments;
     }
-};
-
-/** E5M2 is the top byte of an IEEE half. */
-struct e5m2_metal_widening_t {
-    static constexpr constant uint values_per_word_k = 4;
-    static float4 widen(uint word) { return float4(as_type<half4>(metal_bytes(word) << ushort(8))); }
-};
-
-/** E3M2, OCP FP6 in the low six bits of a byte: bias 3. */
-struct e3m2_metal_widening_t {
-    static constexpr constant uint values_per_word_k = 4;
-    static float4 widen(uint word) {
-        ushort4 const codes = metal_bytes(word);
-        ushort4 const bits = ((codes & ushort(0x1F)) << ushort(8)) | ((codes & ushort(0x20)) << ushort(10));
-        return float4(as_type<half4>(bits) * half(4096));
+    static weighted_t accumulate_weighted(uint4 a, float weight, weighted_t sums) {
+        for (uint word = 0; word != 4; ++word) {
+            float2 const values = metal_f16x2_to_f32x2(a[word]);
+            sums[word * 2] += weight * values.x;
+            sums[word * 2 + 1] += weight * values.y;
+        }
+        return sums;
     }
-};
-
-/** E2M3, OCP FP6 in the low six bits of a byte: bias 1. */
-struct e2m3_metal_widening_t {
-    static constexpr constant uint values_per_word_k = 4;
-    static float4 widen(uint word) {
-        ushort4 const codes = metal_bytes(word);
-        ushort4 const bits = ((codes & ushort(0x1F)) << ushort(7)) | ((codes & ushort(0x20)) << ushort(10));
-        return float4(as_type<half4>(bits) * half(16384));
+    static float2 partials_to_norms(float2 moments) { return moments; }
+    static float distance(uint metric, float dot, float2 query, float2 target) {
+        return metal_distance(metric, dot, query, target);
     }
+    static float convert_to_distance(uint metric, float ranked) { return metal_convert_to_distance(metric, ranked); }
 };
 
-using f16_metal_quads_kit_t = metal_floats_quads_kit<f16_metal_widening_t>;
-using bf16_metal_quads_kit_t = metal_floats_quads_kit<bf16_metal_widening_t>;
-using e4m3_metal_quads_kit_t = metal_floats_quads_kit<e4m3_metal_widening_t>;
-using e5m2_metal_quads_kit_t = metal_floats_quads_kit<e5m2_metal_widening_t>;
-using e3m2_metal_quads_kit_t = metal_floats_quads_kit<e3m2_metal_widening_t>;
-using e2m3_metal_quads_kit_t = metal_floats_quads_kit<e2m3_metal_widening_t>;
+/** E5M2 bytes, four per word, widened through @c half. */
+struct e5m2_metal_quads_kit_t {
+    static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
+    static constexpr constant bool compiled_k = true;
+    using fragment_t = uint4;
+    using dot_t = float;
+    using weighted_t = array<float, 16>;
+    using norms_t = float2;
+    using norms_accumulator_t = float2;
+
+    static float accumulate_dot(uint4 a, uint4 b, float sum) {
+        for (uint word = 0; word != 4; ++word)
+            sum += metal::dot(metal_e5m2x4_to_f32x4(a[word]), metal_e5m2x4_to_f32x4(b[word]));
+        return sum;
+    }
+    static float2 accumulate_norms(uint4 a, float2 moments) {
+        for (uint word = 0; word != 4; ++word) {
+            float4 const values = metal_e5m2x4_to_f32x4(a[word]);
+            moments += float2(values.x + values.y + values.z + values.w, metal::dot(values, values));
+        }
+        return moments;
+    }
+    static weighted_t accumulate_weighted(uint4 a, float weight, weighted_t sums) {
+        for (uint word = 0; word != 4; ++word) {
+            float4 const values = metal_e5m2x4_to_f32x4(a[word]);
+            for (uint value = 0; value != 4; ++value) sums[word * 4 + value] += weight * values[value];
+        }
+        return sums;
+    }
+    static float2 partials_to_norms(float2 moments) { return moments; }
+    static float distance(uint metric, float dot, float2 query, float2 target) {
+        return metal_distance(metric, dot, query, target);
+    }
+    static float convert_to_distance(uint metric, float ranked) { return metal_convert_to_distance(metric, ranked); }
+};
+
+/** E4M3FN bytes, four per word, widened through @c half. */
+struct e4m3_metal_quads_kit_t {
+    static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
+    static constexpr constant bool compiled_k = true;
+    using fragment_t = uint4;
+    using dot_t = float;
+    using weighted_t = array<float, 16>;
+    using norms_t = float2;
+    using norms_accumulator_t = float2;
+
+    static float accumulate_dot(uint4 a, uint4 b, float sum) {
+        for (uint word = 0; word != 4; ++word)
+            sum += metal::dot(metal_e4m3x4_to_f32x4(a[word]), metal_e4m3x4_to_f32x4(b[word]));
+        return sum;
+    }
+    static float2 accumulate_norms(uint4 a, float2 moments) {
+        for (uint word = 0; word != 4; ++word) {
+            float4 const values = metal_e4m3x4_to_f32x4(a[word]);
+            moments += float2(values.x + values.y + values.z + values.w, metal::dot(values, values));
+        }
+        return moments;
+    }
+    static weighted_t accumulate_weighted(uint4 a, float weight, weighted_t sums) {
+        for (uint word = 0; word != 4; ++word) {
+            float4 const values = metal_e4m3x4_to_f32x4(a[word]);
+            for (uint value = 0; value != 4; ++value) sums[word * 4 + value] += weight * values[value];
+        }
+        return sums;
+    }
+    static float2 partials_to_norms(float2 moments) { return moments; }
+    static float distance(uint metric, float dot, float2 query, float2 target) {
+        return metal_distance(metric, dot, query, target);
+    }
+    static float convert_to_distance(uint metric, float ranked) { return metal_convert_to_distance(metric, ranked); }
+};
+
+/** E3M2 bytes, four per word, widened through @c half. */
+struct e3m2_metal_quads_kit_t {
+    static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
+    static constexpr constant bool compiled_k = true;
+    using fragment_t = uint4;
+    using dot_t = float;
+    using weighted_t = array<float, 16>;
+    using norms_t = float2;
+    using norms_accumulator_t = float2;
+
+    static float accumulate_dot(uint4 a, uint4 b, float sum) {
+        for (uint word = 0; word != 4; ++word)
+            sum += metal::dot(metal_e3m2x4_to_f32x4(a[word]), metal_e3m2x4_to_f32x4(b[word]));
+        return sum;
+    }
+    static float2 accumulate_norms(uint4 a, float2 moments) {
+        for (uint word = 0; word != 4; ++word) {
+            float4 const values = metal_e3m2x4_to_f32x4(a[word]);
+            moments += float2(values.x + values.y + values.z + values.w, metal::dot(values, values));
+        }
+        return moments;
+    }
+    static weighted_t accumulate_weighted(uint4 a, float weight, weighted_t sums) {
+        for (uint word = 0; word != 4; ++word) {
+            float4 const values = metal_e3m2x4_to_f32x4(a[word]);
+            for (uint value = 0; value != 4; ++value) sums[word * 4 + value] += weight * values[value];
+        }
+        return sums;
+    }
+    static float2 partials_to_norms(float2 moments) { return moments; }
+    static float distance(uint metric, float dot, float2 query, float2 target) {
+        return metal_distance(metric, dot, query, target);
+    }
+    static float convert_to_distance(uint metric, float ranked) { return metal_convert_to_distance(metric, ranked); }
+};
+
+/** E2M3 bytes, four per word, widened through @c half. */
+struct e2m3_metal_quads_kit_t {
+    static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
+    static constexpr constant bool compiled_k = true;
+    using fragment_t = uint4;
+    using dot_t = float;
+    using weighted_t = array<float, 16>;
+    using norms_t = float2;
+    using norms_accumulator_t = float2;
+
+    static float accumulate_dot(uint4 a, uint4 b, float sum) {
+        for (uint word = 0; word != 4; ++word)
+            sum += metal::dot(metal_e2m3x4_to_f32x4(a[word]), metal_e2m3x4_to_f32x4(b[word]));
+        return sum;
+    }
+    static float2 accumulate_norms(uint4 a, float2 moments) {
+        for (uint word = 0; word != 4; ++word) {
+            float4 const values = metal_e2m3x4_to_f32x4(a[word]);
+            moments += float2(values.x + values.y + values.z + values.w, metal::dot(values, values));
+        }
+        return moments;
+    }
+    static weighted_t accumulate_weighted(uint4 a, float weight, weighted_t sums) {
+        for (uint word = 0; word != 4; ++word) {
+            float4 const values = metal_e2m3x4_to_f32x4(a[word]);
+            for (uint value = 0; value != 4; ++value) sums[word * 4 + value] += weight * values[value];
+        }
+        return sums;
+    }
+    static float2 partials_to_norms(float2 moments) { return moments; }
+    static float distance(uint metric, float dot, float2 query, float2 target) {
+        return metal_distance(metric, dot, query, target);
+    }
+    static float convert_to_distance(uint metric, float ranked) { return metal_convert_to_distance(metric, ranked); }
+};
 
 /** Signed bytes: integer products accumulate exactly. */
 struct i8_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    using warp_t = metal_warp_t;
+    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = int;
     using weighted_t = array<float, 16>;
@@ -255,10 +420,48 @@ struct i8_metal_quads_kit_t {
     static float convert_to_distance(uint metric, float ranked) { return metal_convert_to_distance(metric, ranked); }
 };
 
+/** Signed nibbles, each sign-extended from four bits; the pairing within a byte is irrelevant to a dot, while
+ *  the weighted columns put a byte's high nibble first, as the CUDA kit does. */
+struct i4x2_metal_quads_kit_t {
+    static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
+    static constexpr constant bool compiled_k = true;
+    using fragment_t = uint4;
+    using dot_t = int;
+    using weighted_t = array<float, 32>;
+    using norms_t = int2;
+    using norms_accumulator_t = int2;
+
+    static int nibble(uint word, uint index) { return (int((word >> (4 * index)) & 15u) ^ 8) - 8; }
+    static int accumulate_dot(uint4 a, uint4 b, int sum) {
+        for (uint word = 0; word != 4; ++word)
+            for (uint index = 0; index != 8; ++index) sum += nibble(a[word], index) * nibble(b[word], index);
+        return sum;
+    }
+    static int2 accumulate_norms(uint4 a, int2 moments) {
+        for (uint word = 0; word != 4; ++word)
+            for (uint index = 0; index != 8; ++index) {
+                int const value = nibble(a[word], index);
+                moments += int2(value, value * value);
+            }
+        return moments;
+    }
+    static weighted_t accumulate_weighted(uint4 a, float weight, weighted_t sums) {
+        for (uint word = 0; word != 4; ++word)
+            for (uint index = 0; index != 8; ++index)
+                sums[word * 8 + (index ^ 1u)] += weight * float(nibble(a[word], index));
+        return sums;
+    }
+    static int2 partials_to_norms(int2 moments) { return moments; }
+    static float distance(uint metric, int dot, int2 query, int2 target) {
+        return metal_distance(metric, dot, query, target);
+    }
+    static float convert_to_distance(uint metric, float ranked) { return metal_convert_to_distance(metric, ranked); }
+};
+
 /** Unsigned bytes, accumulating in unsigned words with defined wrapping, as the CUDA kit does. */
 struct u8_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    using warp_t = metal_warp_t;
+    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = uint;
     using weighted_t = array<float, 16>;
@@ -294,48 +497,10 @@ struct u8_metal_quads_kit_t {
     static float convert_to_distance(uint metric, float ranked) { return metal_convert_to_distance(metric, ranked); }
 };
 
-/** Signed nibbles, each sign-extended from four bits; the pairing within a byte is irrelevant to a dot, while
- *  the weighted columns put a byte's high nibble first, as the CUDA kit does. */
-struct i4x2_metal_quads_kit_t {
-    static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    using warp_t = metal_warp_t;
-    using fragment_t = uint4;
-    using dot_t = int;
-    using weighted_t = array<float, 32>;
-    using norms_t = int2;
-    using norms_accumulator_t = int2;
-
-    static int nibble(uint word, uint index) { return (int((word >> (4 * index)) & 15u) ^ 8) - 8; }
-    static int accumulate_dot(uint4 a, uint4 b, int sum) {
-        for (uint word = 0; word != 4; ++word)
-            for (uint index = 0; index != 8; ++index) sum += nibble(a[word], index) * nibble(b[word], index);
-        return sum;
-    }
-    static int2 accumulate_norms(uint4 a, int2 moments) {
-        for (uint word = 0; word != 4; ++word)
-            for (uint index = 0; index != 8; ++index) {
-                int const value = nibble(a[word], index);
-                moments += int2(value, value * value);
-            }
-        return moments;
-    }
-    static weighted_t accumulate_weighted(uint4 a, float weight, weighted_t sums) {
-        for (uint word = 0; word != 4; ++word)
-            for (uint index = 0; index != 8; ++index)
-                sums[word * 8 + (index ^ 1u)] += weight * float(nibble(a[word], index));
-        return sums;
-    }
-    static int2 partials_to_norms(int2 moments) { return moments; }
-    static float distance(uint metric, int dot, int2 query, int2 target) {
-        return metal_distance(metric, dot, query, target);
-    }
-    static float convert_to_distance(uint metric, float ranked) { return metal_convert_to_distance(metric, ranked); }
-};
-
 /** Unsigned nibbles, the weighted columns ordered as the signed kit's. */
 struct u4x2_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    using warp_t = metal_warp_t;
+    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = uint;
     using weighted_t = array<float, 32>;
@@ -373,7 +538,7 @@ struct u4x2_metal_quads_kit_t {
  *  fields, the currency of Jaccard's union; the weighted columns take each byte's most significant bit first. */
 struct u1x8_metal_quads_kit_t {
     static constexpr constant nk_capability_t capability_k = nk_cap_metal_k;
-    using warp_t = metal_warp_t;
+    static constexpr constant bool compiled_k = true;
     using fragment_t = uint4;
     using dot_t = uint;
     using weighted_t = array<float, 128>;
@@ -403,5 +568,79 @@ struct u1x8_metal_quads_kit_t {
     }
     static float convert_to_distance(uint, float ranked) { return ranked; }
 };
+
+#pragma region Ladders
+
+/** The kit @p caps_ runs for each stored dtype, keyed by the dtype the library compiles for. */
+template <nk_dtype_t dtype_, nk_capability_t caps_>
+struct quads_ladder;
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_bf16_k, caps_> {
+    using kit_t = typename highest_kit<caps_, bf16_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_f16_k, caps_> {
+    using kit_t = typename highest_kit<caps_, f16_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_e5m2_k, caps_> {
+    using kit_t = typename highest_kit<caps_, e5m2_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_e4m3_k, caps_> {
+    using kit_t = typename highest_kit<caps_, e4m3_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_e3m2_k, caps_> {
+    using kit_t = typename highest_kit<caps_, e3m2_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_e2m3_k, caps_> {
+    using kit_t = typename highest_kit<caps_, e2m3_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_i8_k, caps_> {
+    using kit_t = typename highest_kit<caps_, i8_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_i4_k, caps_> {
+    using kit_t = typename highest_kit<caps_, i4x2_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_u8_k, caps_> {
+    using kit_t = typename highest_kit<caps_, u8_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_u4_k, caps_> {
+    using kit_t = typename highest_kit<caps_, u4x2_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+struct quads_ladder<nk_u1_k, caps_> {
+    using kit_t = typename highest_kit<caps_, u1x8_metal_quads_kit_t>::type;
+    static constexpr constant nk_capability_t picked_k = kit_t::capability_k;
+};
+
+#pragma endregion Ladders
 
 } // namespace unum::usearch::dense

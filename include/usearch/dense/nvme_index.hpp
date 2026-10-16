@@ -118,12 +118,12 @@ struct nvme_index {
     using vectors_view_t = nk::matrix_view<scalar_t>;
     using vector_norms_t = vector_norms<dot_result_t>;
 
-    /** The capability bit of the distance kit the chain actually picked, lower than @c capability_
+    /** The capability bit of the distance kit the ladder actually picked, lower than @c capability_
      *  when no SIMD kit is adapted for this dtype yet. */
-    inline static constexpr nk_capability_t picked_quads_capability_k = quads_chain<scalar_t, capability_>::picked_k;
+    inline static constexpr nk_capability_t picked_quads_capability_k = quads_ladder<scalar_t, capability_>::picked_k;
 
-    /** The distance kit the chain picked. */
-    using quads_kit_t = typename quads_chain<scalar_t, capability_>::kit_t;
+    /** The distance kit the ladder picked. */
+    using quads_kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
 
     /** The strongest @c synchronization_t contract this design honors: the payload is immutable, so
      *  arbitrary readers share one instance with no fences at all. */
@@ -268,14 +268,15 @@ struct nvme_index {
     /** 8-ary: eight 8-byte scored nodes fill one cache line per level scan. */
     using frontier_queue_t = max_heap_dary<8, scored_node_t, further_scored_node_t, candidates_allocator_t>;
     using visited_set_t = growing_hash_set<node_id_t, std::hash<node_id_t>, scratch_allocator_t,
-                                           typename visits_hash_set_chain<capability_>::kit_t>;
+                                           typename visits_hash_set_ladder<capability_>::kit_t>;
 
     /** Where a part keeps its columns: every row of a column as wide as the next. */
     using part_t = nvme_part_t;
 
     /** Where the row of @p flight starts in the column @p purpose reads of @p part, from the part's
      *  own start. */
-    static u64_t row_offset_(nvme_part_t const& part, nvme_purpose_t purpose, nvme_flight_t const& flight) noexcept {
+    static u64_t row_offset_(nvme_part_t const& part, nvme_purpose_t purpose,
+                             nvme_flight<u32_t> const& flight) noexcept {
         switch (purpose) {
         case nvme_purpose_t::score_k: return part.values_begin + u64_t(flight.node) * part.value_row_bytes;
         case nvme_purpose_t::expand_k:
@@ -286,7 +287,7 @@ struct nvme_index {
     }
 
     /** Bytes of any row of the column @p purpose reads in @p part. */
-    static u64_t row_length_(nvme_part_t const& part, nvme_purpose_t purpose, nvme_flight_t const&) noexcept {
+    static u64_t row_length_(nvme_part_t const& part, nvme_purpose_t purpose, nvme_flight<u32_t> const&) noexcept {
         switch (purpose) {
         case nvme_purpose_t::score_k: return part.value_row_bytes;
         case nvme_purpose_t::expand_k: return part.connectivity * sizeof(node_id_t);
@@ -516,7 +517,7 @@ struct nvme_index {
                               slice_t::reserved_bytes(rows * sizeof(row_type_)) +
                               rows * slice_t::reserved_bytes(staged_bytes) +
                               slice_t::reserved_bytes(rows * sizeof(nvme_row_slot_t)) +
-                              slice_t::reserved_bytes(flights * sizeof(nvme_flight_t)) +
+                              slice_t::reserved_bytes(flights * sizeof(nvme_flight<u32_t>)) +
                               slice_t::reserved_bytes(flights * sizeof(u32_t)) +
                               slice_t::reserved_bytes(walks * shape.hops_per_walk * sizeof(u32_t)) +
                               slice_t::reserved_bytes(shape.buffers * sizeof(io_request_t)) +
@@ -651,7 +652,7 @@ struct nvme_index {
             inputs.counts[row] = kept;
         }
         std::size_t outputs() const noexcept { return 0; }
-        nvme_locator_t locator(std::size_t) const noexcept { return {}; }
+        nvme_locator<u32_t> locator(std::size_t) const noexcept { return {}; }
         void resolve(std::size_t, key_t const&) noexcept {}
         status_t finish() noexcept { return status_t::success_k; }
     };

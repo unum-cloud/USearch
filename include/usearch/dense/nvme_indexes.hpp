@@ -421,7 +421,7 @@ struct nvme_indexes {
         if (keys.empty()) return status_t::success_k;
         auto [call, call_status] = begin_scans_(executor, 1);
         if (failed(call_status)) return call_status;
-        return scan_keys_(keys, executor, [&](std::size_t position, nvme_locator_t) noexcept {
+        return scan_keys_(keys, executor, [&](std::size_t position, nvme_locator<u32_t>) noexcept {
             std::atomic_ref<std::size_t>(entries[position]).fetch_add(1, std::memory_order_relaxed);
         });
     }
@@ -463,7 +463,7 @@ struct nvme_indexes {
 
         // Threads meet a key's rows in any order, so each key keeps its earliest under a lock
         // striped by position, one stripe per thread.
-        growing_buffer<nvme_locator_t, scratch_allocator_t> kept {scratch_allocator_t {executor.arena(0)}};
+        growing_buffer<nvme_locator<u32_t>, scratch_allocator_t> kept {scratch_allocator_t {executor.arena(0)}};
         if (failed(kept.resize_uninitialized(keys.size() * wanted))) return status_t::bad_alloc_k;
         std::size_t const stripes_count = executor.size();
         auto* const stripes = reinterpret_cast<fu::spin_mutex_t*>(
@@ -471,23 +471,24 @@ struct nvme_indexes {
         if (!stripes) return status_t::bad_alloc_k;
         // nvcc mislowers a bare over-aligned placement `new`, so a standard template builds them.
         std::uninitialized_value_construct_n(stripes, stripes_count);
-        auto earlier = [](nvme_locator_t first, nvme_locator_t second) noexcept {
+        auto earlier = [](nvme_locator<u32_t> first, nvme_locator<u32_t> second) noexcept {
             return first.shard != second.shard ? first.shard < second.shard : first.node < second.node;
         };
-        status_t const scanned = scan_keys_(keys, executor, [&](std::size_t position, nvme_locator_t locator) noexcept {
-            std::unique_lock<fu::spin_mutex_t> const held {stripes[position % stripes_count]};
-            nvme_locator_t* const rows = kept.data() + position * wanted;
-            std::size_t slot = min_of(entries[position]++, wanted);
-            if (slot == wanted && (!wanted || !earlier(locator, rows[wanted - 1]))) return;
-            if (slot == wanted) --slot;
-            for (; slot && earlier(locator, rows[slot - 1]); --slot) rows[slot] = rows[slot - 1];
-            rows[slot] = locator;
-        });
+        status_t const scanned = scan_keys_(
+            keys, executor, [&](std::size_t position, nvme_locator<u32_t> locator) noexcept {
+                std::unique_lock<fu::spin_mutex_t> const held {stripes[position % stripes_count]};
+                nvme_locator<u32_t>* const rows = kept.data() + position * wanted;
+                std::size_t slot = min_of(entries[position]++, wanted);
+                if (slot == wanted && (!wanted || !earlier(locator, rows[wanted - 1]))) return;
+                if (slot == wanted) --slot;
+                for (; slot && earlier(locator, rows[slot - 1]); --slot) rows[slot] = rows[slot - 1];
+                rows[slot] = locator;
+            });
         if (failed(scanned)) return scanned;
         auto describe = [&](std::size_t read, u64_t& progress) noexcept -> std::array<extent_t, 1> {
             std::size_t const position = read / wanted, rank = read % wanted;
             if (progress++ || rank >= min_of(entries[position], wanted)) return {};
-            nvme_locator_t const locator = kept[read];
+            nvme_locator<u32_t> const locator = kept[read];
             nvme_part_t const& part = parts_[locator.shard];
             return {extent_t {locator.shard, part.values_begin + u64_t(locator.node) * part.value_row_bytes,
                               part.value_row_bytes}};
@@ -608,7 +609,7 @@ struct nvme_indexes {
         };
 
         inputs_t const& inputs;
-        growing_buffer<nvme_locator_t, scratch_allocator_t> locators;
+        growing_buffer<nvme_locator<u32_t>, scratch_allocator_t> locators;
         growing_buffer<results_array_t, scratch_allocator_t> admitted;
         growing_buffer<key_t, scratch_allocator_t> admitted_keys;
         scratch_allocator_t allocator;
@@ -677,14 +678,14 @@ struct nvme_indexes {
                                              to_span(inputs.keys.row(row).as_vector()), distances, found);
             }
             else
-                found = merge_search_results(to_span(bound(walk)), nvme_shard_locators_t {walk.shard},
+                found = merge_search_results(to_span(bound(walk)), nvme_shard_locators<u32_t> {walk.shard},
                                              to_writable_span(locators), distances, found);
         }
         std::size_t outputs() const noexcept {
             if constexpr (key_reads_k == nvme_key_reads_t::scored_k) return 0;
             else return found;
         }
-        nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
+        nvme_locator<u32_t> locator(std::size_t output) const noexcept { return locators[output]; }
         void resolve(std::size_t output, key_t const& key) noexcept { inputs.keys(row, output) = key; }
         status_t finish() noexcept {
             inputs.counts[row] = found;
@@ -698,7 +699,7 @@ struct nvme_indexes {
     template <typename product_type_>
     struct multiply_row {
         using key_t = key_type_;
-        using fold_t = multiply_fold<nvme_locator_t, product_type_, nvme_shard_locators_t>;
+        using fold_t = multiply_fold<nvme_locator<u32_t>, product_type_, nvme_shard_locators<u32_t>>;
         inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
 
         /** The batch every row of the call reads and writes. */
@@ -710,7 +711,7 @@ struct nvme_indexes {
         };
 
         inputs_t const& inputs;
-        growing_buffer<nvme_locator_t, scratch_allocator_t> locators;
+        growing_buffer<nvme_locator<u32_t>, scratch_allocator_t> locators;
         byte_t* staged = nullptr;
         fold_t pairs;
         std::size_t row = 0;
@@ -744,7 +745,7 @@ struct nvme_indexes {
         results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return pairs.written; }
-        nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
+        nvme_locator<u32_t> locator(std::size_t output) const noexcept { return locators[output]; }
         void resolve(std::size_t output, key_t const& key) noexcept { inputs.keys(row, output) = key; }
         status_t finish() noexcept {
             inputs.counts[row] = pairs.scored;
@@ -836,7 +837,7 @@ struct nvme_indexes {
         results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return 0; }
-        nvme_locator_t locator(std::size_t) const noexcept { return {}; }
+        nvme_locator<u32_t> locator(std::size_t) const noexcept { return {}; }
         void resolve(std::size_t, key_t const&) noexcept {}
         status_t finish() noexcept {
             if (failed(status)) return status;
@@ -922,7 +923,7 @@ struct nvme_indexes {
     struct run_t {
 
         /** The shard and the run's first row inside it. */
-        nvme_locator_t start;
+        nvme_locator<u32_t> start;
 
         /** Rows in the run; zero past the last run. */
         std::size_t rows = 0;
@@ -1207,7 +1208,7 @@ struct nvme_indexes {
                 key_t const key = safegraphs_widened_key<key_t>(bytes + row * part.key_row_bytes, part.key_dtype);
                 std::size_t const slot = slot_of(key);
                 for (std::size_t position = heads[slot]; position != empty_k; position = chains[position])
-                    on_hit(position, nvme_locator_t {extent.shard, static_cast<node_id_t>(first + row)});
+                    on_hit(position, nvme_locator<u32_t> {extent.shard, static_cast<node_id_t>(first + row)});
             }
         };
         return scan_reads_(executor, runs_count_(0, rows_count, key_column_k), describe, consume).status;
@@ -1245,7 +1246,7 @@ struct nvme_indexes {
                                          nk::matrix_span<score_type_> distances, std::span<std::size_t> counts,
                                          predicate_type_& predicate, std::span<u64_t> latencies) noexcept {
         using slice_t = arena_allocator<byte_t>;
-        using tiles_chain_t = tiles_chain<scalar_t, capability_>;
+        using tiles_ladder_t = tiles_ladder<scalar_t, capability_>;
         using quads_kit_t = typename index_t::quads_kit_t;
         constexpr bool filtered_k = !std::is_same_v<std::remove_cv_t<predicate_type_>, dummy_predicate_t>;
         std::size_t const queries_count = query_rows.rows, wanted = keys.extent(1), threads = executor.size();
@@ -1262,8 +1263,8 @@ struct nvme_indexes {
         // A batch narrower than a tile scores per query, as a lone query scans on RAM.
         std::size_t pack_columns = 1, stream_rows = 0, pack_stride = 0;
         bool tiled = false;
-        if constexpr (tiles_chain_t::has_tiles_k) {
-            using tiles_kit_t = typename tiles_chain_t::kit_t;
+        if constexpr (tiles_ladder_t::has_tiles_k) {
+            using tiles_kit_t = typename tiles_ladder_t::kit_t;
             nk_size_t packed_bytes = 0;
             tiled = queries_count >= tiles_kit_t::tile_columns_k &&
                     tiles_kit_t::pack_size(tiles_kit_t::pack_columns_k, dimensions(), &packed_bytes) == nk_success_k;
@@ -1317,8 +1318,8 @@ struct nvme_indexes {
                                                  : vector_norms_t {};
             sumsqs[query] = norms[query].sumsq;
         }
-        if constexpr (tiles_chain_t::has_tiles_k) {
-            using tiles_kit_t = typename tiles_chain_t::kit_t;
+        if constexpr (tiles_ladder_t::has_tiles_k) {
+            using tiles_kit_t = typename tiles_ladder_t::kit_t;
             for (std::size_t pack = 0; pack != packs; ++pack) {
                 std::size_t const first = pack * pack_columns, columns = min_of(pack_columns, queries_count - first);
                 vectors_view_t const block = queries(nk::range(first, first + columns), nk::slice);
@@ -1374,9 +1375,9 @@ struct nvme_indexes {
                     return [&](node_id_t row) noexcept { return judge_key(predicate, key_of(row)); };
                 else return dummy_predicate_t {};
             }();
-            if constexpr (tiles_chain_t::has_tiles_k)
+            if constexpr (tiles_ladder_t::has_tiles_k)
                 if (tiled) {
-                    using tiles_kit_t = typename tiles_chain_t::kit_t;
+                    using tiles_kit_t = typename tiles_ladder_t::kit_t;
                     using raw_dot_t = typename dot_result_t::raw_t;
                     // Rows may be padded past the logical width the queries were packed at.
                     vectors_view_t const dense {reinterpret_cast<scalar_t const*>(landed[1]), run_rows,
@@ -2176,7 +2177,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
         results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return 0; }
-        nvme_locator_t locator(std::size_t) const noexcept { return {}; }
+        nvme_locator<u32_t> locator(std::size_t) const noexcept { return {}; }
         void resolve(std::size_t, key_t const&) noexcept {}
         status_t finish() noexcept { return status_t::success_k; }
     };

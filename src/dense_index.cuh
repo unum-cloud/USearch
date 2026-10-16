@@ -986,37 +986,101 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_ARCH_ROCM_
 #if USEARCH_ARCH_METAL_
-        // apple, serving every Apple class until a family's kernels differ: every cell, 11 variants
-        vram_apple_indexes<nk_bf16_k>, //
+        // apple_metal10 over apple_metal7 by apple10: every cell, 11 variants
+        vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal10_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_apple_indexes<nk_u1_k>, //
+        vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal10_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_apple_indexes<nk_i8_k>, //
+        vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal10_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_apple_indexes<nk_e4m3_k>, //
+        vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal10_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_apple_indexes<nk_f16_k>, //
+        vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal10_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_apple_indexes<nk_u8_k>, //
+        vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal10_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_apple_indexes<nk_e5m2_k>, //
+        vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal10_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_apple_indexes<nk_i4_k>, //
+        vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal10_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_apple_indexes<nk_u4_k>, //
+        vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal10_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_apple_indexes<nk_e3m2_k>, //
+        vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal10_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_apple_indexes<nk_e2m3_k>, //
+        vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal10_k>, //
+#endif
+        // apple_metal9 over apple_metal7 by apple9: every cell, 11 variants
+        vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal9_k>, //
+#if USEARCH_DENSE_DTYPES >= 2
+        vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+        vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+        vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+        vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+        vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+        vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+        vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+        vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+        vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+        vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal9_k>, //
+#endif
+        // apple_metal7, the Apple floor by metal: every cell, 11 variants
+        vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal7_k>, //
+#if USEARCH_DENSE_DTYPES >= 2
+        vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+        vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+        vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+        vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+        vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+        vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+        vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+        vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+        vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+        vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal7_k>, //
 #endif
 #endif // USEARCH_ARCH_METAL_
 
@@ -1793,37 +1857,101 @@ extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t
 #endif
 #endif // USEARCH_ARCH_ROCM_
 #if USEARCH_ARCH_METAL_
-/* apple, serving every Apple class until a family's kernels differ: every cell, 11 variants */
-extern template struct specialized_index<vram_apple_indexes<nk_bf16_k>>;
+/* apple_metal10 over apple_metal7 by apple10: every cell, 11 variants */
+extern template struct specialized_index<vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal10_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_apple_indexes<nk_u1_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal10_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_apple_indexes<nk_i8_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal10_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_apple_indexes<nk_e4m3_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal10_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_apple_indexes<nk_f16_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal10_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_apple_indexes<nk_u8_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal10_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_apple_indexes<nk_e5m2_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal10_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_apple_indexes<nk_i4_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal10_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_apple_indexes<nk_u4_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal10_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_apple_indexes<nk_e3m2_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal10_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_apple_indexes<nk_e2m3_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal10_k>>;
+#endif
+/* apple_metal9 over apple_metal7 by apple9: every cell, 11 variants */
+extern template struct specialized_index<vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal9_k>>;
+#if USEARCH_DENSE_DTYPES >= 2
+extern template struct specialized_index<vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+extern template struct specialized_index<vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+extern template struct specialized_index<vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+extern template struct specialized_index<vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+extern template struct specialized_index<vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+extern template struct specialized_index<vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+extern template struct specialized_index<vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+extern template struct specialized_index<vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+extern template struct specialized_index<vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+extern template struct specialized_index<vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal9_k>>;
+#endif
+/* apple_metal7, the Apple floor by metal: every cell, 11 variants */
+extern template struct specialized_index<vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal7_k>>;
+#if USEARCH_DENSE_DTYPES >= 2
+extern template struct specialized_index<vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+extern template struct specialized_index<vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+extern template struct specialized_index<vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+extern template struct specialized_index<vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+extern template struct specialized_index<vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+extern template struct specialized_index<vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+extern template struct specialized_index<vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+extern template struct specialized_index<vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+extern template struct specialized_index<vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+extern template struct specialized_index<vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal7_k>>;
 #endif
 #endif // USEARCH_ARCH_METAL_
 #if USEARCH_TARGET_INTEL_HASWELL
@@ -2192,7 +2320,7 @@ template <typename multi_type_>
     requires is_ram_index<multi_type_> || is_nvme_index<multi_type_>
 static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_ const&) noexcept {
     constexpr nk_capability_t picked =
-        us::dense::quads_chain<typename multi_type_::scalar_t, multi_type_::capability_k>::picked_k;
+        us::dense::quads_ladder<typename multi_type_::scalar_t, multi_type_::capability_k>::picked_k;
     for (numkong_capability_name_t const& named : numkong_capability_names_k)
         if (picked & named.bit) append_capability(handle, named.name);
 }
@@ -2279,12 +2407,13 @@ template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 consteval bool rung_advances() noexcept {
     constexpr cpu_class_t parent_k = parent_class_of(cpu_class_);
     using scalar_t = typename nk::type_for<dtype_>::type;
-    using upper_chain_t = us::dense::quads_chain<scalar_t, numkong_capabilities_of(cpu_class_)>;
-    using lower_chain_t = us::dense::quads_chain<scalar_t, numkong_capabilities_of(parent_k)>;
-    using upper_tiles_t = us::dense::tiles_chain<scalar_t, numkong_capabilities_of(cpu_class_)>;
-    using lower_tiles_t = us::dense::tiles_chain<scalar_t, numkong_capabilities_of(parent_k)>;
+    using upper_ladder_t = us::dense::quads_ladder<scalar_t, numkong_capabilities_of(cpu_class_)>;
+    using lower_ladder_t = us::dense::quads_ladder<scalar_t, numkong_capabilities_of(parent_k)>;
+    using upper_tiles_t = us::dense::tiles_ladder<scalar_t, numkong_capabilities_of(cpu_class_)>;
+    using lower_tiles_t = us::dense::tiles_ladder<scalar_t, numkong_capabilities_of(parent_k)>;
     return cpu_class_compiled(cpu_class_) &&
-           (upper_chain_t::picked_k != lower_chain_t::picked_k || upper_tiles_t::picked_k != lower_tiles_t::picked_k ||
+           (upper_ladder_t::picked_k != lower_ladder_t::picked_k ||
+            upper_tiles_t::picked_k != lower_tiles_t::picked_k ||
             forkunion_capabilities_of<cpu_class_>() != forkunion_capabilities_of<parent_k>());
 }
 
@@ -2359,8 +2488,8 @@ consteval bool nvme_rung_advances() noexcept {
     constexpr nk_capability_t upper = numkong_capabilities_of(cpu_class_);
     constexpr nk_capability_t lower = numkong_capabilities_of(parent_class_of(cpu_class_));
     return cpu_class_compiled(cpu_class_) &&
-           (us::dense::quads_chain<scalar_t, upper>::picked_k != us::dense::quads_chain<scalar_t, lower>::picked_k ||
-            us::dense::tiles_chain<scalar_t, upper>::picked_k != us::dense::tiles_chain<scalar_t, lower>::picked_k);
+           (us::dense::quads_ladder<scalar_t, upper>::picked_k != us::dense::quads_ladder<scalar_t, lower>::picked_k ||
+            us::dense::tiles_ladder<scalar_t, upper>::picked_k != us::dense::tiles_ladder<scalar_t, lower>::picked_k);
 }
 
 /** The unconditional serial floor of every NVMe ladder. */
@@ -2485,9 +2614,14 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
 #endif // USEARCH_ARCH_ROCM_
 #if USEARCH_ARCH_METAL_
     case gpu_class_t::apple_metal10_k:
+        return make_punned_dense_index<vram_apple_indexes<dtype_, gpu_class_t::apple_metal10_k>>(geometry, vram, kernel,
+                                                                                                 outcome);
     case gpu_class_t::apple_metal9_k:
+        return make_punned_dense_index<vram_apple_indexes<dtype_, gpu_class_t::apple_metal9_k>>(geometry, vram, kernel,
+                                                                                                outcome);
     case gpu_class_t::apple_metal7_k:
-        return make_punned_dense_index<vram_apple_indexes<dtype_>>(geometry, vram, kernel, outcome);
+        return make_punned_dense_index<vram_apple_indexes<dtype_, gpu_class_t::apple_metal7_k>>(geometry, vram, kernel,
+                                                                                                outcome);
 #endif
     default:
         return propagate_error(usearch_status_device_k, outcome,

@@ -443,7 +443,7 @@ struct vram_index {
      *  traversing, then the candidate cache & re-selection spans. */
     u32_t insert_scratch_bytes_per_warp() const noexcept {
         u32_t const selection_slots = min_of(static_cast<u32_t>(connectivity()), vram_cache_rows_k);
-        u32_t const selection_bytes = selection_slots * (gpu_scored_node_bytes_k + 2 * sizeof(u32_t)) +
+        u32_t const selection_bytes = selection_slots * (gpu_scored_node_bytes<node_id_t> + 2 * sizeof(u32_t)) +
                                       vram_cache_rows_k * sizeof(f32_t);
         u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * vram_cache_rows_k;
         return max_of(static_cast<u32_t>(row_bytes()), cache_bytes + selection_bytes);
@@ -454,7 +454,7 @@ struct vram_index {
      *  kept-row indices. */
     u32_t merge_scratch_bytes_per_warp() const noexcept {
         u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * vram_cache_rows_k;
-        return cache_bytes + vram_cache_rows_k * (gpu_scored_node_bytes_k + sizeof(u32_t));
+        return cache_bytes + vram_cache_rows_k * (gpu_scored_node_bytes<node_id_t> + sizeof(u32_t));
     }
 
     /** The serialized extents: published nodes x logical dimensions & connectivity - the fragment
@@ -620,7 +620,8 @@ struct vram_index {
         };
         u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
         gpu_arena_shape_t const arena_shape = build_arena_shape_(config.expansion_factor, pool_slots);
-        std::size_t const arena_warps = device_.multiprocessor_count * derived_::insert_blocks_per_multiprocessor_k *
+        std::size_t const arena_warps = device_.multiprocessor_count *
+                                        derived_::resident_blocks_(derived_::kernel_t::insert_k, pool_slots) *
                                         vram_warps_per_block_k;
         std::size_t const results_bytes = // A default single query's device landing.
             non_zero_expansion_factor(search_config_t {}) * (sizeof(node_id_t) + sizeof(distance_t));
@@ -628,7 +629,7 @@ struct vram_index {
         // per edge and a count.
         std::size_t const links_bytes = (size() + rows + 2 * rows * connectivity() + 1) * sizeof(u32_t);
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
-               aligned(arena_warps * arena_shape.slice_bytes()) +
+               aligned(arena_warps * arena_shape.slice_bytes<node_id_t>()) +
                aligned(round_up_to_multiple<std::size_t>(rows * row_bytes() + import_bytes_(rows, nk_f64_k), 16) +
                        links_bytes + results_bytes);
     }
@@ -1162,11 +1163,13 @@ struct vram_index {
         // The widest walk's arena now, so no pass grows it; a fresh run is zeroed by the pass.
         u32_t const expansion = non_zero_expansion_factor(config);
         u32_t const walks = parts ? 2 : 1;
-        std::size_t const arena_warps = device_.multiprocessor_count * derived_::insert_blocks_per_multiprocessor_k *
+        std::size_t const arena_warps = device_.multiprocessor_count *
+                                        derived_::resident_blocks_(derived_::kernel_t::refine_k,
+                                                                   pool_slots_for_(expansion, 4)) *
                                         vram_warps_per_block_k;
-        if (!context.ensure_arena(
-                arena_warps *
-                build_arena_shape_(expansion * walks, pool_slots_for_(expansion, 4) * walks).slice_bytes()))
+        if (!context.ensure_arena(arena_warps *
+                                  build_arena_shape_(expansion * walks, pool_slots_for_(expansion, 4) * walks)
+                                      .template slice_bytes<node_id_t>()))
             return {std::move(plan), status_t::bad_alloc_k};
         stream_handle_t const stream = context.stream();
         // Zeroed once, so every pass adds up, and landed with every phase. A pageable upload stages
@@ -1229,10 +1232,13 @@ struct vram_index {
         u32_t const expansion = non_zero_expansion_factor(config);
         gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion * walks,
                                                                  pool_slots_for_(expansion, 4) * walks);
-        std::size_t const arena_warps = device_.multiprocessor_count * derived_::insert_blocks_per_multiprocessor_k *
+        std::size_t const arena_warps = device_.multiprocessor_count *
+                                        derived_::resident_blocks_(derived_::kernel_t::refine_k,
+                                                                   pool_slots_for_(expansion, 4)) *
                                         vram_warps_per_block_k;
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
-               aligned(arena_warps * arena_shape.slice_bytes()) + aligned(scratch_bytes_(scratch_use_t::refine_k));
+               aligned(arena_warps * arena_shape.slice_bytes<node_id_t>()) +
+               aligned(scratch_bytes_(scratch_use_t::refine_k));
     }
 
 #pragma endregion Refinement
@@ -1957,10 +1963,11 @@ struct vram_index {
         // Every inserting warp owns an arena slice for its exact visited set.
         u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
         gpu_arena_shape_t const arena_shape = build_arena_shape_(config.expansion_factor, pool_slots);
-        std::size_t const arena_warps = device_.multiprocessor_count * derived_::insert_blocks_per_multiprocessor_k *
+        std::size_t const arena_warps = device_.multiprocessor_count *
+                                        derived_::resident_blocks_(derived_::kernel_t::insert_k, pool_slots) *
                                         vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
-        byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
+        byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>());
         if (!arena) return {{}, status_t::bad_alloc_k};
 
         // The claim admits no other grower, and a rejected grid publishes nothing, so the caller
@@ -2264,16 +2271,12 @@ struct vram_index {
 
 #pragma region Launches
 
-    /** Search blocks per multiprocessor: oversubscribed, so enough queries stay in flight to reach
-     *  the memory-level-parallelism knee. */
-    inline static constexpr u32_t search_blocks_per_multiprocessor_k = 8;
-
-    /** Blocks a walk over @p queries launches: a warp per query up to the oversubscribed grid, so
-     *  the arena carves a slice only for a warp that can take a query. */
-    u32_t walk_blocks_(std::size_t queries) const noexcept {
-        return static_cast<u32_t>(
-            min_of<std::size_t>(divide_round_up<std::size_t>(queries, vram_warps_per_block_k),
-                                device_.multiprocessor_count * search_blocks_per_multiprocessor_k));
+    /** Blocks a walk over @p queries launches at @p resident_blocks blocks per multiprocessor: a
+     *  warp per query up to the grid the device seats, so the arena carves a slice only for a warp
+     *  that can take a query. */
+    u32_t walk_blocks_(std::size_t queries, u32_t resident_blocks) const noexcept {
+        return static_cast<u32_t>(min_of<std::size_t>(divide_round_up<std::size_t>(queries, vram_warps_per_block_k),
+                                                      std::size_t {device_.multiprocessor_count} * resident_blocks));
     }
 
     /** Keeps @p failure as the status unless one is kept already; returns it for the caller's own

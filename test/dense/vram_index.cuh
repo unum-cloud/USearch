@@ -5,12 +5,12 @@
  *  @brief The suite composer for the VRAM-resident index's smoke & concurrency tests, shared by the
  *      per-dtype shards and composed over each vendor's cell.
  *
- *  The shards are vendor-neutral C++, compiled once into the one object library, each instantiating
- *  every vendor and composing over those @c USEARCH_ARCH_<VENDOR>_ carries. A vendor's test header,
- *  free of its SDK like the library's own, specializes @ref vram_cell with its ledgered index, its
- *  sharded collection and their factory over the stream its entry opened, so the scenarios stay
- *  templated on the index alone while the harness's live-bytes-must-balance ledger audits the GPU
- *  flat matrices.
+ *  The shards are compiled once per vendor, each instantiating the executor of the one vendor whose
+ *  @c USEARCH_ARCH_<VENDOR>_ it carries, host-only through that vendor's compiler mode. A vendor's
+ *  test header, free of its SDK like the library's own, specializes @ref vram_cell with its
+ *  ledgered index, its sharded collection and their factory over the stream its entry opened, so
+ *  the scenarios stay templated on the index alone while the harness's live-bytes-must-balance
+ *  ledger audits the GPU flat matrices.
  */
 #pragma once
 
@@ -18,14 +18,20 @@
 
 #include "dense.cuh"
 
+#if USEARCH_ARCH_CUDA_
+#include "usearch/dense/vram_nvidia_index.cuh" // the index's out-of-class members, which the NVIDIA shards compile
+#endif
+#if USEARCH_ARCH_ROCM_
+#include "usearch/dense/vram_amd_index.hip" // the index's out-of-class members, which the AMD shards compile
+#endif
+
 #include "vram_amd.hpp"
 #include "vram_apple.hpp"
 #include "vram_nvidia.hpp"
 
 namespace unum::usearch::test::dense {
 
-/** Whether this build carries @p vendor_ 's GPUs; the shards instantiate every vendor, and the
- *  ones it leaves out compose nothing. */
+/** Whether this shard carries @p vendor_ 's GPUs; the others compose nothing. */
 template <gpu_vendor_t vendor_>
 inline constexpr bool vram_compiled = (vendor_ == gpu_vendor_t::nvidia_k && USEARCH_ARCH_CUDA_) ||
                                       (vendor_ == gpu_vendor_t::amd_k && USEARCH_ARCH_ROCM_) ||
@@ -426,9 +432,9 @@ std::size_t test_vram_attend_cell(char const* name, u64_t seed, executor_type_& 
     return report(fmt::format("{}-{}+attend", dot_cell_t::vendor_prefix_k, name).c_str(), failures);
 }
 
-/** Per-dtype VRAM suite entries the shard translation units define for every vendor's executor and
- *  each carried vendor's entry composes explicitly over the executor it opened; each returns its
- *  shard's failure count. */
+/** Per-dtype VRAM suite entries the shard translation units define once per vendor, for its
+ *  executor, and each carried vendor's entry composes explicitly over the executor it opened; each
+ *  returns its shard's failure count. */
 template <typename executor_type_>
 std::size_t check_vram_index_bf16(settings_t const& settings, executor_type_& executor);
 template <typename executor_type_>

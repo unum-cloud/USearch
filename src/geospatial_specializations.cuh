@@ -15,7 +15,7 @@
 #include <cmath> // `std::sqrt`, `std::floor`, `std::ceil`, `std::fmin`, `std::fmax`
 
 #include <array>       // `std::array` - a quad of stored observations, a sight line's points
-#include <bit>         // `std::bit_cast` - the C key struct & `uuid_t` share sixteen bytes
+#include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
 #include <mutex>       // `std::lock_guard` - one batch lands its keys and rows at a time on a GPU
 #include <span>        // `std::span` - a quad's entries and verdicts
 #include <string_view> // `std::string_view` - tokens and paths
@@ -93,7 +93,7 @@ inline std::string_view token_of(geospatial_geometry_t const&) noexcept { return
  */
 template <cpu_class_t cpu_class_>
 struct geospatial_terrain {
-    using kit_t = us::geospatial::geospatial_kit<numkong_capabilities_of(cpu_class_)>;
+    using kit_t = typename us::geospatial::geospatial_ladder<numkong_capabilities_of(cpu_class_)>::kit_t;
     using value_t = us::geospatial::earth_observation_t;
     using metric_t = us::geospatial::chord_metric<kit_t, thread_allocator_t>;
     using relation_t = us::geospatial::relation_t;
@@ -141,7 +141,7 @@ struct geospatial_terrain {
 template <cpu_class_t cpu_class_>
 struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
     using executor_t = forkunion_executor_t;
-    using kit_t = us::geospatial::geospatial_kit<numkong_capabilities_of(cpu_class_)>;
+    using kit_t = typename us::geospatial::geospatial_ladder<numkong_capabilities_of(cpu_class_)>::kit_t;
     using index_t =
         us::geospatial::ram_index<us::utilities::uuid_t, dummy_waiter_t, standard_atomic_ref, forkunion_allocator_t>;
     using value_t = us::geospatial::earth_observation_t;
@@ -623,7 +623,8 @@ status_t geospatial_ram_variant<cpu_class_>::load(std::string_view path, executo
 template <cpu_class_t cpu_class_>
 struct geospatial_nvme_variant : geospatial_terrain<cpu_class_> {
     using executor_t = nvme_executor_t;
-    using index_t = us::basic::nvme_index<us::geospatial::earth_observation_codec_t, us::utilities::uuid_t, i64_t>;
+    using index_t = basic::nvme_index<us::geospatial::earth_observation_codec_t, us::utilities::uuid_t, u32_t, i64_t,
+                                      default_io_engine_t, row_kit_of<cpu_class_>>;
     using value_t = us::geospatial::earth_observation_t;
     using relation_t = us::geospatial::relation_t;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
@@ -687,13 +688,30 @@ expected<traversal_telemetry_t> geospatial_nvme_variant<cpu_class_>::search(
 
 #if USEARCH_ARCH_CUDA_
 
+/** The fatbin of the geospatial kit and its judging kernel, defined in
+ *  @c src/geospatial/vram_variants_nvidia.cu. */
+struct geospatial_nvidia_fatbin_t {
+    static bytes_view_t bytes() noexcept;
+};
+
+/** The capabilities the geospatial kit compiles under on NVIDIA: the Ampere floor, which one cubin
+ *  per class carries. */
+inline constexpr nk_capability_t geospatial_nvidia_capabilities_k = nk_cap_cuda_k | nk_cap_ampere_k;
+
+/** The face's members reading the kit, defined in @c src/geospatial/vram_variants_nvidia.cu. */
+extern template struct us::geospatial::vram_nvidia_index<u32_t, geospatial_nvidia_capabilities_k,
+                                                         geospatial_nvidia_fatbin_t>;
+
 /** The geospatial alternative on one NVIDIA GPU: the basic VRAM index over observations under the
- *  squared chord, and the kernel judging each walk's pool under a search's relation. A batch
- *  encodes its observations on the host, as the RAM variants do. It holds no terrain, so lines of
- *  sight stay the RAM variants'. */
-struct geospatial_vram_nvidia_variant : vram_nvidia_variant<us::geospatial::vram_nvidia_index> {
+ *  squared chord with 32-bit node IDs, and the kernel judging each walk's pool under a search's
+ *  relation. A batch encodes its observations on the host, as the RAM variants do. It holds no
+ *  terrain, so lines of sight stay the RAM variants'. */
+struct geospatial_vram_nvidia_variant
+    : vram_nvidia_variant<
+          us::geospatial::vram_nvidia_index<u32_t, geospatial_nvidia_capabilities_k, geospatial_nvidia_fatbin_t>> {
     using vram_nvidia_variant::vram_nvidia_variant;
     using value_t = us::geospatial::earth_observation_t;
+    using node_id_t = index_t::node_id_t;
 
     geospatial_geometry_t geometry;
 
@@ -710,10 +728,13 @@ struct geospatial_vram_nvidia_variant : vram_nvidia_variant<us::geospatial::vram
 
     /** Loads the judging kernel onto the index's device. */
     status_t load_admit() noexcept {
-        auto [module, status] = cuda_module_t::load(index.device_specs().ordinal, us::basic::cuda_fatbin<index_t>());
+        auto [module, status] = cuda_module_t::load(index.device_specs().ordinal, geospatial_nvidia_fatbin_t::bytes());
         if (failed(status)) return status;
         admit_module = std::move(module);
-        admit = admit_module.function(us::geospatial::cuda_admit_name_k);
+        vram_kernel_symbol_t symbol;
+        vram_kernel_symbol(symbol, "geospatial", "cuda_admit", {"cuda_admit_arguments", 1},
+                           geospatial_nvidia_capabilities_k, itanium_type<node_id_t> {});
+        admit = admit_module.function(symbol.text);
         return admit ? status_t::success_k : status_t::device_error_k;
     }
 
@@ -786,21 +807,21 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
     // judged IDs, the eight-byte columns first so every column keeps its alignment.
     std::size_t const pooled = count * pool, judged = count * wanted;
     std::size_t const judging_bytes = count * (sizeof(value_t) + sizeof(u64_t)) + judged * sizeof(f64_t) +
-                                      pooled * (sizeof(u32_t) + sizeof(f32_t)) + judged * sizeof(u32_t);
+                                      pooled * (sizeof(node_id_t) + sizeof(f32_t)) + judged * sizeof(node_id_t);
     std::size_t const bytes_per_stream = index.traversal_memory_usage(bytes, tape, config) +
                                          round_up_to_multiple(judging_bytes, default_alignment_k);
     // IDs land narrow at the front of the keys, then widen backward; metres and counts land whole.
-    u32_t* const ids = reinterpret_cast<u32_t*>(landing.keys);
+    node_id_t* const ids = reinterpret_cast<node_id_t*>(landing.keys);
     auto judge = [&](index_t::traversal_context_t& context,
                      cuda_arena_allocator_t& allocator) noexcept -> expected<index_t::search_result_t> {
         value_t* const device_queries = reinterpret_cast<value_t*>(allocator.allocate(judging_bytes));
         if (!device_queries) return {{}, status_t::bad_alloc_k};
         f64_t* const matched_metres = reinterpret_cast<f64_t*>(device_queries + count);
         u64_t* const matched_counts = reinterpret_cast<u64_t*>(matched_metres + judged);
-        u32_t* const pool_ids = reinterpret_cast<u32_t*>(matched_counts + count);
+        node_id_t* const pool_ids = reinterpret_cast<node_id_t*>(matched_counts + count);
         f32_t* const pool_distances = reinterpret_cast<f32_t*>(pool_ids + pooled);
-        u32_t* const matched_ids = reinterpret_cast<u32_t*>(pool_distances + pooled);
-        us::geospatial::cuda_admit_t admitting;
+        node_id_t* const matched_ids = reinterpret_cast<node_id_t*>(pool_distances + pooled);
+        us::geospatial::cuda_admit_arguments<node_id_t> admitting;
         admitting.storage = index.storage();
         admitting.queries = device_queries;
         admitting.pool_ids = pool_ids;
@@ -819,11 +840,11 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
                                                   {pool_distances, {count, pool}}, context, config);
         if (failed(status)) return {{}, status};
         u32_t const blocks = static_cast<u32_t>(
-            min_of<std::size_t>(divide_round_up<std::size_t>(count, us::utilities::vram_warps_per_block_k),
+            min_of<std::size_t>(divide_round_up<std::size_t>(count, vram_warps_per_block_k),
                                 std::size_t {index.device_specs().multiprocessor_count} * 8));
-        if (failed(cuda_launch(admit, blocks, us::utilities::vram_warps_per_block_k * 32, 0, context.stream(),
+        if (failed(cuda_launch(admit, blocks, vram_warps_per_block_k * 32, 0, context.stream(),
                                cuda_overlap_t::serialized_k, admitting)) ||
-            cuda_copy_async(ids, matched_ids, judged * sizeof(u32_t), context.stream()) != cuda_success_k ||
+            cuda_copy_async(ids, matched_ids, judged * sizeof(node_id_t), context.stream()) != cuda_success_k ||
             cuda_copy_async(landing.scores, matched_metres, judged * sizeof(f64_t), context.stream()) !=
                 cuda_success_k ||
             cuda_copy_async(landing.counts, matched_counts, count * sizeof(u64_t), context.stream()) != cuda_success_k)

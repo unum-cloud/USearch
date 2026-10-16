@@ -278,8 +278,9 @@ constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
 }
 
 /** The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the monitored
- *  Arm & RISC-V classes arm TPAUSE, WFET & WRS, everything else yields - as does any class whose
- *  @c FORKUNION_TARGET_<BIT> is off in the probe list. */
+ *  Arm & RISC-V classes arm TPAUSE, WFET & WRS, WebAssembly threads sleep in @c memory.atomic.wait,
+ *  everything else yields - as does any class whose @c FORKUNION_TARGET_<BIT> is off in the probe
+ *  list. */
 template <cpu_class_t cpu_class_>
 struct waiter_for_cpu_class {
     using type = fu::standard_yield_t;
@@ -348,6 +349,16 @@ struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
 template <>
 struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     using type = fu::risc5_wrs_t;
+};
+#endif
+#if FORKUNION_TARGET_WASM_WAIT
+template <>
+struct waiter_for_cpu_class<cpu_class_t::wasm32_v128_k> {
+    using type = fu::wasm_wait_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::wasm64_extended_k> {
+    using type = fu::wasm_wait_t;
 };
 #endif
 

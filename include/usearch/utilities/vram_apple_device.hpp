@@ -28,8 +28,30 @@
 #include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - Metal opened at first use
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's streams and the pipeline registry
 #include "usearch/utilities/types.hpp"
+#include "usearch/utilities/vram_apple_shared.h" // `metal_counter_t` - the words a context reads its telemetry from
 
 namespace unum::usearch::utilities {
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc23-extensions"
+#endif
+
+#if USEARCH_ARCH_METAL_
+
+/** The vocabulary every Apple context and its kernels share, which each MSL source starts with,
+ *  since MSL cannot include. */
+inline constexpr char metal_context_source_k[] = {
+#embed "vram_apple_shared.h" suffix(, 0)
+};
+#else
+// A unit without Metal compiles no pipeline, and NVCC's front end knows no `#embed`.
+inline constexpr char metal_context_source_k[] = {0};
+#endif
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 /** The Objective-C runtime's selector, @c SEL, opaque to everyone but the runtime. */
 using metal_selector_t = struct metal_selector_opaque_t*;
@@ -120,10 +142,14 @@ inline gpu_class_t apple_class_of(void* device) noexcept {
     return gpu_class_t::unknown_k;
 }
 
-/** One compiled entry point and the source library it shares with the other entry points. */
+/** Bytes of the longest kernel name a pipeline is built for, its terminator included. */
+inline constexpr std::size_t metal_pipeline_name_capacity_k = 64;
+
+/** One compiled entry point and the source library it shares with the other entry points; the name
+ *  is copied, as callers spell it into their own buffers. */
 struct metal_pipeline_t {
     char const* source = nullptr;
-    char const* name = nullptr;
+    char name[metal_pipeline_name_capacity_k] = {};
     void* library = nullptr;
     void* pipeline = nullptr;
 };
@@ -170,7 +196,9 @@ struct metal_context_t {
         }
         api.autorelease_pool_pop(pool);
         if (!pipeline) return {nullptr, status_t::device_error_k};
-        pipelines.push_back_reserved({source, name, library, pipeline});
+        metal_pipeline_t entry {source, {}, library, pipeline};
+        std::strncpy(entry.name, name, metal_pipeline_name_capacity_k - 1);
+        pipelines.push_back_reserved(entry);
         return {pipeline, status_t::success_k};
     }
 };
@@ -618,26 +646,6 @@ struct metal_audit_t {
 
     /** Levels the last audit swept to convergence. */
     std::size_t sweeps = 0;
-};
-
-/** The counter words a launch binds: the batch's assigned rows, the published rows, the changed
- *  nodes and the word an attend raises when a node has no value row, then the walks' telemetry,
- *  each tally a low and a high word, so a batch's totals outgrow 32 bits as on CUDA and HIP. */
-enum metal_counter_t : u32_t {
-    metal_assigned_k = 0,
-    metal_published_k = 1,
-    metal_changed_k = 2,
-    metal_missed_k = 3,
-    metal_hops_k = 4,
-    metal_scored_k = 6,
-    metal_restarts_k = 8,
-    metal_lock_attempts_k = 10,
-    metal_lock_skips_k = 12,
-    metal_reselections_k = 14,
-    metal_locked_drops_k = 16,
-    metal_saturations_k = 18,
-    metal_tail_drops_k = 20,
-    metal_counter_words_k = 24,
 };
 
 /** The tally at @p counter in @p words: its low word joined with the high word it carries into. */

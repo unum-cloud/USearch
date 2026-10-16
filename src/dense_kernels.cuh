@@ -26,18 +26,18 @@ static_assert(sizeof(kernel_value_lookup_t) == sizeof(device_value_lookup_t));
 
 /** The keyed lookup each shard's attend kernels resolve rows through, laid out as
  *  @c vram_attend_lookup_t. */
-using kernel_attend_lookup_t = us::dense::vram_keyed_lookup<us::utilities::uuid_t, kernel_value_lookup_t>;
+using kernel_attend_lookup_t = dense::vram_keyed_lookup<us::utilities::uuid_t, kernel_value_lookup_t>;
 
 #if USEARCH_ARCH_CUDA_
 template <>
-struct us::dense::cuda_value_lookup_of<vram_attend_lookup_t::device_lookup_k> {
+struct dense::cuda_value_lookup_of<vram_attend_lookup_t::device_lookup_k> {
     using type = kernel_attend_lookup_t;
 };
 #endif
 
 #if USEARCH_ARCH_ROCM_
 template <>
-struct us::dense::amd_value_lookup_of<vram_attend_lookup_t::device_lookup_k> {
+struct dense::amd_value_lookup_of<vram_attend_lookup_t::device_lookup_k> {
     using type = kernel_attend_lookup_t;
 };
 #endif

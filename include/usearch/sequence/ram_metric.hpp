@@ -14,8 +14,8 @@
  *
  *  A kit binds one ISA's state and vertical types, its @c init / @c step / @c any_active / @c score
  *  verbs, its symbol count, query preparation, transpose and class loaders, how many candidates one
- *  step advances, and how many registers it advances per position. @c levenshtein_kit picks the
- *  widest kit this build compiled in under the requested capability mask and symbol, at compile
+ *  step advances, and how many registers it advances per position. @c levenshtein_ladder picks the
+ *  widest kit this build compiled in under the requested symbol and capability mask, at compile
  *  time, so the loops below unroll around the kit's constants and never test a capability at run
  *  time.
  *
@@ -43,7 +43,7 @@
 #include <limits>      // `std::numeric_limits` - the distance a failed round reports
 #include <memory>      // `std::allocator`
 #include <span>        // `std::span`
-#include <type_traits> // `std::conditional_t`, `std::integral_constant` - the kit choice and the resident word count
+#include <type_traits> // `std::integral_constant` - the resident word count
 #include <utility>     // `std::swap`
 
 #include <stringzilla/levenshtein.h>   // `sz_levenshtein_query_*`, the transposes, and the per-backend step primitives
@@ -59,15 +59,6 @@ using namespace unum::usearch::utilities;
 
 #pragma region Levenshtein Kernels
 
-struct levenshtein_serial_kit_t;
-struct levenshtein_haswell_kit_t;
-struct levenshtein_skylake_kit_t;
-struct levenshtein_neon_kit_t;
-struct levenshtein_utf8_serial_kit_t;
-struct levenshtein_utf8_haswell_kit_t;
-struct levenshtein_utf8_skylake_kit_t;
-struct levenshtein_utf8_neon_kit_t;
-
 /** Symbols in a byte string: its length, as every byte is one. */
 constexpr std::size_t levenshtein_byte_symbols_(sz_cptr_t, sz_size_t length) noexcept { return length; }
 
@@ -75,7 +66,9 @@ constexpr std::size_t levenshtein_byte_symbols_(sz_cptr_t, sz_size_t length) noe
 constexpr std::size_t levenshtein_byte_class_table_bytes_(sz_size_t) noexcept { return sz_levenshtein_byte_classes_k; }
 
 /** Scalar Myers: one candidate per step, eight independent candidates per position to fill the pipeline. */
-struct levenshtein_serial_kit_t {
+struct u8_serial_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using state_t = sz_levenshtein_u64x1_state_serial_t;
     using vertical_t = sz_levenshtein_u64x1_vertical_serial_t;
     using class_t = sz_u32_t;
@@ -97,7 +90,9 @@ struct levenshtein_serial_kit_t {
 };
 
 /** Scalar Myers over UTF-8 runes: the serial steps, fed the rune classes a page table hands out. */
-struct levenshtein_utf8_serial_kit_t : levenshtein_serial_kit_t {
+struct utf8_serial_levenshtein_kit_t : u8_serial_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_serial_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto symbols = sz_levenshtein_utf8_runes;
     static constexpr auto mask_entries = sz_levenshtein_query_mask_entries_utf8;
     static constexpr auto class_table_bytes = sz_levenshtein_utf8_pages_bytes;
@@ -108,7 +103,9 @@ struct levenshtein_utf8_serial_kit_t : levenshtein_serial_kit_t {
 #if STRINGZILLA_TARGET_HASWELL
 
 /** Intel Haswell AVX2: four candidates per step, one register per position, a SIMD byte transpose. */
-struct levenshtein_haswell_kit_t {
+struct u8_haswell_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using state_t = sz_levenshtein_u64x4_state_haswell_t;
     using vertical_t = sz_levenshtein_u64x4_vertical_haswell_t;
     using class_t = sz_u8_t;
@@ -136,7 +133,9 @@ struct levenshtein_haswell_kit_t {
 };
 
 /** Intel Haswell AVX2 over UTF-8 runes: four candidates per step, fed 32-bit rune classes. */
-struct levenshtein_utf8_haswell_kit_t : levenshtein_haswell_kit_t {
+struct utf8_haswell_levenshtein_kit_t : u8_haswell_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using class_t = sz_u32_t;
     static constexpr auto symbols = sz_levenshtein_utf8_runes;
     static constexpr auto mask_entries = sz_levenshtein_query_mask_entries_utf8;
@@ -147,12 +146,26 @@ struct levenshtein_utf8_haswell_kit_t : levenshtein_haswell_kit_t {
         return sz_levenshtein_u64x4_classes_u32_haswell(transpose_classes);
     }
 };
+#else
+
+/** The kits this build cannot carry, kept so @c levenshtein_ladder stays one list rather than a run
+ *  of preprocessor branches. */
+struct u8_haswell_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
+struct utf8_haswell_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // STRINGZILLA_TARGET_HASWELL
 
 #if STRINGZILLA_TARGET_SKYLAKE
 
 /** Intel Skylake-X AVX-512: eight candidates per step, one register per position, a SIMD byte transpose. */
-struct levenshtein_skylake_kit_t {
+struct u8_skylake_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     using state_t = sz_levenshtein_u64x8_state_skylake_t;
     using vertical_t = sz_levenshtein_u64x8_vertical_skylake_t;
     using class_t = sz_u8_t;
@@ -180,7 +193,9 @@ struct levenshtein_skylake_kit_t {
 };
 
 /** Intel Skylake-X AVX-512 over UTF-8 runes: eight candidates per step, fed 32-bit rune classes. */
-struct levenshtein_utf8_skylake_kit_t : levenshtein_skylake_kit_t {
+struct utf8_skylake_levenshtein_kit_t : u8_skylake_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     using class_t = sz_u32_t;
     static constexpr auto symbols = sz_levenshtein_utf8_runes;
     static constexpr auto mask_entries = sz_levenshtein_query_mask_entries_utf8;
@@ -191,12 +206,26 @@ struct levenshtein_utf8_skylake_kit_t : levenshtein_skylake_kit_t {
         return sz_levenshtein_u64x8_classes_u32_skylake(transpose_classes);
     }
 };
+#else
+
+/** The kits this build cannot carry, kept so @c levenshtein_ladder stays one list rather than a run
+ *  of preprocessor branches. */
+struct u8_skylake_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
+struct utf8_skylake_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // STRINGZILLA_TARGET_SKYLAKE
 
 #if STRINGZILLA_TARGET_NEON
 
 /** Arm NEON: two candidates per step, four registers per position, a SIMD byte transpose. */
-struct levenshtein_neon_kit_t {
+struct u8_neon_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_neon_k;
+    static constexpr bool compiled_k = true;
     using state_t = sz_levenshtein_u64x2_state_neon_t;
     using vertical_t = sz_levenshtein_u64x2_vertical_neon_t;
     using class_t = sz_u8_t;
@@ -224,7 +253,9 @@ struct levenshtein_neon_kit_t {
 };
 
 /** Arm NEON over UTF-8 runes: two candidates per step, four registers per position. */
-struct levenshtein_utf8_neon_kit_t : levenshtein_neon_kit_t {
+struct utf8_neon_levenshtein_kit_t : u8_neon_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_neon_k;
+    static constexpr bool compiled_k = true;
     using class_t = sz_u32_t;
     static constexpr auto symbols = sz_levenshtein_utf8_runes;
     static constexpr auto mask_entries = sz_levenshtein_query_mask_entries_utf8;
@@ -235,28 +266,51 @@ struct levenshtein_utf8_neon_kit_t : levenshtein_neon_kit_t {
         return sz_levenshtein_u64x2_classes_u32_neon(transpose_classes);
     }
 };
+#else
+
+/** The kits this build cannot carry, kept so @c levenshtein_ladder stays one list rather than a run
+ *  of preprocessor branches. */
+struct u8_neon_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
+struct utf8_neon_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // STRINGZILLA_TARGET_NEON
 
 /** The widest Levenshtein kit over the symbols @p symbol_ names this build compiled in among the
- *  backends @p capability_ admits, newest first; each row's flag is the backend's
- *  @c STRINGZILLA_TARGET_* and the mask's bit, so an unselected kit's body never has to exist. */
-template <sz_capability_t capability_, sz_levenshtein_symbol_t symbol_ = sz_levenshtein_bytes_k>
-using levenshtein_kit = std::conditional_t<
-    symbol_ == sz_levenshtein_bytes_k,
-    typename first_available_kit<                                                                                    //
-        levenshtein_serial_kit_t,                                                                                    //
-        chain_layer<STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, levenshtein_skylake_kit_t>, //
-        chain_layer<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0, levenshtein_haswell_kit_t>, //
-        chain_layer<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0, levenshtein_neon_kit_t>           //
-        >::type,                                                                                                     //
-    typename first_available_kit<                                                                                    //
-        levenshtein_utf8_serial_kit_t,                                                                               //
-        chain_layer<STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0,                             //
-                    levenshtein_utf8_skylake_kit_t>,                                                                 //
-        chain_layer<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0,                             //
-                    levenshtein_utf8_haswell_kit_t>,                                                                 //
-        chain_layer<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0, levenshtein_utf8_neon_kit_t>      //
-        >::type>;
+ *  backends @p caps_ admits, newest first; each kit states its @c capability_k and its
+ *  @c compiled_k, so an unselected kit's body never has to exist. */
+template <sz_levenshtein_symbol_t symbol_, sz_capability_t caps_>
+struct levenshtein_ladder;
+
+template <sz_capability_t caps_>
+    requires((caps_ & sz_cap_cpus_k) != 0)
+struct levenshtein_ladder<sz_levenshtein_bytes_k, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        u8_serial_levenshtein_kit_t,    //
+        u8_skylake_levenshtein_kit_t,   //
+        u8_haswell_levenshtein_kit_t,   //
+        u8_neon_levenshtein_kit_t       //
+        >::type;
+    static constexpr sz_capability_t picked_k = kit_t::capability_k;
+};
+
+template <sz_capability_t caps_>
+    requires((caps_ & sz_cap_cpus_k) != 0)
+struct levenshtein_ladder<sz_levenshtein_runes_k, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        utf8_serial_levenshtein_kit_t,  //
+        utf8_skylake_levenshtein_kit_t, //
+        utf8_haswell_levenshtein_kit_t, //
+        utf8_neon_levenshtein_kit_t     //
+        >::type;
+    static constexpr sz_capability_t picked_k = kit_t::capability_k;
+};
 
 /** Query words whose verticals stay register-resident: one and two measured faster than the scratch walk,
  *  wider ones spill on sixteen-register machines. */
@@ -391,13 +445,10 @@ void levenshtein_distances(sz_levenshtein_query_t const& query, sz::string_view_
 
 #pragma region Overlap Kernels
 
-struct overlap_serial_kit_t;
-struct overlap_haswell_kit_t;
-struct overlap_skylake_kit_t;
-struct overlap_neon_kit_t;
-
 /** Scalar binding: one position per step, one key per sort and probe step. */
-struct overlap_serial_kit_t {
+struct u8_serial_overlap_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_serial_k;
+    static constexpr bool compiled_k = true;
     static constexpr std::size_t positions_per_step_k = sz_overlap_f64x1_positions_per_step_serial_k;
     static constexpr auto prefix_hash_step = sz_overlap_f64x1_prefix_hash_step_serial;
     static constexpr auto prefix_hash_step_tail = sz_overlap_f64x1_prefix_hash_step_tail_serial;
@@ -410,7 +461,9 @@ struct overlap_serial_kit_t {
 #if STRINGZILLA_TARGET_HASWELL
 
 /** Intel Haswell AVX2: four positions per step, eight keys per sort and probe step. */
-struct overlap_haswell_kit_t {
+struct u8_haswell_overlap_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     static constexpr std::size_t positions_per_step_k = sz_overlap_f64x4_positions_per_step_haswell_k;
     static constexpr auto prefix_hash_step = sz_overlap_f64x4_prefix_hash_step_haswell;
     static constexpr auto prefix_hash_step_tail = sz_overlap_f64x4_prefix_hash_step_tail_haswell;
@@ -419,12 +472,22 @@ struct overlap_haswell_kit_t {
     static constexpr auto btree_sort = sz_overlap_u32x8_btree_sort_haswell;
     static constexpr auto btree_probe = sz_overlap_u32x8_btree_probe_haswell;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c overlap_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_haswell_overlap_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // STRINGZILLA_TARGET_HASWELL
 
 #if STRINGZILLA_TARGET_SKYLAKE
 
 /** Intel Skylake AVX-512: eight positions per step, sixteen keys per sort and probe step. */
-struct overlap_skylake_kit_t {
+struct u8_skylake_overlap_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     static constexpr std::size_t positions_per_step_k = sz_overlap_f64x8_positions_per_step_skylake_k;
     static constexpr auto prefix_hash_step = sz_overlap_f64x8_prefix_hash_step_skylake;
     static constexpr auto prefix_hash_step_tail = sz_overlap_f64x8_prefix_hash_step_tail_skylake;
@@ -433,12 +496,22 @@ struct overlap_skylake_kit_t {
     static constexpr auto btree_sort = sz_overlap_u32x16_btree_sort_skylake;
     static constexpr auto btree_probe = sz_overlap_u32x16_btree_probe_skylake;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c overlap_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_skylake_overlap_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // STRINGZILLA_TARGET_SKYLAKE
 
 #if STRINGZILLA_TARGET_NEON
 
 /** Arm NEON: two positions per step, four keys per sort and probe step. */
-struct overlap_neon_kit_t {
+struct u8_neon_overlap_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_neon_k;
+    static constexpr bool compiled_k = true;
     static constexpr std::size_t positions_per_step_k = sz_overlap_f64x2_positions_per_step_neon_k;
     static constexpr auto prefix_hash_step = sz_overlap_f64x2_prefix_hash_step_neon;
     static constexpr auto prefix_hash_step_tail = sz_overlap_f64x2_prefix_hash_step_tail_neon;
@@ -447,18 +520,34 @@ struct overlap_neon_kit_t {
     static constexpr auto btree_sort = sz_overlap_u32x4_btree_sort_neon;
     static constexpr auto btree_probe = sz_overlap_u32x4_btree_probe_neon;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c overlap_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_neon_overlap_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // STRINGZILLA_TARGET_NEON
 
-/** The widest overlap kit this build compiled in among the backends @p capability_ admits, newest
- *  first; each row's flag is the backend's @c STRINGZILLA_TARGET_* and the mask's bit, so an
- *  unselected kit's body never has to exist. */
-template <sz_capability_t capability_>
-using overlap_kit = typename first_available_kit<                                                            //
-    overlap_serial_kit_t,                                                                                    //
-    chain_layer<STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, overlap_skylake_kit_t>, //
-    chain_layer<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0, overlap_haswell_kit_t>, //
-    chain_layer<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0, overlap_neon_kit_t>           //
-    >::type;
+/** The widest overlap kit this build compiled in among the backends @p caps_ admits, newest first;
+ *  each kit states its @c capability_k and its @c compiled_k, so an unselected kit's body never
+ *  has to exist. */
+template <sz_capability_t caps_>
+struct overlap_ladder;
+
+template <sz_capability_t caps_>
+    requires((caps_ & sz_cap_cpus_k) != 0)
+struct overlap_ladder<caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        u8_serial_overlap_kit_t,        //
+        u8_skylake_overlap_kit_t,       //
+        u8_haswell_overlap_kit_t,       //
+        u8_neon_overlap_kit_t           //
+        >::type;
+    static constexpr sz_capability_t picked_k = kit_t::capability_k;
+};
 
 /** Candidates whose prefix-hash chains advance together: one chain's recurrence is latency-bound at about fifty
  *  cycles per step, and four independent chains hide it - measured 39 → 26 µs per round of 64 candidates. */
@@ -539,7 +628,7 @@ template <sz_capability_t capability_ = sz_cap_any_k, sz_levenshtein_symbol_t sy
           typename allocator_type_ = std::allocator<byte_t>>
 class levenshtein_metric {
   public:
-    using kit_t = levenshtein_kit<capability_, symbol_>;
+    using kit_t = typename levenshtein_ladder<symbol_, capability_>::kit_t;
     using allocator_t = allocator_type_;
     using is_transparent = void;
 
@@ -733,7 +822,7 @@ using levenshtein_metric_t = levenshtein_metric<>;
 template <sz_capability_t capability_ = sz_cap_any_k, typename allocator_type_ = std::allocator<byte_t>>
 class overlap_metric {
   public:
-    using kit_t = overlap_kit<capability_>;
+    using kit_t = typename overlap_ladder<capability_>::kit_t;
     using allocator_t = allocator_type_;
     using is_transparent = void;
     /** The full scale of a distance: the widest that still fits @c i64 times a @c u32 window count. */

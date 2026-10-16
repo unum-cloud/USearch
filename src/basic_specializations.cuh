@@ -18,15 +18,16 @@
 #include <cstring> // `std::memcpy` - a row an NVMe read borrowed, kept past it
 
 #include <array>       // `std::array` - a predicate's quad, the one key a view scans for
-#include <bit>         // `std::bit_cast` - the C key struct & `uuid_t` share sixteen bytes
+#include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
 #include <charconv>    // `std::to_chars`, `std::from_chars` - the metadata a checkpoint records as text
+#include <limits>      // `std::numeric_limits` - a GPU index's sentinel node ID
 #include <memory>      // `std::make_obj_using_allocator` - values built from the index's allocator
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view` - entries, tokens and paths
 #include <type_traits> // `std::type_identity`
 
 #include "usearch/basic/ram_index.hpp"
-#include "usearch/basic/nvme_index.hpp"
+#include "usearch/basic/nvme_index.hpp"    // `basic::nvme_index` and SmashTable's row kits, through its directories
 #include "usearch/utilities/ram_sorts.hpp" // `partial_sort` - a key's entries in insertion order
 #include "usearch/utilities/safegraphs_format.hpp"
 #if USEARCH_ARCH_CUDA_
@@ -35,7 +36,97 @@
 
 #include "lib.hpp"
 
-using us::basic::traversal_telemetry_t;
+using basic::traversal_telemetry_t;
+
+/** The SmashTable row kit one CPU class pairs for the scans its NVMe directories run: picked here
+ *  per class, never by a unit's own flags, so every class unit spells one index type with one kit
+ *  - the serial floor, as is any class whose @c SMASHTABLE_TARGET_<KIT> is off. */
+template <cpu_class_t cpu_class_>
+struct row_kit_for_cpu_class {
+    using type = st::serial_row_kit_t;
+};
+#if SMASHTABLE_TARGET_HASWELL
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::intel_haswell_k> {
+    using type = st::haswell_row_kit_t;
+};
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::intel_sierra_k> {
+    using type = st::haswell_row_kit_t;
+};
+#endif
+#if SMASHTABLE_TARGET_SKYLAKE
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::intel_skylake_k> {
+    using type = st::skylake_row_kit_t;
+};
+#endif
+#if SMASHTABLE_TARGET_ICELAKE
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::intel_icelake_k> {
+    using type = st::icelake_row_kit_t;
+};
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::amd_genoa_k> {
+    using type = st::icelake_row_kit_t;
+};
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::intel_sapphire_k> {
+    using type = st::icelake_row_kit_t;
+};
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::intel_granite_k> {
+    using type = st::icelake_row_kit_t;
+};
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::intel_diamond_k> {
+    using type = st::icelake_row_kit_t;
+};
+#endif
+#if SMASHTABLE_TARGET_NEON
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::aws_g2_k> {
+    using type = st::neon_row_kit_t;
+};
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::apple_m2_k> {
+    using type = st::neon_row_kit_t;
+};
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::apple_m4_k> {
+    using type = st::neon_row_kit_t;
+};
+#endif
+#if SMASHTABLE_TARGET_SVE
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::aws_g5_k> {
+    using type = st::sve_row_kit_t;
+};
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::nvidia_vera_k> {
+    using type = st::sve_row_kit_t;
+};
+#endif
+#if SMASHTABLE_TARGET_RVV
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::alibaba_c930_k> {
+    using type = st::rvv_row_kit_t;
+};
+#endif
+#if SMASHTABLE_TARGET_V128
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::wasm32_v128_k> {
+    using type = st::v128_row_kit_t;
+};
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::wasm64_extended_k> {
+    using type = st::v128_row_kit_t;
+};
+#endif
+
+/** The row kit a CPU class pairs, spelled short for the variants' explicit instantiations. */
+template <cpu_class_t cpu_class_>
+using row_kit_of = typename row_kit_for_cpu_class<cpu_class_>::type;
 
 #pragma region Crossings and Fan Outs
 
@@ -473,9 +564,12 @@ struct vram_nvidia_variant {
     /** The key of each row, by node ID; a batch covers its rows before writing them. */
     keys_column_t keys;
 
-    /** Places the index on CUDA device @p device. */
-    explicit vram_nvidia_variant(int device) noexcept
-        : index(cuda_virtual_memory_allocator<byte_t> {device}), keys(forkunion_allocator_t {no_memory_domain_k}) {}
+    /** Places the index on CUDA device @p device, handing it @p index_arguments ahead of its
+     *  allocator, such as the kernel kind its kits score under. */
+    template <typename... index_arguments_types_>
+    explicit vram_nvidia_variant(int device, index_arguments_types_... index_arguments) noexcept
+        : index(index_arguments..., cuda_virtual_memory_allocator<byte_t> {device}),
+          keys(forkunion_allocator_t {no_memory_domain_k}) {}
 
   protected:
 
@@ -555,7 +649,7 @@ struct vram_nvidia_variant {
         for (std::size_t match = count * wanted; match-- != 0;) {
             node_id_t const id = ids[match];
             usearch_distance_t const distance = distances[match];
-            if (id == us::utilities::node_id_unknown_k) landing.counts[match / wanted] = match % wanted;
+            if (id == std::numeric_limits<node_id_t>::max()) landing.counts[match / wanted] = match % wanted;
             else {
                 landing.keys[match] = std::bit_cast<usearch_key_t>(keys[id]);
                 landing.scores[match] = distance;

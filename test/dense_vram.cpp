@@ -6,13 +6,13 @@
  *      each named device through the suites its vendor's test object registered, then through the
  *      library's own variant for its class.
  *
- *  One object library carries the vendor-neutral shards, composed over the cell of every vendor
- *  this build carries, and each carried vendor's entry registers with @c vram_suites before
- *  @c main runs. The runner names no vendor: a device whose vendor registered nothing is reported
- *  and skipped, and an unset @c USEARCH_DEVICES runs the first device of every vendor present.
- *  The library's variants are reached as users reach them, through the C interface, which picks
- *  the variant of the device's class, so every class the library compiles is covered on a device
- *  of that class without instantiating its index again.
+ *  One object library per vendor carries the shards, composed over the cell of that vendor, and
+ *  each carried vendor's entry registers with @c vram_suites before @c main runs. The runner names
+ *  no vendor: a device whose vendor registered nothing is reported and skipped, and an unset
+ *  @c USEARCH_DEVICES runs the first device of every vendor present. The library's variants are
+ *  reached as users reach them, through the C interface, which picks the variant of the device's
+ *  class, so every class the library compiles is covered on a device of that class without
+ *  instantiating its index again.
  */
 #include <cstdint> // `std::uintptr_t` - the checkpoint path's per-run salt
 #include <cstdio>  // `std::remove` - the reloaded checkpoint's files

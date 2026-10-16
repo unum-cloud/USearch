@@ -40,8 +40,8 @@ The variants are aliases over those templates, keyed by the storage dtype and th
 
 - `ram_indexes<dtype, cpu_class>` → `dense::ram_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class), waiter_of<cpu_class>, ...>`, with the class's atomic reference and cache hints last.
 - `nvme_indexes<dtype, cpu_class>` → `dense::nvme_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class)>`.
-- `vram_nvidia_indexes<dtype, gpu_class>` → `dense::vram_nvidia_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class)>`, and `vram_amd_indexes<dtype, gpu_class>` likewise over `dense::vram_amd_indexes`.
-- `vram_apple_indexes<dtype>` → `dense::vram_apple_indexes<uuid_t, dtype>`, one variant serving every Apple class until a family's kernels differ.
+- `vram_nvidia_indexes<dtype, gpu_class>` → `dense::vram_nvidia_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class), cuda_fatbin<gpu_class>>`, and `vram_amd_indexes<dtype, gpu_class>` likewise over `dense::vram_amd_indexes` and `hip_code_object<gpu_class>`.
+- `vram_apple_indexes<dtype, gpu_class>` → `dense::vram_apple_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class)>`, one variant per Apple class, each compiling its own library at first use.
 
 A variant's executor type is its residency, so `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
 The core verbs land on `specialized_index` members of the same names, `count`, `get`, `reserve`, `clear`, `refine`, `health`, `search`, `multiply`, `maxsim`, `attend`, `save` and `load`.
@@ -80,8 +80,9 @@ The dispatch unit visits every variant yet compiles at the baseline instruction 
 - `usearch_dense_vram_variants_nvidia_<class>` embeds one NVIDIA class's fatbin, compiled by NVCC device-only for its own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
   Nothing links `libcuda` or the CUDA runtime: `cuda_api` opens the driver at first use through entry points it declares itself, and Clang's host-only pass builds the variants.
 - `usearch_dense_vram_variants_amd_<class>` embeds one AMD class's code object, compiled for its own processors, and the CDNA3 floor for CDNA4 too.
+  Its kernels sit in `dense/vram_kernels_amd_<class>.hip`, compiled device-only beside the class unit, which names none of them.
   Nothing links `libamdhip64`: `hip_api` opens it at first use through entry points it declares itself, so host units need no ROCm headers.
-- `usearch_dense_vram_variants_apple` compiles the Apple variants as plain C++, their kernels compiled from embedded source at first use.
+- `usearch_dense_vram_variants_apple` compiles the Apple variants as plain C++, one unit per Apple class, their kernels compiled from embedded source at first use.
   Nothing links Metal, Foundation or `libobjc`: `metal_api` opens them at first use.
 - `usearch_sequence_ram_variants`, `usearch_shapes_ram_variants` and `usearch_geospatial_ram_variants` collect each modality's class units, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
 - `usearch_<modality>_vram_variants_nvidia` embeds one basic modality's NVIDIA fatbin, every kit compiled past the Ampere floor.

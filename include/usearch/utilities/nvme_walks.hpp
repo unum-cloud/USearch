@@ -80,24 +80,26 @@ struct nvme_part_t {
 };
 
 /** Where one entry lives among the shards a call reads: what a walk ranks by until keys resolve. */
-struct nvme_locator_t {
+template <typename node_id_type_>
+struct nvme_locator {
 
     /** The shard holding the entry, positional among the call's shards. */
     u32_t shard = 0;
 
     /** The entry's ID inside that shard's own space. */
-    u32_t node = 0;
+    node_id_type_ node = 0;
 };
 
 /** Maps a walked node ID of one shard to its locator, as an ID resolver and as an ID-to-key
  *  table. */
-struct nvme_shard_locators_t {
+template <typename node_id_type_>
+struct nvme_shard_locators {
 
     /** The shard every resolved ID belongs to. */
     u32_t shard = 0;
 
-    nvme_locator_t operator()(u32_t node) const noexcept { return {shard, node}; }
-    nvme_locator_t operator[](u32_t node) const noexcept { return {shard, node}; }
+    nvme_locator<node_id_type_> operator()(node_id_type_ node) const noexcept { return {shard, node}; }
+    nvme_locator<node_id_type_> operator[](node_id_type_ node) const noexcept { return {shard, node}; }
 };
 
 /** Reads of one purpose a call issued, and the bytes they transferred, block rounding included. */
@@ -245,14 +247,15 @@ enum class nvme_purpose_t : u8_t {
 
 /** One scored, expanded or resolved row in flight. Its first read lands in the buffer of the
  *  flight's own index, and a keyed score's key in the buffer one flight count past it. The
- *  shard it reads follows from its issuer, which keeps a flight at 16 bytes. */
-struct nvme_flight_t {
+ *  shard it reads follows from its issuer, which keeps a flight of 32-bit IDs at 16 bytes. */
+template <typename node_id_type_>
+struct nvme_flight {
 
     /** The walk that issued a score or an expansion, or the row slot behind a resolution. */
     u32_t issuer = 0;
 
     /** The row's node ID inside its shard. */
-    u32_t node = 0;
+    node_id_type_ node = 0;
 
     /** Where in its issuer the landing counts: a walk's hop slot, or a row slot's output. */
     u32_t position = 0;
@@ -264,7 +267,7 @@ struct nvme_flight_t {
     nvme_purpose_t purpose = nvme_purpose_t::score_k;
 };
 
-static_assert(sizeof(nvme_flight_t) == 16, "A flight is 16 bytes, so none straddles a cache line");
+static_assert(sizeof(nvme_flight<u32_t>) == 16, "A flight is 16 bytes, so none straddles a cache line");
 
 /** Where a row slot stands. */
 enum class nvme_row_stage_t : u8_t {
@@ -354,6 +357,7 @@ class row_walker {
     using medium_t = typename tier_t::medium_t;
     using part_t = typename tier_t::part_t;
     using node_id_t = typename tier_t::node_id_t;
+    using flight_t = nvme_flight<node_id_t>;
     using walk_t = typename tier_t::walk_t;
     using walk_shape_t = typename tier_t::walk_shape_t;
     using search_result_t = typename tier_t::search_result_t;
@@ -384,7 +388,7 @@ class row_walker {
         walk_t* const walk_slots = carve_<walk_t>(walks);
         row_t* const row_slots = carve_<row_t>(rows);
         nvme_row_slot_t* const slot_states = carve_<nvme_row_slot_t>(rows);
-        nvme_flight_t* const flight_states = carve_<nvme_flight_t>(flights);
+        flight_t* const flight_states = carve_<flight_t>(flights);
         u32_t* const free_flights = carve_<u32_t>(flights);
         u32_t* const hop_flights = carve_<u32_t>(walks * shape_.hops_per_walk);
         io_request_t* const backlog = carve_<io_request_t>(shape_.buffers);
@@ -571,32 +575,32 @@ class row_walker {
     }
 
     /** The shard @p flight reads: its walk's, or the shard of the output a resolution fills. */
-    u32_t shard_of_(nvme_flight_t const& flight) const noexcept {
+    u32_t shard_of_(flight_t const& flight) const noexcept {
         return flight.purpose == nvme_purpose_t::key_k ? rows_[flight.issuer].locator(flight.position).shard
                                                        : walks_[flight.issuer].shard;
     }
 
     /** Where the row of @p flight starts in the column @p purpose reads, from the medium's byte
      *  zero. */
-    u64_t row_begin_(nvme_flight_t const& flight, nvme_purpose_t purpose) const noexcept {
+    u64_t row_begin_(flight_t const& flight, nvme_purpose_t purpose) const noexcept {
         u32_t const shard = shard_of_(flight);
         return byte_base_of(media_[shard]) + tier_t::row_offset_(parts_[shard], purpose, flight);
     }
 
-    u64_t row_bytes_(nvme_flight_t const& flight, nvme_purpose_t purpose) const noexcept {
+    u64_t row_bytes_(flight_t const& flight, nvme_purpose_t purpose) const noexcept {
         return tier_t::row_length_(parts_[shard_of_(flight)], purpose, flight);
     }
 
     /** The landed row of @p flight_index in the column @p purpose read, inside @p buffer. */
     byte_t const* landed_row_(u32_t flight_index, nvme_purpose_t purpose, io_buffer_id_t buffer) noexcept {
-        nvme_flight_t const& flight = flights_[flight_index];
+        flight_t const& flight = flights_[flight_index];
         return engine_.buffer(buffer) + row_begin_(flight, purpose) % block_bytes_of(media_[shard_of_(flight)]);
     }
 
     /** Stages the covering read of @p flight_index 's row in the column @p purpose reads, into
      *  @p buffer, its context naming the flight's issuer. */
     void issue_(u32_t flight_index, nvme_purpose_t purpose, io_buffer_id_t buffer) noexcept {
-        nvme_flight_t const& flight = flights_[flight_index];
+        flight_t const& flight = flights_[flight_index];
         u32_t const shard = shard_of_(flight);
         io_request_t const request = nvme_covering_read(row_begin_(flight, purpose), row_bytes_(flight, purpose),
                                                         block_bytes_of(media_[shard]), shard, buffer, flight.issuer);
@@ -659,7 +663,7 @@ class row_walker {
      *  many. A walk seeds only with nothing in flight, so the hop takes slot zero. */
     std::size_t seed_(u32_t walk_index, std::size_t count) noexcept {
         walk_t& walk = walks_[walk_index];
-        u32_t const nodes = parts_[walk.shard].nodes;
+        node_id_t const nodes = parts_[walk.shard].nodes;
         if (failed(walk.visited.reserve(walk.visited.size() + count))) return saturate_(walk), 0;
         std::size_t issued = 0;
         for (; issued != count && walk.visited.size() < nodes; ++issued) {
@@ -675,8 +679,8 @@ class row_walker {
 
     void issue_score_(u32_t walk_index, node_id_t node, u32_t hop) noexcept {
         u32_t const flight = take_flight_();
-        flights_[flight] = nvme_flight_t {walk_index, node, hop, static_cast<u8_t>(shape_.buffers_per_flight),
-                                          nvme_purpose_t::score_k};
+        flights_[flight] = flight_t {walk_index, node, hop, static_cast<u8_t>(shape_.buffers_per_flight),
+                                     nvme_purpose_t::score_k};
         issue_(flight, nvme_purpose_t::score_k, flight);
         if constexpr (row_t::key_reads_k == nvme_key_reads_t::scored_k)
             issue_(flight, nvme_purpose_t::key_k, key_buffer_(flight));
@@ -688,7 +692,7 @@ class row_walker {
         --outstanding_;
         if (failed(failure_)) return false;
         u32_t const flight_index = static_cast<u32_t>(completion.buffer % flights_.size());
-        nvme_flight_t& flight = flights_[flight_index];
+        flight_t& flight = flights_[flight_index];
         nvme_purpose_t const purpose = completion.buffer == flight_index ? flight.purpose : nvme_purpose_t::key_k;
         u64_t const row_begin = row_begin_(flight, purpose);
         u64_t const needed = row_begin % block_bytes_of(media_[shard_of_(flight)]) + row_bytes_(flight, purpose);
@@ -770,7 +774,7 @@ class row_walker {
             walk.frontier.pop();
             ++telemetry_.visited_members;
             u32_t const flight = take_flight_();
-            flights_[flight] = nvme_flight_t {walk_index, candidate.node_id, slot, 1, nvme_purpose_t::expand_k};
+            flights_[flight] = flight_t {walk_index, candidate.node_id, slot, 1, nvme_purpose_t::expand_k};
             issue_(flight, nvme_purpose_t::expand_k, flight);
             hop_flights[slot] = 1;
         }
@@ -834,9 +838,9 @@ class row_walker {
         row_t& row = rows_[slot_index];
         std::size_t const budget = parts_.size() * shape_.walk_flights;
         while (slot.next_output != slot.outputs && slot.resolving != budget) {
-            nvme_locator_t const locator = row.locator(slot.next_output);
+            auto const locator = row.locator(slot.next_output);
             u32_t const flight = take_flight_();
-            flights_[flight] = nvme_flight_t {slot_index, locator.node, slot.next_output, 1, nvme_purpose_t::key_k};
+            flights_[flight] = flight_t {slot_index, locator.node, slot.next_output, 1, nvme_purpose_t::key_k};
             issue_(flight, nvme_purpose_t::key_k, flight);
             ++slot.next_output;
             ++slot.resolving;
@@ -860,7 +864,7 @@ class row_walker {
     std::span<walk_t> walks_;
     std::span<row_t> rows_;
     std::span<nvme_row_slot_t> slots_;
-    std::span<nvme_flight_t> flights_;
+    std::span<flight_t> flights_;
     std::span<u32_t> free_flights_;
     std::span<u32_t> hop_flights_;
     std::span<io_request_t> backlog_;

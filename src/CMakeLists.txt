@@ -238,9 +238,19 @@ set(USEARCH_PUNNED_LIBRARIES usearch_punned usearch_dense_ram_variants usearch_d
 # CUDA fatbin or a HIP offload bundle, with @p target's includes and definitions; the bundle links into @p target
 # page-aligned in a read-only section through an assembler stub, under `<name>_bundle_start` and `<name>_bundle_end`, so
 # it travels into archives too. With no codes the bundle is empty, and its devices refuse to load it. NVCC pairs with
-# `CMAKE_CUDA_HOST_COMPILER` when set, and `CMAKE_CUDA_FLAGS` reach its pass. The tests and benchmarks bundle theirs
-# through it too.
+# `CMAKE_CUDA_HOST_COMPILER` when set, splits its optimizations across every CPU, and `CMAKE_CUDA_FLAGS` reach its pass.
+# The device pass compiles @p source, or the `DEVICE` source when the unit keeps its kernels apart, as an AMD unit must:
+# HIP-Clang refuses a kernel's address in device code, so a host function takes it, which the host pass may never
+# compile, or it would emit launch stubs and a fat-binary registration. The tests and benchmarks bundle theirs through
+# it too. Device passes run one at a time, each spreading its own work across every CPU: NVCC's split assemblers take
+# about 9 GB on the largest units, so two at once would exhaust a laptop.
+set_property(GLOBAL APPEND PROPERTY JOB_POOLS usearch_gpu_device_pass=1)
 function (usearch_gpu_bundle target vendor name source)
+    cmake_parse_arguments(arg "" "DEVICE" "" ${ARGN})
+    set(device_source_ ${source})
+    if (arg_DEVICE)
+        set(device_source_ ${arg_DEVICE})
+    endif ()
     set(bundle_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${target}/${name}.bundle)
     if (vendor STREQUAL "nvidia")
         set(host_compiler_ ${CMAKE_CXX_COMPILER})
@@ -249,6 +259,7 @@ function (usearch_gpu_bundle target vendor name source)
         endif ()
         set(device_only_
             "${CUDAToolkit_NVCC_EXECUTABLE};-x;cu;--fatbin;-ccbin;${host_compiler_};--expt-relaxed-constexpr"
+            -split-compile=0
         )
         separate_arguments(device_flags_ UNIX_COMMAND "${CMAKE_CUDA_FLAGS}")
         set(host_only_ "-xcuda;--cuda-host-only;-nocudalib;--cuda-path=${CUDAToolkit_LIBRARY_ROOT}")
@@ -259,16 +270,28 @@ function (usearch_gpu_bundle target vendor name source)
         set(host_only_ "-xhip;--cuda-host-only;-nogpulib")
     endif ()
     set_source_files_properties(${source} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "${host_only_}")
-    if (ARGN)
+    # Debug trees compile device code unoptimized, as their host code: NVCC's `-O` reaches only its host compiler, so
+    # its debug pass also takes its device compiler and assembler down to `-O0`, without `-G`'s device debug
+    # information.
+    if (vendor STREQUAL "nvidia")
+        set(optimization_ "$<$<CONFIG:Debug>:-O0$<SEMICOLON>-Xcicc$<SEMICOLON>-O0$<SEMICOLON>-Xptxas$<SEMICOLON>-O0>"
+                          "$<$<NOT:$<CONFIG:Debug>>:-O3>"
+        )
+    else ()
+        set(optimization_ "$<$<CONFIG:Debug>:-O0>" "$<$<NOT:$<CONFIG:Debug>>:-O3>")
+    endif ()
+    if (arg_UNPARSED_ARGUMENTS)
         add_custom_command(
             OUTPUT ${bundle_}
             COMMAND
-                ${device_only_} -std=c++20 -O3 ${ARGN} "-I$<JOIN:$<TARGET_PROPERTY:${target},INCLUDE_DIRECTORIES>,;-I>"
+                ${device_only_} -std=c++20 ${optimization_} ${arg_UNPARSED_ARGUMENTS}
+                "-I$<JOIN:$<TARGET_PROPERTY:${target},INCLUDE_DIRECTORIES>,;-I>"
                 "-D$<JOIN:$<TARGET_PROPERTY:${target},COMPILE_DEFINITIONS>,;-D>" ${device_flags_} -MD -MF ${bundle_}.d
-                ${source} -o ${bundle_}
-            DEPENDS ${source}
+                ${device_source_} -o ${bundle_}
+            DEPENDS ${device_source_}
             DEPFILE ${bundle_}.d
             COMMENT "Compiling the ${name} kernels"
+            JOB_POOL usearch_gpu_device_pass
             COMMAND_EXPAND_LISTS VERBATIM
         )
     else ()
@@ -283,6 +306,16 @@ function (usearch_gpu_bundle target vendor name source)
     )
     set_source_files_properties(${stub_} PROPERTIES LANGUAGE ASM OBJECT_DEPENDS ${bundle_})
     target_sources(${target} PRIVATE ${stub_})
+endfunction ()
+
+# Puts the host-only flags `usearch_gpu_bundle` gave the GPU unit @p entry onto every C++ unit of @p target, but for its
+# assembler stub, so the unit's sibling shards see the vendor's headers and targets as the entry does.
+function (usearch_gpu_host_only target entry)
+    get_source_file_property(host_only_ ${entry} COMPILE_OPTIONS)
+    foreach (flag_ IN LISTS host_only_)
+        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${flag_}>")
+    endforeach ()
+    set_source_files_properties(${entry} PROPERTIES COMPILE_OPTIONS "")
 endfunction ()
 
 # NVCC is only a device compiler here, and NVIDIA's units, tests and benchmarks bundle their kernels as above.
@@ -415,7 +448,8 @@ endif ()
 
 # The AMD variants join beside the NVIDIA ones, so one dispatch unit carries both vendors. Each class unit bundles its
 # kernels as above, through ROCm's Clang, never through CMake's HIP language, whose fat binaries would register with
-# `libamdhip64`, for the class's processors `USEARCH_ROCM_ARCHITECTURES` lists.
+# `libamdhip64`, for the class's processors `USEARCH_ROCM_ARCHITECTURES` lists. The kernels sit in a device entry beside
+# the class's host unit, which names none of them.
 if (USEARCH_BUILD_ROCM)
     enable_language(ASM)
     function (usearch_dense_vram_amd_variant class target_macro)
@@ -427,6 +461,7 @@ if (USEARCH_BUILD_ROCM)
         endforeach ()
         set(target_ usearch_dense_vram_variants_${class})
         set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_variants_${class}.hip)
+        set(kernels_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_kernels_${class}.hip)
         add_library(${target_} OBJECT ${source_})
         usearch_setup_target(${target_})
         target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -438,7 +473,15 @@ if (USEARCH_BUILD_ROCM)
         )
         # A class none of whose processors is listed still links its variants, over an empty code object, so the
         # dispatch unit lists every class whatever the toolchain compiles for.
-        usearch_gpu_bundle(${target_} amd dense_${class} ${source_} ${processors_})
+        usearch_gpu_bundle(
+            ${target_}
+            amd
+            dense_${class}
+            ${source_}
+            ${processors_}
+            DEVICE
+            ${kernels_}
+        )
         set(USEARCH_PUNNED_LIBRARIES
             ${USEARCH_PUNNED_LIBRARIES} ${target_}
             PARENT_SCOPE
@@ -450,12 +493,15 @@ if (USEARCH_BUILD_ROCM)
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_ROCM_=1")
 endif ()
 
-# The Apple variants: one plain C++ unit serving every Apple class until a family's kernels differ, whose kernels
-# compile from embedded source at first use, so no Metal toolchain is needed to build it. The dispatch unit and the
-# Apple unit see `USEARCH_ARCH_METAL_=1`, and nothing links Metal, Foundation or `libobjc`, which `metal_api` opens at
-# first use.
+# The Apple variants: one plain C++ unit per Apple class, as NVIDIA and AMD have one per class, whose kernels compile
+# from embedded source at first use, one library per dtype and class, so no Metal toolchain is needed to build them. The
+# dispatch unit and the Apple unit see `USEARCH_ARCH_METAL_=1`, and nothing links Metal, Foundation or `libobjc`, which
+# `metal_api` opens at first use.
 if (USEARCH_BUILD_METAL)
-    add_library(usearch_dense_vram_variants_apple OBJECT dense/vram_variants_apple.cpp)
+    add_library(
+        usearch_dense_vram_variants_apple OBJECT
+        dense/vram_variants_apple_metal7.cpp dense/vram_variants_apple_metal9.cpp dense/vram_variants_apple_metal10.cpp
+    )
     usearch_setup_target(usearch_dense_vram_variants_apple)
     target_include_directories(usearch_dense_vram_variants_apple PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(usearch_dense_vram_variants_apple PRIVATE "USEARCH_ARCH_METAL_=1")

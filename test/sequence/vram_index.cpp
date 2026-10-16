@@ -16,6 +16,7 @@
  */
 #include <algorithm> // `std::min`, `std::nth_element`
 #include <array>     // `std::array` - the templates
+#include <limits>    // `std::numeric_limits` - the node-ID type's sentinel
 #include <string>    // `std::string` - the tape and the generated strings
 #include <vector>    // `std::vector` - strings, offsets, matches
 
@@ -25,6 +26,16 @@
 #endif
 
 #include "harness.hpp"
+
+#if USEARCH_ARCH_CUDA_
+
+/** The library's fatbin of every sequence kit, defined in
+ *  @c src/sequence/vram_variants_nvidia.cu. */
+struct sequence_nvidia_fatbin_t {
+    static us::utilities::bytes_view_t bytes() noexcept;
+};
+
+#endif
 
 namespace unum::usearch::test::sequence {
 using namespace unum::usearch::sequence;
@@ -85,16 +96,16 @@ static std::size_t matched_count(std::span<i64_t const> found, std::vector<i64_t
 
 /**
  *  @brief One collection of @p count strings of about @p length bytes, held out @p queries_count
- *      queries, built on the GPU and in RAM alike.
+ *      queries, built on the GPU with @p node_id_type_ IDs and in RAM alike.
  *
  *  Every match the GPU reports must carry the pair's exact distance, ascending, and the GPU's
  *  recall at ten must reach the RAM index's at the same breadth, give or take a twentieth.
  */
-template <sz_levenshtein_symbol_t symbol_>
+template <sz_levenshtein_symbol_t symbol_, typename node_id_type_ = u32_t>
 static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& executor, std::size_t count,
                                                   std::size_t length, std::size_t queries_count) {
     using ram_index_t = ram_index<us::utilities::uuid_t, u32_t>;
-    using vram_index_t = vram_nvidia_index<symbol_>;
+    using vram_index_t = vram_nvidia_index<symbol_, node_id_type_, sz_cap_cuda_k, sequence_nvidia_fatbin_t>;
     using metric_t = levenshtein_metric<sz_cap_any_k, symbol_>;
     using serial_metric_t = levenshtein_metric<sz_cap_serial_k, symbol_>;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3, origin_k = 3;
@@ -166,7 +177,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     }
     failures += expect_eq(vram_index.size(), count);
 
-    std::vector<u32_t> ids(queries_count * wanted_k);
+    std::vector<node_id_type_> ids(queries_count * wanted_k);
     std::vector<f32_t> distances(queries_count * wanted_k);
     std::span<std::size_t const> const query_offsets {offsets.data() + count, queries_count + 1};
     typename vram_index_t::search_config_t const search_config {expansion_k, wanted_k};
@@ -184,8 +195,8 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     for (std::size_t query = 0; query != queries_count && !failures; ++query) {
         std::vector<i64_t> found;
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
-            u32_t const id = ids[query * wanted_k + rank];
-            if (id == us::utilities::node_id_unknown_k) break;
+            node_id_type_ const id = ids[query * wanted_k + rank];
+            if (id == std::numeric_limits<node_id_type_>::max()) break;
             i64_t const distance = static_cast<i64_t>(distances[query * wanted_k + rank]);
             failures += expect(id < count) || expect_eq(distance, exact[query][id]);
             failures += expect(found.empty() || found.back() <= distance);

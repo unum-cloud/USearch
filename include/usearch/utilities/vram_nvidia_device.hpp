@@ -1201,12 +1201,6 @@ status_t cuda_launch(cuda_function_handle_t function, u32_t blocks, u32_t thread
 
 static_assert(cuda_reservable_allocator<cuda_virtual_memory_allocator<byte_t>>);
 
-/** Insertion and refinement blocks per multiprocessor: two, the most whose share of the register
- *  file holds the walk and its selection without spilling. */
-inline constexpr u32_t cuda_insert_blocks_per_multiprocessor_k = 2;
-
-inline constexpr std::size_t cuda_kernel_name_capacity_k = 160;
-
 /** One stream's device-side scratch for driving a CUDA index: the traversal arena, the batch
  *  staging, the telemetry counters and the attend miss word, riding the stream its allocator names
  *  and never opening one. Two contexts on one index share only the storage and the published

@@ -19,10 +19,15 @@
 #pragma once
 
 #include <cstddef> // `std::size_t`
+#include <cstdio>  // `std::snprintf` - a kernel symbol's digits
+#include <cstring> // `std::strlen` - a name's length prefix in a kernel symbol
 
-#include <mutex>   // `std::call_once` - the listing is taken once per process
-#include <span>    // `std::span` - the listing handed out
-#include <variant> // `std::variant`, `std::monostate` - one alternative per vendor
+#include <mutex>       // `std::call_once` - the listing is taken once per process
+#include <span>        // `std::span` - the listing handed out
+#include <type_traits> // `std::is_enum_v`, `std::is_same_v` - a kernel symbol's arguments
+#include <variant>     // `std::variant`, `std::monostate` - one alternative per vendor
+
+#include <numkong/types.h> // `nk_dtype_t` - a kernel symbol's dtype argument
 
 #include "usearch/utilities/ram_buffers.hpp"        // `growing_buffer` - the ordinals an executor opens over
 #include "usearch/utilities/types.hpp"              // `gpu_device_t`
@@ -183,5 +188,224 @@ struct gpu_arena_t {
             arena);
     }
 };
+
+#pragma region Kernel Symbols
+
+/** Every GPU kernel of every design and vendor, the first template argument of each kernel
+ *  template - dense @c cuda_kernel and @c amd_kernel, each modality's @c cuda_kernel - and the
+ *  words of Apple's exported names. A vendor exports the kernels its design launches, and sizes
+ *  its tables of loaded kernels by @c count_k. */
+enum class vram_kernel_t : u32_t {
+
+    /** Walks the graph for each row of an insertion wave and selects its forward neighbors. */
+    insert_k,
+
+    /** Links the nodes an insertion wave picked back to the wave's rows. */
+    back_link_k,
+
+    /** Walks the graph again for existing rows and re-selects their neighbors. */
+    refine_k,
+
+    /** Walks the graph for each query and ranks its matches. */
+    search_k,
+
+    /** A search rescoring its candidates through the indexer heads. */
+    search_indexer_k,
+
+    /** Scores every visible row against each query, without walking the graph. */
+    scan_k,
+
+    /** A walk landing every scored pair, rather than ranked matches. */
+    multiply_k,
+
+    /** A walk folding the values of the rows it attends to, per head. */
+    attend_k,
+
+    /** Merges each node's forward and reverse candidates into its final neighbors. */
+    merge_back_links_k,
+
+    /** Scatters the walked rows' forward picks into the reverse buckets of their targets. */
+    scatter_back_links_k,
+
+    /** Rebuilds the norms column from the stored vectors. */
+    derive_norms_k,
+
+    /** Moves rows' neighbor IDs between ID spaces, packing the survivors. */
+    rebase_links_k,
+
+    /** Marks the reachability audit's landmark rows reached and in the first frontier. */
+    mark_seeds_k,
+
+    /** Expands the reachability frontier by one level. */
+    reachability_sweep_k,
+
+    /** Counts the rows no sweep reached, collecting their IDs. */
+    reachability_islands_k,
+
+    /** Counts, for every row, the reached rows that point at it. */
+    reached_in_links_k,
+
+    /** Links each unreached island back into the reached graph. */
+    reconnect_island_k,
+
+    /** Merges the attended rows of several shards' walks by the flash rule. */
+    merge_attention_k,
+
+    /** Ranks a walk's matches into the queries' rankings. */
+    resolve_matches_k,
+
+    /** Merges the rankings of several shards' walks per query. */
+    merge_matches_k,
+
+    /** Casts rows into the stored scalar. */
+    cast_k,
+
+    /** Casts rows into the stored scalar, scaled to unit RMS. */
+    rmscast_k,
+
+    /** The number of kernels, sizing the tables of loaded kernels. */
+    count_k,
+};
+
+/** The Itanium spelling of @ref vram_kernel_t, a sibling of every kernel's scope, as
+ *  @c vram_kernel_symbol documents. */
+constexpr char const* itanium_name(vram_kernel_t) noexcept { return "NS0_9utilities13vram_kernel_tE"; }
+
+/** Bytes of the longest symbol any kernel's spelling reaches, its terminator included. */
+inline constexpr std::size_t vram_kernel_symbol_capacity_k = 256;
+
+/** One kernel instantiation's symbol, as a module lookup takes it. */
+struct vram_kernel_symbol_t {
+    char text[vram_kernel_symbol_capacity_k] = {};
+    std::size_t length = 0;
+
+    /** Appends @p bytes of @p source, clipping at the capacity, which no kernel reaches. */
+    void append(char const* source, std::size_t bytes) noexcept {
+        for (std::size_t offset = 0; offset != bytes && length + 1 < vram_kernel_symbol_capacity_k; ++offset)
+            text[length++] = source[offset];
+        text[length] = 0;
+    }
+    void append(char const* source) noexcept { append(source, std::strlen(source)); }
+
+    /** Appends @p name after its decimal length, as the mangling prefixes every source name. */
+    void append_name(char const* name) noexcept {
+        char digits[24];
+        int const written = std::snprintf(digits, sizeof(digits), "%zu", std::strlen(name));
+        append(digits, static_cast<std::size_t>(written));
+        append(name);
+    }
+
+    /** Appends the decimal digits of @p value. */
+    void append_value(unsigned long long value) noexcept {
+        char digits[24];
+        int const written = std::snprintf(digits, sizeof(digits), "%llu", value);
+        append(digits, static_cast<std::size_t>(written));
+    }
+};
+
+/** The one-letter builtin spelling of the unsigned integer @p value_type_ - @c j, @c m or @c y, as
+ *  the platform's widths name them, so @c u64_t spells as @c m on Linux and @c y elsewhere. */
+template <typename value_type_>
+constexpr char itanium_builtin() noexcept {
+    if constexpr (std::is_same_v<value_type_, unsigned int>) return 'j';
+    else if constexpr (std::is_same_v<value_type_, unsigned long>) return 'm';
+    else {
+        static_assert(std::is_same_v<value_type_, unsigned long long>, "Kernels take unsigned integers alone");
+        return 'y';
+    }
+}
+
+/** Appends one template argument: a type, an integer, @c nk_dtype_t, or an enum spelled by its own
+ *  @c itanium_name overload - through @c unum::usearch, @c S0_, for @ref vram_kernel_t, or whole
+ *  for a C enum. */
+template <typename argument_type_>
+void append_itanium_argument(vram_kernel_symbol_t& symbol, argument_type_ argument) noexcept {
+    if constexpr (std::is_same_v<argument_type_, nk_dtype_t>) {
+        symbol.append("L");
+        symbol.append_name("nk_dtype_t");
+        symbol.append_value(static_cast<unsigned long long>(argument));
+        symbol.append("E");
+    }
+    else if constexpr (std::is_enum_v<argument_type_>) {
+        symbol.append("L");
+        symbol.append(itanium_name(argument));
+        symbol.append_value(
+            static_cast<unsigned long long>(static_cast<std::underlying_type_t<argument_type_>>(argument)));
+        symbol.append("E");
+    }
+    else {
+        char const builtin[2] = {itanium_builtin<argument_type_>(), 0};
+        symbol.append("L");
+        symbol.append(builtin);
+        symbol.append_value(static_cast<unsigned long long>(argument));
+        symbol.append("E");
+    }
+}
+
+/** The tag a type argument travels as, beside the values. */
+template <typename value_type_>
+struct itanium_type {};
+
+template <typename value_type_>
+void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<value_type_>) noexcept {
+    char const builtin[2] = {itanium_builtin<value_type_>(), 0};
+    symbol.append(builtin);
+}
+
+/** Where the kernel's parameter struct lives: the kernel's own scope, or @c basic, whose arguments
+ *  every modality kernel takes. */
+enum class itanium_scope_t { kernel_k, basic_k };
+
+/** The kernel's one parameter: a struct of @c scope, or a template of it instantiated with the
+ *  kernel's own template argument at @c argument, counted from zero. */
+struct itanium_parameter_t {
+    char const* name;
+    int argument = -1;
+    itanium_scope_t scope = itanium_scope_t::kernel_k;
+
+    itanium_parameter_t(char const* struct_name) noexcept : name(struct_name) {}
+    itanium_parameter_t(char const* template_name, int template_argument,
+                        itanium_scope_t template_scope = itanium_scope_t::kernel_k) noexcept
+        : name(template_name), argument(template_argument), scope(template_scope) {}
+};
+
+/**
+ *  @brief Spells the symbol of @b unum::usearch::<scope>::<kernel><arguments...>(<parameter>), the
+ *      kernel's one parameter being a struct, or a struct template, of that same scope or of
+ *      @c basic.
+ *
+ *  The substitutions are fixed by that shape: @c S_ is @c unum, @c S0_ is @c unum::usearch, @c S1_
+ *  is the scope and @c S2_ the kernel's template. A @ref vram_kernel_t argument spells as
+ *  @c NS0_9utilities13vram_kernel_tE, adding @c S3_ and @c S4_, which no later name reuses. The
+ *  parameter spells as @c NS1_<length><parameter>E for the scope's own struct and as
+ *  @c NS0_5basic<length><parameter>E for basic's - with @c I<T>E before the closing @c E when it
+ *  reuses the kernel's template argument, @c T_ for the first and @c T<n-1>_ for the n-th. So
+ *  @c sequence::cuda_kernel<vram_kernel_t::search_k, sz_cap_cuda_k, sz_levenshtein_bytes_k, 2,
+ *  u32_t, 4> over @c basic::vram_arguments<u32_t> spells, broken here at its components:
+ *  @c _ZN4unum7usearch8sequence11cuda_kernel @c I @c LNS0_9utilities13vram_kernel_tE3E
+ *  @c Lm281474976710656E @c L23sz_levenshtein_symbol_t0E @c Lj2E @c j @c Lj4E @c EEv
+ *  @c NS0_5basic14vram_argumentsIT3_EE
+ */
+template <typename... arguments_types_>
+void vram_kernel_symbol(vram_kernel_symbol_t& symbol, char const* scope, char const* kernel,
+                        itanium_parameter_t parameter, arguments_types_... arguments) noexcept {
+    symbol = {};
+    symbol.append("_ZN4unum7usearch");
+    symbol.append_name(scope);
+    symbol.append_name(kernel);
+    symbol.append("I");
+    (append_itanium_argument(symbol, arguments), ...);
+    symbol.append(parameter.scope == itanium_scope_t::basic_k ? "EEvNS0_5basic" : "EEvNS1_");
+    symbol.append_name(parameter.name);
+    if (parameter.argument == 0) symbol.append("IT_E");
+    else if (parameter.argument > 0) {
+        symbol.append("IT");
+        symbol.append_value(static_cast<unsigned long long>(parameter.argument - 1));
+        symbol.append("_E");
+    }
+    symbol.append("E");
+}
+
+#pragma endregion Kernel Symbols
 
 } // namespace unum::usearch::utilities

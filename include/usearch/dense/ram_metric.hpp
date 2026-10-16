@@ -23,10 +23,11 @@
  *  that reaches only @c convert_to_distances, so one kit serves every metric of its scalar.
  *  The shape is uniform - the @c quads_kit concept enforces it.
  *
- *  @b Chains - one @c quads_chain<scalar,caps> per supported scalar. A linear list of
- *  @c chain_layer rows fed to @c first_available_kit picks the first kit whose @c NUMKONG_TARGET_*
- *  is on AND whose runtime-caps bit is set, else falls back to serial. Unsupported scalars simply
- *  have no specialization. Adding an ISA tier is one row and zero preprocessor lines.
+ *  @b Ladders - one @c quads_ladder<scalar,caps> per supported scalar. A linear list of kits fed
+ *  to @c highest_kit picks the first one this build compiled, by its @c compiled_k, whose
+ *  @c capability_k the caps admit, else falls back to serial. A kit the build cannot carry is a
+ *  stub in the @c #else of its @c NUMKONG_TARGET_* guard, stating only those two facts.
+ *  Unsupported scalars simply have no specialization. Adding an ISA tier is one row and one stub.
  *
  *  @b Trampoline - @c invoke_scores_<fan_out,kit> is the one place the load, update,
  *  finalize, through, prefetch, demote choreography lives. Reads everything it needs -
@@ -41,7 +42,7 @@
  *  sites read @c distance<caps>(nk_kernel_angular_k,...) - no per-spec method, no per-spec class.
  *
  *  @b Tiles - a second engine axis over the same capability bitmask, for scans rather than walks.
- *  Each @c tiles_chain<scalar,caps> names a matrix-engine kit - @c no_tiles_kit_t where the
+ *  Each @c tiles_ladder<scalar,caps> names a matrix-engine kit - @c no_tiles_kit_t where the
  *  platform has none for the scalar - and its @c has_tiles_k verdict gates the tiled scan. A tiles
  *  kit, like @c bf16_sapphireamx_tiles_kit_t, packs a batch of queries into the engine's operand
  *  layout once and streams stored rows against the pack where they lie, answering raw dots; the
@@ -200,92 +201,10 @@ inline vector_norms<typename scalar_type_::dot_result_t> invoke_dense_norms_( //
     return {static_cast<dot_result_t>(native_sum), static_cast<dot_result_t>(native_sumsq)};
 }
 
-/** Forward declarations for every "kit" regardless of @c NUMKONG_TARGET_* availability,
- *  so @c quads_chain backend resolution chains name-resolve on every build. */
-struct bf16_serial_quads_kit_t;
-struct bf16_haswell_quads_kit_t;
-struct bf16_skylake_quads_kit_t;
-struct bf16_genoa_quads_kit_t;
-struct bf16_neon_quads_kit_t;
-struct bf16_neonbfdot_quads_kit_t;
-struct bf16_v128_quads_kit_t;
-struct bf16_v128relaxed_quads_kit_t;
-struct bf16_powervsx_quads_kit_t;
-struct f16_serial_quads_kit_t;
-struct f16_haswell_quads_kit_t;
-struct f16_skylake_quads_kit_t;
-struct f16_neon_quads_kit_t;
-struct f16_neonfhm_quads_kit_t;
-struct f16_v128relaxed_quads_kit_t;
-struct f16_powervsx_quads_kit_t;
-struct e5m2_serial_quads_kit_t;
-struct e5m2_diamond_quads_kit_t;
-struct e5m2_haswell_quads_kit_t;
-struct e5m2_skylake_quads_kit_t;
-struct e5m2_genoa_quads_kit_t;
-struct e5m2_neonfhm_quads_kit_t;
-struct e5m2_neonfp8_quads_kit_t;
-struct e5m2_v128relaxed_quads_kit_t;
-struct e4m3_serial_quads_kit_t;
-struct e4m3_diamond_quads_kit_t;
-struct e4m3_haswell_quads_kit_t;
-struct e4m3_skylake_quads_kit_t;
-struct e4m3_genoa_quads_kit_t;
-struct e4m3_neonfhm_quads_kit_t;
-struct e4m3_neonfp8_quads_kit_t;
-struct e4m3_v128relaxed_quads_kit_t;
-struct e3m2_serial_quads_kit_t;
-struct e3m2_haswell_quads_kit_t;
-struct e3m2_skylake_quads_kit_t;
-struct e3m2_neonsdot_quads_kit_t;
-struct e3m2_neonfp8_quads_kit_t;
-struct e3m2_v128relaxed_quads_kit_t;
-struct e2m3_serial_quads_kit_t;
-struct e2m3_haswell_quads_kit_t;
-struct e2m3_skylake_quads_kit_t;
-struct e2m3_alder_quads_kit_t;
-struct e2m3_sierra_quads_kit_t;
-struct e2m3_neonsdot_quads_kit_t;
-struct e2m3_neonfp8_quads_kit_t;
-struct e2m3_v128relaxed_quads_kit_t;
-struct i8_serial_quads_kit_t;
-struct i8_haswell_quads_kit_t;
-struct i8_icelake_quads_kit_t;
-struct i8_alder_quads_kit_t;
-struct i8_sierra_quads_kit_t;
-struct i8_neonsdot_quads_kit_t;
-struct i8_v128_quads_kit_t;
-struct i8_v128relaxed_quads_kit_t;
-struct i8_powervsx_quads_kit_t;
-struct u8_serial_quads_kit_t;
-struct u8_icelake_quads_kit_t;
-struct u8_haswell_quads_kit_t;
-struct u8_alder_quads_kit_t;
-struct u8_sierra_quads_kit_t;
-struct u8_neonsdot_quads_kit_t;
-struct u8_v128_quads_kit_t;
-struct u8_v128relaxed_quads_kit_t;
-struct u8_powervsx_quads_kit_t;
-struct u4x2_serial_quads_kit_t;
-struct u4x2_haswell_quads_kit_t;
-struct u4x2_icelake_quads_kit_t;
-struct u4x2_neonsdot_quads_kit_t;
-struct u4x2_v128relaxed_quads_kit_t;
-struct i4x2_serial_quads_kit_t;
-struct i4x2_haswell_quads_kit_t;
-struct i4x2_icelake_quads_kit_t;
-struct i4x2_neonsdot_quads_kit_t;
-struct i4x2_v128relaxed_quads_kit_t;
-struct u1x8_serial_quads_kit_t;
-struct u1x8_haswell_quads_kit_t;
-struct u1x8_icelake_quads_kit_t;
-struct u1x8_neon_quads_kit_t;
-struct u1x8_v128_quads_kit_t;
-struct u1x8_powervsx_quads_kit_t;
-
 /** bf16 inner-product distance kit - serial reference. */
 struct bf16_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -306,6 +225,7 @@ struct bf16_serial_quads_kit_t {
 /** bf16 inner-product distance kit - Intel Haswell AVX2. */
 struct bf16_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x16_state_haswell_t;
     using step_vec_t = nk_b256_vec_t;
@@ -320,6 +240,14 @@ struct bf16_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_bf16_haswell;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
@@ -327,6 +255,7 @@ struct bf16_haswell_quads_kit_t {
 /** bf16 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct bf16_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x32_state_skylake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -341,6 +270,14 @@ struct bf16_skylake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_bf16_skylake;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_skylake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SKYLAKE
 
 #if NUMKONG_TARGET_GENOA
@@ -348,6 +285,7 @@ struct bf16_skylake_quads_kit_t {
 /** bf16 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. */
 struct bf16_genoa_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x32_state_genoa_t;
     using step_vec_t = nk_b512_vec_t;
@@ -362,6 +300,14 @@ struct bf16_genoa_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_bf16_genoa;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_genoa_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_GENOA
 
 #if NUMKONG_TARGET_NEON
@@ -369,6 +315,7 @@ struct bf16_genoa_quads_kit_t {
 /** bf16 inner-product distance kit - Arm NEON. */
 struct bf16_neon_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_neon_t;
     using step_vec_t = nk_b128_vec_t;
@@ -383,6 +330,14 @@ struct bf16_neon_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_bf16_serial;
     static constexpr std::size_t step_dimensions = 8;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_neon_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEON
 
 #if NUMKONG_TARGET_NEONBFDOT
@@ -390,6 +345,7 @@ struct bf16_neon_quads_kit_t {
 /** bf16 inner-product distance kit - Arm BFDOT. */
 struct bf16_neonbfdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonbfdot_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_neonbfdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -404,6 +360,14 @@ struct bf16_neonbfdot_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_bf16_neonbfdot;
     static constexpr std::size_t step_dimensions = 8;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_neonbfdot_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonbfdot_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONBFDOT
 
 #if NUMKONG_TARGET_V128
@@ -411,6 +375,7 @@ struct bf16_neonbfdot_quads_kit_t {
 /** bf16 inner-product distance kit - WebAssembly SIMD128. */
 struct bf16_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_v128_t;
     using step_vec_t = nk_b128_vec_t;
@@ -425,6 +390,14 @@ struct bf16_v128_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_bf16_v128;
     static constexpr std::size_t step_dimensions = 8;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_v128_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128
 
 #if NUMKONG_TARGET_V128RELAXED
@@ -432,6 +405,7 @@ struct bf16_v128_quads_kit_t {
 /** bf16 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct bf16_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -446,6 +420,14 @@ struct bf16_v128relaxed_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_bf16_v128;
     static constexpr std::size_t step_dimensions = 8;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_v128relaxed_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 #if NUMKONG_TARGET_POWERVSX
@@ -454,6 +436,7 @@ struct bf16_v128relaxed_quads_kit_t {
  *  kernel for this tier, so the norms come from the serial one. */
 struct bf16_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
@@ -468,11 +451,20 @@ struct bf16_powervsx_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_bf16_serial;
     static constexpr std::size_t step_dimensions = 8;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_powervsx_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_POWERVSX
 
 /** f16 inner-product distance kit - serial reference. */
 struct f16_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -500,6 +492,7 @@ struct f16_serial_quads_kit_t {
  */
 struct f16_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_through_f32_state_haswell_t_;
     using step_vec_t = nk_b256_vec_t;
@@ -514,6 +507,14 @@ struct f16_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_f16_haswell;
     static constexpr std::size_t step_dimensions = 8;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
@@ -521,6 +522,7 @@ struct f16_haswell_quads_kit_t {
 /** f16 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
 struct f16_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_through_f32_state_skylake_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -535,6 +537,14 @@ struct f16_skylake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_f16_skylake;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_skylake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SKYLAKE
 
 #if NUMKONG_TARGET_NEON
@@ -542,6 +552,7 @@ struct f16_skylake_quads_kit_t {
 /** f16 inner-product distance kit - Arm NEON. */
 struct f16_neon_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_neon_t;
     using step_vec_t = nk_b128_vec_t;
@@ -556,6 +567,14 @@ struct f16_neon_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_f16_neon;
     static constexpr std::size_t step_dimensions = 8;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_neon_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEON
 
 #if NUMKONG_TARGET_NEONFHM
@@ -564,6 +583,7 @@ struct f16_neon_quads_kit_t {
  *  kernel for this tier, so the norms come from the serial one. */
 struct f16_neonfhm_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_neonfhm_t;
     using step_vec_t = nk_b128_vec_t;
@@ -578,6 +598,14 @@ struct f16_neonfhm_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_f16_serial;
     static constexpr std::size_t step_dimensions = 8;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_neonfhm_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONFHM
 
 #if NUMKONG_TARGET_V128RELAXED
@@ -586,6 +614,7 @@ struct f16_neonfhm_quads_kit_t {
  *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
 struct f16_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_through_f32x4_state_v128relaxed_t_;
     using step_vec_t = nk_b128_vec_t;
@@ -600,6 +629,14 @@ struct f16_v128relaxed_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_f16_v128relaxed;
     static constexpr std::size_t step_dimensions = 4;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_v128relaxed_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 #if NUMKONG_TARGET_POWERVSX
@@ -608,6 +645,7 @@ struct f16_v128relaxed_quads_kit_t {
  *  kernel for this tier, so the norms come from the serial one. */
 struct f16_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
@@ -622,11 +660,20 @@ struct f16_powervsx_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_f16_serial;
     static constexpr std::size_t step_dimensions = 8;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_powervsx_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_POWERVSX
 
 /** e5m2 inner-product distance kit - serial reference. */
 struct e5m2_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -652,6 +699,7 @@ struct e5m2_serial_quads_kit_t {
  */
 struct e5m2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_through_f32_state_haswell_t_;
     using step_vec_t = nk_b256_vec_t;
@@ -666,6 +714,14 @@ struct e5m2_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e5m2_haswell;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e5m2_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
@@ -673,6 +729,7 @@ struct e5m2_haswell_quads_kit_t {
 /** e5m2 inner-product distance kit - Intel Skylake-X AVX-512, widening in the update. */
 struct e5m2_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_through_f32_state_skylake_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -687,6 +744,14 @@ struct e5m2_skylake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e5m2_skylake;
     static constexpr std::size_t step_dimensions = 64;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e5m2_skylake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SKYLAKE
 
 #if NUMKONG_TARGET_DIAMOND
@@ -697,6 +762,7 @@ struct e5m2_skylake_quads_kit_t {
  *  come from the AVX-512 one. */
 struct e5m2_diamond_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_through_f16_state_diamond_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -711,6 +777,14 @@ struct e5m2_diamond_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e5m2_skylake;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e5m2_diamond_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_DIAMOND
 
 #if NUMKONG_TARGET_GENOA
@@ -719,6 +793,7 @@ struct e5m2_diamond_quads_kit_t {
  *  widen each step to bf16 so the dot rides the BF16 accumulator. */
 struct e5m2_genoa_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_through_bf16_state_genoa_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -733,6 +808,14 @@ struct e5m2_genoa_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e5m2_genoa;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e5m2_genoa_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_GENOA
 
 #if NUMKONG_TARGET_NEONFHM
@@ -740,6 +823,7 @@ struct e5m2_genoa_quads_kit_t {
 /** e5m2 inner-product distance kit - Arm FP16 FML. */
 struct e5m2_neonfhm_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x16_state_neonfhm_t;
     using step_vec_t = nk_b128_vec_t;
@@ -754,6 +838,14 @@ struct e5m2_neonfhm_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e5m2_neonfhm;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e5m2_neonfhm_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONFHM
 
 #if NUMKONG_TARGET_NEONFP8
@@ -762,6 +854,7 @@ struct e5m2_neonfhm_quads_kit_t {
  *  kernel for this tier, so the norms come from the serial one. */
 struct e5m2_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
@@ -776,6 +869,14 @@ struct e5m2_neonfp8_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e5m2_serial;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e5m2_neonfp8_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONFP8
 
 #if NUMKONG_TARGET_V128RELAXED
@@ -784,6 +885,7 @@ struct e5m2_neonfp8_quads_kit_t {
  *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
 struct e5m2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x4_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -798,11 +900,20 @@ struct e5m2_v128relaxed_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e5m2_v128relaxed;
     static constexpr std::size_t step_dimensions = 4;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e5m2_v128relaxed_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 /** e4m3 inner-product distance kit - serial reference. */
 struct e4m3_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -823,6 +934,7 @@ struct e4m3_serial_quads_kit_t {
 /** e4m3 inner-product distance kit - Intel Haswell AVX2, widening in the update. */
 struct e4m3_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_through_f32_state_haswell_t_;
     using step_vec_t = nk_b256_vec_t;
@@ -837,6 +949,14 @@ struct e4m3_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e4m3_haswell;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e4m3_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
@@ -844,6 +964,7 @@ struct e4m3_haswell_quads_kit_t {
 /** e4m3 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
 struct e4m3_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_through_f32_state_skylake_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -858,6 +979,14 @@ struct e4m3_skylake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e4m3_skylake;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e4m3_skylake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SKYLAKE
 
 #if NUMKONG_TARGET_DIAMOND
@@ -868,6 +997,7 @@ struct e4m3_skylake_quads_kit_t {
  *  come from the AVX-512 one. */
 struct e4m3_diamond_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_through_f16_state_diamond_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -882,6 +1012,14 @@ struct e4m3_diamond_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e4m3_skylake;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e4m3_diamond_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_DIAMOND
 
 #if NUMKONG_TARGET_GENOA
@@ -890,6 +1028,7 @@ struct e4m3_diamond_quads_kit_t {
  *  widen each step to bf16 so the dot rides the BF16 accumulator. */
 struct e4m3_genoa_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_through_bf16_state_genoa_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -904,6 +1043,14 @@ struct e4m3_genoa_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e4m3_genoa;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e4m3_genoa_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_GENOA
 
 #if NUMKONG_TARGET_NEONFHM
@@ -911,6 +1058,7 @@ struct e4m3_genoa_quads_kit_t {
 /** e4m3 inner-product distance kit - Arm FP16 FML. */
 struct e4m3_neonfhm_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x16_state_neonfhm_t;
     using step_vec_t = nk_b128_vec_t;
@@ -925,6 +1073,14 @@ struct e4m3_neonfhm_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e4m3_neonfhm;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e4m3_neonfhm_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONFHM
 
 #if NUMKONG_TARGET_NEONFP8
@@ -933,6 +1089,7 @@ struct e4m3_neonfhm_quads_kit_t {
  *  kernel for this tier, so the norms come from the serial one. */
 struct e4m3_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
@@ -947,6 +1104,14 @@ struct e4m3_neonfp8_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e4m3_serial;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e4m3_neonfp8_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONFP8
 
 #if NUMKONG_TARGET_V128RELAXED
@@ -955,6 +1120,7 @@ struct e4m3_neonfp8_quads_kit_t {
  *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
 struct e4m3_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x4_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -969,6 +1135,14 @@ struct e4m3_v128relaxed_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e4m3_v128relaxed;
     static constexpr std::size_t step_dimensions = 4;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e4m3_v128relaxed_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 /**
@@ -980,6 +1154,7 @@ struct e4m3_v128relaxed_quads_kit_t {
  */
 struct e3m2_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1000,6 +1175,7 @@ struct e3m2_serial_quads_kit_t {
 /** e3m2 inner-product distance kit - Intel Haswell AVX2. */
 struct e3m2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x32_state_haswell_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1014,6 +1190,14 @@ struct e3m2_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e3m2_haswell;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e3m2_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
@@ -1021,6 +1205,7 @@ struct e3m2_haswell_quads_kit_t {
 /** e3m2 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct e3m2_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x64_state_skylake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1035,6 +1220,14 @@ struct e3m2_skylake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e3m2_skylake;
     static constexpr std::size_t step_dimensions = 64;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e3m2_skylake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SKYLAKE
 
 #if NUMKONG_TARGET_NEONSDOT
@@ -1043,6 +1236,7 @@ struct e3m2_skylake_quads_kit_t {
  *  for this tier, so the norms come from the serial one. */
 struct e3m2_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1057,6 +1251,14 @@ struct e3m2_neonsdot_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e3m2_serial;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e3m2_neonsdot_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONSDOT
 
 #if NUMKONG_TARGET_NEONFP8
@@ -1065,6 +1267,7 @@ struct e3m2_neonsdot_quads_kit_t {
  *  kernel for this tier, so the norms come from the serial one. */
 struct e3m2_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1079,6 +1282,14 @@ struct e3m2_neonfp8_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e3m2_serial;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e3m2_neonfp8_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONFP8
 
 #if NUMKONG_TARGET_V128RELAXED
@@ -1086,6 +1297,7 @@ struct e3m2_neonfp8_quads_kit_t {
 /** e3m2 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct e3m2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1100,11 +1312,20 @@ struct e3m2_v128relaxed_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e3m2_v128relaxed;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e3m2_v128relaxed_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 /** e2m3 inner-product distance kit - serial reference. One element per byte. */
 struct e2m3_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1125,6 +1346,7 @@ struct e2m3_serial_quads_kit_t {
 /** e2m3 inner-product distance kit - Intel Haswell AVX2. */
 struct e2m3_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x32_state_haswell_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1139,6 +1361,14 @@ struct e2m3_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e2m3_haswell;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e2m3_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
@@ -1146,6 +1376,7 @@ struct e2m3_haswell_quads_kit_t {
 /** e2m3 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct e2m3_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x64_state_skylake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1160,6 +1391,14 @@ struct e2m3_skylake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e2m3_skylake;
     static constexpr std::size_t step_dimensions = 64;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e2m3_skylake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SKYLAKE
 
 #if NUMKONG_TARGET_ALDER
@@ -1167,6 +1406,7 @@ struct e2m3_skylake_quads_kit_t {
 /** e2m3 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
 struct e2m3_alder_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x32_state_alder_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1181,6 +1421,14 @@ struct e2m3_alder_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e2m3_alder;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e2m3_alder_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_alder_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_ALDER
 
 #if NUMKONG_TARGET_SIERRA
@@ -1188,6 +1436,7 @@ struct e2m3_alder_quads_kit_t {
 /** e2m3 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct e2m3_sierra_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x32_state_sierra_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1202,6 +1451,14 @@ struct e2m3_sierra_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e2m3_sierra;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e2m3_sierra_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SIERRA
 
 #if NUMKONG_TARGET_NEONSDOT
@@ -1209,6 +1466,7 @@ struct e2m3_sierra_quads_kit_t {
 /** e2m3 inner-product distance kit - Arm SDOT. */
 struct e2m3_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1223,6 +1481,14 @@ struct e2m3_neonsdot_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e2m3_neonsdot;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e2m3_neonsdot_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONSDOT
 
 #if NUMKONG_TARGET_NEONFP8
@@ -1230,6 +1496,7 @@ struct e2m3_neonsdot_quads_kit_t {
 /** e2m3 inner-product distance kit - Arm FP8 DOT. */
 struct e2m3_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1244,6 +1511,14 @@ struct e2m3_neonfp8_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e2m3_neonsdot;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e2m3_neonfp8_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONFP8
 
 #if NUMKONG_TARGET_V128RELAXED
@@ -1251,6 +1526,7 @@ struct e2m3_neonfp8_quads_kit_t {
 /** e2m3 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct e2m3_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1265,11 +1541,20 @@ struct e2m3_v128relaxed_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_e2m3_v128relaxed;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e2m3_v128relaxed_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 /** u8 inner-product distance kit - serial reference. */
 struct u8_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1290,6 +1575,7 @@ struct u8_serial_quads_kit_t {
 /** u8 inner-product distance kit - Haswell AVX2. */
 struct u8_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1304,6 +1590,14 @@ struct u8_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u8_haswell;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_ICELAKE
@@ -1311,6 +1605,7 @@ struct u8_haswell_quads_kit_t {
 /** u8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD. */
 struct u8_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x64_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1325,6 +1620,14 @@ struct u8_icelake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u8_icelake;
     static constexpr std::size_t step_dimensions = 64;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_icelake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_ICELAKE
 
 #if NUMKONG_TARGET_ALDER
@@ -1332,6 +1635,7 @@ struct u8_icelake_quads_kit_t {
 /** u8 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
 struct u8_alder_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x32_state_alder_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1346,6 +1650,14 @@ struct u8_alder_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u8_alder;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_alder_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_alder_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_ALDER
 
 #if NUMKONG_TARGET_SIERRA
@@ -1353,6 +1665,7 @@ struct u8_alder_quads_kit_t {
 /** u8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct u8_sierra_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x32_state_sierra_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1367,6 +1680,14 @@ struct u8_sierra_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u8_sierra;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_sierra_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SIERRA
 
 #if NUMKONG_TARGET_NEONSDOT
@@ -1374,6 +1695,7 @@ struct u8_sierra_quads_kit_t {
 /** u8 inner-product distance kit - Arm UDOT. */
 struct u8_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1388,6 +1710,14 @@ struct u8_neonsdot_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u8_neonsdot;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_neonsdot_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONSDOT
 
 #if NUMKONG_TARGET_V128
@@ -1395,6 +1725,7 @@ struct u8_neonsdot_quads_kit_t {
 /** u8 inner-product distance kit - WebAssembly SIMD128. */
 struct u8_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_v128_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1409,6 +1740,14 @@ struct u8_v128_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u8_v128;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_v128_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128
 
 #if NUMKONG_TARGET_V128RELAXED
@@ -1416,6 +1755,7 @@ struct u8_v128_quads_kit_t {
 /** u8 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct u8_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1430,6 +1770,14 @@ struct u8_v128relaxed_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u8_v128;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_v128relaxed_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 #if NUMKONG_TARGET_POWERVSX
@@ -1437,6 +1785,7 @@ struct u8_v128relaxed_quads_kit_t {
 /** u8 inner-product distance kit - IBM POWER VSX. */
 struct u8_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1451,11 +1800,20 @@ struct u8_powervsx_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u8_serial;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_powervsx_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_POWERVSX
 
 /** i8 inner-product distance kit - serial reference. */
 struct i8_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1476,6 +1834,7 @@ struct i8_serial_quads_kit_t {
 /** i8 inner-product distance kit - Intel Haswell AVX2. */
 struct i8_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1490,6 +1849,14 @@ struct i8_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i8_haswell;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i8_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_ICELAKE
@@ -1497,6 +1864,7 @@ struct i8_haswell_quads_kit_t {
 /** i8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD compensation. */
 struct i8_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x64_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1511,6 +1879,14 @@ struct i8_icelake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i8_icelake;
     static constexpr std::size_t step_dimensions = 64;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i8_icelake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_ICELAKE
 
 #if NUMKONG_TARGET_ALDER
@@ -1520,6 +1896,7 @@ struct i8_icelake_quads_kit_t {
  *  which Alder Lake also implements. */
 struct i8_alder_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x32_state_alder_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1534,6 +1911,14 @@ struct i8_alder_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i8_haswell;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i8_alder_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_alder_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_ALDER
 
 #if NUMKONG_TARGET_SIERRA
@@ -1541,6 +1926,7 @@ struct i8_alder_quads_kit_t {
 /** i8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct i8_sierra_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x32_state_sierra_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1555,6 +1941,14 @@ struct i8_sierra_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i8_sierra;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i8_sierra_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SIERRA
 
 #if NUMKONG_TARGET_NEONSDOT
@@ -1562,6 +1956,7 @@ struct i8_sierra_quads_kit_t {
 /** i8 inner-product distance kit - Arm SDOT. */
 struct i8_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1576,6 +1971,14 @@ struct i8_neonsdot_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i8_neonsdot;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i8_neonsdot_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONSDOT
 
 #if NUMKONG_TARGET_V128
@@ -1583,6 +1986,7 @@ struct i8_neonsdot_quads_kit_t {
 /** i8 inner-product distance kit - WebAssembly SIMD128. */
 struct i8_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_v128_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1597,6 +2001,14 @@ struct i8_v128_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i8_v128;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i8_v128_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128
 
 #if NUMKONG_TARGET_V128RELAXED
@@ -1604,6 +2016,7 @@ struct i8_v128_quads_kit_t {
 /** i8 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct i8_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1618,6 +2031,14 @@ struct i8_v128relaxed_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i8_v128;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i8_v128relaxed_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 #if NUMKONG_TARGET_POWERVSX
@@ -1625,6 +2046,7 @@ struct i8_v128relaxed_quads_kit_t {
 /** i8 inner-product distance kit - IBM POWER VSX. */
 struct i8_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1639,6 +2061,14 @@ struct i8_powervsx_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i8_serial;
     static constexpr std::size_t step_dimensions = 16;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i8_powervsx_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_POWERVSX
 
 /** u4x2 inner-product distance kit - serial reference. Two unsigned nibbles per
@@ -1646,6 +2076,7 @@ struct i8_powervsx_quads_kit_t {
  *  @c i32 like every other integral kit, even though @c dot_result_t is unsigned. */
 struct u4x2_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x16_state_serial_t;
     using step_vec_t = nk_b64_vec_t;
@@ -1666,6 +2097,7 @@ struct u4x2_serial_quads_kit_t {
 /** u4x2 inner-product distance kit - Intel Haswell AVX2. */
 struct u4x2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x32_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1680,6 +2112,14 @@ struct u4x2_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u4_haswell;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u4x2_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_ICELAKE
@@ -1687,6 +2127,7 @@ struct u4x2_haswell_quads_kit_t {
 /** u4x2 inner-product distance kit - Ice Lake VNNI. */
 struct u4x2_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x128_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1701,6 +2142,14 @@ struct u4x2_icelake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u4_skylake;
     static constexpr std::size_t step_dimensions = 128;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u4x2_icelake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_ICELAKE
 
 #if NUMKONG_TARGET_NEONSDOT
@@ -1708,6 +2157,7 @@ struct u4x2_icelake_quads_kit_t {
 /** u4x2 inner-product distance kit - Arm UDOT. */
 struct u4x2_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x32_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1722,6 +2172,14 @@ struct u4x2_neonsdot_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u4_serial;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u4x2_neonsdot_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONSDOT
 
 #if NUMKONG_TARGET_V128RELAXED
@@ -1729,6 +2187,7 @@ struct u4x2_neonsdot_quads_kit_t {
 /** u4x2 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct u4x2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x32_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1743,11 +2202,20 @@ struct u4x2_v128relaxed_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u4_serial;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u4x2_v128relaxed_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 /** i4x2 inner-product distance kit - serial reference. */
 struct i4x2_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x16_state_serial_t;
     using step_vec_t = nk_b64_vec_t;
@@ -1768,6 +2236,7 @@ struct i4x2_serial_quads_kit_t {
 /** i4x2 inner-product distance kit - Haswell AVX2. */
 struct i4x2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x32_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1782,7 +2251,14 @@ struct i4x2_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i4_haswell;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
 
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i4x2_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_ICELAKE
@@ -1790,6 +2266,7 @@ struct i4x2_haswell_quads_kit_t {
 /** i4 inner-product distance kit - Ice Lake VNNI. */
 struct i4x2_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x128_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1804,6 +2281,14 @@ struct i4x2_icelake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i4_skylake;
     static constexpr std::size_t step_dimensions = 128;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i4x2_icelake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_ICELAKE
 
 #if NUMKONG_TARGET_NEONSDOT
@@ -1811,6 +2296,7 @@ struct i4x2_icelake_quads_kit_t {
 /** i4 inner-product distance kit - Arm SDOT. */
 struct i4x2_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x32_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1825,6 +2311,14 @@ struct i4x2_neonsdot_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i4_serial;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i4x2_neonsdot_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONSDOT
 
 #if NUMKONG_TARGET_V128RELAXED
@@ -1833,6 +2327,7 @@ struct i4x2_neonsdot_quads_kit_t {
  *  4-bit moments kernel for this tier, so the norms come from the serial one. */
 struct i4x2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x32_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1847,11 +2342,20 @@ struct i4x2_v128relaxed_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_i4_serial;
     static constexpr std::size_t step_dimensions = 32;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct i4x2_v128relaxed_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 /** u1x8 inner-product distance kit - serial reference (binary AND-popcount). */
 struct u1x8_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1872,6 +2376,7 @@ struct u1x8_serial_quads_kit_t {
 /** u1x8 inner-product distance kit - Intel Haswell AVX2 + POPCNT. */
 struct u1x8_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1886,6 +2391,14 @@ struct u1x8_haswell_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u1_haswell;
     static constexpr std::size_t step_dimensions = 128;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u1x8_haswell_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_ICELAKE
@@ -1893,6 +2406,7 @@ struct u1x8_haswell_quads_kit_t {
 /** u1x8 inner-product distance kit - Intel Ice Lake AVX-512 + VPOPCNTQ. */
 struct u1x8_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x512_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1907,6 +2421,14 @@ struct u1x8_icelake_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u1_skylake;
     static constexpr std::size_t step_dimensions = 512;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u1x8_icelake_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_ICELAKE
 
 #if NUMKONG_TARGET_NEON
@@ -1914,6 +2436,7 @@ struct u1x8_icelake_quads_kit_t {
 /** u1x8 inner-product distance kit - Arm NEON (binary AND-popcount). */
 struct u1x8_neon_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_neon_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1928,6 +2451,14 @@ struct u1x8_neon_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u1_neon;
     static constexpr std::size_t step_dimensions = 128;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u1x8_neon_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEON
 
 #if NUMKONG_TARGET_V128
@@ -1936,6 +2467,7 @@ struct u1x8_neon_quads_kit_t {
  *  binary moments kernel for this tier, so the norms come from the serial one. */
 struct u1x8_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_v128_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1950,6 +2482,14 @@ struct u1x8_v128_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u1_serial;
     static constexpr std::size_t step_dimensions = 128;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u1x8_v128_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128
 
 #if NUMKONG_TARGET_POWERVSX
@@ -1958,6 +2498,7 @@ struct u1x8_v128_quads_kit_t {
  *  kernel for this tier, so the norms come from the serial one. */
 struct u1x8_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1972,203 +2513,282 @@ struct u1x8_powervsx_quads_kit_t {
     static constexpr auto compute_norms = nk_reduce_moments_u1_serial;
     static constexpr std::size_t step_dimensions = 128;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c quads_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u1x8_powervsx_quads_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_POWERVSX
 
-/** The visited set's kit for one capability ceiling: the Skylake group scan where the
- *  class carries AVX-512, the serial walk otherwise. */
+#if NUMKONG_TARGET_SKYLAKE
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("avx512f"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx512f")
+#endif
+
+/**
+ *  @brief The group scan for u32 slots on AVX-512 units: one 512-bit load compares sixteen slots
+ *      against the element and against the empty sentinel, so a probe touches cache lines rather
+ *      than slots.
+ *
+ *  Placement is group-ordered: an element may land @b before its exact hashed slot inside its
+ *  starting group, and every reader replicates that order, so a group holding any empty lane ends
+ *  the walk. Groups are 16-aligned and the capacity is a power of two, so once it reaches 16 no
+ *  load straddles the table's end; smaller tables take the serial walk. The scan carries its own
+ *  ISA, so any unit compiles it whatever flags that unit was given.
+ */
+struct u32_skylake_visits_hash_set_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
+
+    template <typename hasher_type_>
+    static inline u32_t* locate_slot(u32_t* slots, std::size_t capacity, hasher_type_ const& hasher,
+                                     u32_t element) noexcept {
+        if (capacity < 16) return serial_visits_hash_set_kit_t::locate_slot(slots, capacity, hasher, element);
+        __m512i const key_u32x16 = _mm512_set1_epi32(static_cast<int>(element));
+        __m512i const empty_u32x16 = _mm512_set1_epi32(static_cast<int>(unused_hash_slot_value<u32_t>()));
+        std::size_t group = (hasher(element) & (capacity - 1)) & ~std::size_t {15};
+        while (true) {
+            __m512i const slots_u32x16 = _mm512_loadu_si512(slots + group);
+            __mmask16 const key_mask_m16 = _mm512_cmpeq_epi32_mask(slots_u32x16, key_u32x16);
+            if (key_mask_m16) return slots + group + std::countr_zero(static_cast<unsigned>(key_mask_m16));
+            __mmask16 const empty_mask_m16 = _mm512_cmpeq_epi32_mask(slots_u32x16, empty_u32x16);
+            if (empty_mask_m16) return slots + group + std::countr_zero(static_cast<unsigned>(empty_mask_m16));
+            group = (group + 16) & (capacity - 1);
+        }
+    }
+};
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#else
+
+/** The kit this build cannot carry, kept so @c visits_hash_set_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct u32_skylake_visits_hash_set_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
+#endif // NUMKONG_TARGET_SKYLAKE
+
+/** The visited set's kit for one capability ceiling: the Skylake group scan where the class
+ *  carries AVX-512, else the dependency-free core's serial walk, which as the floor states no
+ *  capability. */
 template <nk_capability_t caps_>
-struct visits_hash_set_chain {
-    using kit_t = typename first_available_kit<                                                                   //
-        serial_visits_hash_set_kit_t,                                                                             //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, u32_skylake_visits_hash_set_kit_t> //
+struct visits_hash_set_ladder {
+    using kit_t = typename highest_kit<   //
+        caps_,                            //
+        serial_visits_hash_set_kit_t,     //
+        u32_skylake_visits_hash_set_kit_t //
         >::type;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                       //
-        bf16_serial_quads_kit_t,                                                                                      //
-        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_quads_kit_t>,                   //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, bf16_skylake_quads_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, bf16_haswell_quads_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_NEONBFDOT && (caps_ & nk_cap_neonbfdot_k) != 0, bf16_neonbfdot_quads_kit_t>,       //
-        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, bf16_neon_quads_kit_t>,                      //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, bf16_v128relaxed_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, bf16_v128_quads_kit_t>,                      //
-        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, bf16_powervsx_quads_kit_t>           //
+struct quads_ladder<nk::bf16_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        bf16_serial_quads_kit_t,        //
+        bf16_genoa_quads_kit_t,         //
+        bf16_skylake_quads_kit_t,       //
+        bf16_haswell_quads_kit_t,       //
+        bf16_neonbfdot_quads_kit_t,     //
+        bf16_neon_quads_kit_t,          //
+        bf16_v128relaxed_quads_kit_t,   //
+        bf16_v128_quads_kit_t,          //
+        bf16_powervsx_quads_kit_t       //
         >::type;
 
-    /** The capability bit of the layer that won - compare against the requested ceiling. */
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::f16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        f16_serial_quads_kit_t,                                                                                      //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_quads_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, f16_haswell_quads_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_quads_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_quads_kit_t>,                      //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, f16_v128relaxed_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, f16_powervsx_quads_kit_t>           //
+struct quads_ladder<nk::f16_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        f16_serial_quads_kit_t,         //
+        f16_skylake_quads_kit_t,        //
+        f16_haswell_quads_kit_t,        //
+        f16_neonfhm_quads_kit_t,        //
+        f16_neon_quads_kit_t,           //
+        f16_v128relaxed_quads_kit_t,    //
+        f16_powervsx_quads_kit_t        //
         >::type;
 
-    /** The capability bit of the layer that won - compare against the requested ceiling. */
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::e5m2_t, caps_> {
-    using kit_t = typename first_available_kit< //
-        e5m2_serial_quads_kit_t,                //
-        chain_layer<NUMKONG_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_quads_kit_t>,
-        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e5m2_genoa_quads_kit_t>,                  //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e5m2_skylake_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e5m2_haswell_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e5m2_neonfp8_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e5m2_neonfhm_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e5m2_v128relaxed_quads_kit_t> //
+struct quads_ladder<nk::e5m2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e5m2_serial_quads_kit_t,        //
+        e5m2_diamond_quads_kit_t,       //
+        e5m2_genoa_quads_kit_t,         //
+        e5m2_skylake_quads_kit_t,       //
+        e5m2_haswell_quads_kit_t,       //
+        e5m2_neonfp8_quads_kit_t,       //
+        e5m2_neonfhm_quads_kit_t,       //
+        e5m2_v128relaxed_quads_kit_t    //
         >::type;
 
-    /** The capability bit of the layer that won - compare against the requested ceiling. */
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::e4m3_t, caps_> {
-    using kit_t = typename first_available_kit< //
-        e4m3_serial_quads_kit_t,                //
-        chain_layer<NUMKONG_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_quads_kit_t>,
-        chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, e4m3_genoa_quads_kit_t>,                  //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e4m3_neonfp8_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_NEONFHM && (caps_ & nk_cap_neonfhm_k) != 0, e4m3_neonfhm_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e4m3_v128relaxed_quads_kit_t> //
+struct quads_ladder<nk::e4m3_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e4m3_serial_quads_kit_t,        //
+        e4m3_diamond_quads_kit_t,       //
+        e4m3_genoa_quads_kit_t,         //
+        e4m3_skylake_quads_kit_t,       //
+        e4m3_haswell_quads_kit_t,       //
+        e4m3_neonfp8_quads_kit_t,       //
+        e4m3_neonfhm_quads_kit_t,       //
+        e4m3_v128relaxed_quads_kit_t    //
         >::type;
 
-    /** The capability bit of the layer that won - compare against the requested ceiling. */
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::e3m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        e3m2_serial_quads_kit_t,                                                                                     //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e3m2_haswell_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e3m2_neonfp8_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e3m2_neonsdot_quads_kit_t>,         //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e3m2_v128relaxed_quads_kit_t> //
+struct quads_ladder<nk::e3m2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e3m2_serial_quads_kit_t,        //
+        e3m2_skylake_quads_kit_t,       //
+        e3m2_haswell_quads_kit_t,       //
+        e3m2_neonfp8_quads_kit_t,       //
+        e3m2_neonsdot_quads_kit_t,      //
+        e3m2_v128relaxed_quads_kit_t    //
         >::type;
 
-    /** The capability bit of the layer that won - compare against the requested ceiling. */
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::e2m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        e2m3_serial_quads_kit_t,                                                                                     //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, e2m3_sierra_quads_kit_t>,               //
-        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, e2m3_alder_quads_kit_t>,                  //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e2m3_haswell_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_NEONFP8 && (caps_ & nk_cap_neonfp8_k) != 0, e2m3_neonfp8_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, e2m3_neonsdot_quads_kit_t>,         //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, e2m3_v128relaxed_quads_kit_t> //
+struct quads_ladder<nk::e2m3_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e2m3_serial_quads_kit_t,        //
+        e2m3_skylake_quads_kit_t,       //
+        e2m3_sierra_quads_kit_t,        //
+        e2m3_alder_quads_kit_t,         //
+        e2m3_haswell_quads_kit_t,       //
+        e2m3_neonfp8_quads_kit_t,       //
+        e2m3_neonsdot_quads_kit_t,      //
+        e2m3_v128relaxed_quads_kit_t    //
         >::type;
 
-    /** The capability bit of the layer that won - compare against the requested ceiling. */
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                     //
-        i8_serial_quads_kit_t,                                                                                      //
-        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_quads_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, i8_sierra_quads_kit_t>,                //
-        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, i8_alder_quads_kit_t>,                   //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i8_haswell_quads_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i8_neonsdot_quads_kit_t>,          //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i8_v128relaxed_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, i8_v128_quads_kit_t>,                      //
-        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, i8_powervsx_quads_kit_t>           //
+struct quads_ladder<nk::i8_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        i8_serial_quads_kit_t,          //
+        i8_icelake_quads_kit_t,         //
+        i8_sierra_quads_kit_t,          //
+        i8_alder_quads_kit_t,           //
+        i8_haswell_quads_kit_t,         //
+        i8_neonsdot_quads_kit_t,        //
+        i8_v128relaxed_quads_kit_t,     //
+        i8_v128_quads_kit_t,            //
+        i8_powervsx_quads_kit_t         //
         >::type;
 
-    /** The capability bit of the layer that won - compare against the requested ceiling. */
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::u8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                     //
-        u8_serial_quads_kit_t,                                                                                      //
-        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_quads_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_SIERRA && (caps_ & nk_cap_sierra_k) != 0, u8_sierra_quads_kit_t>,                //
-        chain_layer<NUMKONG_TARGET_ALDER && (caps_ & nk_cap_alder_k) != 0, u8_alder_quads_kit_t>,                   //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u8_haswell_quads_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u8_neonsdot_quads_kit_t>,          //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u8_v128relaxed_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u8_v128_quads_kit_t>,                      //
-        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u8_powervsx_quads_kit_t>           //
+struct quads_ladder<nk::u8_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        u8_serial_quads_kit_t,          //
+        u8_icelake_quads_kit_t,         //
+        u8_sierra_quads_kit_t,          //
+        u8_alder_quads_kit_t,           //
+        u8_haswell_quads_kit_t,         //
+        u8_neonsdot_quads_kit_t,        //
+        u8_v128relaxed_quads_kit_t,     //
+        u8_v128_quads_kit_t,            //
+        u8_powervsx_quads_kit_t         //
         >::type;
 
-    /** The capability bit of the layer that won - compare against the requested ceiling. */
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::u4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        u4x2_serial_quads_kit_t,                                                                                     //
-        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u4x2_haswell_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, u4x2_neonsdot_quads_kit_t>,         //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, u4x2_v128relaxed_quads_kit_t> //
+struct quads_ladder<nk::u4x2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        u4x2_serial_quads_kit_t,        //
+        u4x2_icelake_quads_kit_t,       //
+        u4x2_haswell_quads_kit_t,       //
+        u4x2_neonsdot_quads_kit_t,      //
+        u4x2_v128relaxed_quads_kit_t    //
         >::type;
 
-    /** The capability bit of the layer that won - compare against the requested ceiling. */
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::i4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        i4x2_serial_quads_kit_t,                                                                                     //
-        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, i4x2_haswell_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_NEONSDOT && (caps_ & nk_cap_neonsdot_k) != 0, i4x2_neonsdot_quads_kit_t>,         //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0, i4x2_v128relaxed_quads_kit_t> //
+struct quads_ladder<nk::i4x2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        i4x2_serial_quads_kit_t,        //
+        i4x2_icelake_quads_kit_t,       //
+        i4x2_haswell_quads_kit_t,       //
+        i4x2_neonsdot_quads_kit_t,      //
+        i4x2_v128relaxed_quads_kit_t    //
         >::type;
 
-    /** The capability bit of the layer that won - compare against the requested ceiling. */
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct quads_chain<nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                             //
-        u1x8_serial_quads_kit_t,                                                                            //
-        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_quads_kit_t>,   //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, u1x8_haswell_quads_kit_t>,   //
-        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, u1x8_neon_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_V128 && (caps_ & nk_cap_v128_k) != 0, u1x8_v128_quads_kit_t>,            //
-        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, u1x8_powervsx_quads_kit_t> //
+struct quads_ladder<nk::u1x8_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        u1x8_serial_quads_kit_t,        //
+        u1x8_icelake_quads_kit_t,       //
+        u1x8_haswell_quads_kit_t,       //
+        u1x8_neon_quads_kit_t,          //
+        u1x8_v128_quads_kit_t,          //
+        u1x8_powervsx_quads_kit_t       //
         >::type;
+
+    /** The capability bit of the rung that won - compare against the requested ceiling. */
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -2176,6 +2796,7 @@ struct quads_chain<nk::u1x8_t, caps_> {
  *  kernels every CPU runs. */
 struct serial_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_serial;
     static constexpr auto scale = nk_each_scale_f32_serial;
     static constexpr auto blend = nk_each_blend_f32_serial;
@@ -2186,18 +2807,10 @@ struct serial_elementwise_kit_t {
     }
 };
 
-struct haswell_elementwise_kit_t;
-struct skylake_elementwise_kit_t;
-struct icelake_elementwise_kit_t;
-struct sapphire_elementwise_kit_t;
-struct neon_elementwise_kit_t;
-struct rvv_elementwise_kit_t;
-struct v128relaxed_elementwise_kit_t;
-struct powervsx_elementwise_kit_t;
-
 #if NUMKONG_TARGET_HASWELL
 struct haswell_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_haswell;
     static constexpr auto scale = nk_each_scale_f32_haswell;
     static constexpr auto blend = nk_each_blend_f32_haswell;
@@ -2206,15 +2819,32 @@ struct haswell_elementwise_kit_t {
         _mm256_storeu_ps(values.data(), nk_exp2_f32x8_haswell_(_mm256_loadu_ps(values.data())));
     }
 };
+#else
+
+/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct haswell_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
 /** Skylake's casts and arithmetic over Haswell's exponentials, as one tile fills a single AVX2 register. */
 struct skylake_elementwise_kit_t : haswell_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_skylake;
     static constexpr auto scale = nk_each_scale_f32_skylake;
     static constexpr auto blend = nk_each_blend_f32_skylake;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct skylake_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_SKYLAKE
 
@@ -2222,7 +2852,16 @@ struct skylake_elementwise_kit_t : haswell_elementwise_kit_t {
 /** Icelake's casts over Skylake's arithmetic, which Icelake adds no kernels to. */
 struct icelake_elementwise_kit_t : skylake_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_icelake;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct icelake_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_ICELAKE
 
@@ -2230,13 +2869,23 @@ struct icelake_elementwise_kit_t : skylake_elementwise_kit_t {
 /** Sapphire's half-precision casts over Skylake's arithmetic. */
 struct sapphire_elementwise_kit_t : skylake_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphire_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_sapphire;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct sapphire_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphire_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_SAPPHIRE
 
 #if NUMKONG_TARGET_NEON
 struct neon_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_neon;
     static constexpr auto scale = nk_each_scale_f32_neon;
     static constexpr auto blend = nk_each_blend_f32_neon;
@@ -2246,11 +2895,20 @@ struct neon_elementwise_kit_t {
         vst1q_f32(values.data() + 4, nk_exp2_f32x4_neon_(vld1q_f32(values.data() + 4)));
     }
 };
+#else
+
+/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct neon_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEON
 
 #if NUMKONG_TARGET_RVV
 struct rvv_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_rvv;
     static constexpr auto scale = nk_each_scale_f32_rvv;
     static constexpr auto blend = nk_each_blend_f32_rvv;
@@ -2260,11 +2918,20 @@ struct rvv_elementwise_kit_t {
         __riscv_vse32_v_f32m4(values.data(), nk_exp2_f32m4_rvv_(lanes, values.size()), values.size());
     }
 };
+#else
+
+/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct rvv_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_RVV
 
 #if NUMKONG_TARGET_V128RELAXED
 struct v128relaxed_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_v128relaxed;
     static constexpr auto scale = nk_each_scale_f32_v128relaxed;
     static constexpr auto blend = nk_each_blend_f32_v128relaxed;
@@ -2274,6 +2941,14 @@ struct v128relaxed_elementwise_kit_t {
         wasm_v128_store(values.data() + 4, nk_exp2_f32x4_v128relaxed_(wasm_v128_load(values.data() + 4)));
     }
 };
+#else
+
+/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct v128relaxed_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 #if NUMKONG_TARGET_POWERVSX
@@ -2281,24 +2956,33 @@ struct v128relaxed_elementwise_kit_t {
 /** POWER's casts over the serial arithmetic, which POWER adds no kernels to. */
 struct powervsx_elementwise_kit_t : serial_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_powervsx;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c elementwise_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct powervsx_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_POWERVSX
 
 /** The values kit for one capability ceiling. Reading order is the priority order. */
 template <nk_capability_t caps_>
-struct elementwise_chain {
-    using kit_t = typename first_available_kit<                                                               //
-        serial_elementwise_kit_t,                                                                             //
-        chain_layer<NUMKONG_TARGET_SAPPHIRE && (caps_ & nk_cap_sapphire_k) != 0, sapphire_elementwise_kit_t>, //
-        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, icelake_elementwise_kit_t>,    //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, skylake_elementwise_kit_t>,    //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, haswell_elementwise_kit_t>,    //
-        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, neon_elementwise_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_RVV && (caps_ & nk_cap_rvv_k) != 0, rvv_elementwise_kit_t>,                //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
-                    v128relaxed_elementwise_kit_t>,                                                          //
-        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, powervsx_elementwise_kit_t> //
+struct elementwise_ladder {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        serial_elementwise_kit_t,       //
+        sapphire_elementwise_kit_t,     //
+        icelake_elementwise_kit_t,      //
+        skylake_elementwise_kit_t,      //
+        haswell_elementwise_kit_t,      //
+        neon_elementwise_kit_t,         //
+        rvv_elementwise_kit_t,          //
+        v128relaxed_elementwise_kit_t,  //
+        powervsx_elementwise_kit_t      //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -2306,95 +2990,129 @@ struct elementwise_chain {
 /** The kit narrowing f32 rows at unit RMS into @p scalar_type_, whose dot products land in f32; a
  *  scalar without one has no @c kit_t, and bf16 needs none, as it keeps f32's exponent range. */
 template <typename scalar_type_, nk_capability_t caps_>
-struct rmscast_chain {};
-
-struct f16_serial_rmscast_kit_t;
-struct e4m3_serial_rmscast_kit_t;
-struct e5m2_serial_rmscast_kit_t;
-struct e2m3_serial_rmscast_kit_t;
-struct e3m2_serial_rmscast_kit_t;
-struct e4m3_haswell_rmscast_kit_t;
-struct e4m3_skylake_rmscast_kit_t;
-struct f16_neon_rmscast_kit_t;
-struct e4m3_neon_rmscast_kit_t;
+struct rmscast_ladder {};
 
 struct f16_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_f16_serial;
 };
 struct e4m3_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e4m3_serial;
 };
 struct e5m2_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e5m2_serial;
 };
 struct e2m3_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e2m3_serial;
 };
 struct e3m2_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e3m2_serial;
 };
 
 #if NUMKONG_TARGET_HASWELL
 struct e4m3_haswell_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e4m3_haswell;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c rmscast_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e4m3_haswell_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
 struct e4m3_skylake_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e4m3_skylake;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c rmscast_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct e4m3_skylake_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_SKYLAKE
 
 #if NUMKONG_TARGET_NEON
 struct f16_neon_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_f16_neon;
 };
 struct e4m3_neon_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e4m3_neon;
+};
+#else
+
+/** The kits this build cannot carry, kept so @c rmscast_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_neon_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
+struct e4m3_neon_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_NEON
 
 template <nk_capability_t caps_>
-struct rmscast_chain<nk::f16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                  //
-        f16_serial_rmscast_kit_t,                                                                //
-        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_rmscast_kit_t> //
+struct rmscast_ladder<nk::f16_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        f16_serial_rmscast_kit_t,       //
+        f16_neon_rmscast_kit_t          //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
-struct rmscast_chain<nk::e4m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                                             //
-        e4m3_serial_rmscast_kit_t,                                                                          //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_rmscast_kit_t>, //
-        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_rmscast_kit_t>, //
-        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, e4m3_neon_rmscast_kit_t>           //
+struct rmscast_ladder<nk::e4m3_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e4m3_serial_rmscast_kit_t,      //
+        e4m3_skylake_rmscast_kit_t,     //
+        e4m3_haswell_rmscast_kit_t,     //
+        e4m3_neon_rmscast_kit_t         //
         >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
-struct rmscast_chain<nk::e5m2_t, caps_> {
+struct rmscast_ladder<nk::e5m2_t, caps_> {
     using kit_t = e5m2_serial_rmscast_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
-struct rmscast_chain<nk::e2m3_t, caps_> {
+struct rmscast_ladder<nk::e2m3_t, caps_> {
     using kit_t = e2m3_serial_rmscast_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
-struct rmscast_chain<nk::e3m2_t, caps_> {
+struct rmscast_ladder<nk::e3m2_t, caps_> {
     using kit_t = e3m2_serial_rmscast_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 /** Writes row @p row of @p source into @p target in @p scalar_type_: a byte move when the scalars
@@ -2404,7 +3122,7 @@ struct rmscast_chain<nk::e3m2_t, caps_> {
 template <nk_capability_t capability_, nk::numeric_dtype scalar_type_>
 void import_row(rows_view_t source, std::size_t row, nk_kernel_kind_t kernel, nk::vector_span<scalar_type_> target,
                 nk::vector_span<f32_t> widened) noexcept {
-    using cast_kit_t = typename elementwise_chain<capability_>::kit_t;
+    using cast_kit_t = typename elementwise_ladder<capability_>::kit_t;
     byte_t const* const from = source.row(row);
     std::size_t const columns = source.columns;
     if (source.dtype == scalar_type_::dtype()) {
@@ -2412,14 +3130,14 @@ void import_row(rows_view_t source, std::size_t row, nk_kernel_kind_t kernel, nk
         return;
     }
     [[maybe_unused]] nk_status_t status = nk_success_k;
-    if constexpr (requires { typename rmscast_chain<scalar_type_, capability_>::kit_t; })
+    if constexpr (requires { typename rmscast_ladder<scalar_type_, capability_>::kit_t; })
         if (kernel == nk_kernel_angular_k && (source.dtype == nk_f32_k || source.dtype == nk_f64_k)) {
             f32_t const* wide = reinterpret_cast<f32_t const*>(from);
             if (source.dtype == nk_f64_k) {
                 status = cast_kit_t::cast(from, nk_f64_k, widened.data(), nk_f32_k, columns, nullptr);
                 wide = widened.data();
             }
-            status = rmscast_chain<scalar_type_, capability_>::kit_t::rmscast(
+            status = rmscast_ladder<scalar_type_, capability_>::kit_t::rmscast(
                 wide, nullptr, &target.data()->raw_, 1, 1, columns, columns * sizeof(f32_t),
                 packed_bytes(scalar_type_::dtype(), columns), std::numeric_limits<f32_t>::min(), nullptr);
             assert(status == nk_success_k && "Every kit RMS-casts from f32");
@@ -2445,7 +3163,7 @@ nk::matrix_view<scalar_type_> import_rows(rows_view_t source, std::size_t first,
  *  move when they agree, else a cast. */
 template <nk_capability_t capability_>
 void export_row(void const* native, nk_dtype_t native_dtype, rows_span_t target, std::size_t row) noexcept {
-    using cast_kit_t = typename elementwise_chain<capability_>::kit_t;
+    using cast_kit_t = typename elementwise_ladder<capability_>::kit_t;
     if (target.dtype == native_dtype) {
         std::memcpy(target.row(row), native, packed_bytes(target.dtype, target.columns));
         return;
@@ -2462,7 +3180,7 @@ template <nk::numeric_dtype scalar_type_, nk_capability_t caps_>
 void values_step(f32_t* outputs, std::size_t heads, std::size_t columns, char const* const* rows,
                  std::array<f32_t, 8> const* weights, std::array<f32_t, 8> const& corrections,
                  std::size_t count) noexcept {
-    using kit_t = typename elementwise_chain<caps_>::kit_t;
+    using kit_t = typename elementwise_ladder<caps_>::kit_t;
     // A multiple of eight columns, so every chunk starts on a byte even for the packed kinds.
     constexpr std::size_t chunk_columns_k = 64;
     std::size_t const bits = nk_dtype_bits(scalar_type_::dtype());
@@ -2520,15 +3238,15 @@ constexpr bool kernel_supported(nk_kernel_kind_t kernel) noexcept {
     else return kernel == nk_kernel_dot_k || kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
 }
 
-/** Whether a quads kit covers @p scalar_ under @p caps_ - the chains specialize only the scalars
+/** Whether a quads kit covers @p scalar_ under @p caps_ - the ladders specialize only the scalars
  *  they adapt. */
 template <typename scalar_, nk_capability_t caps_>
-concept quads_adapted = requires { typename quads_chain<scalar_, caps_>::kit_t; };
+concept quads_adapted = requires { typename quads_ladder<scalar_, caps_>::kit_t; };
 
 /** Whether that kit's epilogue also finalizes @p kernel_. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 concept quads_supported = quads_adapted<scalar_, caps_> &&
-                          kernel_supported<typename quads_chain<scalar_, caps_>::kit_t>(kernel_);
+                          kernel_supported<typename quads_ladder<scalar_, caps_>::kit_t>(kernel_);
 
 /** Widens the four lanes an epilogue wrote as @p lane_type_ into distances. */
 template <typename lane_type_, typename finalized_vec_type_>
@@ -2704,7 +3422,7 @@ template <std::size_t fan_out_, quads_kit kit_, typename cache_hints_type_>
 template <nk_capability_t caps_, nk::numeric_dtype scalar_>
 [[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> norms(
     nk::vector_view<scalar_> vec) noexcept {
-    using kit_t = typename quads_chain<scalar_, caps_>::kit_t;
+    using kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
     return invoke_dense_norms_(kit_t::compute_norms, vec);
 }
 
@@ -2721,7 +3439,7 @@ template <nk_capability_t caps_, nk::numeric_dtype scalar_>
     vector_norms<typename scalar_::dot_result_t> query_norms, //
     nk::vector_view<scalar_> candidate,                       //
     vector_norms<typename scalar_::dot_result_t> candidate_norms) noexcept {
-    using kit_t = typename quads_chain<scalar_, caps_>::kit_t;
+    using kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
     return invoke_scores_<1, kit_t>( //
                kernel, query, query_norms, std::array<nk::vector_view<scalar_>, 1> {candidate},
                std::array {candidate_norms}, std::array<nk::vector_view<scalar_>, 1> {candidate},
@@ -2737,7 +3455,7 @@ template <nk_capability_t caps_, nk::numeric_dtype scalar_>
     vector_norms<typename scalar_::dot_result_t> query_norms, //
     std::array<nk::vector_view<scalar_>, 4> candidates,       //
     std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms) noexcept {
-    using kit_t = typename quads_chain<scalar_, caps_>::kit_t;
+    using kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
     return invoke_scores_<4, kit_t>(kernel, query, query_norms, candidates, candidates_norms, candidates,
                                     fu::standard_cache_hints_t {})
         .distances;
@@ -2751,7 +3469,7 @@ template <nk_capability_t caps_, nk::numeric_dtype scalar_>
     vector_norms<typename scalar_::dot_result_t> query_norms,                          //
     std::array<nk::vector_view<scalar_>, 4> candidates,                                //
     std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms) noexcept {
-    using kit_t = typename quads_chain<scalar_, caps_>::kit_t;
+    using kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
     return invoke_scores_<4, kit_t>(kernel, query, query_norms, candidates, candidates_norms, candidates,
                                     fu::standard_cache_hints_t {});
 }
@@ -2767,7 +3485,7 @@ template <nk_capability_t caps_, nk::numeric_dtype scalar_, typename cache_hints
     std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms,      //
     std::array<nk::vector_view<scalar_>, 4> next_candidates,                           //
     cache_hints_type_ hints) noexcept {
-    using kit_t = typename quads_chain<scalar_, caps_>::kit_t;
+    using kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
     return invoke_scores_<4, kit_t>(kernel, query, query_norms, candidates, candidates_norms, next_candidates, hints);
 }
 
@@ -2782,34 +3500,15 @@ struct dummy_rescoring_t {
  *  the 4-way kits. */
 struct no_tiles_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
 };
-
-struct bf16_sapphireamx_tiles_kit_t;
-struct i8_sapphireamx_tiles_kit_t;
-struct u8_sapphireamx_tiles_kit_t;
-struct e4m3_sapphireamx_tiles_kit_t;
-struct e5m2_sapphireamx_tiles_kit_t;
-struct e3m2_sapphireamx_tiles_kit_t;
-struct e2m3_sapphireamx_tiles_kit_t;
-struct f16_graniteamx_tiles_kit_t;
-struct e5m2_graniteamx_tiles_kit_t;
-struct bf16_sme_tiles_kit_t;
-struct f16_sme_tiles_kit_t;
-struct i8_sme_tiles_kit_t;
-struct u8_sme_tiles_kit_t;
-struct e4m3_sme_tiles_kit_t;
-struct e5m2_sme_tiles_kit_t;
-struct e3m2_sme_tiles_kit_t;
-struct e2m3_sme_tiles_kit_t;
-struct i4x2_sme_tiles_kit_t;
-struct u4x2_sme_tiles_kit_t;
-struct u1x8_smebi32_tiles_kit_t;
 
 #if NUMKONG_TARGET_SAPPHIREAMX
 
 /** bf16 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct bf16_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2822,6 +3521,7 @@ struct bf16_sapphireamx_tiles_kit_t {
 /** i8 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct i8_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2834,6 +3534,7 @@ struct i8_sapphireamx_tiles_kit_t {
 /** u8 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct u8_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2846,6 +3547,7 @@ struct u8_sapphireamx_tiles_kit_t {
 /** e4m3 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct e4m3_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2858,6 +3560,7 @@ struct e4m3_sapphireamx_tiles_kit_t {
 /** e5m2 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct e5m2_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2870,6 +3573,7 @@ struct e5m2_sapphireamx_tiles_kit_t {
 /** e3m2 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct e3m2_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2882,6 +3586,7 @@ struct e3m2_sapphireamx_tiles_kit_t {
 /** e2m3 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct e2m3_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2891,6 +3596,38 @@ struct e2m3_sapphireamx_tiles_kit_t {
     static constexpr auto dots_packed = nk_dots_packed_e2m3_sapphireamx;
 };
 
+#else
+
+/** The kits this build cannot carry, kept so @c tiles_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = false;
+};
+struct i8_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = false;
+};
+struct u8_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = false;
+};
+struct e4m3_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = false;
+};
+struct e5m2_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = false;
+};
+struct e3m2_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = false;
+};
+struct e2m3_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SAPPHIREAMX
 
 #if NUMKONG_TARGET_GRANITEAMX
@@ -2898,6 +3635,7 @@ struct e2m3_sapphireamx_tiles_kit_t {
 /** f16 tiles kit - Intel AMX-FP16. */
 struct f16_graniteamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_graniteamx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2910,6 +3648,7 @@ struct f16_graniteamx_tiles_kit_t {
 /** e5m2 tiles kit - Intel AMX-FP16. */
 struct e5m2_graniteamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_graniteamx_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2919,6 +3658,18 @@ struct e5m2_graniteamx_tiles_kit_t {
     static constexpr auto dots_packed = nk_dots_packed_e5m2_graniteamx;
 };
 
+#else
+
+/** The kits this build cannot carry, kept so @c tiles_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_graniteamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_graniteamx_k;
+    static constexpr bool compiled_k = false;
+};
+struct e5m2_graniteamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_graniteamx_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_GRANITEAMX
 
 #if NUMKONG_TARGET_SME
@@ -2926,6 +3677,7 @@ struct e5m2_graniteamx_tiles_kit_t {
 /** bf16 tiles kit - Arm SME. */
 struct bf16_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2938,6 +3690,7 @@ struct bf16_sme_tiles_kit_t {
 /** f16 tiles kit - Arm SME. */
 struct f16_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2950,6 +3703,7 @@ struct f16_sme_tiles_kit_t {
 /** i8 tiles kit - Arm SME. */
 struct i8_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2962,6 +3716,7 @@ struct i8_sme_tiles_kit_t {
 /** u8 tiles kit - Arm SME. */
 struct u8_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2974,6 +3729,7 @@ struct u8_sme_tiles_kit_t {
 /** e4m3 tiles kit - Arm SME. */
 struct e4m3_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2986,6 +3742,7 @@ struct e4m3_sme_tiles_kit_t {
 /** e5m2 tiles kit - Arm SME. */
 struct e5m2_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -2998,6 +3755,7 @@ struct e5m2_sme_tiles_kit_t {
 /** e3m2 tiles kit - Arm SME. */
 struct e3m2_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -3010,6 +3768,7 @@ struct e3m2_sme_tiles_kit_t {
 /** e2m3 tiles kit - Arm SME. */
 struct e2m3_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -3022,6 +3781,7 @@ struct e2m3_sme_tiles_kit_t {
 /** i4x2 tiles kit - Arm SME. */
 struct i4x2_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -3034,6 +3794,7 @@ struct i4x2_sme_tiles_kit_t {
 /** u4x2 tiles kit - Arm SME. */
 struct u4x2_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -3043,6 +3804,50 @@ struct u4x2_sme_tiles_kit_t {
     static constexpr auto dots_packed = nk_dots_packed_u4_sme;
 };
 
+#else
+
+/** The kits this build cannot carry, kept so @c tiles_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = false;
+};
+struct f16_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = false;
+};
+struct i8_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = false;
+};
+struct u8_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = false;
+};
+struct e4m3_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = false;
+};
+struct e5m2_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = false;
+};
+struct e3m2_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = false;
+};
+struct e2m3_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = false;
+};
+struct i4x2_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = false;
+};
+struct u4x2_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SME
 
 #if NUMKONG_TARGET_SMEBI32
@@ -3050,6 +3855,7 @@ struct u4x2_sme_tiles_kit_t {
 /** u1x8 tiles kit - Arm SME binary outer products. */
 struct u1x8_smebi32_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_smebi32_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -3059,13 +3865,21 @@ struct u1x8_smebi32_tiles_kit_t {
     static constexpr auto dots_packed = nk_dots_packed_u1_smebi32;
 };
 
+#else
+
+/** The kit this build cannot carry, kept so @c tiles_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u1x8_smebi32_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_smebi32_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SMEBI32
 
 /** Matrix-engine capability cascade for every scalar, over the same @p caps_ bitmask as
- *  @c quads_chain. The primary template resolves to @c no_tiles_kit_t, and only the scalars
+ *  @c quads_ladder. The primary template resolves to @c no_tiles_kit_t, and only the scalars
  *  some engine multiplies specialize it. */
 template <nk::numeric_dtype scalar_, nk_capability_t caps_>
-struct tiles_chain {
+struct tiles_ladder {
     using kit_t = no_tiles_kit_t;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = false;
@@ -3073,11 +3887,12 @@ struct tiles_chain {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        no_tiles_kit_t,                                                                                              //
-        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, bf16_sme_tiles_kit_t>,                        //
-        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, bf16_sapphireamx_tiles_kit_t> //
+struct tiles_ladder<nk::bf16_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        bf16_sme_tiles_kit_t,           //
+        bf16_sapphireamx_tiles_kit_t    //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -3085,10 +3900,11 @@ struct tiles_chain<nk::bf16_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::u1x8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                          //
-        no_tiles_kit_t,                                                                                  //
-        chain_layer<NUMKONG_TARGET_SMEBI32 && (caps_ & nk_cap_smebi32_k) != 0, u1x8_smebi32_tiles_kit_t> //
+struct tiles_ladder<nk::u1x8_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        u1x8_smebi32_tiles_kit_t        //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -3096,11 +3912,12 @@ struct tiles_chain<nk::u1x8_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                    //
-        no_tiles_kit_t,                                                                                            //
-        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, i8_sme_tiles_kit_t>,                        //
-        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, i8_sapphireamx_tiles_kit_t> //
+struct tiles_ladder<nk::i8_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        i8_sme_tiles_kit_t,             //
+        i8_sapphireamx_tiles_kit_t      //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -3108,11 +3925,12 @@ struct tiles_chain<nk::i8_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::e4m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        no_tiles_kit_t,                                                                                              //
-        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e4m3_sme_tiles_kit_t>,                        //
-        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, e4m3_sapphireamx_tiles_kit_t> //
+struct tiles_ladder<nk::e4m3_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        e4m3_sme_tiles_kit_t,           //
+        e4m3_sapphireamx_tiles_kit_t    //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -3120,11 +3938,12 @@ struct tiles_chain<nk::e4m3_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::f16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                  //
-        no_tiles_kit_t,                                                                                          //
-        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, f16_sme_tiles_kit_t>,                     //
-        chain_layer<NUMKONG_TARGET_GRANITEAMX && (caps_ & nk_cap_graniteamx_k) != 0, f16_graniteamx_tiles_kit_t> //
+struct tiles_ladder<nk::f16_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        f16_sme_tiles_kit_t,            //
+        f16_graniteamx_tiles_kit_t      //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -3132,11 +3951,12 @@ struct tiles_chain<nk::f16_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::u8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                    //
-        no_tiles_kit_t,                                                                                            //
-        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, u8_sme_tiles_kit_t>,                        //
-        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, u8_sapphireamx_tiles_kit_t> //
+struct tiles_ladder<nk::u8_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        u8_sme_tiles_kit_t,             //
+        u8_sapphireamx_tiles_kit_t      //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -3144,12 +3964,13 @@ struct tiles_chain<nk::u8_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::e5m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        no_tiles_kit_t,                                                                                              //
-        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e5m2_sme_tiles_kit_t>,                        //
-        chain_layer<NUMKONG_TARGET_GRANITEAMX && (caps_ & nk_cap_graniteamx_k) != 0, e5m2_graniteamx_tiles_kit_t>,   //
-        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, e5m2_sapphireamx_tiles_kit_t> //
+struct tiles_ladder<nk::e5m2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        e5m2_sme_tiles_kit_t,           //
+        e5m2_graniteamx_tiles_kit_t,    //
+        e5m2_sapphireamx_tiles_kit_t    //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -3157,10 +3978,11 @@ struct tiles_chain<nk::e5m2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::i4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                              //
-        no_tiles_kit_t,                                                                      //
-        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, i4x2_sme_tiles_kit_t> //
+struct tiles_ladder<nk::i4x2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        i4x2_sme_tiles_kit_t            //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -3168,10 +3990,11 @@ struct tiles_chain<nk::i4x2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::u4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                              //
-        no_tiles_kit_t,                                                                      //
-        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, u4x2_sme_tiles_kit_t> //
+struct tiles_ladder<nk::u4x2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        u4x2_sme_tiles_kit_t            //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -3179,11 +4002,12 @@ struct tiles_chain<nk::u4x2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::e3m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        no_tiles_kit_t,                                                                                              //
-        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e3m2_sme_tiles_kit_t>,                        //
-        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, e3m2_sapphireamx_tiles_kit_t> //
+struct tiles_ladder<nk::e3m2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        e3m2_sme_tiles_kit_t,           //
+        e3m2_sapphireamx_tiles_kit_t    //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -3191,11 +4015,12 @@ struct tiles_chain<nk::e3m2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct tiles_chain<nk::e2m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        no_tiles_kit_t,                                                                                              //
-        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e2m3_sme_tiles_kit_t>,                        //
-        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, e2m3_sapphireamx_tiles_kit_t> //
+struct tiles_ladder<nk::e2m3_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        no_tiles_kit_t,                 //
+        e2m3_sme_tiles_kit_t,           //
+        e2m3_sapphireamx_tiles_kit_t    //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;

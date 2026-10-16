@@ -415,8 +415,8 @@ std::size_t test_vram_indexes_configuration(char const* name, u64_t seed, execut
     return report(vendor_name.c_str(), failures_count);
 }
 
-/** The sharded VRAM suite entry its translation unit defines for every vendor's executor and each
- *  carried vendor's entry composes explicitly over the executor it opened; returns the suite's
+/** The sharded VRAM suite entry its translation unit defines once per vendor, for its executor, and
+ *  each carried vendor's entry composes explicitly over the executor it opened; returns the suite's
  *  failure count. */
 template <typename executor_type_>
 std::size_t check_vram_indexes(settings_t const& settings, executor_type_& executor);

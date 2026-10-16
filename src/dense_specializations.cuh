@@ -110,35 +110,51 @@ constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcep
 /** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask, its waiter,
  *  its atomic reference and its cache hints. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
-using ram_indexes = us::dense::ram_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(cpu_class_),
-                                           waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type,
-                                           typename cache_hints_for_cpu_class<cpu_class_>::type>;
+using ram_indexes = dense::ram_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(cpu_class_),
+                                       waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type,
+                                       typename cache_hints_for_cpu_class<cpu_class_>::type>;
 
 /** One NVMe alternative: scoring compiles per CPU class, while the metric comes from the parts'
  *  headers and the transport is the executor's runtime choice. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
-using nvme_indexes = us::dense::nvme_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(cpu_class_)>;
+using nvme_indexes = dense::nvme_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(cpu_class_)>;
 
-/** One NVIDIA alternative: the class names the rung and its capability ceiling; its unit holds the
- *  kernels. */
+/** One NVIDIA class's fatbin, carrying every compiled dtype's kernels; the class's unit defines
+ *  @c bytes beside the bytes it embeds. */
 #if USEARCH_ARCH_CUDA_
+template <gpu_class_t gpu_class_>
+struct cuda_fatbin {
+    static bytes_view_t bytes() noexcept;
+};
+
+/** One NVIDIA alternative: the class names the rung, its capability ceiling and the fatbin its unit
+ *  holds the kernels in. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_nvidia_indexes =
-    us::dense::vram_nvidia_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
+using vram_nvidia_indexes = dense::vram_nvidia_indexes<us::utilities::uuid_t, dtype_,
+                                                       numkong_capabilities_of(gpu_class_), cuda_fatbin<gpu_class_>>;
 #endif
 
-/** One AMD alternative: the class names the rung and its capability ceiling; its unit holds the
- *  code object. */
+/** One AMD class's code object, an offload bundle of its listed processors carrying every compiled
+ *  dtype; the class's host unit defines @c bytes beside the bytes it embeds. */
 #if USEARCH_ARCH_ROCM_
+template <gpu_class_t gpu_class_>
+struct hip_code_object {
+    static bytes_view_t bytes() noexcept;
+};
+
+/** One AMD alternative: the class names the rung, its capability ceiling and the code object its
+ *  unit holds the kernels in. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_amd_indexes =
-    us::dense::vram_amd_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
+using vram_amd_indexes = dense::vram_amd_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(gpu_class_),
+                                                 hip_code_object<gpu_class_>>;
 #endif
 
-/** One Apple alternative, serving every Apple class until a family's kernels differ. */
+/** One Apple alternative: the class names the rung and the capability ceiling its kernels compile
+ *  for at the first @c reserve. */
 #if USEARCH_ARCH_METAL_
-template <nk_dtype_t dtype_>
-using vram_apple_indexes = us::dense::vram_apple_indexes<us::utilities::uuid_t, dtype_>;
+template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
+using vram_apple_indexes =
+    dense::vram_apple_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
 #endif
 
 /** The C value lookup lifted onto the index's key vocabulary: one callback per scored batch, a NULL row
@@ -179,7 +195,7 @@ struct device_value_lookup_t {
 #if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_
 
 /** What each shard of a VRAM attend resolves rows through: the C lookup behind the shard's keys. */
-using vram_attend_lookup_t = us::dense::vram_keyed_lookup<us::utilities::uuid_t, device_value_lookup_t>;
+using vram_attend_lookup_t = dense::vram_keyed_lookup<us::utilities::uuid_t, device_value_lookup_t>;
 #endif
 
 /** One variant's verbs, fixed to the C layer's callback types and wrapped as non-template members
@@ -200,8 +216,8 @@ struct specialized_index {
     using refine_result_t = typename index_type_::refine_result_t;
     using refine_plan_t = typename index_type_::refine_plan_t;
     using health_result_t = typename index_type_::health_result_t;
-    using rows_view_t = us::dense::rows_view_t;
-    using rows_span_t = us::dense::rows_span_t;
+    using rows_view_t = dense::rows_view_t;
+    using rows_span_t = dense::rows_span_t;
     using keys_view_t = nk::vector_view<key_t>;
     using keys_span_t = nk::matrix_span<key_t>;
     using scores_span_t = nk::matrix_span<f64_t>;
@@ -262,9 +278,8 @@ struct specialized_index {
                                      search_config_t config, keys_span_t keys, scores_span_t scores,
                                      counts_span_t counts) noexcept;
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
-                                     f32_t score_scale, rows_span_t outputs,
-                                     std::span<us::dense::softmax_state_t> carry, executor_t& executor,
-                                     search_config_t config) noexcept;
+                                     f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
+                                     executor_t& executor, search_config_t config) noexcept;
     status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t save(bytes_span_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
@@ -430,7 +445,7 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
     rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
-    std::span<us::dense::softmax_state_t> carry, executor_t& executor, search_config_t config) noexcept {
+    std::span<dense::softmax_state_t> carry, executor_t& executor, search_config_t config) noexcept {
     return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }
 template <typename index_type_>
@@ -471,8 +486,8 @@ struct specialized_index<index_type_> {
     using search_config_t = typename index_type_::search_config_t;
     using search_result_t = typename index_type_::search_result_t;
     using health_result_t = typename index_type_::health_result_t;
-    using rows_view_t = us::dense::rows_view_t;
-    using rows_span_t = us::dense::rows_span_t;
+    using rows_view_t = dense::rows_view_t;
+    using rows_span_t = dense::rows_span_t;
     using keys_span_t = nk::matrix_span<key_t>;
     using scores_span_t = nk::matrix_span<f64_t>;
     using counts_span_t = std::span<std::size_t>;
@@ -503,9 +518,8 @@ struct specialized_index<index_type_> {
                                      search_config_t config, keys_span_t keys, scores_span_t scores,
                                      counts_span_t counts) noexcept;
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
-                                     f32_t score_scale, rows_span_t outputs,
-                                     std::span<us::dense::softmax_state_t> carry, executor_t& executor,
-                                     search_config_t config) noexcept;
+                                     f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
+                                     executor_t& executor, search_config_t config) noexcept;
 };
 
 template <typename index_type_>
@@ -593,7 +607,7 @@ template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
     rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
-    std::span<us::dense::softmax_state_t> carry, executor_t& executor, search_config_t config) noexcept {
+    std::span<dense::softmax_state_t> carry, executor_t& executor, search_config_t config) noexcept {
     return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }
 

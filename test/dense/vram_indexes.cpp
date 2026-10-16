@@ -24,6 +24,12 @@ std::size_t test::dense::check_vram_indexes(settings_t const& settings, executor
     return failures_count;
 }
 
+#if USEARCH_ARCH_CUDA_
 template std::size_t test::dense::check_vram_indexes<cuda_executor_t>(settings_t const&, cuda_executor_t&);
+#endif
+#if USEARCH_ARCH_ROCM_
 template std::size_t test::dense::check_vram_indexes<hip_executor_t>(settings_t const&, hip_executor_t&);
+#endif
+#if USEARCH_ARCH_METAL_
 template std::size_t test::dense::check_vram_indexes<metal_executor_t>(settings_t const&, metal_executor_t&);
+#endif

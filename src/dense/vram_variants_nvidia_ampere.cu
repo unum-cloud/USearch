@@ -12,66 +12,64 @@
 #include "usearch/dense/vram_nvidia_index.cuh"
 
 /** The class's fatbin, linked in as raw bytes beside the variants. */
-extern "C" us::utilities::byte_t const dense_nvidia_ampere_bundle_start[], dense_nvidia_ampere_bundle_end[];
-
-inline constexpr nk_capability_t ampere_capabilities_k = numkong_capabilities_of(gpu_class_t::nvidia_ampere_k);
+extern "C" byte_t const dense_nvidia_ampere_bundle_start[], dense_nvidia_ampere_bundle_end[];
 
 template <>
-us::utilities::bytes_view_t us::dense::cuda_fatbin<ampere_capabilities_k>() noexcept {
+bytes_view_t cuda_fatbin<gpu_class_t::nvidia_ampere_k>::bytes() noexcept {
     return {dense_nvidia_ampere_bundle_start,
             static_cast<std::size_t>(dense_nvidia_ampere_bundle_end - dense_nvidia_ampere_bundle_start)};
 }
 
 template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_bf16_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_bf16_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #if USEARCH_DENSE_DTYPES >= 2
 template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_u1_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_u1_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
 template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_i8_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_i8_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
 template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_e4m3_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_e4m3_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
 template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_f16_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_f16_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
 template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_u8_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_u8_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
 template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_e5m2_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_e5m2_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
 template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_i4_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_i4_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
 template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_u4_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_u4_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
 template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_e3m2_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_e3m2_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
 template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>>;
-template __device__ void
-us::dense::cuda_instantiate<ampere_capabilities_k, nk_e2m3_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<numkong_capabilities_of(gpu_class_t::nvidia_ampere_k), nk_e2m3_k,
+                                                 vram_attend_lookup_t::device_lookup_k>();
 #endif

@@ -6,14 +6,14 @@
  *      and tiled kernels against NumKong's monolithic 1-to-1 reference.
  *
  *  Mirrors the structure of @c test/dense/ram_metric.hpp - the @c dense::quads_supported concept
- *  gates each cell so unadapted (kernel, scalar, caps) tuples never run, and new kits or
- *  chains light up matching rows automatically. Three flavors per supported tuple: USearch's
- *  @c distance (1-to-1), USearch's @c distances (1-to-4 fan-out), and NumKong's @c nk::dot /
- *  @c nk::angular / @c nk::euclidean / @c nk::hamming / @c nk::jaccard monolithic baseline
- *  using the @c nk::default_capabilities() mask (run once per kernel-scalar, since the
- *  baseline isn't caps-parameterized). Where a tile engine is adapted and the machine offers
- *  it, a fourth row measures one 16×16 tile of distances per call - gather, pack, and the
- *  depth walk - so the tile engine's primitive throughput reads next to 256 quads-path distances.
+ *  gates each cell so unadapted (kernel, scalar, caps) tuples never run, and new kits or ladders
+ *  light up matching rows automatically. Three flavors per supported tuple: USearch's @c distance
+ *  (1-to-1), USearch's @c distances (1-to-4 fan-out), and NumKong's @c nk::dot / @c nk::angular /
+ *  @c nk::euclidean / @c nk::hamming / @c nk::jaccard monolithic baseline using the
+ *  @c nk::default_capabilities() mask (run once per kernel-scalar, since the baseline isn't
+ *  caps-parameterized). Where a tile engine is adapted and the machine offers it, a fourth row
+ *  measures one 16×16 tile of distances per call - gather, pack, and the depth walk - so the tile
+ *  engine's primitive throughput reads next to 256 quads-path distances.
  *
  *  Rows are named `kernel/scalar/caps/shape/dimensions`, like `dot/f32/neon/1to4/768d`, and
  *  every flag has a default:
@@ -284,10 +284,10 @@ constexpr std::array<std::size_t, 3> dimensions_to_bench = {256, 768, 1536};
 template <nk_kernel_kind_t kernel_, typename scalar_>
 concept quads_in_scope = quads_supported<kernel_, scalar_, nk_cap_serial_k>;
 
-/** True iff a tile engine is compiled for this tuple - the tiles chain always names
+/** True iff a tile engine is compiled for this tuple - the tiles ladder always names
  *  a kit, so the gate is its @c has_tiles_k verdict, never the alias's existence. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept tiles_supported = quads_supported<kernel_, scalar_, caps_> && tiles_chain<scalar_, caps_>::has_tiles_k;
+concept tiles_supported = quads_supported<kernel_, scalar_, caps_> && tiles_ladder<scalar_, caps_>::has_tiles_k;
 
 /** Whether this machine runs every bit of @p caps_; serial always runs. */
 template <nk_capability_t caps_>
@@ -504,8 +504,8 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k || nk_cpu_configure_thread(available) != nk_success_k)
         return loop.skip("the thread cannot run these capabilities");
-    using tiles_kit_t = typename tiles_chain<scalar_, caps_>::kit_t;
-    using quads_kit_t = typename quads_chain<scalar_, caps_>::kit_t;
+    using tiles_kit_t = typename tiles_ladder<scalar_, caps_>::kit_t;
+    using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
     using raw_dot_t = typename scalar_::dot_result_t::raw_t;
     constexpr std::size_t queries_k = tiles_kit_t::tile_columns_k, rows_k = 256;
 

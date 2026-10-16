@@ -25,18 +25,23 @@ using counting_hip_allocator_t = counting_device_allocator<hip_virtual_memory_al
 static_assert(hip_reservable_allocator<counting_hip_allocator_t>);
 
 /** The ceiling of the suite's own code object, which carries the attends over its value lookups:
- *  the CDNA3 tier alone, which picks the CDNA3 class that CDNA3 and CDNA4 run, while naming that
- *  code object apart from the library's CDNA3 one the runner also links. */
-inline constexpr nk_capability_t dense_amd_capabilities_k = nk_cap_cdna3_k;
+ *  the CDNA3 class's, which CDNA3 and CDNA4 run. */
+inline constexpr nk_capability_t dense_amd_capabilities_k = nk_cap_rocm_k | nk_cap_cdna3_k;
+
+/** The suite's own code object, carrying every cell's kernels and the attends over its value
+ *  lookups; @c vram_amd.hip defines @c bytes beside the bytes it embeds. */
+struct dense_amd_code_object_t {
+    static bytes_view_t bytes() noexcept;
+};
 
 /** The AMD index of one (dtype, kernel) cell over the ledgered flat matrices and its sharded
  *  collection, built over the stream of the executor the ROCm entry opened; device attention runs
  *  in @c vram_amd.hip instead of the shared composers. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::amd_k, dtype_, kernel_> {
-    using index_t = vram_amd_index<dtype_, dense_amd_capabilities_k, counting_hip_allocator_t, counting_hip_allocator_t,
-                                   hip_device_allocator_t>;
-    using indexes_t = vram_amd_indexes<u32_t, dtype_, dense_amd_capabilities_k>;
+    using index_t = vram_amd_index<dtype_, dense_amd_capabilities_k, dense_amd_code_object_t, counting_hip_allocator_t,
+                                   counting_hip_allocator_t, hip_device_allocator_t>;
+    using indexes_t = vram_amd_indexes<u32_t, dtype_, dense_amd_capabilities_k, dense_amd_code_object_t>;
     inline static constexpr char const* vendor_prefix_k = "rocm";
     inline static constexpr bool attends_k = true;
 

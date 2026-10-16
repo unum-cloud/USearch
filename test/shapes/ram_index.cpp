@@ -138,10 +138,10 @@ std::vector<std::vector<scalar_type_>> make_clouds(std::size_t count, u64_t seed
  *  sharing nothing with the metric's staging, bounds or workspace growth; the largest distance when
  *  the kernel refuses. */
 template <typename scalar_type_>
-typename shapes_kit<scalar_type_, nk_cap_serial_k>::distance_t serial_distance(nk_kernel_kind_t kernel,
-                                                                               void const* first,
-                                                                               void const* second) noexcept {
-    using kit_t = shapes_kit<scalar_type_, nk_cap_serial_k>;
+typename shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t::distance_t serial_distance(nk_kernel_kind_t kernel,
+                                                                                         void const* first,
+                                                                                         void const* second) noexcept {
+    using kit_t = typename shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     using distance_t = typename kit_t::distance_t;
     alignas(nk_default_alignment_k) byte_t workspace[shapes_oracle_workspace_k];
     distance_t distance = 0;
@@ -239,9 +239,9 @@ struct shapes_fixture {
     }
 };
 
-using chamfer_fixture_t = shapes_fixture<shapes_kit<nk::f32_t, nk_cap_any_k>, nk_kernel_chamfers_packed_k>;
+using chamfer_fixture_t = shapes_fixture<shapes_ladder<nk::f32_t, nk_cap_any_k>::kit_t, nk_kernel_chamfers_packed_k>;
 using procrustes_fixture_t =
-    shapes_fixture<shapes_kit<nk::f16_t, nk_cap_any_k>, nk_kernel_wassersteinprocrustes_packed_k>;
+    shapes_fixture<shapes_ladder<nk::f16_t, nk_cap_any_k>::kit_t, nk_kernel_wassersteinprocrustes_packed_k>;
 
 static_assert(us::basic::value<chamfer_fixture_t::value_t>);
 static_assert(metric<chamfer_fixture_t::metric_t, chamfer_fixture_t::value_t, chamfer_fixture_t::distance_t>);
@@ -404,8 +404,8 @@ std::size_t check_shapes_nvme(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = shapes_metric<fixture_t::kit_t, scratch_t>;
     using query_t = nk::shapes_packed<scalar_t, std::allocator_traits<scratch_t>::rebind_alloc<char>>;
-    using nvme_index_t = us::basic::nvme_index<codec<fixture_t::kit_t>, us::utilities::uuid_t, fixture_t::distance_t,
-                                               blocking_files_engine<>>;
+    using nvme_index_t = us::basic::nvme_index<codec<fixture_t::kit_t>, us::utilities::uuid_t, u32_t,
+                                               fixture_t::distance_t, blocking_files_engine<>>;
     std::vector<std::vector<scalar_t>> const clouds = make_clouds<scalar_t>(32, stream_key(seed, "nvme"));
 
     auto make_cloud = [&](std::size_t entry, counting_allocator_t const& allocator) {

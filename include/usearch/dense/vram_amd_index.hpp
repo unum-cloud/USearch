@@ -8,14 +8,13 @@
  *  records of @c vram_index.hpp and launches the kernels of @c vram_amd_index.hip by name through
  *  the HIP runtime it opens at first use, so it never sees a kit, a shared view or HIP beyond its
  *  runtime's declarations. Every kernel is one instantiation of a single template over five
- *  integers - the kernel, the class, the dtype, the register rung and the attend value lookup - so
- *  its mangled name is spelled here from those integers alone, and one code object per class
- *  carries every dtype.
+ *  arguments - the kernel, the capability ceiling, the dtype, the register rung and the attend
+ *  value lookup - so @c vram_kernel_symbol spells its symbol here from those arguments alone, and
+ *  one code object per class, which the face's kernels type names, carries every dtype.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <cstdio>  // `std::snprintf` - a kernel's mangled name
 #include <cstring> // `std::memcpy` - an attend's value lookup travels as bytes
 
 #include <bit>         // `std::bit_ceil` - the lanes sharing a row
@@ -30,7 +29,8 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_amd_device.hpp"
-#include "usearch/dense/types.hpp" // `vram_telemetry_block_t` & the launch geometry constants
+#include "usearch/utilities/vram_device.hpp" // `vram_kernel_symbol` - a kernel's symbol
+#include "usearch/dense/types.hpp"           // `vram_telemetry_block_t` & the launch geometry constants
 #include "usearch/dense/vram_index.hpp"
 
 namespace unum::usearch::dense {
@@ -43,143 +43,94 @@ namespace unum::usearch::dense {
 template <u32_t lookup_>
 struct amd_value_lookup_of;
 
-/** The AMD kernels, the first template argument of @c amd_kernel. */
-enum class amd_kernel_t : u32_t {
-    insert_k,
-    back_link_k,
-    refine_k,
-    search_k,
-    search_indexer_k,
-    multiply_k,
-    attend_k,
-    merge_back_links_k,
-    scatter_back_links_k,
-    derive_norms_k,
-    rebase_links_k,
-    mark_seeds_k,
-    reachability_sweep_k,
-    reachability_islands_k,
-    reached_in_links_k,
-    reconnect_island_k,
-    merge_attention_k,
-    resolve_matches_k,
-    merge_matches_k,
-    cast_k,
-    rmscast_k,
-    count_k,
-};
+/** Blocks of @p kernel on its @p slots rung resident per compute unit under @p capability_ over
+ *  @p dtype_ - the register budget its launch bounds set, the load window its body sizes, and its
+ *  grid's share of every compute unit: three for the builders and the back-links riding their grid
+ *  and arena, as many as saturate the path at its registers; a walk's by its rung; eight for the
+ *  sweeps striding the graph, oversubscribed so enough rows stay in flight; and one for the rest,
+ *  whose grids follow their work. */
+template <nk_capability_t capability_, nk_dtype_t dtype_>
+constexpr u32_t hip_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept {
+    switch (kernel) {
+    case vram_kernel_t::insert_k:
+    case vram_kernel_t::back_link_k:
+    case vram_kernel_t::refine_k:
+    case vram_kernel_t::merge_back_links_k: return 3;
+    case vram_kernel_t::search_k:
+    case vram_kernel_t::search_indexer_k:
+    case vram_kernel_t::multiply_k: return slots <= 8 ? 4 : 3;
+    // The attend fold carries per-head state, which spills at 8 slots under four blocks' budget.
+    case vram_kernel_t::attend_k: return slots <= 4 ? 4 : 3;
+    case vram_kernel_t::scatter_back_links_k:
+    case vram_kernel_t::derive_norms_k:
+    case vram_kernel_t::rebase_links_k:
+    case vram_kernel_t::reachability_sweep_k:
+    case vram_kernel_t::reached_in_links_k:
+    case vram_kernel_t::cast_k:
+    case vram_kernel_t::rmscast_k: return 8;
+    default: return 1;
+    }
+}
+
+/** Waves each SIMD keeps when @p blocks blocks of @c vram_warps_per_block_k wavefronts share a
+ *  compute unit's four SIMDs - the unit HIP-Clang reads the second argument of
+ *  @c __launch_bounds__ in, where CUDA reads blocks per multiprocessor. */
+constexpr u32_t hip_waves_per_simd(u32_t blocks) noexcept { return blocks * vram_warps_per_block_k / 4; }
 
 /** One instantiated kernel: the kernel and its register rung, zero where it keeps no ladder or
  *  walks the arena frontier. */
 struct amd_rung_t {
-    amd_kernel_t kernel;
+    vram_kernel_t kernel;
     u32_t slots;
 };
 
 /** Every instantiation one dtype's code exports bar the attends, which the device pass instantiates
  *  and the host looks up as it loads the code object. */
 inline constexpr amd_rung_t amd_rungs[] = {
-    {amd_kernel_t::insert_k, 0},
-    {amd_kernel_t::insert_k, 2},
-    {amd_kernel_t::insert_k, 4},
-    {amd_kernel_t::insert_k, 8},
-    {amd_kernel_t::insert_k, 16},
-    {amd_kernel_t::back_link_k, 0},
-    {amd_kernel_t::refine_k, 0},
-    {amd_kernel_t::refine_k, 2},
-    {amd_kernel_t::refine_k, 4},
-    {amd_kernel_t::refine_k, 8},
-    {amd_kernel_t::refine_k, 16},
-    {amd_kernel_t::search_k, 0},
-    {amd_kernel_t::search_k, 2},
-    {amd_kernel_t::search_k, 4},
-    {amd_kernel_t::search_k, 8},
-    {amd_kernel_t::search_k, 16},
-    {amd_kernel_t::search_indexer_k, 0},
-    {amd_kernel_t::search_indexer_k, 2},
-    {amd_kernel_t::search_indexer_k, 4},
-    {amd_kernel_t::search_indexer_k, 8},
-    {amd_kernel_t::search_indexer_k, 16},
-    {amd_kernel_t::multiply_k, 0},
-    {amd_kernel_t::multiply_k, 2},
-    {amd_kernel_t::multiply_k, 4},
-    {amd_kernel_t::multiply_k, 8},
-    {amd_kernel_t::multiply_k, 16},
-    {amd_kernel_t::merge_back_links_k, 0},
-    {amd_kernel_t::scatter_back_links_k, 0},
-    {amd_kernel_t::derive_norms_k, 0},
-    {amd_kernel_t::rebase_links_k, 0},
-    {amd_kernel_t::mark_seeds_k, 0},
-    {amd_kernel_t::reachability_sweep_k, 0},
-    {amd_kernel_t::reachability_islands_k, 0},
-    {amd_kernel_t::reached_in_links_k, 0},
-    {amd_kernel_t::reconnect_island_k, 0},
-    {amd_kernel_t::merge_attention_k, 0},
-    {amd_kernel_t::resolve_matches_k, 0},
-    {amd_kernel_t::merge_matches_k, 0},
-    {amd_kernel_t::cast_k, 0},
-    {amd_kernel_t::rmscast_k, 0},
+    {vram_kernel_t::insert_k, 0},
+    {vram_kernel_t::insert_k, 2},
+    {vram_kernel_t::insert_k, 4},
+    {vram_kernel_t::insert_k, 8},
+    {vram_kernel_t::insert_k, 16},
+    {vram_kernel_t::back_link_k, 0},
+    {vram_kernel_t::refine_k, 0},
+    {vram_kernel_t::refine_k, 2},
+    {vram_kernel_t::refine_k, 4},
+    {vram_kernel_t::refine_k, 8},
+    {vram_kernel_t::refine_k, 16},
+    {vram_kernel_t::search_k, 0},
+    {vram_kernel_t::search_k, 2},
+    {vram_kernel_t::search_k, 4},
+    {vram_kernel_t::search_k, 8},
+    {vram_kernel_t::search_k, 16},
+    {vram_kernel_t::search_indexer_k, 0},
+    {vram_kernel_t::search_indexer_k, 2},
+    {vram_kernel_t::search_indexer_k, 4},
+    {vram_kernel_t::search_indexer_k, 8},
+    {vram_kernel_t::search_indexer_k, 16},
+    {vram_kernel_t::multiply_k, 0},
+    {vram_kernel_t::multiply_k, 2},
+    {vram_kernel_t::multiply_k, 4},
+    {vram_kernel_t::multiply_k, 8},
+    {vram_kernel_t::multiply_k, 16},
+    {vram_kernel_t::merge_back_links_k, 0},
+    {vram_kernel_t::scatter_back_links_k, 0},
+    {vram_kernel_t::derive_norms_k, 0},
+    {vram_kernel_t::rebase_links_k, 0},
+    {vram_kernel_t::mark_seeds_k, 0},
+    {vram_kernel_t::reachability_sweep_k, 0},
+    {vram_kernel_t::reachability_islands_k, 0},
+    {vram_kernel_t::reached_in_links_k, 0},
+    {vram_kernel_t::reconnect_island_k, 0},
+    {vram_kernel_t::merge_attention_k, 0},
+    {vram_kernel_t::resolve_matches_k, 0},
+    {vram_kernel_t::merge_matches_k, 0},
+    {vram_kernel_t::cast_k, 0},
+    {vram_kernel_t::rmscast_k, 0},
 };
 
 /** The rungs every walk family, attends included, is instantiated over. */
 inline constexpr u32_t amd_walk_rungs[] = {0, 2, 4, 8, 16};
-
-/**
- *  @brief The host-visible half of the quads kit @c quads_chain picks for @p vector_dtype_
- *      under @p capability_: the types and record sizes the host sizes launches by.
- *
- *  Every AMD kit loads 16-byte fragments and keeps the CPU's norms over its dot type. A class unit
- *  compiles its own class's kits alone, so the pick follows the class the ceiling names; the
- *  kernel side checks both against the kit itself.
- */
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_>
-struct amd_kit_traits {
-    using scalar_t = typename nk::type_for<vector_dtype_>::type;
-    using dot_t = typename scalar_t::dot_result_t::raw_t;
-    using norms_t = vector_norms<dot_t>;
-
-    /** The class the ceiling names, whose kits alone its unit compiles. */
-    inline static constexpr gpu_class_t class_k = amd_class_of(capability_);
-
-    /** Lanes of the class's wavefronts. */
-    inline static constexpr u32_t wave_lanes_k = hip_wave_lanes(class_k);
-
-    /** Bytes of one wavefront's staged batch, the kernels' @c vram_gathered: a cache of candidate
-     *  IDs, then a wavefront of scored nodes and a wavefront of native dots. */
-    inline static constexpr std::size_t gathered_bytes_k = vram_cache_rows_k * sizeof(u32_t) +
-                                                           wave_lanes_k * (gpu_scored_node_bytes_k + sizeof(dot_t));
-
-    /** Bytes of one wavefront's static schedule state: the plain schedule's one flag. */
-    inline static constexpr std::size_t schedule_bytes_k = 1;
-
-    /** The capability of the kit the chain picks: CDNA5's for the signed bytes and nibbles, CDNA4's
-     *  for bf16 on CDNA4 and the fp8 pair from CDNA4 on, CDNA3's half and byte dots below CDNA5,
-     *  and the ROCm floor otherwise. */
-    inline static constexpr nk_capability_t picked_k =
-        (vector_dtype_ == nk_i8_k || vector_dtype_ == nk_i4_k)
-            ? (class_k == gpu_class_t::amd_cdna5_k ? nk_cap_cdna5_k : nk_cap_cdna3_k)
-        : vector_dtype_ == nk_f16_k  ? (class_k == gpu_class_t::amd_cdna5_k ? nk_cap_rocm_k : nk_cap_cdna3_k)
-        : vector_dtype_ == nk_bf16_k ? (class_k == gpu_class_t::amd_cdna4_k ? nk_cap_cdna4_k : nk_cap_rocm_k)
-        : (vector_dtype_ == nk_e5m2_k || vector_dtype_ == nk_e4m3_k)
-            ? (class_k == gpu_class_t::amd_cdna3_k ? nk_cap_rocm_k : nk_cap_cdna4_k)
-            : nk_cap_rocm_k;
-};
-
-/** Spells the Itanium mangled name of @c amd_kernel<kernel,class,dtype,slots,lookup>: five unsigned
- *  template arguments, then the one @ref vram_arguments_t parameter, as the device pass emits it;
- *  @p lookup is zero for every kernel but an attend. */
-inline void amd_kernel_name(char (&name)[amd_kernel_name_capacity_k], amd_rung_t rung, gpu_class_t gpu_class,
-                            nk_dtype_t dtype, u32_t lookup = 0) noexcept {
-    std::snprintf(name, sizeof(name),
-                  "_ZN4unum7usearch5dense10amd_kernelILj%uELj%uELj%uELj%uELj%uEEEvNS1_16vram_arguments_tE",
-                  static_cast<unsigned>(rung.kernel), static_cast<unsigned>(gpu_class), static_cast<unsigned>(dtype),
-                  static_cast<unsigned>(rung.slots), static_cast<unsigned>(lookup));
-}
-
-/** One class's code object, an offload bundle of its listed processors carrying every compiled
- *  dtype, defined in that class's host unit. */
-template <nk_capability_t capability_>
-bytes_view_t amd_code_object() noexcept;
 
 #pragma endregion Kernels
 
@@ -187,15 +138,17 @@ bytes_view_t amd_code_object() noexcept;
  *  @brief Vector Search index for a single uniform latency memory space on AMD GPUs.
  *
  *  Everything but the kernels is @c vram_index; a wavefront plays the part an NVIDIA warp plays,
- *  64 lanes wide before CDNA5 and 32 on it.
+ *  64 lanes wide before CDNA5 and 32 on it. The kernels come from the code object @p kernels_type_
+ *  hands out through its static @c bytes, compiled under @p capability_.
  */
 template <                                                                     //
-    nk_dtype_t vector_dtype_ = nk_i8_k,                                        //
-    nk_capability_t capability_ = nk_cap_rocm_k | nk_cap_cdna3_k,              //
+    nk_dtype_t vector_dtype_,                                                  //
+    nk_capability_t capability_,                                               //
+    typename kernels_type_,                                                    //
     typename vectors_allocator_type_ = hip_virtual_memory_allocator<byte_t>,   //
     typename neighbors_allocator_type_ = hip_virtual_memory_allocator<byte_t>, //
     typename traversals_allocator_type_ = hip_arena_allocator_t>               //
-struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, vectors_allocator_type_,
+struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, kernels_type_, vectors_allocator_type_,
                                                   neighbors_allocator_type_, traversals_allocator_type_>,
                                    hip_vendor_t, vector_dtype_, vectors_allocator_type_, neighbors_allocator_type_,
                                    traversals_allocator_type_> {
@@ -228,42 +181,29 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
     using typename base_t::search_result_t;
     using typename base_t::traversal_context_t;
 
-    /** The host-visible half of the quads kit the chain picks under @c capability_. */
-    using kit_traits_t = amd_kit_traits<vector_dtype_, capability_>;
-    static_assert(std::is_same_v<typename kit_traits_t::norms_t, norms_t>);
-
-    /** The capability of the quads kit the chain picked under @c capability_, surfaced in the bench
-     *  reports. */
-    inline static constexpr nk_capability_t picked_quads_capability_k = kit_traits_t::picked_k;
+    /** The capability of the quads kit the ladder picked under @c capability_, surfaced in the
+     *  bench reports; read only where the AMD kits are visible, as its initializer is. */
+    inline static constexpr nk_capability_t picked_quads_capability_k = quads_ladder<scalar_t, capability_>::picked_k;
 
     /** Lanes cooperating on one row: the smallest power of two covering its fragments, at most a
      *  warp. */
     u32_t lanes_per_row() const noexcept { return min_of(std::bit_ceil(row_fragments()), wave_lanes()); }
 
     /** Lanes of this class's wavefronts: 32 on CDNA5, 64 before it. */
-    static constexpr u32_t wave_lanes() noexcept { return kit_traits_t::wave_lanes_k; }
+    static constexpr u32_t wave_lanes() noexcept { return hip_wave_lanes(capability_); }
 
     /** Threads per block, four wavefronts. */
     u32_t block_threads() const noexcept { return vram_warps_per_block_k * wave_lanes(); }
 
     /** Whether a search, multiply or attend launch seats on this device: per warp, the query span
-     *  and the @p fold_bytes an attend keeps past it, beside the static batch buffers. */
-    bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept {
-        return std::size_t {vram_warps_per_block_k} * (row_bytes() + fold_bytes + kit_traits_t::gathered_bytes_k) <=
-               device_.shared_memory_per_block_bytes;
-    }
+     *  and the @p fold_bytes an attend keeps past it, beside the static batch buffers. Defined in
+     *  @c vram_amd_index.hip, where the kits are visible. */
+    bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept;
 
     /** Whether an insert or refine launch seats its per-warp scratch in shared memory beside the
      *  static norms, batch buffers and schedule state; when it cannot, the warp's arena slice
-     *  keeps it, as Apple's always does. */
-    bool build_scratch_fits() const noexcept {
-        std::size_t const statics = std::size_t {vram_warps_per_block_k} *
-                                    (vram_cache_rows_k * sizeof(norms_t) + kit_traits_t::gathered_bytes_k +
-                                     kit_traits_t::schedule_bytes_k);
-        return statics + std::size_t {vram_warps_per_block_k} *
-                             max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp()) <=
-               device_.shared_memory_per_block_bytes;
-    }
+     *  keeps it, as Apple's always does. Defined in @c vram_amd_index.hip. */
+    bool build_scratch_fits() const noexcept;
 
     /** The bytes an executor's run must hold before a context carved over it can search or multiply
      *  @p rows rows under @p config, landing @c config.count columns per row, one aligned term per
@@ -285,12 +225,14 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         gpu_arena_shape_t const arena_shape = arena_shape_for(
             wide ? expansion : pool_slots * wave_lanes(),
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
-        std::size_t const arena_warps = std::size_t {walk_blocks_(rows)} * vram_warps_per_block_k;
+        // The walks seat as many blocks as a search on the same rung, an attend no more.
+        u32_t const resident_blocks = resident_blocks_(vram_kernel_t::search_k, wide ? 0 : pool_slots);
+        std::size_t const arena_warps = std::size_t {walk_blocks_(rows, resident_blocks)} * vram_warps_per_block_k;
         std::size_t const staging_bytes = rows * row_bytes() + import_bytes_(rows, nk_f64_k) +
                                           rows * config.count * (sizeof(node_id_t) + sizeof(distance_t)) +
                                           rows * sizeof(u32_t);
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
-               aligned(arena_warps * arena_shape.slice_bytes()) + aligned(staging_bytes);
+               aligned(arena_warps * arena_shape.slice_bytes<node_id_t>()) + aligned(staging_bytes);
     }
 
   private:
@@ -298,7 +240,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
 
     /** The sharded index walks its shards under one snapshot of their watermarks, merges their
      *  attends on its first device, and publishes or fails their batches together. */
-    template <typename, nk_dtype_t, nk_capability_t, typename>
+    template <typename, nk_dtype_t, nk_capability_t, typename, typename>
     friend struct vram_amd_indexes;
     template <typename, typename, typename, typename, typename, template <typename> class>
     friend struct sharded_indexes;
@@ -315,7 +257,6 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
     using base_t::neighbors_matrix_;
     using base_t::pool_slots_for_;
     using base_t::rows_refusal_;
-    using base_t::search_blocks_per_multiprocessor_k;
     using base_t::vectors_matrix_;
     using base_t::walk_blocks_;
     using typename base_t::attend_heads_t;
@@ -379,9 +320,13 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         u32_t const pool_slots = pool_slots_for_(expansion, minimum_slots);
         gpu_arena_shape_t const arena_shape = arena_shape_for(
             frontier == frontier_kind_t::wide_arena_k ? expansion : pool_slots * wave_lanes(), frontier);
-        std::size_t const arena_warps = std::size_t {walk_blocks_(queries_count)} * vram_warps_per_block_k;
+        // A search, an indexed search and a multiply seat as many blocks on one rung.
+        u32_t const resident_blocks = resident_blocks_(attend_k ? vram_kernel_t::attend_k : vram_kernel_t::search_k,
+                                                       frontier == frontier_kind_t::wide_arena_k ? 0 : pool_slots);
+        std::size_t const arena_warps = std::size_t {walk_blocks_(queries_count, resident_blocks)} *
+                                        vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
-        byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
+        byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>());
         if (!arena) return {{}, status_t::bad_alloc_k};
         // The staging holds the query rows and any head rows first, since they carry the widest
         // alignment, then the window importing them, the heads' weights, then the outputs; stream
@@ -602,10 +547,10 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         // Walking across makes two walks into one visited set, so the slice is shaped for both.
         u32_t const walks = parts > 1 ? 2 : 1;
         gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion * walks, pool_slots * walks);
-        std::size_t const arena_warps = device_.multiprocessor_count * insert_blocks_per_multiprocessor_k *
-                                        vram_warps_per_block_k;
+        std::size_t const arena_warps = device_.multiprocessor_count *
+                                        resident_blocks_(vram_kernel_t::refine_k, pool_slots) * vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
-        byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
+        byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>());
         if (!arena) return status_t::bad_alloc_k;
         auto const [epoch_base, epochs_status] = context.take_epochs(walk_count, arena_bytes_before);
         if (failed(epochs_status)) return epochs_status;
@@ -669,7 +614,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         sweep.graph.counter = scratch.expanded;
         sweep.graph.levels = scratch.expanded;
         sweep.graph.island_ids = scratch.island_ids;
-        if (status_t const launched = launch_(amd_kernel_t::mark_seeds_k, 0,
+        if (status_t const launched = launch_(vram_kernel_t::mark_seeds_k, 0,
                                               divide_round_up<u32_t>(static_cast<u32_t>(seed_count), block_threads()),
                                               0, stream, sweep);
             failed(launched))
@@ -677,20 +622,20 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
 
         // Every sweep up to the cap queues blind: one queued past convergence finds the one before
         // it expanded nothing and leaves at entry.
-        u32_t const grid = device_.multiprocessor_count * search_blocks_per_multiprocessor_k;
+        u32_t const grid = device_.multiprocessor_count * resident_blocks_(vram_kernel_t::reachability_sweep_k, 0);
         for (std::size_t sweep_number = 1; sweep_number != audit_sweeps_cap_k; ++sweep_number) {
             sweep.graph.counter = scratch.expanded + sweep_number;
             sweep.graph.previous_counter = sweep_number == 1 ? nullptr : scratch.expanded + sweep_number - 1;
             if (hip_api().fill_async(sweep.graph.next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) !=
                 hip_success_k)
                 return status_t::device_error_k;
-            if (status_t const launched = launch_(amd_kernel_t::reachability_sweep_k, 0, grid, 0, stream, sweep);
+            if (status_t const launched = launch_(vram_kernel_t::reachability_sweep_k, 0, grid, 0, stream, sweep);
                 failed(launched))
                 return launched;
             std::swap(sweep.graph.frontier, sweep.graph.next_frontier);
         }
         sweep.graph.counter = scratch.unreached;
-        if (status_t const launched = launch_(amd_kernel_t::reachability_islands_k, 0,
+        if (status_t const launched = launch_(vram_kernel_t::reachability_islands_k, 0,
                                               divide_round_up<u32_t>(static_cast<u32_t>(rows), block_threads()), 0,
                                               stream, sweep);
             failed(launched))
@@ -715,40 +660,46 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         heal.graph.islands_count = islands;
         heal.graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(connectivity(), rows));
         heal.graph.reconnected = scratch.reconnected;
-        if (status_t const counted = launch_(amd_kernel_t::reached_in_links_k, 0,
-                                             device_.multiprocessor_count * search_blocks_per_multiprocessor_k, 0,
-                                             stream, heal);
+        if (status_t const counted = launch_(
+                vram_kernel_t::reached_in_links_k, 0,
+                device_.multiprocessor_count * resident_blocks_(vram_kernel_t::reached_in_links_k, 0), 0, stream, heal);
             failed(counted))
             return counted;
-        return launch_(amd_kernel_t::reconnect_island_k, 0, divide_round_up<u32_t>(islands, block_threads()), 0, stream,
-                       heal);
+        return launch_(vram_kernel_t::reconnect_island_k, 0, divide_round_up<u32_t>(islands, block_threads()), 0,
+                       stream, heal);
     }
 
 #pragma endregion Refinement
 
 #pragma region Launches
 
-    /** Insertion blocks per multiprocessor: the resident count saturates the path at its
-     *  registers. */
-    inline static constexpr u32_t insert_blocks_per_multiprocessor_k = vram_resident_blocks_per_multiprocessor_k;
+    /** The kernels the base names when it sizes an arena for their grid. */
+    using kernel_t = vram_kernel_t;
 
-    /** Loads this class's code object onto the device and finds every kernel this dtype exports bar
-     *  the attends, by the mangled name @ref amd_kernel_name spells. */
+    /** Blocks of @p kernel on its @p slots rung resident per compute unit, as its launch bounds
+     *  read them; every grid and the arena behind it are sized by it. */
+    static constexpr u32_t resident_blocks_(vram_kernel_t kernel, u32_t slots) noexcept {
+        return hip_resident_blocks<capability_, vector_dtype_>(kernel, slots);
+    }
+
+    /** Loads the code object of @p kernels_type_ onto the device and finds every kernel this dtype
+     *  exports bar the attends, by the symbol @ref vram_kernel_symbol spells. */
     status_t load_kernels_() noexcept {
-        auto [module, status] = hip_module_t::load(device_.ordinal, amd_code_object<capability_>());
+        auto [module, status] = hip_module_t::load(device_.ordinal, kernels_type_::bytes());
         if (failed(status)) return status;
         module_ = std::move(module);
-        char name[amd_kernel_name_capacity_k];
+        vram_kernel_symbol_t symbol;
         for (amd_rung_t const rung : amd_rungs) {
-            amd_kernel_name(name, rung, amd_class_of(capability_), vector_dtype_);
+            vram_kernel_symbol(symbol, "dense", "amd_kernel", "vram_arguments_t", rung.kernel, capability_,
+                               vector_dtype_, rung.slots, u32_t {0});
             hip_function_handle_t& function = kernels_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)];
-            if (!(function = module_.function(name))) return status_t::device_error_k;
+            if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
         }
         return status_t::success_k;
     }
 
     /** Launches @p kernel on its @p slots rung over @p blocks of four wavefronts on @p stream. */
-    status_t launch_(amd_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes, hip_stream_handle_t stream,
+    status_t launch_(vram_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes, hip_stream_handle_t stream,
                      vram_arguments_t const& arguments) const noexcept {
         return hip_launch(kernels_[static_cast<u32_t>(kernel)][gpu_rung_index(slots)], blocks, block_threads(),
                           shared_bytes, stream, arguments);
@@ -762,7 +713,10 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
     status_t launch_insert_(vram_build_t const& build, u32_t pool_slots, traversal_context_t& context) noexcept {
         hip_stream_handle_t const stream = context.stream();
         vram_arguments_t arguments {};
-        u32_t const blocks = device_.multiprocessor_count * insert_blocks_per_multiprocessor_k;
+        // Both launches carve their warps' slices from the one arena, sized for the insert's grid,
+        // which the back-link's resident count matches.
+        static_assert(resident_blocks_(vram_kernel_t::back_link_k, 0) == resident_blocks_(vram_kernel_t::insert_k, 0));
+        u32_t const blocks = device_.multiprocessor_count * resident_blocks_(vram_kernel_t::insert_k, pool_slots);
         u32_t const back_link_scratch = build.arena_shape.cache_bytes ? 0u : merge_scratch_bytes_per_warp();
         auto zeroed = [&](u32_t* counter) noexcept {
             return hip_api().fill_async(counter, 0, sizeof(u32_t), stream) == hip_success_k;
@@ -779,13 +733,13 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
             status_t launched = zeroed(build.assigned_rows) && zeroed(build.touched_count) ? status_t::success_k
                                                                                            : status_t::device_error_k;
             if (succeeded(launched))
-                launched = launch_(amd_kernel_t::insert_k, pool_slots, blocks,
+                launched = launch_(vram_kernel_t::insert_k, pool_slots, blocks,
                                    vram_warps_per_block_k * build.scratch_bytes_per_warp, stream, arguments);
             if (failed(launched)) return offset ? fail_(launched) : launched;
             // The wave's rows are queued now, so a failure past here can no longer be un-claimed.
             arguments.build.scratch_bytes_per_warp = back_link_scratch;
             if (!zeroed(build.assigned_rows)) return fail_(status_t::device_error_k);
-            if (status_t const linked = launch_(amd_kernel_t::back_link_k, 0, blocks,
+            if (status_t const linked = launch_(vram_kernel_t::back_link_k, 0, blocks,
                                                 vram_warps_per_block_k * back_link_scratch, stream, arguments);
                 failed(linked))
                 return fail_(linked);
@@ -796,8 +750,8 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
     status_t launch_refine_(vram_refine_t const& view, u32_t pool_slots, hip_stream_handle_t stream) noexcept {
         vram_arguments_t arguments {};
         arguments.refine = view;
-        return launch_(amd_kernel_t::refine_k, pool_slots,
-                       device_.multiprocessor_count * insert_blocks_per_multiprocessor_k,
+        return launch_(vram_kernel_t::refine_k, pool_slots,
+                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, pool_slots),
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
 
@@ -806,7 +760,6 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
      *  neighbors. */
     status_t launch_refine_back_links_(vram_refine_t const& view, refine_scratch_t const& scratch, u32_t walk_count,
                                        hip_stream_handle_t stream) noexcept {
-        u32_t const blocks = device_.multiprocessor_count * insert_blocks_per_multiprocessor_k;
         vram_arguments_t arguments {};
         vram_graph_t& graph = arguments.graph;
         graph.neighbors = scratch.shadow_neighbors;
@@ -819,17 +772,24 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         graph.bucket_ids = scratch.buckets;
         graph.bucket_counts = scratch.bucket_counts;
         graph.touched = scratch.touched;
-        if (status_t const launched = launch_(amd_kernel_t::scatter_back_links_k, 0, blocks, 0, stream, arguments);
+        if (status_t const launched = launch_(
+                vram_kernel_t::scatter_back_links_k, 0,
+                device_.multiprocessor_count * resident_blocks_(vram_kernel_t::scatter_back_links_k, 0), 0, stream,
+                arguments);
             failed(launched))
             return launched;
-        // The merge sweeps the whole ID space and skips the rows the scatter left untouched.
+        // The merge sweeps the whole ID space and skips the rows the scatter left untouched,
+        // carving its slices from the arena sized for the refine's grid, which its count matches.
+        static_assert(resident_blocks_(vram_kernel_t::merge_back_links_k, 0) ==
+                      resident_blocks_(vram_kernel_t::refine_k, 0));
         arguments.refine = view;
         arguments.refine.scratch_bytes_per_warp = view.arena_shape.cache_bytes ? 0u : merge_scratch_bytes_per_warp();
         arguments.refine.assigned_rows = scratch.claims + 1;
         arguments.refine.node_ids = nullptr;
         arguments.refine.first_id = 0;
         arguments.refine.end_id = view.sampling_bound;
-        return launch_(amd_kernel_t::merge_back_links_k, 0, blocks,
+        return launch_(vram_kernel_t::merge_back_links_k, 0,
+                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::merge_back_links_k, 0),
                        vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, stream, arguments);
     }
 
@@ -839,8 +799,9 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         arguments.graph.storage = storage();
         arguments.graph.first_id = static_cast<u32_t>(first_row);
         arguments.graph.rows_count = static_cast<u32_t>(rows);
-        return launch_(amd_kernel_t::derive_norms_k, 0,
-                       device_.multiprocessor_count * search_blocks_per_multiprocessor_k, 0, stream, arguments);
+        return launch_(vram_kernel_t::derive_norms_k, 0,
+                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::derive_norms_k, 0), 0, stream,
+                       arguments);
     }
 
     /** Rebases rows @p rows of the neighbors matrix from @p source_range onto the IDs from @p shift
@@ -856,8 +817,9 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         graph.source_first = source_range.first;
         graph.source_bound = source_range.bound;
         graph.shift = shift;
-        return launch_(amd_kernel_t::rebase_links_k, 0,
-                       device_.multiprocessor_count * search_blocks_per_multiprocessor_k, 0, stream, arguments);
+        return launch_(vram_kernel_t::rebase_links_k, 0,
+                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::rebase_links_k, 0), 0, stream,
+                       arguments);
     }
 
     /** Merges the attended rows and carries of @p shards walks into the first's on @p stream - the
@@ -869,7 +831,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         arguments.attend.rows = rows;
         arguments.attend.columns = columns;
         arguments.attend.shards = shards;
-        return launch_(amd_kernel_t::merge_attention_k, 0, divide_round_up<u32_t>(rows, vram_warps_per_block_k), 0,
+        return launch_(vram_kernel_t::merge_attention_k, 0, divide_round_up<u32_t>(rows, vram_warps_per_block_k), 0,
                        stream, arguments);
     }
 
@@ -886,7 +848,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         arguments.matches.ranking = ranking;
         arguments.matches.walked = walked;
         arguments.matches.queries_count = queries_count;
-        return launch_(amd_kernel_t::resolve_matches_k, 0,
+        return launch_(vram_kernel_t::resolve_matches_k, 0,
                        divide_round_up<u32_t>(queries_count, vram_warps_per_block_k), 0, stream, arguments);
     }
 
@@ -901,7 +863,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         arguments.matches.block_bytes = block_bytes;
         arguments.matches.queries_count = queries_count;
         arguments.matches.shards = shards;
-        return launch_(amd_kernel_t::merge_matches_k, 0, divide_round_up<u32_t>(queries_count, vram_warps_per_block_k),
+        return launch_(vram_kernel_t::merge_matches_k, 0, divide_round_up<u32_t>(queries_count, vram_warps_per_block_k),
                        0, stream, arguments);
     }
 
@@ -918,8 +880,8 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
             return status_t::unsupported_k;
         u32_t const blocks = static_cast<u32_t>(
             min_of<std::size_t>(divide_round_up<std::size_t>(arguments.cast.plan.units, block_threads()),
-                                device_.multiprocessor_count * search_blocks_per_multiprocessor_k));
-        return launch_(amd_kernel_t::cast_k, 0, blocks, 0, stream, arguments);
+                                device_.multiprocessor_count * resident_blocks_(vram_kernel_t::cast_k, 0)));
+        return launch_(vram_kernel_t::cast_k, 0, blocks, 0, stream, arguments);
     }
 
     /** Narrows @p rows rows of the index's columns at @p from, @p from_stride bytes apart, into
@@ -937,28 +899,28 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         rmscast.y_stride = row_bytes();
         rmscast.epsilon = std::numeric_limits<f32_t>::min();
         u32_t const blocks = static_cast<u32_t>(
-            min_of<std::size_t>(rows, device_.multiprocessor_count * search_blocks_per_multiprocessor_k));
-        return launch_(amd_kernel_t::rmscast_k, 0, blocks, 0, stream, arguments);
+            min_of<std::size_t>(rows, device_.multiprocessor_count * resident_blocks_(vram_kernel_t::rmscast_k, 0)));
+        return launch_(vram_kernel_t::rmscast_k, 0, blocks, 0, stream, arguments);
     }
 
     /** Launches one walk per query of @p launch, each written out through @p sink: the search,
      *  indexed search and multiply families, each on its register rung or the arena frontier. */
     template <typename sink_>
     status_t launch_walk_(walk_launch_t const& launch, sink_ sink, hip_stream_handle_t stream) noexcept {
-        u32_t const blocks = walk_blocks_(launch.view.queries_count);
         vram_arguments_t arguments {};
         arguments.search = launch.view;
         arguments.rescoring = launch.rescoring;
-        amd_kernel_t kernel = amd_kernel_t::search_k;
+        vram_kernel_t kernel = vram_kernel_t::search_k;
         if constexpr (std::is_same_v<sink_, vram_multiply_sink_t>) {
             arguments.multiply_sink = sink;
-            kernel = amd_kernel_t::multiply_k;
+            kernel = vram_kernel_t::multiply_k;
         }
         else {
             arguments.search_sink = sink;
-            if (launch.rescoring.heads) kernel = amd_kernel_t::search_indexer_k;
+            if (launch.rescoring.heads) kernel = vram_kernel_t::search_indexer_k;
         }
         u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.pool_slots;
+        u32_t const blocks = walk_blocks_(launch.view.queries_count, resident_blocks_(kernel, slots));
         return launch_(kernel, slots, blocks, vram_warps_per_block_k * launch.view.scratch_bytes_per_warp, stream,
                        arguments);
     }
@@ -986,19 +948,21 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ve
         attend.columns = static_cast<u32_t>(dimensions());
         std::memcpy(attend.value_lookup, &value_lookup, sizeof(value_lookup));
         u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.pool_slots;
-        char name[amd_kernel_name_capacity_k];
-        amd_kernel_name(name, {amd_kernel_t::attend_k, slots}, amd_class_of(capability_), vector_dtype_,
-                        value_lookup_type_::device_lookup_k);
-        return hip_launch(module_.function(name), walk_blocks_(launch.view.queries_count), block_threads(),
-                          vram_warps_per_block_k * launch.view.scratch_bytes_per_warp, context.stream(), arguments);
+        vram_kernel_symbol_t symbol;
+        vram_kernel_symbol(symbol, "dense", "amd_kernel", "vram_arguments_t", vram_kernel_t::attend_k, capability_,
+                           vector_dtype_, slots, u32_t {value_lookup_type_::device_lookup_k});
+        return hip_launch(module_.function(symbol.text),
+                          walk_blocks_(launch.view.queries_count, resident_blocks_(vram_kernel_t::attend_k, slots)),
+                          block_threads(), vram_warps_per_block_k * launch.view.scratch_bytes_per_warp,
+                          context.stream(), arguments);
     }
 
 #pragma endregion Launches
 
-    /** This class's code object on this device, and its kernels in @ref amd_kernel_t order, the
+    /** This class's code object on this device, and its kernels in @ref vram_kernel_t order, the
      *  attends left to their launches. */
     hip_module_t module_;
-    hip_function_handle_t kernels_[static_cast<u32_t>(amd_kernel_t::count_k)][gpu_rungs_per_kernel_k] = {};
+    hip_function_handle_t kernels_[static_cast<u32_t>(vram_kernel_t::count_k)][gpu_rungs_per_kernel_k] = {};
 };
 
 } // namespace unum::usearch::dense

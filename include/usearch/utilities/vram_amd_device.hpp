@@ -278,22 +278,8 @@ constexpr u32_t hip_wave_lanes(gpu_class_t gpu_class) noexcept {
     return gpu_class == gpu_class_t::amd_cdna5_k ? 32u : 64u;
 }
 
-/** The AMD class a capability ceiling names. */
-constexpr gpu_class_t amd_class_of(nk_capability_t capability) noexcept {
-    return capability & nk_cap_cdna5_k   ? gpu_class_t::amd_cdna5_k
-           : capability & nk_cap_cdna4_k ? gpu_class_t::amd_cdna4_k
-                                         : gpu_class_t::amd_cdna3_k;
-}
-
-/** The ceiling a class's kits are chosen under, as @c numkong_capabilities_of grants it. */
-constexpr nk_capability_t amd_capabilities_of(gpu_class_t gpu_class) noexcept {
-    nk_capability_t const cdna3 = nk_cap_rocm_k | nk_cap_cdna3_k, cdna4 = cdna3 | nk_cap_cdna4_k;
-    return gpu_class == gpu_class_t::amd_cdna5_k   ? cdna4 | nk_cap_cdna5_k
-           : gpu_class == gpu_class_t::amd_cdna4_k ? cdna4
-                                                   : cdna3;
-}
-
-inline constexpr std::size_t amd_kernel_name_capacity_k = 160;
+/** Lanes of a wavefront under the ceiling @p capability: 32 once it reaches CDNA5, 64 below. */
+constexpr u32_t hip_wave_lanes(nk_capability_t capability) noexcept { return capability & nk_cap_cdna5_k ? 32u : 64u; }
 
 /** One AMD GPU's hardware specification - the facts runtime dispatch consults; hardware only, never
  *  derived policy. */

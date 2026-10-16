@@ -24,6 +24,7 @@
 
 #include <array>       // `std::array` - a quad's distances, scored rows and verdicts
 #include <atomic>      // `std::atomic_ref` - the first failure and the counts across threads
+#include <concepts>    // `std::same_as`
 #include <limits>      // `std::numeric_limits` - the node ID ceiling
 #include <memory>      // `std::uninitialized_value_construct_n` - the lock stripes of `get`
 #include <mutex>       // `std::unique_lock` - one stripe's hold
@@ -59,11 +60,15 @@ namespace unum::usearch::basic {
  *  @tparam codec_type_ The value codec the parts were saved with, whose @c view borrows a landed
  *      row.
  *  @tparam key_type_ The caller-visible identity, read from every part's key column.
+ *  @tparam node_id_type_ Identity within one part, as wide as the neighbor IDs the parts were saved
+ *      with; @c u32_t or @c u64_t.
  *  @tparam distance_type_ The distance the metrics drain and the walks rank by.
  *  @tparam engine_type_ The I/O engine every executor thread drives.
  */
-template <typename codec_type_, typename key_type_ = uuid_t, typename distance_type_ = f64_t,
-          typename engine_type_ = default_io_engine_t>
+template <typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t,
+          typename distance_type_ = f64_t, typename engine_type_ = default_io_engine_t,
+          typename row_kit_type_ = st::serial_row_kit_t>
+    requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
 class nvme_index {
     template <typename, typename>
     friend class utilities::row_walker;
@@ -78,7 +83,7 @@ class nvme_index {
     using arena_t = typename executor_t::arena_t;
 
     /** Node identifier within one part. */
-    using node_id_t = u32_t;
+    using node_id_t = node_id_type_;
     using scored_node_t = scored_node<node_id_t, distance_t>;
 
     /** Per-search knobs; zero derives from the parts' connectivity. */
@@ -261,7 +266,7 @@ class nvme_index {
         if (keys.empty()) return status_t::success_k;
         auto [call, call_status] = begin_scans_(executor);
         if (failed(call_status)) return call_status;
-        return scan_keys_(keys, executor, [&](std::size_t position, nvme_locator_t) noexcept {
+        return scan_keys_(keys, executor, [&](std::size_t position, locator_t) noexcept {
             std::atomic_ref<std::size_t>(entries[position]).fetch_add(1, std::memory_order_relaxed);
         });
     }
@@ -301,19 +306,19 @@ class nvme_index {
 
         // Threads meet a key's rows in any order, so each key keeps its earliest under a lock
         // striped by position, one stripe per thread.
-        growing_buffer<nvme_locator_t, scratch_allocator_t> kept {scratch_allocator_t {executor.arena(0)}};
+        growing_buffer<locator_t, scratch_allocator_t> kept {scratch_allocator_t {executor.arena(0)}};
         if (failed(kept.resize_uninitialized(keys.size() * wanted))) return status_t::bad_alloc_k;
         std::size_t const stripes_count = executor.size();
         auto* const stripes = reinterpret_cast<fu::spin_mutex_t*>(
             executor.arena(0).allocate(stripes_count * sizeof(fu::spin_mutex_t), alignof(fu::spin_mutex_t)));
         if (!stripes) return status_t::bad_alloc_k;
         std::uninitialized_value_construct_n(stripes, stripes_count);
-        auto earlier = [](nvme_locator_t first, nvme_locator_t second) noexcept {
+        auto earlier = [](locator_t first, locator_t second) noexcept {
             return first.shard != second.shard ? first.shard < second.shard : first.node < second.node;
         };
-        status_t const scanned = scan_keys_(keys, executor, [&](std::size_t position, nvme_locator_t locator) noexcept {
+        status_t const scanned = scan_keys_(keys, executor, [&](std::size_t position, locator_t locator) noexcept {
             std::unique_lock<fu::spin_mutex_t> const held {stripes[position % stripes_count]};
-            nvme_locator_t* const rows = kept.data() + position * wanted;
+            locator_t* const rows = kept.data() + position * wanted;
             std::size_t slot = min_of(entries[position]++, wanted);
             if (slot == wanted && (!wanted || !earlier(locator, rows[wanted - 1]))) return;
             if (slot == wanted) --slot;
@@ -327,7 +332,7 @@ class nvme_index {
             std::size_t const position = read / wanted, rank = read % wanted;
             if (rank >= min_of(entries[position], wanted)) return;
             if (failed(std::atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
-            nvme_locator_t const locator = kept[read];
+            locator_t const locator = kept[read];
             part_t const& part = parts_[locator.shard];
             std::size_t const bytes = static_cast<std::size_t>(
                 row_length_(part, nvme_purpose_t::score_k, locator.node));
@@ -372,7 +377,7 @@ class nvme_index {
             std::size_t node = first + row;
             while (node >= parts_[shard].nodes) node -= parts_[shard].nodes, ++shard;
             part_t const& part = parts_[shard];
-            u32_t const id = static_cast<u32_t>(node);
+            node_id_t const id = static_cast<node_id_t>(node);
             auto const [key_bytes, key_status] = read_(
                 executor, thread, shard, row_offset_(part, nvme_purpose_t::key_k, id), part.key_row_bytes);
             status_t read_status = key_status;
@@ -396,6 +401,7 @@ class nvme_index {
     }
 
   private:
+    using locator_t = nvme_locator<node_id_t>;
     using scratch_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using candidates_allocator_t = arena_allocator<scored_node_t, forkunion_allocator_t>;
     using results_array_t = sorted_buffer<scored_node_t, typename scored_node_t::closer_t, candidates_allocator_t>;
@@ -405,7 +411,7 @@ class nvme_index {
     using visited_set_t = growing_hash_set<node_id_t, std::hash<node_id_t>, scratch_allocator_t>;
 
     /** A ragged column's row starts in its own elements, then its end, a few bits a row. */
-    using directory_t = st::immutable_elias_fano<u64_t, forkunion_allocator<u64_t>>;
+    using directory_t = st::immutable_elias_fano<u64_t, forkunion_allocator<u64_t>, row_kit_type_>;
 
     /** Bytes of the key rows one scan read covers, and of the offsets one directory chunk
      *  streams. */
@@ -418,7 +424,7 @@ class nvme_index {
     struct part_t {
 
         /** Rows the part holds; neighbor IDs at or past it are sentinels. */
-        u32_t nodes = 0;
+        node_id_t nodes = 0;
 
         /** Neighbor IDs of the widest neighbors row, at least one: a fixed-degree column's width,
          *  or the longest ragged row. */
@@ -456,7 +462,7 @@ class nvme_index {
 
     /** Where row @p node of the column @p purpose reads starts in @p part, from the part's own
      *  start. */
-    static u64_t row_offset_(part_t const& part, nvme_purpose_t purpose, u32_t node) noexcept {
+    static u64_t row_offset_(part_t const& part, nvme_purpose_t purpose, node_id_t node) noexcept {
         switch (purpose) {
         case nvme_purpose_t::score_k:
             return part.values_begin + (part.value_starts.empty()
@@ -472,7 +478,7 @@ class nvme_index {
     }
 
     /** Bytes of row @p node of the column @p purpose reads in @p part. */
-    static u64_t row_length_(part_t const& part, nvme_purpose_t purpose, u32_t node) noexcept {
+    static u64_t row_length_(part_t const& part, nvme_purpose_t purpose, node_id_t node) noexcept {
         switch (purpose) {
         case nvme_purpose_t::score_k:
             return part.value_starts.empty() ? part.value_row_bytes
@@ -489,12 +495,14 @@ class nvme_index {
     }
 
     /** The walker's spelling of @ref row_offset_, for the row @p flight reads. */
-    static u64_t row_offset_(part_t const& part, nvme_purpose_t purpose, nvme_flight_t const& flight) noexcept {
+    static u64_t row_offset_(part_t const& part, nvme_purpose_t purpose,
+                             nvme_flight<node_id_t> const& flight) noexcept {
         return row_offset_(part, purpose, flight.node);
     }
 
     /** The walker's spelling of @ref row_length_, for the row @p flight reads. */
-    static u64_t row_length_(part_t const& part, nvme_purpose_t purpose, nvme_flight_t const& flight) noexcept {
+    static u64_t row_length_(part_t const& part, nvme_purpose_t purpose,
+                             nvme_flight<node_id_t> const& flight) noexcept {
         return row_length_(part, purpose, flight.node);
     }
 
@@ -626,7 +634,7 @@ class nvme_index {
                               slice_t::reserved_bytes(rows * sizeof(row_type_)) +
                               rows * slice_t::reserved_bytes(staged_bytes) +
                               slice_t::reserved_bytes(rows * sizeof(nvme_row_slot_t)) +
-                              slice_t::reserved_bytes(flights * sizeof(nvme_flight_t)) +
+                              slice_t::reserved_bytes(flights * sizeof(nvme_flight<node_id_t>)) +
                               slice_t::reserved_bytes(flights * sizeof(u32_t)) +
                               slice_t::reserved_bytes(walks * shape.hops_per_walk * sizeof(u32_t)) +
                               slice_t::reserved_bytes(shape.buffers * sizeof(io_request_t)) +
@@ -751,7 +759,7 @@ class nvme_index {
         metric_t metric;
         query_t query {};
         status_t status = status_t::success_k;
-        growing_buffer<nvme_locator_t, scratch_allocator_t> locators;
+        growing_buffer<locator_t, scratch_allocator_t> locators;
         growing_buffer<distance_t, scratch_allocator_t> ranked_distances;
         growing_buffer<key_t, scratch_allocator_t> resolved;
         std::size_t row = 0;
@@ -764,7 +772,7 @@ class nvme_index {
          *  keys. */
         static std::size_t staged_bytes(inputs_t const& inputs) noexcept {
             using slice_t = arena_allocator<byte_t>;
-            return slice_t::reserved_bytes(inputs.ranked * sizeof(nvme_locator_t)) +
+            return slice_t::reserved_bytes(inputs.ranked * sizeof(locator_t)) +
                    slice_t::reserved_bytes(inputs.ranked * sizeof(distance_t)) +
                    slice_t::reserved_bytes(inputs.ranked * sizeof(key_t));
         }
@@ -789,7 +797,7 @@ class nvme_index {
         void finish_walk(walk_t const& walk) noexcept {
             // A judging row ranked what it admitted as each walk scored it.
             if constexpr (!judged_k)
-                found = merge_search_results(to_span(walk.results), nvme_shard_locators_t {walk.shard},
+                found = merge_search_results(to_span(walk.results), nvme_shard_locators<node_id_t> {walk.shard},
                                              to_writable_span(locators), to_writable_span(ranked_distances), found);
         }
 
@@ -814,11 +822,12 @@ class nvme_index {
                 if (verdicts[lane] == admission_t::admit_k) asked[admitted++] = asked[lane];
             std::span<scored_node_t> const ranking = std::span(asked).first(admitted);
             network_sort(ranking, typename scored_node_t::closer_t {});
-            found = merge_search_results(std::span<scored_node_t const>(ranking), nvme_shard_locators_t {shard},
-                                         to_writable_span(locators), to_writable_span(ranked_distances), found);
+            found = merge_search_results(std::span<scored_node_t const>(ranking),
+                                         nvme_shard_locators<node_id_t> {shard}, to_writable_span(locators),
+                                         to_writable_span(ranked_distances), found);
         }
         std::size_t outputs() const noexcept { return found; }
-        nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
+        locator_t locator(std::size_t output) const noexcept { return locators[output]; }
         void resolve(std::size_t output, key_t const& key) noexcept { resolved[output] = key; }
         status_t finish() noexcept {
             std::span<key_t> const keys = inputs.keys.subspan(row * inputs.wanted, inputs.wanted);
@@ -937,9 +946,9 @@ class nvme_index {
             part_t const& part = parts_[shard];
             std::size_t const first = task * run_rows_(part),
                               rows = min_of<std::size_t>(run_rows_(part), part.nodes - first);
-            auto const [bytes, read_status] = read_(executor, thread, shard,
-                                                    row_offset_(part, nvme_purpose_t::key_k, static_cast<u32_t>(first)),
-                                                    u64_t(rows) * part.key_row_bytes);
+            auto const [bytes, read_status] = read_(
+                executor, thread, shard, row_offset_(part, nvme_purpose_t::key_k, static_cast<node_id_t>(first)),
+                u64_t(rows) * part.key_row_bytes);
             if (failed(read_status)) {
                 status_t unset = status_t::success_k;
                 std::atomic_ref<status_t>(failure).compare_exchange_strong(
@@ -950,7 +959,7 @@ class nvme_index {
                 key_t const key = safegraphs_widened_key<key_t>(bytes + row * part.key_row_bytes, part.key_dtype);
                 std::size_t const slot = slot_of(key);
                 for (std::size_t position = heads[slot]; position != empty_k; position = chains[position])
-                    on_hit(position, nvme_locator_t {shard, static_cast<u32_t>(first + row)});
+                    on_hit(position, locator_t {shard, static_cast<node_id_t>(first + row)});
             }
         };
         if (status_t const fanned = executor.for_tasks(tasks, scan_run); failed(fanned)) return fanned;
@@ -1054,15 +1063,15 @@ class nvme_index {
         std::size_t const degree = std::holds_alternative<vector_shape_t>(adjacency.shape) && !adjacency.offsets
                                        ? std::get<vector_shape_t>(adjacency.shape).columns
                                        : 0;
-        if (adjacency.dtype != dtype_t::u32_k ||
+        if (adjacency.dtype != safegraphs_node_id_dtype<node_id_t>() ||
             (adjacency.offsets ? adjacency.shape != column_shape_t {scalar_shape_t {}} : !degree))
             return status_t::config_mismatch_k;
         std::size_t const nodes = header.nodes();
         if (value.nodes() != nodes || adjacency.nodes() != nodes || !header.key.row_bytes() ||
-            nodes >= (std::numeric_limits<u32_t>::max)())
+            nodes >= (std::numeric_limits<node_id_t>::max)())
             return status_t::malformed_k;
 
-        part.nodes = static_cast<u32_t>(nodes);
+        part.nodes = static_cast<node_id_t>(nodes);
         part.key_row_bytes = static_cast<u32_t>(header.key.row_bytes());
         part.key_dtype = header.key.dtype;
         part.value_element_bytes = static_cast<u32_t>(dtype_bytes(value.dtype));

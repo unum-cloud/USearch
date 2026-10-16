@@ -13,7 +13,7 @@
  *  1. Enumerates one NumKong scalar per shard and every @c (kernel,scalar,capability) tuple
  *     inside @c check_scalar. The @c dense::quads_supported concept gates each call so
  *     combinations not yet adapted are no-ops at compile time without breaking the build - new
- *     kits and chains light up the matching cells automatically.
+ *     kits and ladders light up the matching cells automatically.
  *  2. For each supported tuple and a range of dimensions, computes a baseline distance with
  *     NumKong's monolithic API - @c nk::dot returns the raw inner product, wrapped to `1 - dot`
  *     for the dot kernel; @c nk::sqeuclidean is compared to USearch's squared euclidean), then
@@ -55,11 +55,11 @@ using namespace unum::usearch::dense;
 
 constexpr std::array<std::size_t, 7> dimensions_to_test = {7, 8, 32, 64, 128, 257, 1024};
 
-/** True iff a tile engine is compiled for this tuple. The tiles chain always names a
+/** True iff a tile engine is compiled for this tuple. The tiles ladder always names a
  *  kit - @c no_tiles_kit_t at minimum - so the gate is its @c has_tiles_k verdict, never
  *  the alias's existence. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept tiles_supported = quads_supported<kernel_, scalar_, caps_> && tiles_chain<scalar_, caps_>::has_tiles_k;
+concept tiles_supported = quads_supported<kernel_, scalar_, caps_> && tiles_ladder<scalar_, caps_>::has_tiles_k;
 
 /** Populates the input @p vec with small scalars - universally representable in any
  *  supported datatype from Float64 to E2M1 nibble-sized floats, but at a different cyclic rotation. */
@@ -120,7 +120,7 @@ static int check_quads(std::size_t dim) noexcept {
     // winner is either that tier or the serial fallback. Anything else means a row names
     // a kit from another backend - numerically indistinguishable, hence the static check.
     static_assert(
-        quads_chain<scalar_, caps_>::picked_k == caps_ || quads_chain<scalar_, caps_>::picked_k == nk_cap_serial_k,
+        quads_ladder<scalar_, caps_>::picked_k == caps_ || quads_ladder<scalar_, caps_>::picked_k == nk_cap_serial_k,
         "Capability cascade selected a tier that was never requested");
 
     auto query = nk::vector<scalar_>::zeros(dim).value;
@@ -198,8 +198,8 @@ static int check_tiles() noexcept {
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k || (available & caps_) != caps_) return 0;
     if (nk_cpu_configure_thread(available) != nk_success_k) return 0;
 
-    using tiles_kit_t = typename tiles_chain<scalar_, caps_>::kit_t;
-    using quads_kit_t = typename quads_chain<scalar_, caps_>::kit_t;
+    using tiles_kit_t = typename tiles_ladder<scalar_, caps_>::kit_t;
+    using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
     using raw_dot_t = typename scalar_::dot_result_t::raw_t;
     constexpr std::size_t queries_k = tiles_kit_t::tile_columns_k + 3, rows_k = 37, dimensions_k = 128;
 
@@ -289,9 +289,9 @@ int check_scalar<nk::u1x8_t>() noexcept {
            check_kernel<nk_kernel_jaccard_k, nk::u1x8_t>();
 }
 
-/** Every scalar below must resolve at least at the serial tier. Without this the
- *  no-op overload would swallow a dtype whose chain specialization went missing, and the
- *  suite would stay green while covering nothing. */
+/** Every scalar below must resolve at least at the serial tier. Without this the no-op overload
+ *  would swallow a dtype whose ladder specialization went missing, and the suite would stay green
+ *  while covering nothing. */
 template <typename scalar_>
 concept scalar_wired = quads_supported<nk_kernel_dot_k, scalar_, nk_cap_serial_k>;
 

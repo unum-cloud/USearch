@@ -247,7 +247,8 @@ bool run_indexes_merge(streamed_dataset_type_& streamed) {
     fmt::println("  visited: {}", humanized(merged.visited_members));
     fmt::println("  restarts: {}", merged.restarts);
     fmt::println("  islands: {} found, {} reconnected", merged.islands_found, merged.islands_reconnected);
-    fmt::println("  reachable: {} of {} · {} sweeps", merged.reachable_nodes, bench.indexes.size(), merged.sweeps);
+    fmt::println("  reachable: {} of {} · {} sweeps", merged.health.reachable_nodes, bench.indexes.size(),
+                 merged.health.sweeps);
     return true;
 }
 
@@ -423,7 +424,8 @@ struct indexes_search_workload_t {
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
 int stage_indexes_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                           std::span<int const> devices, nk_kernel_kind_t kernel, workload_type_ const& workload) {
-    cuda_indexes_context<vram_nvidia_indexes<u32_t, stored_dtype_, capability_>> bench {settings, devices, kernel};
+    cuda_indexes_context<vram_nvidia_indexes<u32_t, stored_dtype_, capability_, cuda_bench_fatbin_t>> bench {
+        settings, devices, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare_indexes(streamed) && run_indexes_insertion(streamed) && run_indexes_merge(streamed) &&
                run_indexes_refinement(streamed) && (settings.save_name.empty() || save_indexes(streamed)) &&

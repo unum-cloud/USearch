@@ -33,8 +33,9 @@ struct cuda_test_lookup_t {
     __device__ void const* operator()(u32_t id) const noexcept { return id < count ? rows + id * pitch : nullptr; }
 };
 
-using test::dense_nvidia_capabilities_k;
 using test::dense::counting_cuda_allocator_t;
+using test::dense::dense_nvidia_capabilities_k;
+using test::dense::dense_nvidia_fatbin_t;
 
 /** The lookups the suite attends through: by node ID on one GPU, and by key on shards. */
 using cuda_test_keyed_lookup_t = vram_keyed_lookup<u32_t, cuda_test_lookup_t>;
@@ -47,15 +48,6 @@ template <>
 struct cuda_value_lookup_of<cuda_test_keyed_lookup_t::device_lookup_k> {
     using type = cuda_test_keyed_lookup_t;
 };
-
-/** The suite's fatbin, linked in as raw bytes beside its host half. */
-extern "C" byte_t const test_vram_nvidia_bundle_start[], test_vram_nvidia_bundle_end[];
-
-template <>
-bytes_view_t cuda_fatbin<dense_nvidia_capabilities_k>() noexcept {
-    return {test_vram_nvidia_bundle_start,
-            static_cast<std::size_t>(test_vram_nvidia_bundle_end - test_vram_nvidia_bundle_start)};
-}
 
 // Every cell's kernels and attends, and the keyed attends of the sharded suite's collection.
 template __device__ void cuda_instantiate<dense_nvidia_capabilities_k, nk_bf16_k, cuda_test_lookup_t::device_lookup_k,
@@ -96,54 +88,62 @@ cuda_instantiate<dense_nvidia_capabilities_k, nk_e2m3_k, cuda_test_lookup_t::dev
 #endif
 
 // The ledgered index of every NVIDIA cell and the collections the sharded suite drives.
-template struct vram_nvidia_index<nk_bf16_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
-template struct vram_nvidia_indexes<u32_t, nk_bf16_k, dense_nvidia_capabilities_k>;
+template struct vram_nvidia_index<nk_bf16_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_indexes<u32_t, nk_bf16_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t>;
 #if USEARCH_DENSE_DTYPES >= 2
-template struct vram_nvidia_index<nk_u1_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_index<nk_u1_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-template struct vram_nvidia_index<nk_i8_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
-template struct vram_nvidia_indexes<u32_t, nk_i8_k, dense_nvidia_capabilities_k>;
+template struct vram_nvidia_index<nk_i8_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_indexes<u32_t, nk_i8_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-template struct vram_nvidia_index<nk_e4m3_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_index<nk_e4m3_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-template struct vram_nvidia_index<nk_f16_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_index<nk_f16_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-template struct vram_nvidia_index<nk_u8_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_index<nk_u8_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-template struct vram_nvidia_index<nk_e5m2_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_index<nk_e5m2_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-template struct vram_nvidia_index<nk_i4_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_index<nk_i4_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-template struct vram_nvidia_index<nk_u4_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_index<nk_u4_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-template struct vram_nvidia_index<nk_e3m2_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_index<nk_e3m2_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-template struct vram_nvidia_index<nk_e2m3_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                  counting_cuda_allocator_t, cuda_device_allocator_t>;
+template struct vram_nvidia_index<nk_e2m3_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
+                                  counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
 #endif
 
 } // namespace unum::usearch::dense
 
 namespace unum::usearch::test::dense {
+
+/** The suite's fatbin, linked in as raw bytes beside its host half. */
+extern "C" byte_t const test_vram_nvidia_bundle_start[], test_vram_nvidia_bundle_end[];
+
+bytes_view_t dense_nvidia_fatbin_t::bytes() noexcept {
+    return {test_vram_nvidia_bundle_start,
+            static_cast<std::size_t>(test_vram_nvidia_bundle_end - test_vram_nvidia_bundle_start)};
+}
 
 /** A value table copied onto the device, its rows a 16-byte pitch apart; null rows when the copy
  *  failed. */
@@ -181,8 +181,9 @@ static std::size_t check_vram_nvidia_attend(settings_t const& settings, cuda_exe
     if (settings.selects("vram_indexes"))
         failures_count += report(
             "cuda-sharded bf16+attend",
-            dense_expect_vram_indexes_attend<vram_nvidia_indexes<u32_t, nk_bf16_k, dense_nvidia_capabilities_k>,
-                                             dense_cuda_value_table_t>(settings.seed, executor));
+            dense_expect_vram_indexes_attend<
+                vram_nvidia_indexes<u32_t, nk_bf16_k, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t>,
+                dense_cuda_value_table_t>(settings.seed, executor));
     return failures_count;
 }
 

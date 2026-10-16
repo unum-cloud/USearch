@@ -7,17 +7,19 @@
  *  A kit binds one storage dtype to one GPU generation, named like the CPU kits -
  *  @b dtype_generation_quads_kit_t. The generation slot names the oldest tier whose instructions
  *  the kit needs: @c ampere for the sm_80 floor, @c ada for the fp8 conversions, @c blackwell for
- *  the mixed-precision multiply-adds and the fp6 conversions. A chain picks among them under the
- *  class's ceiling alone, never under a @c NUMKONG_TARGET_* switch, and only the picked kit's
- *  instructions are emitted, so a unit compiled for one architecture carries no newer one's. The
- *  arithmetic lives in named device primitives; a kit binds them.
+ *  the mixed-precision multiply-adds and the fp6 conversions. Each kit states the capability it
+ *  runs under, @c capability_k, and whether this unit carries it, @c compiled_k, from NumKong's
+ *  cumulative @c NUMKONG_ARCH_CUDA_* switches, so a Blackwell unit keeps the Ampere floor. A ladder
+ *  picks the first kit both admit through @c highest_kit, and only the picked kit's instructions
+ *  are emitted, so a unit compiled for one architecture carries no newer one's. The arithmetic
+ *  lives in named device primitives; a kit binds them.
  *
  *  Kits stay pure arithmetic. How a warp's candidate rows reach shared memory is a separate
- *  @b schedule, picked under the same ceiling: @c cp.async commit groups through Ada, whole-row
- *  Tensor Memory Accelerator copies from Hopper on. The schedule also scores a walk's batch:
- *  through the kit's @c mma.sync step from registers where the kit has one, and otherwise through
- *  its scalar dots, a lane loading one fragment at once through Hopper and two from Blackwell on,
- *  whose 256-bit loads serve the random row gathers better.
+ *  @b schedule, picked by @c schedule_ladder the same way: @c cp.async commit groups through Ada,
+ *  whole-row Tensor Memory Accelerator copies from Hopper on. The schedule also scores a walk's
+ *  batch: through the kit's @c mma.sync step from registers where the kit has one, and otherwise
+ *  through its scalar dots, a lane loading one fragment at once through Hopper and two from
+ *  Blackwell on, whose 256-bit loads serve the random row gathers better.
  *
  *  Fragments are 16 bytes of scalars held in registers, and metrics with precomputable norms
  *  finalize "through the dot". Row geometry - how many fragments span one vector, how many lanes
@@ -25,8 +27,8 @@
  *  dimensions are frozen by the first @c reserve, never by a type, and the metric only steers the
  *  scalar epilogue, so one kernel serves every metric of a dtype. The cross-lane reduction is
  *  deliberately not a kit member - one shuffle tree in @c vram_index.cuh serves every kit, over the
- *  warp policy each kit names. Distances take both sides' norms, as the CPU finalizers do, so a
- *  symmetric candidate-to-candidate distance is the same call.
+ *  warp policy each schedule names. Distances take both sides' norms, as the CPU finalizers do, so
+ *  a symmetric candidate-to-candidate distance is the same call.
  *
  *  Families sort from the widest numeric types to the smallest & most exotic: 16-bit floats, 8-bit
  *  integers, minifloats, packed nibbles, packed bits. Norms are the CPU's @c vector_norms over each
@@ -199,7 +201,7 @@ __device__ __forceinline__ std::array<f32_t, 4> cuda_mma_bf16_ampere(uint4 a, ui
 /** f16 kit - the sm_80 floor. */
 struct f16_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -237,7 +239,7 @@ struct f16_ampere_quads_kit_t {
 /** bf16 kit - the sm_80 floor. */
 struct bf16_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -315,8 +317,8 @@ __device__ __forceinline__ f32_t cuda_dot_bf16x8_blackwell(uint4 a, uint4 b, f32
 
 /** f16 kit - Blackwell, @c fma.rn.f32.f16. */
 struct f16_blackwell_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -353,8 +355,8 @@ struct f16_blackwell_quads_kit_t {
 
 /** bf16 kit - Blackwell, @c fma.rn.f32.bf16. */
 struct bf16_blackwell_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -480,7 +482,7 @@ __device__ __forceinline__ std::array<u32_t, 4> cuda_mma_u8_ampere(uint4 a, uint
 /** i8 kit - the sm_80 floor. */
 struct i8_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -518,7 +520,7 @@ struct i8_ampere_quads_kit_t {
 /** u8 kit - the sm_80 floor. */
 struct u8_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -559,113 +561,229 @@ struct u8_ampere_quads_kit_t {
 
 /*  No generation has fp8 or fp6 arithmetic outside the tensor cores - conversion is all the ISA
  *  offers - so every minifloat kit widens byte pairs and accumulates like the 16-bit float kits,
- *  and one generation's kit differs from another's only in its widening. */
+ *  and one generation's kit differs from another's only in the conversion its loops call. */
 
-/** Sixteen minifloat products of a fragment pair, each byte pair widened by @p widening_type_ into
- *  f32. */
-template <typename widening_type_>
-__device__ __forceinline__ f32_t cuda_dot_minifloats_ampere(uint4 a, uint4 b, f32_t sum) noexcept {
+/** One @c e4m3 byte placed into an f32 by hand, as the Ampere floor has no fp8 conversion:
+ *  subnormals scale by 2⁻⁹, and the all-ones magnitude is the format's only NaN. */
+__device__ __forceinline__ f32_t cuda_e4m3_to_f32_ampere(u32_t byte) noexcept {
+    u32_t const exponent = (byte >> 3) & 0xF, mantissa = byte & 0x7;
+    f32_t const magnitude = (byte & 0x7F) == 0x7F ? __int_as_float(0x7FC00000)
+                            : exponent ? __int_as_float(static_cast<int>(((exponent + 120u) << 23) | (mantissa << 20)))
+                                       : static_cast<f32_t>(mantissa) * 0x1p-9f;
+    return byte & 0x80 ? -magnitude : magnitude;
+}
+
+/** A packed @c e4m3 pair widened to two floats by hand, at the Ampere floor. */
+__device__ __forceinline__ float2 cuda_e4m3x2_to_f32x2_ampere(u32_t packed_pair) noexcept {
+    return {cuda_e4m3_to_f32_ampere(packed_pair & 0xFF), cuda_e4m3_to_f32_ampere((packed_pair >> 8) & 0xFF)};
+}
+
+/** A packed @c e5m2 pair widened at the Ampere floor: @c e5m2 is exactly the high byte of a half,
+ *  so shifting each byte up is the whole conversion, infinities and NaNs included. */
+__device__ __forceinline__ float2 cuda_e5m2x2_to_f32x2_ampere(u32_t packed_pair) noexcept {
+    u32_t const half_pair = ((packed_pair & 0xFF) << 8) | ((packed_pair & 0xFF00) << 16);
+    return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
+}
+
+/** A packed @c e3m2 pair widened by hand at the Ampere floor. The OCP fp6 formats sit low in a
+ *  byte, with the sign at bit 5 and no infinities or NaN, so the five magnitude bits drop into a
+ *  half's exponent and mantissa fields as they stand, the sign moves to bit 15, and one exact
+ *  power-of-two product rebiases, subnormals too: two mantissa bits, bias 3 against the half's
+ *  15. */
+__device__ __forceinline__ float2 cuda_e3m2x2_to_f32x2_ampere(u32_t packed_pair) noexcept {
+    u32_t const magnitudes = ((packed_pair & 0x001Fu) | ((packed_pair & 0x1F00u) << 8)) << (10 - 2);
+    u32_t const signs = ((packed_pair & 0x0020u) | ((packed_pair & 0x2000u) << 8)) << 10;
+    u32_t const unscaled = magnitudes | signs;
+    __half2 const scale = __half2half2(__ushort_as_half(static_cast<unsigned short>((15u + 12u) << 10)));
+    return __half22float2(__hmul2(*reinterpret_cast<__half2 const*>(&unscaled), scale));
+}
+
+/** The @c e2m3 twin of @ref cuda_e3m2x2_to_f32x2_ampere: three mantissa bits, bias 1 against the
+ *  half's 15. */
+__device__ __forceinline__ float2 cuda_e2m3x2_to_f32x2_ampere(u32_t packed_pair) noexcept {
+    u32_t const magnitudes = ((packed_pair & 0x001Fu) | ((packed_pair & 0x1F00u) << 8)) << (10 - 3);
+    u32_t const signs = ((packed_pair & 0x0020u) | ((packed_pair & 0x2000u) << 8)) << 10;
+    u32_t const unscaled = magnitudes | signs;
+    __half2 const scale = __half2half2(__ushort_as_half(static_cast<unsigned short>((15u + 14u) << 10)));
+    return __half22float2(__hmul2(*reinterpret_cast<__half2 const*>(&unscaled), scale));
+}
+
+/** Sixteen @c e5m2 products of a fragment pair, each byte pair widened into f32 by shifts. */
+__device__ __forceinline__ f32_t cuda_dot_e5m2x16_ampere(uint4 a, uint4 b, f32_t sum) noexcept {
     u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
 #pragma unroll
     for (u32_t word = 0; word != 4; ++word)
 #pragma unroll
         for (u32_t pair = 0; pair != 2; ++pair) {
-            float2 const values_a = widening_type_::pair_to_floats(words_a[word] >> (16 * pair));
-            float2 const values_b = widening_type_::pair_to_floats(words_b[word] >> (16 * pair));
+            float2 const values_a = cuda_e5m2x2_to_f32x2_ampere(words_a[word] >> (16 * pair));
+            float2 const values_b = cuda_e5m2x2_to_f32x2_ampere(words_b[word] >> (16 * pair));
             sum += values_a.x * values_b.x + values_a.y * values_b.y;
         }
     return sum;
 }
 
-/** A minifloat fragment's sum & sum of squares, each byte pair widened by @p widening_type_ into
- *  f32. */
-template <typename widening_type_>
-__device__ __forceinline__ float2 cuda_moments_minifloats_ampere(uint4 a, float2 moments) noexcept {
+/** An @c e5m2 fragment's sum & sum of squares, widened into f32 by shifts. */
+__device__ __forceinline__ float2 cuda_moments_e5m2x16_ampere(uint4 a, float2 moments) noexcept {
     u32_t const words[4] = {a.x, a.y, a.z, a.w};
 #pragma unroll
     for (u32_t word = 0; word != 4; ++word)
 #pragma unroll
         for (u32_t pair = 0; pair != 2; ++pair) {
-            float2 const values = widening_type_::pair_to_floats(words[word] >> (16 * pair));
+            float2 const values = cuda_e5m2x2_to_f32x2_ampere(words[word] >> (16 * pair));
             moments.x += values.x + values.y;
             moments.y += values.x * values.x + values.y * values.y;
         }
     return moments;
 }
 
-/** Returns @p sums plus @p weight times each of a minifloat fragment's sixteen values, each byte
- *  pair widened by @p widening_type_ into f32. */
-template <typename widening_type_>
-__device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_minifloats_ampere( //
+/** Returns @p sums plus @p weight times each of an @c e5m2 fragment's sixteen values. */
+__device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_e5m2x16_ampere( //
     uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
     u32_t const words[4] = {a.x, a.y, a.z, a.w};
 #pragma unroll
     for (u32_t word = 0; word != 4; ++word)
 #pragma unroll
         for (u32_t pair = 0; pair != 2; ++pair) {
-            float2 const values = widening_type_::pair_to_floats(words[word] >> (16 * pair));
+            float2 const values = cuda_e5m2x2_to_f32x2_ampere(words[word] >> (16 * pair));
             sums[4 * word + 2 * pair] += weight * values.x;
             sums[4 * word + 2 * pair + 1] += weight * values.y;
         }
     return sums;
 }
 
-/** The Ampere floor has no fp8 conversion, so each byte's fields are placed into an f32 by hand:
- *  subnormals scale by 2⁻⁹, and the all-ones magnitude is the format's only NaN. */
-struct e4m3_ampere_widening_t {
-    static __device__ __forceinline__ f32_t byte_to_float(u32_t byte) noexcept {
-        u32_t const exponent = (byte >> 3) & 0xF, mantissa = byte & 0x7;
-        f32_t const magnitude = (byte & 0x7F) == 0x7F ? __int_as_float(0x7FC00000)
-                                : exponent
-                                    ? __int_as_float(static_cast<int>(((exponent + 120u) << 23) | (mantissa << 20)))
-                                    : static_cast<f32_t>(mantissa) * 0x1p-9f;
-        return byte & 0x80 ? -magnitude : magnitude;
-    }
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        return {byte_to_float(packed_pair & 0xFF), byte_to_float((packed_pair >> 8) & 0xFF)};
-    }
-};
-
-/** The Ampere floor for @c e5m2, which is exactly the high byte of a half: shifting each byte up
- *  is the whole conversion, infinities and NaNs included. */
-struct e5m2_ampere_widening_t {
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        u32_t const half_pair = ((packed_pair & 0xFF) << 8) | ((packed_pair & 0xFF00) << 16);
-        return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
-    }
-};
-
-/** The OCP fp6 formats sit low in a byte - sign at bit 5, no infinities or NaN - so the floor
- *  widens a pair by hand: the five magnitude bits drop into a half's exponent and mantissa fields
- *  as they stand, the sign moves to bit 15, and one exact power-of-two product rebiases, subnormals
- *  too. */
-template <u32_t mantissa_bits_, u32_t rebias_log2_>
-__device__ __forceinline__ float2 cuda_fp6x2_to_f32x2_ampere(u32_t packed_pair) noexcept {
-    u32_t const magnitudes = ((packed_pair & 0x001Fu) | ((packed_pair & 0x1F00u) << 8)) << (10 - mantissa_bits_);
-    u32_t const signs = ((packed_pair & 0x0020u) | ((packed_pair & 0x2000u) << 8)) << 10;
-    u32_t const unscaled = magnitudes | signs;
-    __half2 const scale = __half2half2(__ushort_as_half(static_cast<unsigned short>((15u + rebias_log2_) << 10)));
-    return __half22float2(__hmul2(*reinterpret_cast<__half2 const*>(&unscaled), scale));
+/** The @c e4m3 twin of @ref cuda_dot_e5m2x16_ampere, widening by hand. */
+__device__ __forceinline__ f32_t cuda_dot_e4m3x16_ampere(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = cuda_e4m3x2_to_f32x2_ampere(words_a[word] >> (16 * pair));
+            float2 const values_b = cuda_e4m3x2_to_f32x2_ampere(words_b[word] >> (16 * pair));
+            sum += values_a.x * values_b.x + values_a.y * values_b.y;
+        }
+    return sum;
 }
 
-/** @c e3m2 by hand: two mantissa bits, bias 3 against the half's 15. */
-struct e3m2_ampere_widening_t {
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        return cuda_fp6x2_to_f32x2_ampere<2, 12>(packed_pair);
-    }
-};
+/** The @c e4m3 twin of @ref cuda_moments_e5m2x16_ampere, widening by hand. */
+__device__ __forceinline__ float2 cuda_moments_e4m3x16_ampere(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e4m3x2_to_f32x2_ampere(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
 
-/** @c e2m3 by hand: three mantissa bits, bias 1 against the half's 15. */
-struct e2m3_ampere_widening_t {
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        return cuda_fp6x2_to_f32x2_ampere<3, 14>(packed_pair);
-    }
-};
+/** The @c e4m3 twin of @ref cuda_weighted_e5m2x16_ampere, widening by hand. */
+__device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_e4m3x16_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e4m3x2_to_f32x2_ampere(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
+
+/** The @c e3m2 twin of @ref cuda_dot_e5m2x16_ampere, widening by hand. */
+__device__ __forceinline__ f32_t cuda_dot_e3m2x16_ampere(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = cuda_e3m2x2_to_f32x2_ampere(words_a[word] >> (16 * pair));
+            float2 const values_b = cuda_e3m2x2_to_f32x2_ampere(words_b[word] >> (16 * pair));
+            sum += values_a.x * values_b.x + values_a.y * values_b.y;
+        }
+    return sum;
+}
+
+/** The @c e3m2 twin of @ref cuda_moments_e5m2x16_ampere, widening by hand. */
+__device__ __forceinline__ float2 cuda_moments_e3m2x16_ampere(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e3m2x2_to_f32x2_ampere(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** The @c e3m2 twin of @ref cuda_weighted_e5m2x16_ampere, widening by hand. */
+__device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_e3m2x16_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e3m2x2_to_f32x2_ampere(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
+
+/** The @c e2m3 twin of @ref cuda_dot_e5m2x16_ampere, widening by hand. */
+__device__ __forceinline__ f32_t cuda_dot_e2m3x16_ampere(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = cuda_e2m3x2_to_f32x2_ampere(words_a[word] >> (16 * pair));
+            float2 const values_b = cuda_e2m3x2_to_f32x2_ampere(words_b[word] >> (16 * pair));
+            sum += values_a.x * values_b.x + values_a.y * values_b.y;
+        }
+    return sum;
+}
+
+/** The @c e2m3 twin of @ref cuda_moments_e5m2x16_ampere, widening by hand. */
+__device__ __forceinline__ float2 cuda_moments_e2m3x16_ampere(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e2m3x2_to_f32x2_ampere(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** The @c e2m3 twin of @ref cuda_weighted_e5m2x16_ampere, widening by hand. */
+__device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_e2m3x16_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e2m3x2_to_f32x2_ampere(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
 
 /** e5m2 kit - the sm_80 floor, widening by shifts. */
 struct e5m2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -674,14 +792,14 @@ struct e5m2_ampere_quads_kit_t {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return cuda_dot_minifloats_ampere<e5m2_ampere_widening_t>(a, b, sum);
+        return cuda_dot_e5m2x16_ampere(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return cuda_moments_minifloats_ampere<e5m2_ampere_widening_t>(a, moments);
+        return cuda_moments_e5m2x16_ampere(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return cuda_weighted_minifloats_ampere<e5m2_ampere_widening_t>(a, weight, sums);
+        return cuda_weighted_e5m2x16_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -699,7 +817,7 @@ struct e5m2_ampere_quads_kit_t {
 /** e4m3 kit - the sm_80 floor, widening by hand. */
 struct e4m3_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -708,14 +826,14 @@ struct e4m3_ampere_quads_kit_t {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return cuda_dot_minifloats_ampere<e4m3_ampere_widening_t>(a, b, sum);
+        return cuda_dot_e4m3x16_ampere(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return cuda_moments_minifloats_ampere<e4m3_ampere_widening_t>(a, moments);
+        return cuda_moments_e4m3x16_ampere(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return cuda_weighted_minifloats_ampere<e4m3_ampere_widening_t>(a, weight, sums);
+        return cuda_weighted_e4m3x16_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -733,7 +851,7 @@ struct e4m3_ampere_quads_kit_t {
 /** e3m2 kit - the sm_80 floor, widening by hand. */
 struct e3m2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -742,14 +860,14 @@ struct e3m2_ampere_quads_kit_t {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return cuda_dot_minifloats_ampere<e3m2_ampere_widening_t>(a, b, sum);
+        return cuda_dot_e3m2x16_ampere(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return cuda_moments_minifloats_ampere<e3m2_ampere_widening_t>(a, moments);
+        return cuda_moments_e3m2x16_ampere(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return cuda_weighted_minifloats_ampere<e3m2_ampere_widening_t>(a, weight, sums);
+        return cuda_weighted_e3m2x16_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -767,7 +885,7 @@ struct e3m2_ampere_quads_kit_t {
 /** e2m3 kit - the sm_80 floor, widening by hand. */
 struct e2m3_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -776,14 +894,14 @@ struct e2m3_ampere_quads_kit_t {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return cuda_dot_minifloats_ampere<e2m3_ampere_widening_t>(a, b, sum);
+        return cuda_dot_e2m3x16_ampere(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return cuda_moments_minifloats_ampere<e2m3_ampere_widening_t>(a, moments);
+        return cuda_moments_e2m3x16_ampere(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return cuda_weighted_minifloats_ampere<e2m3_ampere_widening_t>(a, weight, sums);
+        return cuda_weighted_e2m3x16_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -798,31 +916,120 @@ struct e2m3_ampere_quads_kit_t {
     }
 };
 
-/** Ada and every tier since widens an fp8 pair in one @c cvt.rn.f16x2.e4m3x2. */
-struct e4m3_ada_widening_t {
-    static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
-        u32_t half_pair;
-        asm("{cvt.rn.f16x2.e4m3x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
-        return half_pair;
-    }
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        u32_t const half_pair = pair_to_halves(packed_pair);
-        return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
-    }
-};
+/** A packed @c e4m3 pair widened to two halves in one @c cvt.rn.f16x2.e4m3x2, on Ada and every tier
+ *  since. */
+__device__ __forceinline__ u32_t cuda_e4m3x2_to_f16x2_ada(u32_t packed_pair) noexcept {
+    u32_t half_pair;
+    asm("{cvt.rn.f16x2.e4m3x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
+    return half_pair;
+}
 
-/** The @c e5m2 twin of @ref e4m3_ada_widening_t, through @c cvt.rn.f16x2.e5m2x2. */
-struct e5m2_ada_widening_t {
-    static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
-        u32_t half_pair;
-        asm("{cvt.rn.f16x2.e5m2x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
-        return half_pair;
-    }
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        u32_t const half_pair = pair_to_halves(packed_pair);
-        return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
-    }
-};
+/** A packed @c e4m3 pair widened to two floats through @ref cuda_e4m3x2_to_f16x2_ada. */
+__device__ __forceinline__ float2 cuda_e4m3x2_to_f32x2_ada(u32_t packed_pair) noexcept {
+    u32_t const half_pair = cuda_e4m3x2_to_f16x2_ada(packed_pair);
+    return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
+}
+
+/** The @c e5m2 twin of @ref cuda_e4m3x2_to_f16x2_ada, through @c cvt.rn.f16x2.e5m2x2. */
+__device__ __forceinline__ u32_t cuda_e5m2x2_to_f16x2_ada(u32_t packed_pair) noexcept {
+    u32_t half_pair;
+    asm("{cvt.rn.f16x2.e5m2x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
+    return half_pair;
+}
+
+/** A packed @c e5m2 pair widened to two floats through @ref cuda_e5m2x2_to_f16x2_ada. */
+__device__ __forceinline__ float2 cuda_e5m2x2_to_f32x2_ada(u32_t packed_pair) noexcept {
+    u32_t const half_pair = cuda_e5m2x2_to_f16x2_ada(packed_pair);
+    return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
+}
+
+/** Sixteen @c e5m2 products of a fragment pair, each byte pair widened into f32 through the Ada
+ *  conversion. */
+__device__ __forceinline__ f32_t cuda_dot_e5m2x16_ada(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = cuda_e5m2x2_to_f32x2_ada(words_a[word] >> (16 * pair));
+            float2 const values_b = cuda_e5m2x2_to_f32x2_ada(words_b[word] >> (16 * pair));
+            sum += values_a.x * values_b.x + values_a.y * values_b.y;
+        }
+    return sum;
+}
+
+/** An @c e5m2 fragment's sum & sum of squares, widened into f32 through the Ada conversion. */
+__device__ __forceinline__ float2 cuda_moments_e5m2x16_ada(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e5m2x2_to_f32x2_ada(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** Returns @p sums plus @p weight times each of an @c e5m2 fragment's sixteen values, widened
+ *  through the Ada conversion. */
+__device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_e5m2x16_ada( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e5m2x2_to_f32x2_ada(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
+
+/** The @c e4m3 twin of @ref cuda_dot_e5m2x16_ada. */
+__device__ __forceinline__ f32_t cuda_dot_e4m3x16_ada(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = cuda_e4m3x2_to_f32x2_ada(words_a[word] >> (16 * pair));
+            float2 const values_b = cuda_e4m3x2_to_f32x2_ada(words_b[word] >> (16 * pair));
+            sum += values_a.x * values_b.x + values_a.y * values_b.y;
+        }
+    return sum;
+}
+
+/** The @c e4m3 twin of @ref cuda_moments_e5m2x16_ada. */
+__device__ __forceinline__ float2 cuda_moments_e4m3x16_ada(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e4m3x2_to_f32x2_ada(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** The @c e4m3 twin of @ref cuda_weighted_e5m2x16_ada. */
+__device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_e4m3x16_ada( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e4m3x2_to_f32x2_ada(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
 
 /** One @c mma.sync m16n8k32 step over @c e5m2 bytes into f32, laid out as
  *  @ref cuda_mma_f16_ampere's. */
@@ -848,7 +1055,7 @@ __device__ __forceinline__ std::array<f32_t, 4> cuda_mma_e4m3_ada(uint4 a, uint2
 /** e5m2 kit - Ada, widening through the conversion. */
 struct e5m2_ada_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_ADA_;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -857,18 +1064,18 @@ struct e5m2_ada_quads_kit_t {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return cuda_dot_minifloats_ampere<e5m2_ada_widening_t>(a, b, sum);
+        return cuda_dot_e5m2x16_ada(a, b, sum);
     }
     static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
                                                                            std::array<dot_t, 4> tile) noexcept {
         return cuda_mma_e5m2_ada(a, b, tile);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return cuda_moments_minifloats_ampere<e5m2_ada_widening_t>(a, moments);
+        return cuda_moments_e5m2x16_ada(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return cuda_weighted_minifloats_ampere<e5m2_ada_widening_t>(a, weight, sums);
+        return cuda_weighted_e5m2x16_ada(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -886,7 +1093,7 @@ struct e5m2_ada_quads_kit_t {
 /** e4m3 kit - Ada, widening through the conversion. */
 struct e4m3_ada_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_ADA_;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -895,18 +1102,18 @@ struct e4m3_ada_quads_kit_t {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return cuda_dot_minifloats_ampere<e4m3_ada_widening_t>(a, b, sum);
+        return cuda_dot_e4m3x16_ada(a, b, sum);
     }
     static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
                                                                            std::array<dot_t, 4> tile) noexcept {
         return cuda_mma_e4m3_ada(a, b, tile);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return cuda_moments_minifloats_ampere<e4m3_ada_widening_t>(a, moments);
+        return cuda_moments_e4m3x16_ada(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return cuda_weighted_minifloats_ampere<e4m3_ada_widening_t>(a, weight, sums);
+        return cuda_weighted_e4m3x16_ada(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -921,52 +1128,145 @@ struct e4m3_ada_quads_kit_t {
     }
 };
 
-/** Sixteen minifloat products of a fragment pair, each byte pair widened by @p widening_type_ into
- *  halves and multiplied straight into the f32 sum, so the dot never widens to f32 - the norms
- *  still do. */
-template <typename widening_type_>
-__device__ __forceinline__ f32_t cuda_dot_minifloats_blackwell(uint4 a, uint4 b, f32_t sum) noexcept {
+/** A packed @c e3m2 pair widened to two halves in one @c cvt.rn.f16x2.e3m2x2, which only
+ *  Blackwell's family-specific code encodes. */
+__device__ __forceinline__ u32_t cuda_e3m2x2_to_f16x2_blackwell(u32_t packed_pair) noexcept {
+    u32_t half_pair;
+    asm("{cvt.rn.f16x2.e3m2x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
+    return half_pair;
+}
+
+/** A packed @c e3m2 pair widened to two floats through @ref cuda_e3m2x2_to_f16x2_blackwell. */
+__device__ __forceinline__ float2 cuda_e3m2x2_to_f32x2_blackwell(u32_t packed_pair) noexcept {
+    u32_t const half_pair = cuda_e3m2x2_to_f16x2_blackwell(packed_pair);
+    return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
+}
+
+/** The @c e2m3 twin of @ref cuda_e3m2x2_to_f16x2_blackwell, through @c cvt.rn.f16x2.e2m3x2. */
+__device__ __forceinline__ u32_t cuda_e2m3x2_to_f16x2_blackwell(u32_t packed_pair) noexcept {
+    u32_t half_pair;
+    asm("{cvt.rn.f16x2.e2m3x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
+    return half_pair;
+}
+
+/** A packed @c e2m3 pair widened to two floats through @ref cuda_e2m3x2_to_f16x2_blackwell. */
+__device__ __forceinline__ float2 cuda_e2m3x2_to_f32x2_blackwell(u32_t packed_pair) noexcept {
+    u32_t const half_pair = cuda_e2m3x2_to_f16x2_blackwell(packed_pair);
+    return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
+}
+
+/** Sixteen @c e5m2 products of a fragment pair, each byte pair converted into halves and multiplied
+ *  straight into the f32 sum, so the dot never widens to f32 - the norms still do. */
+__device__ __forceinline__ f32_t cuda_dot_e5m2x16_blackwell(uint4 a, uint4 b, f32_t sum) noexcept {
     u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
 #pragma unroll
     for (u32_t word = 0; word != 4; ++word)
 #pragma unroll
         for (u32_t pair = 0; pair != 2; ++pair)
-            sum = cuda_fma_f16x2_blackwell(widening_type_::pair_to_halves(words_a[word] >> (16 * pair)),
-                                           widening_type_::pair_to_halves(words_b[word] >> (16 * pair)), sum);
+            sum = cuda_fma_f16x2_blackwell(cuda_e5m2x2_to_f16x2_ada(words_a[word] >> (16 * pair)),
+                                           cuda_e5m2x2_to_f16x2_ada(words_b[word] >> (16 * pair)), sum);
     return sum;
 }
 
-/** Blackwell widens an fp6 pair in one @c cvt.rn.f16x2.e3m2x2, which only family-specific code
- *  encodes. */
-struct e3m2_blackwell_widening_t {
-    static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
-        u32_t half_pair;
-        asm("{cvt.rn.f16x2.e3m2x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
-        return half_pair;
-    }
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        u32_t const half_pair = pair_to_halves(packed_pair);
-        return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
-    }
-};
+/** The @c e4m3 twin of @ref cuda_dot_e5m2x16_blackwell. */
+__device__ __forceinline__ f32_t cuda_dot_e4m3x16_blackwell(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair)
+            sum = cuda_fma_f16x2_blackwell(cuda_e4m3x2_to_f16x2_ada(words_a[word] >> (16 * pair)),
+                                           cuda_e4m3x2_to_f16x2_ada(words_b[word] >> (16 * pair)), sum);
+    return sum;
+}
 
-/** The @c e2m3 twin of @ref e3m2_blackwell_widening_t, through @c cvt.rn.f16x2.e2m3x2. */
-struct e2m3_blackwell_widening_t {
-    static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
-        u32_t half_pair;
-        asm("{cvt.rn.f16x2.e2m3x2 %0, %1;}" : "=r"(half_pair) : "h"(static_cast<unsigned short>(packed_pair)));
-        return half_pair;
-    }
-    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
-        u32_t const half_pair = pair_to_halves(packed_pair);
-        return __half22float2(*reinterpret_cast<__half2 const*>(&half_pair));
-    }
-};
+/** The @c e3m2 twin of @ref cuda_dot_e5m2x16_blackwell, through the fp6 conversion. */
+__device__ __forceinline__ f32_t cuda_dot_e3m2x16_blackwell(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair)
+            sum = cuda_fma_f16x2_blackwell(cuda_e3m2x2_to_f16x2_blackwell(words_a[word] >> (16 * pair)),
+                                           cuda_e3m2x2_to_f16x2_blackwell(words_b[word] >> (16 * pair)), sum);
+    return sum;
+}
+
+/** An @c e3m2 fragment's sum & sum of squares, widened into f32 through the fp6 conversion. */
+__device__ __forceinline__ float2 cuda_moments_e3m2x16_blackwell(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e3m2x2_to_f32x2_blackwell(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** Returns @p sums plus @p weight times each of an @c e3m2 fragment's sixteen values, widened
+ *  through the fp6 conversion. */
+__device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_e3m2x16_blackwell( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e3m2x2_to_f32x2_blackwell(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
+
+/** The @c e2m3 twin of @ref cuda_dot_e3m2x16_blackwell. */
+__device__ __forceinline__ f32_t cuda_dot_e2m3x16_blackwell(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair)
+            sum = cuda_fma_f16x2_blackwell(cuda_e2m3x2_to_f16x2_blackwell(words_a[word] >> (16 * pair)),
+                                           cuda_e2m3x2_to_f16x2_blackwell(words_b[word] >> (16 * pair)), sum);
+    return sum;
+}
+
+/** The @c e2m3 twin of @ref cuda_moments_e3m2x16_blackwell. */
+__device__ __forceinline__ float2 cuda_moments_e2m3x16_blackwell(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e2m3x2_to_f32x2_blackwell(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** The @c e2m3 twin of @ref cuda_weighted_e3m2x16_blackwell. */
+__device__ __forceinline__ std::array<f32_t, 16> cuda_weighted_e2m3x16_blackwell( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = cuda_e2m3x2_to_f32x2_blackwell(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
 
 /** e5m2 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
 struct e5m2_blackwell_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -975,18 +1275,18 @@ struct e5m2_blackwell_quads_kit_t {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return cuda_dot_minifloats_blackwell<e5m2_ada_widening_t>(a, b, sum);
+        return cuda_dot_e5m2x16_blackwell(a, b, sum);
     }
     static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
                                                                            std::array<dot_t, 4> tile) noexcept {
         return cuda_mma_e5m2_ada(a, b, tile);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return cuda_moments_minifloats_ampere<e5m2_ada_widening_t>(a, moments);
+        return cuda_moments_e5m2x16_ada(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return cuda_weighted_minifloats_ampere<e5m2_ada_widening_t>(a, weight, sums);
+        return cuda_weighted_e5m2x16_ada(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -1003,8 +1303,8 @@ struct e5m2_blackwell_quads_kit_t {
 
 /** e4m3 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
 struct e4m3_blackwell_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1013,18 +1313,18 @@ struct e4m3_blackwell_quads_kit_t {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return cuda_dot_minifloats_blackwell<e4m3_ada_widening_t>(a, b, sum);
+        return cuda_dot_e4m3x16_blackwell(a, b, sum);
     }
     static __device__ __forceinline__ std::array<dot_t, 4> accumulate_tile(fragment_t a, uint2 b,
                                                                            std::array<dot_t, 4> tile) noexcept {
         return cuda_mma_e4m3_ada(a, b, tile);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return cuda_moments_minifloats_ampere<e4m3_ada_widening_t>(a, moments);
+        return cuda_moments_e4m3x16_ada(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return cuda_weighted_minifloats_ampere<e4m3_ada_widening_t>(a, weight, sums);
+        return cuda_weighted_e4m3x16_ada(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -1041,8 +1341,8 @@ struct e4m3_blackwell_quads_kit_t {
 
 /** e3m2 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
 struct e3m2_blackwell_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1051,14 +1351,14 @@ struct e3m2_blackwell_quads_kit_t {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return cuda_dot_minifloats_blackwell<e3m2_blackwell_widening_t>(a, b, sum);
+        return cuda_dot_e3m2x16_blackwell(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return cuda_moments_minifloats_ampere<e3m2_blackwell_widening_t>(a, moments);
+        return cuda_moments_e3m2x16_blackwell(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return cuda_weighted_minifloats_ampere<e3m2_blackwell_widening_t>(a, weight, sums);
+        return cuda_weighted_e3m2x16_blackwell(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -1075,8 +1375,8 @@ struct e3m2_blackwell_quads_kit_t {
 
 /** e2m3 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
 struct e2m3_blackwell_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1085,14 +1385,14 @@ struct e2m3_blackwell_quads_kit_t {
     using norms_accumulator_t = float2;
 
     static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
-        return cuda_dot_minifloats_blackwell<e2m3_blackwell_widening_t>(a, b, sum);
+        return cuda_dot_e2m3x16_blackwell(a, b, sum);
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
-        return cuda_moments_minifloats_ampere<e2m3_blackwell_widening_t>(a, moments);
+        return cuda_moments_e2m3x16_blackwell(a, moments);
     }
     static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
                                                                      weighted_t sums) noexcept {
-        return cuda_weighted_minifloats_ampere<e2m3_blackwell_widening_t>(a, weight, sums);
+        return cuda_weighted_e2m3x16_blackwell(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -1214,7 +1514,7 @@ __device__ __forceinline__ std::array<f32_t, 32> cuda_weighted_u4x32_ampere( //
 /** i4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
 struct i4x2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -1248,7 +1548,7 @@ struct i4x2_ampere_quads_kit_t {
 /** u4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
 struct u4x2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1317,7 +1617,7 @@ __device__ __forceinline__ std::array<u32_t, 4> cuda_mma_u1_ampere(uint4 a, uint
  *  row's set-bit count, the currency of Jaccard's union, mirrored into both fields. */
 struct u1x8_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using warp_t = cuda_warp_t;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1380,9 +1680,10 @@ struct u1x8_ampere_quads_kit_t {
  *  re-read its first row, and rows split into whole 32-byte pieces.
  */
 template <vram_quads_kit kit_, u32_t lanes_per_row_>
-__device__ __forceinline__ vram_scored_node_t cuda_score_tiles( //
+__device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_tiles( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
-    typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+    typename kit_::norms_t query_state, vram_gathered<kit_, cuda_warp_t>& gathered, u32_t gathered_count,
+    u32_t lane) noexcept {
 
     using fragment_t = typename kit_::fragment_t;
     using dot_t = typename kit_::dot_t;
@@ -1469,9 +1770,9 @@ __device__ __forceinline__ vram_scored_node_t cuda_score_tiles( //
                              : 8 * (lane & 3) + 4 * ((lane >> 2) & 1) + 2 * ((lane >> 4) & 1) + ((lane >> 3) & 1);
     dot_t const dot = cuda_warp_t::shuffle(held, holder);
     cuda_warp_t::sync();
-    if (!live) return vram_scored_node_t::sentinel();
+    if (!live) return vram_scored_node<node_id_t>::sentinel();
     gathered.dots[lane] = dot;
-    vram_scored_node_t const scored = vram_scored_node_t::make(
+    vram_scored_node<node_id_t> const scored = vram_scored_node<node_id_t>::make(
         kit_::distance(storage.kernel, dot, query_state, target_state), gathered.ids[lane]);
     gathered.scored[lane] = scored;
     return scored;
@@ -1480,10 +1781,11 @@ __device__ __forceinline__ vram_scored_node_t cuda_score_tiles( //
 /** A walk's batch under a kit without a tensor-core step: its scalar dots, @p fragments_per_load_
  *  adjacent fragments a load. */
 template <vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_>
-__device__ __forceinline__ vram_scored_node_t cuda_score_batch( //
+__device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_batch( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
-    typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
-    return vram_score_batch<kit_, resident_blocks_, fragments_per_load_>( //
+    typename kit_::norms_t query_state, vram_gathered<kit_, cuda_warp_t>& gathered, u32_t gathered_count,
+    u32_t lane) noexcept {
+    return vram_score_batch<kit_, cuda_warp_t, resident_blocks_, fragments_per_load_>( //
         storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
 }
 
@@ -1495,15 +1797,16 @@ template <vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_
     requires requires(typename kit_::fragment_t a, uint2 b, std::array<typename kit_::dot_t, 4> tile) {
         kit_::accumulate_tile(a, b, tile);
     }
-__device__ __forceinline__ vram_scored_node_t cuda_score_batch( //
+__device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_batch( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
-    typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+    typename kit_::norms_t query_state, vram_gathered<kit_, cuda_warp_t>& gathered, u32_t gathered_count,
+    u32_t lane) noexcept {
     if constexpr (!std::is_same_v<typename kit_::scalar_t, nk::u1x8_t>)
         if (storage.row_fragments % 2 == 0)
             return storage.row_fragments >= 16
                        ? cuda_score_tiles<kit_, 8>(storage, query_span, query_state, gathered, gathered_count, lane)
                        : cuda_score_tiles<kit_, 4>(storage, query_span, query_state, gathered, gathered_count, lane);
-    return vram_score_batch<kit_, resident_blocks_, fragments_per_load_>( //
+    return vram_score_batch<kit_, cuda_warp_t, resident_blocks_, fragments_per_load_>( //
         storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
 }
 
@@ -1515,6 +1818,9 @@ __device__ __forceinline__ vram_scored_node_t cuda_score_batch( //
  *  A @c cp.async lands only for the lane that queued it, so every await ends in a warp barrier.
  */
 struct ampere_cp_async_schedule_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
+    using warp_t = cuda_warp_t;
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 1;
 
@@ -1528,9 +1834,10 @@ struct ampere_cp_async_schedule_t {
 
     /** Scores a walk's batch as @ref cuda_score_batch does at this schedule's load width. */
     template <vram_quads_kit kit_, u32_t resident_blocks_>
-    static __device__ __forceinline__ vram_scored_node_t score_batch( //
+    static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
-        typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+        typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
+        u32_t lane) noexcept {
         return cuda_score_batch<kit_, resident_blocks_, fragments_per_load_k>( //
             storage, query_span, query_state, gathered, gathered_count, lane);
     }
@@ -1576,19 +1883,72 @@ struct ampere_cp_async_schedule_t {
     }
 };
 
-/**
- *  @brief The Hopper and Blackwell staging: the Tensor Memory Accelerator copies every row whole in
- *      one @c cp.async.bulk, and each stage's bytes complete on that stage's @c mbarrier, so the
- *      copies hold no registers and every lane waits on the barrier, not on its own copies.
- *
- *  A row is one contiguous span of whole 16-byte fragments, so no tensor map is needed and no row
- *  length is capped. Each barrier advances one phase per staging that fills its stage. A walking
- *  lane loads @p fragments_per_load_ adjacent fragments at once.
- */
-template <u32_t fragments_per_load_>
-struct cuda_tma_schedule {
+/*  The Hopper and Blackwell staging: the Tensor Memory Accelerator copies every row whole in one
+ *  @c cp.async.bulk, and each stage's bytes complete on that stage's @c mbarrier, so the copies
+ *  hold no registers and every lane waits on the barrier, not on its own copies. A row is one
+ *  contiguous span of whole 16-byte fragments, so no tensor map is needed and no row length is
+ *  capped. Each barrier advances one phase per staging that fills its stage. The two schedules
+ *  differ in how many adjacent fragments a walking lane loads at once. */
+
+/** Arms @p stages barriers from @p barriers on, one arrival each, from the warp's first lane. */
+__device__ __forceinline__ void cuda_tma_initialize_barriers(u64_t* barriers, u32_t stages, u32_t lane) noexcept {
+    if (lane == 0) {
+        for (u32_t stage = 0; stage != stages; ++stage)
+            asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(cuda_shared_address(barriers + stage)), "r"(1u)
+                         : "memory");
+        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+    }
+    __syncwarp();
+}
+
+/** Queues one @c cp.async.bulk per row an ID span names into the cache's leading rows, each
+ *  completing on the barrier of its stage of @p rows_per_stage rows. */
+template <typename storage_, typename cache_>
+__device__ __forceinline__ void cuda_tma_copy_rows(u64_t* barriers, u32_t rows_per_stage, storage_ const& storage,
+                                                   cache_ cache, u32_t const* ids, u32_t rows, u32_t lane) noexcept {
+    u32_t const row_bytes = storage.row_fragments * sizeof(typename storage_::fragment_t);
+    // The cache rows' earlier generic reads must precede the copies' asynchronous writes.
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+    if (lane == 0)
+        for (u32_t first_row = 0; first_row < rows; first_row += rows_per_stage) {
+            u32_t const barrier = cuda_shared_address(barriers + first_row / rows_per_stage);
+            u32_t const stage_bytes = (min_of(first_row + rows_per_stage, rows) - first_row) * row_bytes;
+            asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(barrier), "r"(stage_bytes)
+                         : "memory");
+        }
+    __syncwarp();
+    for (u32_t row = lane; row < rows; row += cuda_warp_t::width_k) {
+        u32_t const destination = cuda_shared_address(cache.row(row));
+        u32_t const barrier = cuda_shared_address(barriers + row / rows_per_stage);
+        asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" //
+                     ::"r"(destination),
+                     "l"(storage.vector_span_for(ids[row])), "r"(row_bytes), "r"(barrier)
+                     : "memory");
+    }
+}
+
+/** Spins until @p barrier completes the phase of parity @p parity. */
+__device__ __forceinline__ void cuda_tma_wait_barrier(u64_t* barrier, u32_t parity) noexcept {
+    u32_t landed;
+    do {
+        asm volatile("{\n.reg .pred ready;\n"                                      //
+                     "mbarrier.try_wait.parity.shared::cta.b64 ready, [%1], %2;\n" //
+                     "selp.u32 %0, 1, 0, ready;\n}\n"
+                     : "=r"(landed)
+                     : "r"(cuda_shared_address(barrier)), "r"(parity)
+                     : "memory");
+    } while (!landed);
+}
+
+/** The Hopper staging: whole-row Tensor Memory Accelerator copies, a walking lane loading one
+ *  fragment at once. */
+struct hopper_tma_schedule_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_hopper_k;
+    inline static constexpr bool compiled_k = NUMKONG_TARGET_HOPPER || NUMKONG_ARCH_CUDA_BLACKWELL_ ||
+                                              NUMKONG_TARGET_BLACKWELLRTX;
+    using warp_t = cuda_warp_t;
     inline static constexpr u32_t stages_k = 2;
-    inline static constexpr u32_t fragments_per_load_k = fragments_per_load_;
+    inline static constexpr u32_t fragments_per_load_k = 1;
 
     /** One barrier per stage, in the warp's static shared memory. */
     struct shared_t {
@@ -1604,20 +1964,17 @@ struct cuda_tma_schedule {
     /** Bit @b s is the parity of the phase stage @b s is filling. */
     u32_t phases_ = 0;
 
-    __device__ __forceinline__ cuda_tma_schedule(shared_t& shared, u32_t lane) noexcept : barriers_(shared.barriers) {
-        if (lane == 0) {
-            for (u32_t stage = 0; stage != stages_k; ++stage)
-                asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(barrier_(stage)), "r"(1u) : "memory");
-            asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
-        }
-        __syncwarp();
+    __device__ __forceinline__ hopper_tma_schedule_t(shared_t& shared, u32_t lane) noexcept
+        : barriers_(shared.barriers) {
+        cuda_tma_initialize_barriers(barriers_, stages_k, lane);
     }
 
     /** Scores a walk's batch as @ref cuda_score_batch does at this schedule's load width. */
     template <vram_quads_kit kit_, u32_t resident_blocks_>
-    static __device__ __forceinline__ vram_scored_node_t score_batch( //
+    static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
         vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
-        typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+        typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
+        u32_t lane) noexcept {
         return cuda_score_batch<kit_, resident_blocks_, fragments_per_load_k>( //
             storage, query_span, query_state, gathered, gathered_count, lane);
     }
@@ -1625,154 +1982,207 @@ struct cuda_tma_schedule {
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
-        u32_t const row_bytes = storage.row_fragments * sizeof(typename storage_::fragment_t);
         rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
         if (cache.ids_) {
             landed_rows_ = rows;
             return;
         }
-        // The cache rows' earlier generic reads must precede the copies' asynchronous writes.
-        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
-        if (lane == 0)
-            for (u32_t first_row = 0; first_row < rows; first_row += rows_per_stage_) {
-                u32_t const barrier = barrier_(first_row / rows_per_stage_);
-                u32_t const stage_bytes = (min_of(first_row + rows_per_stage_, rows) - first_row) * row_bytes;
-                asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(barrier), "r"(stage_bytes)
-                             : "memory");
-            }
-        __syncwarp();
-        for (u32_t row = lane; row < rows; row += cuda_warp_t::width_k) {
-            u32_t const destination = cuda_shared_address(cache.row(row));
-            u32_t const barrier = barrier_(row / rows_per_stage_);
-            asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" //
-                         ::"r"(destination),
-                         "l"(storage.vector_span_for(ids[row])), "r"(row_bytes), "r"(barrier)
-                         : "memory");
-        }
+        cuda_tma_copy_rows(barriers_, rows_per_stage_, storage, cache, ids, rows, lane);
     }
 
     __device__ __forceinline__ void await_rows(u32_t rows) noexcept {
         for (; landed_rows_ < rows; landed_rows_ += rows_per_stage_) {
             u32_t const stage = landed_rows_ / rows_per_stage_;
-            u32_t landed;
-            do {
-                asm volatile("{\n.reg .pred ready;\n"                                      //
-                             "mbarrier.try_wait.parity.shared::cta.b64 ready, [%1], %2;\n" //
-                             "selp.u32 %0, 1, 0, ready;\n}\n"
-                             : "=r"(landed)
-                             : "r"(barrier_(stage)), "r"((phases_ >> stage) & 1u)
-                             : "memory");
-            } while (!landed);
+            cuda_tma_wait_barrier(barriers_ + stage, (phases_ >> stage) & 1u);
             phases_ ^= 1u << stage;
         }
     }
+};
 
-  private:
-    __device__ __forceinline__ u32_t barrier_(u32_t stage) const noexcept {
-        return cuda_shared_address(barriers_ + stage);
+/** The Blackwell staging, datacenter and RTX alike: the Hopper copies, a walking lane loading two
+ *  adjacent fragments at once, whose 256-bit loads serve the random row gathers better. */
+struct blackwell_tma_schedule_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
+    using warp_t = cuda_warp_t;
+    inline static constexpr u32_t stages_k = 2;
+    inline static constexpr u32_t fragments_per_load_k = 2;
+
+    /** One barrier per stage, in the warp's static shared memory. */
+    struct shared_t {
+        u64_t barriers[stages_k];
+    };
+
+    /** The stages' barriers. */
+    u64_t* barriers_;
+
+    /** Rows per stage of the latest staging, and the leading rows landed. */
+    u32_t rows_per_stage_ = 0, landed_rows_ = 0;
+
+    /** Bit @b s is the parity of the phase stage @b s is filling. */
+    u32_t phases_ = 0;
+
+    __device__ __forceinline__ blackwell_tma_schedule_t(shared_t& shared, u32_t lane) noexcept
+        : barriers_(shared.barriers) {
+        cuda_tma_initialize_barriers(barriers_, stages_k, lane);
+    }
+
+    /** Scores a walk's batch as @ref cuda_score_batch does at this schedule's load width. */
+    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
+        vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+        typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
+        u32_t lane) noexcept {
+        return cuda_score_batch<kit_, resident_blocks_, fragments_per_load_k>( //
+            storage, query_span, query_state, gathered, gathered_count, lane);
+    }
+
+    template <typename storage_, typename cache_>
+    __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
+                                               u32_t lane) noexcept {
+        rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
+        if (cache.ids_) {
+            landed_rows_ = rows;
+            return;
+        }
+        cuda_tma_copy_rows(barriers_, rows_per_stage_, storage, cache, ids, rows, lane);
+    }
+
+    __device__ __forceinline__ void await_rows(u32_t rows) noexcept {
+        for (; landed_rows_ < rows; landed_rows_ += rows_per_stage_) {
+            u32_t const stage = landed_rows_ / rows_per_stage_;
+            cuda_tma_wait_barrier(barriers_ + stage, (phases_ >> stage) & 1u);
+            phases_ ^= 1u << stage;
+        }
     }
 };
 
-using hopper_tma_schedule_t = cuda_tma_schedule<1>;
-using blackwell_tma_schedule_t = cuda_tma_schedule<2>;
-
 #pragma endregion Schedules
 
-#pragma region Chains
+#pragma region Ladders
+
+/*  Each ladder lists the newest kit first. The Blackwell kits and schedule serve datacenter and RTX
+ *  Blackwell alike, so their @c capability_k names both bits, and @c picked_k keeps the one the
+ *  class carries. */
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::f16_t, caps_> {
-    using kit_t = std::conditional_t<(caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0,
-                                     f16_blackwell_quads_kit_t, f16_ampere_quads_kit_t>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::f16_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        f16_ampere_quads_kit_t,         //
+        f16_blackwell_quads_kit_t       //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::bf16_t, caps_> {
-    using kit_t = std::conditional_t<(caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0,
-                                     bf16_blackwell_quads_kit_t, bf16_ampere_quads_kit_t>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::bf16_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        bf16_ampere_quads_kit_t,        //
+        bf16_blackwell_quads_kit_t      //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::i8_t, caps_> {
-    using kit_t = i8_ampere_quads_kit_t;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::i8_t, caps_> {
+    using kit_t = typename highest_kit<caps_, i8_ampere_quads_kit_t>::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::u8_t, caps_> {
-    using kit_t = u8_ampere_quads_kit_t;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::u8_t, caps_> {
+    using kit_t = typename highest_kit<caps_, u8_ampere_quads_kit_t>::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::e5m2_t, caps_> {
-    using kit_t = std::conditional_t<
-        (caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0, e5m2_blackwell_quads_kit_t,
-        std::conditional_t<(caps_ & nk_cap_ada_k) != 0, e5m2_ada_quads_kit_t, e5m2_ampere_quads_kit_t>>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::e5m2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e5m2_ampere_quads_kit_t,        //
+        e5m2_blackwell_quads_kit_t,     //
+        e5m2_ada_quads_kit_t            //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::e4m3_t, caps_> {
-    using kit_t = std::conditional_t<
-        (caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0, e4m3_blackwell_quads_kit_t,
-        std::conditional_t<(caps_ & nk_cap_ada_k) != 0, e4m3_ada_quads_kit_t, e4m3_ampere_quads_kit_t>>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::e4m3_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e4m3_ampere_quads_kit_t,        //
+        e4m3_blackwell_quads_kit_t,     //
+        e4m3_ada_quads_kit_t            //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::e3m2_t, caps_> {
-    using kit_t = std::conditional_t<(caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0,
-                                     e3m2_blackwell_quads_kit_t, e3m2_ampere_quads_kit_t>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::e3m2_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e3m2_ampere_quads_kit_t,        //
+        e3m2_blackwell_quads_kit_t      //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::e2m3_t, caps_> {
-    using kit_t = std::conditional_t<(caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0,
-                                     e2m3_blackwell_quads_kit_t, e2m3_ampere_quads_kit_t>;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::e2m3_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        e2m3_ampere_quads_kit_t,        //
+        e2m3_blackwell_quads_kit_t      //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::i4x2_t, caps_> {
-    using kit_t = i4x2_ampere_quads_kit_t;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::i4x2_t, caps_> {
+    using kit_t = typename highest_kit<caps_, i4x2_ampere_quads_kit_t>::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::u4x2_t, caps_> {
-    using kit_t = u4x2_ampere_quads_kit_t;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::u4x2_t, caps_> {
+    using kit_t = typename highest_kit<caps_, u4x2_ampere_quads_kit_t>::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
-struct quads_chain<nk::u1x8_t, caps_> {
-    using kit_t = u1x8_ampere_quads_kit_t;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+struct quads_ladder<nk::u1x8_t, caps_> {
+    using kit_t = typename highest_kit<caps_, u1x8_ampere_quads_kit_t>::type;
+    static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
 /** The staging schedule under @p caps_: whole-row Tensor Memory Accelerator copies on every class
  *  that has one, Hopper on, paired-fragment loads from Blackwell on, and the @c cp.async ring
  *  below. */
 template <nk_capability_t caps_>
-using cuda_schedule_of = std::conditional_t<
-    (caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0, blackwell_tma_schedule_t,
-    std::conditional_t<(caps_ & nk_cap_hopper_k) != 0, hopper_tma_schedule_t, ampere_cp_async_schedule_t>>;
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct schedule_ladder<caps_> {
+    using schedule_t = typename highest_kit< //
+        caps_,                               //
+        ampere_cp_async_schedule_t,          //
+        blackwell_tma_schedule_t,            //
+        hopper_tma_schedule_t                //
+        >::type;
+    static constexpr nk_capability_t picked_k = caps_ & schedule_t::capability_k;
+};
 
-#pragma endregion Chains
+#pragma endregion Ladders
 
 } // namespace unum::usearch::dense

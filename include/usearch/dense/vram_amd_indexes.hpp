@@ -38,18 +38,20 @@ namespace unum::usearch::dense {
  *  Each shard's keys live twice: on the host, where the merges resolve them, and on its device,
  *  where a walk resolves its nodes and the on-device merge reads them.
  */
-template <                                                        //
-    typename key_type_ = uuid_t,                                  //
-    nk_dtype_t vector_dtype_ = nk_i8_k,                           //
-    nk_capability_t capability_ = nk_cap_rocm_k | nk_cap_cdna3_k, //
-    typename key_hash_type_ = std::hash<key_type_>                //
+template <                                         //
+    typename key_type_,                            //
+    nk_dtype_t vector_dtype_,                      //
+    nk_capability_t capability_,                   //
+    typename kernels_type_,                        //
+    typename key_hash_type_ = std::hash<key_type_> //
     >
-struct vram_amd_indexes : sharded_indexes<vram_amd_indexes<key_type_, vector_dtype_, capability_, key_hash_type_>, //
-                                          vram_amd_index<vector_dtype_, capability_>,                              //
-                                          hip_executor_t, key_type_, key_hash_type_> {
+struct vram_amd_indexes
+    : sharded_indexes<vram_amd_indexes<key_type_, vector_dtype_, capability_, kernels_type_, key_hash_type_>, //
+                      vram_amd_index<vector_dtype_, capability_, kernels_type_>,                              //
+                      hip_executor_t, key_type_, key_hash_type_> {
 
-    using base_t = sharded_indexes<vram_amd_indexes, vram_amd_index<vector_dtype_, capability_>, hip_executor_t,
-                                   key_type_, key_hash_type_>;
+    using base_t = sharded_indexes<vram_amd_indexes, vram_amd_index<vector_dtype_, capability_, kernels_type_>,
+                                   hip_executor_t, key_type_, key_hash_type_>;
     using typename base_t::batch_t;
     using typename base_t::executor_t;
     using typename base_t::index_t;

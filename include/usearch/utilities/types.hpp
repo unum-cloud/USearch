@@ -1261,33 +1261,23 @@ struct vector_norms {
 };
 
 /**
- *  @brief One row in a capability cascade - pairs an availability flag with a candidate kit.
+ *  @brief Picks the first of @p kits_ this build compiled and @p caps_ runs, else @p floor_ - a
+ *      ladder's one closing @c >::type, with no nested @c std::conditional_t pile.
  *
- *  The flag is the @c &&-of a @c NUMKONG_TARGET_* (always 0/1) and the class's ceiling test - a CPU
- *  capability bit or a GPU architecture - so rows for tiers that aren't compiled-in fold to @c false
- *  at preprocessing time and the unselected kit's body never has to exist on the current target.
+ *  Every kit states its own needs: @c capability_k, the capability it runs under, and
+ *  @c compiled_k, whether this build carries its body. A kit whose target this build cannot carry
+ *  is a stub of those two members alone, so naming it in a ladder never needs its body. @p caps_
+ *  is a NumKong or a StringZilla capability set, whichever the kits state theirs in.
  */
-template <bool available_, typename kit_>
-struct chain_layer {
-    static constexpr bool available = available_;
-    using kit_t = kit_;
+template <auto caps_, typename floor_, typename... kits_>
+struct highest_kit {
+    using type = floor_;
 };
 
-/**
- *  @brief Picks the first @c chain_layer whose @c available flag is true, else @c fallback_.
- *
- *  Lets capability cascades be written linearly with one row per tier and a single closing
- *  @c >::type - no nested @c std::conditional_t pile.
- */
-template <typename fallback_, typename... layers_>
-struct first_available_kit {
-    using type = fallback_;
-};
-
-template <typename fallback_, typename head_, typename... tail_>
-struct first_available_kit<fallback_, head_, tail_...> {
-    using type = std::conditional_t<head_::available, typename head_::kit_t,
-                                    typename first_available_kit<fallback_, tail_...>::type>;
+template <auto caps_, typename floor_, typename head_, typename... tail_>
+struct highest_kit<caps_, floor_, head_, tail_...> {
+    using type = std::conditional_t<head_::compiled_k && (caps_ & head_::capability_k) != 0, head_,
+                                    typename highest_kit<caps_, floor_, tail_...>::type>;
 };
 
 /**
@@ -1400,10 +1390,6 @@ struct scored_node_t {
 /** Warps per thread block across every kernel of the VRAM design - four schedulers per
  *  multiprocessor on every modern GPU, one lane group each. */
 inline constexpr u32_t vram_warps_per_block_k = 4;
-
-/** Resident blocks per multiprocessor - shared by the launch grids and the kernels' launch
- *  bounds, so the register allocator sizes to it; small-pool search kernels fit four. */
-inline constexpr u32_t vram_resident_blocks_per_multiprocessor_k = 3;
 
 /** Rows of the per-warp shared candidate cache; also bounds the diversity-selection pool prefix
  *  and the staging arrays. */

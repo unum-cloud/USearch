@@ -6,9 +6,9 @@
  *      and the sharded suite the settings select, then device attention, whose value lookups run
  *      on the device.
  *
- *  Compiled twice, like the library's class units: by HIP-Clang device-only into the suite's own
- *  code object, carrying every cell's kernels and the attends over this file's value lookups, and
- *  host-only into the cells' index types, which the shared shards see only through the faces.
+ *  Compiled host-only by HIP-Clang into the cells' index types, which the shared shards see only
+ *  through the faces; @c vram_kernels_amd.hip includes it and compiles every cell's kernels, with
+ *  the attends over this file's value lookups, device-only into the suite's own code object.
  */
 #include <fmt/format.h>
 
@@ -34,6 +34,7 @@ struct hip_test_lookup_t {
 };
 
 using test::dense::dense_amd_capabilities_k;
+using test::dense::dense_amd_code_object_t;
 
 /** The lookups the suite attends through: by node ID on one GPU, and by key on shards. */
 using hip_test_keyed_lookup_t = vram_keyed_lookup<u32_t, hip_test_lookup_t>;
@@ -47,55 +48,17 @@ struct amd_value_lookup_of<hip_test_keyed_lookup_t::device_lookup_k> {
     using type = hip_test_keyed_lookup_t;
 };
 
-/** The suite's code object, linked in as raw bytes beside its host half. */
-extern "C" byte_t const test_vram_amd_bundle_start[], test_vram_amd_bundle_end[];
-
-template <>
-bytes_view_t amd_code_object<dense_amd_capabilities_k>() noexcept {
-    return {test_vram_amd_bundle_start,
-            static_cast<std::size_t>(test_vram_amd_bundle_end - test_vram_amd_bundle_start)};
-}
-
-/** The class the suite's ceiling picks, which its code object compiles for. */
-inline constexpr gpu_class_t dense_amd_class_k = amd_class_of(dense_amd_capabilities_k);
-
-// Every cell's kernels and attends, and the keyed attends of the sharded suite's collection.
-template void amd_instantiate<dense_amd_class_k, nk_bf16_k, hip_test_lookup_t::device_lookup_k,
-                              hip_test_keyed_lookup_t::device_lookup_k>();
-#if USEARCH_DENSE_DTYPES >= 2
-template void amd_instantiate<dense_amd_class_k, nk_u1_k, hip_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-template void amd_instantiate<dense_amd_class_k, nk_i8_k, hip_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-template void amd_instantiate<dense_amd_class_k, nk_e4m3_k, hip_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-template void amd_instantiate<dense_amd_class_k, nk_f16_k, hip_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-template void amd_instantiate<dense_amd_class_k, nk_u8_k, hip_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-template void amd_instantiate<dense_amd_class_k, nk_e5m2_k, hip_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-template void amd_instantiate<dense_amd_class_k, nk_i4_k, hip_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-template void amd_instantiate<dense_amd_class_k, nk_u4_k, hip_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-template void amd_instantiate<dense_amd_class_k, nk_e3m2_k, hip_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-template void amd_instantiate<dense_amd_class_k, nk_e2m3_k, hip_test_lookup_t::device_lookup_k>();
-#endif
-
 } // namespace unum::usearch::dense
 
 namespace unum::usearch::test::dense {
+
+/** The suite's code object, linked in as raw bytes beside its host half. */
+extern "C" byte_t const test_vram_amd_bundle_start[], test_vram_amd_bundle_end[];
+
+bytes_view_t dense_amd_code_object_t::bytes() noexcept {
+    return {test_vram_amd_bundle_start,
+            static_cast<std::size_t>(test_vram_amd_bundle_end - test_vram_amd_bundle_start)};
+}
 
 /** A value table copied onto the device, its rows a 16-byte pitch apart; null rows when the copy
  *  failed. */
@@ -135,8 +98,9 @@ static std::size_t check_vram_amd_attend(settings_t const& settings, hip_executo
     if (settings.selects("vram_indexes"))
         failures_count += report(
             "rocm-sharded bf16+attend",
-            dense_expect_vram_indexes_attend<vram_amd_indexes<u32_t, nk_bf16_k, dense_amd_capabilities_k>,
-                                             dense_hip_value_table_t>(settings.seed, executor));
+            dense_expect_vram_indexes_attend<
+                vram_amd_indexes<u32_t, nk_bf16_k, dense_amd_capabilities_k, dense_amd_code_object_t>,
+                dense_hip_value_table_t>(settings.seed, executor));
     return failures_count;
 }
 

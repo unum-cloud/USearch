@@ -4,12 +4,12 @@
  *  @date July 18, 2026
  *  @brief Vector Search index for a single uniform latency memory space on NVIDIA GPUs.
  *
- *  The kernel side of the index: the exact scan and the one kernel template over five integers -
+ *  The kernel side of the index: the exact scan and the one kernel template over five arguments -
  *  the kernel, the capability ceiling, the dtype, the register rung and the attend value lookup -
  *  whose instantiations a fatbin carries. Only NVCC's device-only passes include it, once per
  *  ceiling over every compiled dtype; each @c cuda_kernel turns the plain records of
  *  @c vram_index.hpp into the shared views of @c vram_index.cuh, runs the shared bodies there
- *  through @ref cuda_warp_t, and the host finds it by the mangled name @c cuda_kernel_name spells.
+ *  through @ref cuda_warp_t, and the host finds it by the symbol @c vram_kernel_symbol spells.
  */
 #pragma once
 
@@ -34,25 +34,35 @@
 namespace unum::usearch::dense {
 
 // Every dispensable ID fits a scored node's ID field, the sentinel the claim word closes on aside.
-static_assert(vram_nvidia_index<>::max_node_count_k <= vram_scored_node_t::id_capacity_k);
+static_assert(vram_nvidia_index<nk_i8_k, nk_cap_cuda_k | nk_cap_ampere_k, void>::max_node_count_k <=
+              vram_scored_node<node_id_t>::id_capacity_k);
 
-/** The quads kit @c quads_chain picks for @p vector_dtype_ under @p capability_, checked
- *  against the host-visible half the face sizes its launches by. */
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_>
-struct cuda_kit_of {
-    using traits_t = cuda_kit_traits<vector_dtype_, capability_>;
-    using type = typename quads_chain<typename traits_t::scalar_t, capability_>::kit_t;
-    static_assert(std::is_same_v<typename traits_t::scalar_t, typename type::scalar_t> &&
-                  sizeof(typename traits_t::fragment_t) == sizeof(typename type::fragment_t) &&
-                  std::is_same_v<typename traits_t::dot_t, typename type::dot_t> &&
-                  std::is_same_v<typename traits_t::norms_t, typename type::norms_t>);
-    static_assert(traits_t::picked_k == type::capability_k);
-    static_assert(traits_t::gathered_bytes_k == sizeof(vram_gathered<type>));
-    static_assert(traits_t::schedule_bytes_k == sizeof(typename cuda_schedule_of<capability_>::shared_t));
-};
+template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename kernels_type_,
+          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
+bool vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vectors_allocator_type_, neighbors_allocator_type_,
+                       traversals_allocator_type_>::walk_scratch_fits(std::size_t fold_bytes) const noexcept {
+    using kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
+    using warp_t = typename schedule_ladder<capability_>::schedule_t::warp_t;
+    static_assert(std::is_same_v<typename kit_t::norms_t, norms_t> &&
+                  sizeof(typename kit_t::fragment_t) == sizeof(fragment_t));
+    return std::size_t {vram_warps_per_block_k} * (row_bytes() + fold_bytes + sizeof(vram_gathered<kit_t, warp_t>)) <=
+           device_.shared_memory_per_block_bytes;
+}
 
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_>
-using cuda_kit_t = typename cuda_kit_of<vector_dtype_, capability_>::type;
+template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename kernels_type_,
+          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
+bool vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vectors_allocator_type_, neighbors_allocator_type_,
+                       traversals_allocator_type_>::build_scratch_fits() const noexcept {
+    using kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
+    using schedule_t = typename schedule_ladder<capability_>::schedule_t;
+    std::size_t const statics = std::size_t {vram_warps_per_block_k} *
+                                (vram_cache_rows_k * sizeof(norms_t) +
+                                 sizeof(vram_gathered<kit_t, typename schedule_t::warp_t>) +
+                                 sizeof(typename schedule_t::shared_t));
+    return statics + std::size_t {vram_warps_per_block_k} *
+                         max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp()) <=
+           device_.shared_memory_per_block_bytes;
+}
 
 /** Post-drain structural audit of the neighbors matrix: every row published, every ID in range,
  *  self-loop rows childless, no duplicate neighbors within a row. One warp scans one row, a
@@ -107,11 +117,12 @@ static __global__ void cuda_invariant_kernel(u32_t const* neighbors, u32_t rows_
  *  Items are claimed through @c assigned_queries range by range, so the blocks in flight read the
  *  same rows. The scratch holds every block of queries' count of finished ranges, then each query's
  *  matches in every range, a short range's ending in the sentinel. Candidates order as
- *  @c vram_scored_node_t, so a tie in distance keeps the lower row. @p kernel_ fixes the ranking
+ *  @c vram_scored_node, so a tie in distance keeps the lower row. @p kernel_ fixes the ranking
  *  metric, so the epilogue branches on none, while the matches convert out by the sink's own
- *  metric, as a walk's do.
+ *  metric, as a walk's do. @p resident_blocks_ is the grid's share of every multiprocessor, which
+ *  the host split the ranges by.
  */
-template <vram_quads_kit kit_, nk_kernel_kind_t kernel_>
+template <vram_quads_kit kit_, nk_kernel_kind_t kernel_, u32_t resident_blocks_>
 __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vram_search_sink<kit_> const& sink) {
     using fragment_t = typename kit_::fragment_t;
     using dot_t = typename kit_::dot_t;
@@ -120,8 +131,8 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
     static_assert(vram_warps_per_block_k == 4, "Four warps split a scanning step two by two");
     constexpr u32_t tile_k = cuda_scan_tile_k, staging_k = 2 * tile_k, rounds_k = staging_k / cuda_warp_t::width_k;
     constexpr u32_t width_k = cuda_warp_t::width_k;
-    extern __shared__ vram_scored_node_t staged[];
-    __shared__ vram_scored_node_t worst[tile_k];
+    extern __shared__ vram_scored_node<node_id_t> staged[];
+    __shared__ vram_scored_node<node_id_t> worst[tile_k];
     __shared__ u32_t staged_counts[tile_k], kept_counts[tile_k];
     __shared__ norms_t query_norms[tile_k];
     __shared__ u32_t staging_full[3];
@@ -134,12 +145,12 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
     u32_t const warp_queries = (warp >> 1) * 32, warp_rows = (warp & 1) * 32;
     u32_t const blocks = divide_round_up(view.queries_count, tile_k);
     u32_t const visible = view.sampling_bound, count = sink.count;
-    u32_t const ranges = cuda_scan_ranges(gridDim.x, blocks, visible);
+    u32_t const ranges = cuda_scan_ranges(gridDim.x, resident_blocks_, blocks, visible);
     u32_t const range_rows = round_up_to_multiple(divide_round_up(visible, ranges), tile_k);
     u32_t const spans = divide_round_up(storage.row_fragments, 4u);
     u32_t* const finished_ranges = reinterpret_cast<u32_t*>(view.arena);
-    vram_scored_node_t* const matches = reinterpret_cast<vram_scored_node_t*>(finished_ranges +
-                                                                              round_up_to_multiple(blocks, 4u));
+    vram_scored_node<node_id_t>* const matches = reinterpret_cast<vram_scored_node<node_id_t>*>(
+        finished_ranges + round_up_to_multiple(blocks, 4u));
 
     for (;;) {
         // The barrier also parts the last item's merge from this item's staging.
@@ -154,7 +165,8 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
 
         // Queries past the block or keeping none rank nothing: no entry orders below the zero word.
         for (u32_t local = threadIdx.x; local < tile_k; local += blockDim.x) {
-            worst[local] = local < block_queries && count ? vram_scored_node_t::sentinel() : vram_scored_node_t {0};
+            worst[local] = local < block_queries && count ? vram_scored_node<node_id_t>::sentinel()
+                                                          : vram_scored_node<node_id_t> {0};
             staged_counts[local] = 0, kept_counts[local] = 0;
         }
         if (threadIdx.x < 3) staging_full[threadIdx.x] = 0;
@@ -190,16 +202,16 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
                 for (u32_t local = warp; local < block_queries; local += vram_warps_per_block_k) {
                     u32_t const pending = staged_counts[local], held = kept_counts[local];
                     if (!pending) continue;
-                    vram_scored_node_t* const kept = matches +
-                                                     (std::size_t {first_query + local} * ranges + range) * count;
-                    vram_scored_node_t const* const candidates = staged + local * staging_k;
+                    vram_scored_node<node_id_t>* const kept =
+                        matches + (std::size_t {first_query + local} * ranges + range) * count;
+                    vram_scored_node<node_id_t> const* const candidates = staged + local * staging_k;
                     u32_t places[rounds_k];
 #pragma unroll
                     for (u32_t round = 0; round != rounds_k; ++round) {
                         u32_t const index = round * width_k + lane;
                         places[round] = 0;
                         if (index >= pending) continue;
-                        vram_scored_node_t const candidate = candidates[index];
+                        vram_scored_node<node_id_t> const candidate = candidates[index];
                         for (u32_t other = 0; other != pending; ++other) places[round] += candidates[other] < candidate;
                         places[round] += vram_rank_below(held, candidate.bits_, vram_ties_t::excluded_k,
                                                          [&](u32_t rank) noexcept { return kept[rank].bits_; });
@@ -207,7 +219,8 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
                     for (u32_t top = held; top;) {
                         u32_t const first = top > width_k ? top - width_k : 0;
                         u32_t const index = first + lane;
-                        vram_scored_node_t const value = index < top ? kept[index] : vram_scored_node_t::sentinel();
+                        vram_scored_node<node_id_t> const value = index < top ? kept[index]
+                                                                              : vram_scored_node<node_id_t>::sentinel();
                         cuda_warp_t::sync();
                         u32_t place = index;
                         for (u32_t other = 0; other != pending; ++other) place += candidates[other] < value;
@@ -224,7 +237,7 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
                     u32_t const now_held = min_of(held + pending, count);
                     if (lane == 0) {
                         kept_counts[local] = now_held, staged_counts[local] = 0;
-                        worst[local] = now_held == count ? kept[count - 1] : vram_scored_node_t::sentinel();
+                        worst[local] = now_held == count ? kept[count - 1] : vram_scored_node<node_id_t>::sentinel();
                     }
                 }
                 __syncthreads();
@@ -328,7 +341,8 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
                             distance_t const distance = kit_::distance(kernel_, dot, lane_norms[query_tile][half],
                                                                        row_norms[row_tile][column]);
                             if (row >= end_row || distance > radii[query_tile][half]) continue;
-                            vram_scored_node_t const candidate = vram_scored_node_t::make(distance, row);
+                            vram_scored_node<node_id_t> const candidate = vram_scored_node<node_id_t>::make(distance,
+                                                                                                            row);
                             u32_t const local = warp_queries + query_tile * 16 + half * 8 + group;
                             if (!(candidate < worst[local])) continue;
                             u32_t const slot = cuda_warp_t::fetch_add_relaxed(staged_counts[local], 1u);
@@ -339,8 +353,9 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
         }
 
         for (u32_t local = threadIdx.x; local < block_queries; local += blockDim.x) {
-            vram_scored_node_t* const kept = matches + (std::size_t {first_query + local} * ranges + range) * count;
-            if (kept_counts[local] < count) kept[kept_counts[local]] = vram_scored_node_t::sentinel();
+            vram_scored_node<node_id_t>* const kept = matches +
+                                                      (std::size_t {first_query + local} * ranges + range) * count;
+            if (kept_counts[local] < count) kept[kept_counts[local]] = vram_scored_node<node_id_t>::sentinel();
         }
         if (threadIdx.x == 0)
             cuda_warp_t::fetch_add_relaxed(view.telemetry->scored, u64_t {end_row - first_row} * block_queries);
@@ -355,18 +370,18 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
         cuda::atomic_thread_fence(cuda::memory_order_acquire, cuda::thread_scope_device);
 
         // Each lane keeps its ranges' nearest unmerged matches; the warp's nearest is written next.
-        vram_scored_node_t* const heads = staged + warp * ranges;
+        vram_scored_node<node_id_t>* const heads = staged + warp * ranges;
         u32_t* const taken = reinterpret_cast<u32_t*>(staged + vram_warps_per_block_k * ranges) + warp * ranges;
         for (u32_t local = warp; local < block_queries; local += vram_warps_per_block_k) {
             u32_t const query = first_query + local;
-            vram_scored_node_t* const query_matches = matches + std::size_t {query} * ranges * count;
+            vram_scored_node<node_id_t>* const query_matches = matches + std::size_t {query} * ranges * count;
             node_id_t* const ids_row = vram_row(sink.result_ids, query, count);
             distance_t* const distances_row = sink.result_distances ? vram_row(sink.result_distances, query, count)
                                                                     : nullptr;
             for (u32_t of_range = lane; of_range < ranges; of_range += width_k) {
-                heads[of_range] = count ? vram_scored_node_t {cuda_warp_t::load_relaxed(
+                heads[of_range] = count ? vram_scored_node<node_id_t> {cuda_warp_t::load_relaxed(
                                               query_matches[std::size_t {of_range} * count].bits_)}
-                                        : vram_scored_node_t::sentinel();
+                                        : vram_scored_node<node_id_t>::sentinel();
                 taken[of_range] = 0;
             }
             u32_t chosen = ranges;
@@ -377,11 +392,12 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
                     for (u32_t of_range = lane + width_k; of_range < ranges; of_range += width_k)
                         if (heads[of_range] < heads[chosen]) chosen = of_range;
                 }
-                vram_scored_node_t const held = chosen < ranges ? heads[chosen] : vram_scored_node_t::sentinel();
-                vram_scored_node_t least = held;
+                vram_scored_node<node_id_t> const held = chosen < ranges ? heads[chosen]
+                                                                         : vram_scored_node<node_id_t>::sentinel();
+                vram_scored_node<node_id_t> least = held;
 #pragma unroll
                 for (u32_t mask = width_k / 2; mask; mask >>= 1) {
-                    vram_scored_node_t const other = shuffle_xor<cuda_warp_t>(least, mask);
+                    vram_scored_node<node_id_t> const other = shuffle_xor<cuda_warp_t>(least, mask);
                     if (other < least) least = other;
                 }
                 if (lane == 0) {
@@ -389,13 +405,13 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
                     if (distances_row) distances_row[rank] = kit_::convert_to_distance(sink.kernel, least.distance());
                 }
                 // Every row sits in one range, so one lane at most holds the nearest.
-                advanced = held == least && !(least == vram_scored_node_t::sentinel());
+                advanced = held == least && !(least == vram_scored_node<node_id_t>::sentinel());
                 if (advanced) {
                     u32_t const position = ++taken[chosen];
                     heads[chosen] = position < count
-                                        ? vram_scored_node_t {cuda_warp_t::load_relaxed(
+                                        ? vram_scored_node<node_id_t> {cuda_warp_t::load_relaxed(
                                               query_matches[std::size_t {chosen} * count + position].bits_)}
-                                        : vram_scored_node_t::sentinel();
+                                        : vram_scored_node<node_id_t>::sentinel();
                 }
             }
         }
@@ -404,128 +420,109 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
 
 #pragma region Kernels
 
-/** The kit of one dtype under one capability ceiling, both as the kernels' template integers. */
-template <u32_t capabilities_, u32_t dtype_>
-using cuda_kit =
-    cuda_kit_t<static_cast<nk_dtype_t>(dtype_), static_cast<nk_capability_t>(capabilities_) * nk_cap_cuda_k>;
-
-/** Blocks of each kernel resident per multiprocessor, the register budget its launch bounds set:
- *  the builders' saturating count, a walk's by its rung, and one for the light graph sweeps. */
-constexpr u32_t cuda_resident_blocks(cuda_kernel_t kernel, u32_t slots) noexcept {
-    switch (kernel) {
-    case cuda_kernel_t::insert_k:
-    case cuda_kernel_t::refine_k: return cuda_insert_blocks_per_multiprocessor_k;
-    case cuda_kernel_t::back_link_k:
-    case cuda_kernel_t::merge_back_links_k: return vram_resident_blocks_per_multiprocessor_k;
-    case cuda_kernel_t::search_k:
-    case cuda_kernel_t::search_indexer_k:
-    case cuda_kernel_t::multiply_k: return slots <= 8 ? 4 : 3;
-    case cuda_kernel_t::scan_k: return cuda_scan_blocks_per_multiprocessor_k;
-    // The attend fold carries per-head state, which spills at 8 slots under four blocks' budget.
-    case cuda_kernel_t::attend_k: return slots <= 4 ? 4 : 3;
-    default: return 1;
-    }
-}
-
-/** Every NVIDIA kernel: @p kernel_ picks the body, @p capabilities_ and @p dtype_ the kit,
- *  @p capabilities_ alone the schedule, @p slots_ the rung, and @p lookup_ an attend's
- *  value lookup through @ref cuda_value_lookup_of. */
-template <u32_t kernel_, u32_t capabilities_, u32_t dtype_, u32_t slots_, u32_t lookup_>
+/** Every NVIDIA kernel: @p kernel_ picks the body, @p capability_ and @p dtype_ the kit,
+ *  @p capability_ alone the schedule and its warp, @p slots_ the rung, and @p lookup_ an attend's
+ *  value lookup through @ref cuda_value_lookup_of. The blocks @ref cuda_resident_blocks seats per
+ *  multiprocessor bound its registers and reach the body, which sizes its load window by them. */
+template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_, u32_t lookup_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
-                                  cuda_resident_blocks(static_cast<cuda_kernel_t>(kernel_), slots_))
+                                  cuda_resident_blocks<capability_, dtype_>(kernel_, slots_))
     cuda_kernel(vram_arguments_t arguments) {
-    using kit_t = cuda_kit<capabilities_, dtype_>;
-    using schedule_t = cuda_schedule_of<static_cast<nk_capability_t>(capabilities_) * nk_cap_cuda_k>;
-    constexpr cuda_kernel_t kernel = static_cast<cuda_kernel_t>(kernel_);
+    using kit_t = typename quads_ladder<typename nk::type_for<dtype_>::type, capability_>::kit_t;
+    using schedule_t = typename schedule_ladder<capability_>::schedule_t;
+    using warp_t = typename schedule_t::warp_t;
+    constexpr u32_t resident_blocks = cuda_resident_blocks<capability_, dtype_>(kernel_, slots_);
     vram_graph_t const& graph = arguments.graph;
     // Launched overlapping its predecessor's drain, so nothing is read before that predecessor
     // lands; the successor's blocks may then seat as this grid's blocks retire.
-    if constexpr (cuda_overlaps_launches(static_cast<nk_capability_t>(capabilities_) * nk_cap_cuda_k))
+    if constexpr (cuda_overlaps_launches(capability_))
         asm volatile("griddepcontrol.wait;\n\tgriddepcontrol.launch_dependents;" ::: "memory");
-    if constexpr (kernel == cuda_kernel_t::insert_k)
-        vram_insert<kit_t, schedule_t, slots_>(vram_view<kit_t>(arguments.build));
-    else if constexpr (kernel == cuda_kernel_t::back_link_k)
-        vram_back_link<kit_t, schedule_t>(vram_view<kit_t>(arguments.build));
-    else if constexpr (kernel == cuda_kernel_t::refine_k)
-        vram_refine<kit_t, schedule_t, slots_>(vram_view<kit_t>(arguments.refine));
-    else if constexpr (kernel == cuda_kernel_t::search_k)
-        vram_walk_rung<kit_t, schedule_t, slots_>(vram_view<kit_t>(arguments.search),
-                                                  vram_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
-    else if constexpr (kernel == cuda_kernel_t::search_indexer_k) {
+    if constexpr (kernel_ == vram_kernel_t::insert_k)
+        vram_insert<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.build));
+    else if constexpr (kernel_ == vram_kernel_t::back_link_k)
+        vram_back_link<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.build));
+    else if constexpr (kernel_ == vram_kernel_t::refine_k)
+        vram_refine<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.refine));
+    else if constexpr (kernel_ == vram_kernel_t::search_k)
+        vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
+            vram_view<kit_t>(arguments.search), vram_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
+    else if constexpr (kernel_ == vram_kernel_t::search_indexer_k) {
         // Only the floating dtypes take indexer heads; others export a plain walk never launched.
         if constexpr (floating_scalar<typename kit_t::scalar_t>)
-            vram_walk_rung<kit_t, schedule_t, slots_>(vram_view<kit_t>(arguments.search),
-                                                      vram_view<kit_t>(arguments.search_sink),
-                                                      vram_view<kit_t>(arguments.rescoring));
+            vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.search),
+                                                                       vram_view<kit_t>(arguments.search_sink),
+                                                                       vram_view<kit_t, warp_t>(arguments.rescoring));
         else
-            vram_walk_rung<kit_t, schedule_t, slots_>(vram_view<kit_t>(arguments.search),
-                                                      vram_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
+            vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
+                vram_view<kit_t>(arguments.search), vram_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
     }
-    else if constexpr (kernel == cuda_kernel_t::scan_k) {
+    else if constexpr (kernel_ == vram_kernel_t::scan_k) {
         vram_search_view<kit_t> const view = vram_view<kit_t>(arguments.search);
         vram_search_sink<kit_t> const sink = vram_view<kit_t>(arguments.search_sink);
         // Each kit's last metric is the one its `distance` falls back to.
         if constexpr (std::is_same_v<typename kit_t::scalar_t, nk::u1x8_t>) switch (sink.kernel) {
-            case nk_kernel_dot_k: cuda_scan<kit_t, nk_kernel_dot_k>(view, sink); break;
-            case nk_kernel_hamming_k: cuda_scan<kit_t, nk_kernel_hamming_k>(view, sink); break;
-            default: cuda_scan<kit_t, nk_kernel_jaccard_k>(view, sink); break;
+            case nk_kernel_dot_k: cuda_scan<kit_t, nk_kernel_dot_k, resident_blocks>(view, sink); break;
+            case nk_kernel_hamming_k: cuda_scan<kit_t, nk_kernel_hamming_k, resident_blocks>(view, sink); break;
+            default: cuda_scan<kit_t, nk_kernel_jaccard_k, resident_blocks>(view, sink); break;
             }
         else switch (sink.kernel) {
-            case nk_kernel_dot_k: cuda_scan<kit_t, nk_kernel_dot_k>(view, sink); break;
-            case nk_kernel_angular_k: cuda_scan<kit_t, nk_kernel_angular_k>(view, sink); break;
-            default: cuda_scan<kit_t, nk_kernel_euclidean_k>(view, sink); break;
+            case nk_kernel_dot_k: cuda_scan<kit_t, nk_kernel_dot_k, resident_blocks>(view, sink); break;
+            case nk_kernel_angular_k: cuda_scan<kit_t, nk_kernel_angular_k, resident_blocks>(view, sink); break;
+            default: cuda_scan<kit_t, nk_kernel_euclidean_k, resident_blocks>(view, sink); break;
             }
     }
-    else if constexpr (kernel == cuda_kernel_t::multiply_k)
-        vram_walk_rung<kit_t, schedule_t, slots_>(vram_view<kit_t>(arguments.search),
-                                                  vram_view<kit_t>(arguments.multiply_sink), vram_no_rescoring {});
-    else if constexpr (kernel == cuda_kernel_t::attend_k) {
+    else if constexpr (kernel_ == vram_kernel_t::multiply_k)
+        vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.search),
+                                                                   vram_view<kit_t, warp_t>(arguments.multiply_sink),
+                                                                   vram_no_rescoring {});
+    else if constexpr (kernel_ == vram_kernel_t::attend_k) {
         using value_lookup_t = typename cuda_value_lookup_of<lookup_>::type;
         vram_attend_t const& attend = arguments.attend;
         vram_rescoring_t const& heads = arguments.rescoring;
         value_lookup_t value_lookup;
         std::memcpy(&value_lookup, attend.value_lookup, sizeof(value_lookup_t));
-        vram_walk_rung<kit_t, schedule_t, slots_>(
+        vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
             vram_view<kit_t>(arguments.search),
-            vram_attend_sink<kit_t, value_lookup_t> {value_lookup, attend.outputs, attend.states, attend.missed,
-                                                     attend.logit_scale, attend.heads_count, attend.columns},
-            vram_heads_rescoring<kit_t> {reinterpret_cast<typename kit_t::fragment_t const*>(heads.heads), nullptr,
-                                         heads.heads_count, heads.row_fragments});
+            vram_attend_sink<kit_t, warp_t, value_lookup_t> {value_lookup, attend.outputs, attend.states, attend.missed,
+                                                             attend.logit_scale, attend.heads_count, attend.columns},
+            vram_heads_rescoring<kit_t, warp_t> {reinterpret_cast<typename kit_t::fragment_t const*>(heads.heads),
+                                                 nullptr, heads.heads_count, heads.row_fragments});
     }
-    else if constexpr (kernel == cuda_kernel_t::merge_back_links_k)
-        vram_merge_back_links<kit_t, schedule_t>(vram_view<kit_t>(arguments.refine), graph.bucket_ids,
-                                                 graph.bucket_counts, graph.bucket_width, graph.touched);
-    else if constexpr (kernel == cuda_kernel_t::scatter_back_links_k)
+    else if constexpr (kernel_ == vram_kernel_t::merge_back_links_k)
+        vram_merge_back_links<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.refine), graph.bucket_ids,
+                                                                  graph.bucket_counts, graph.bucket_width,
+                                                                  graph.touched);
+    else if constexpr (kernel_ == vram_kernel_t::scatter_back_links_k)
         vram_scatter_back_links<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.first_id, graph.walk_count,
                                              graph.node_ids, graph.connectivity, graph.bucket_width, graph.bucket_ids,
                                              graph.bucket_counts, graph.touched);
-    else if constexpr (kernel == cuda_kernel_t::derive_norms_k)
-        vram_derive_norms<kit_t>(vram_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
-    else if constexpr (kernel == cuda_kernel_t::rebase_links_k)
+    else if constexpr (kernel_ == vram_kernel_t::derive_norms_k)
+        vram_derive_norms<kit_t, warp_t>(vram_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
+    else if constexpr (kernel_ == vram_kernel_t::rebase_links_k)
         vram_rebase_links<cuda_warp_t>(graph.neighbors, graph.first_id, graph.rows_count, graph.connectivity,
                                        graph.source_first, graph.source_bound, graph.shift);
-    else if constexpr (kernel == cuda_kernel_t::mark_seeds_k)
+    else if constexpr (kernel_ == vram_kernel_t::mark_seeds_k)
         vram_mark_seeds<cuda_warp_t>(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
-    else if constexpr (kernel == cuda_kernel_t::reachability_sweep_k)
+    else if constexpr (kernel_ == vram_kernel_t::reachability_sweep_k)
         vram_reachability_sweep<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached,
                                              graph.frontier, graph.next_frontier, graph.counter, graph.previous_counter,
                                              graph.levels);
-    else if constexpr (kernel == cuda_kernel_t::reachability_islands_k)
+    else if constexpr (kernel_ == vram_kernel_t::reachability_islands_k)
         vram_reachability_islands<cuda_warp_t>(graph.reached, graph.rows_count, graph.island_ids, graph.counter);
-    else if constexpr (kernel == cuda_kernel_t::reached_in_links_k)
+    else if constexpr (kernel_ == vram_kernel_t::reached_in_links_k)
         vram_reached_in_links<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached,
                                            graph.in_links);
-    else if constexpr (kernel == cuda_kernel_t::reconnect_island_k)
+    else if constexpr (kernel_ == vram_kernel_t::reconnect_island_k)
         vram_reconnect_island<cuda_warp_t>(graph.neighbors, graph.connectivity, graph.island_ids, graph.islands_count,
                                            graph.reached, graph.rows_count, graph.seed_count, graph.in_links,
                                            graph.reconnected);
-    else if constexpr (kernel == cuda_kernel_t::cast_k) {
+    else if constexpr (kernel_ == vram_kernel_t::cast_k) {
         nk_size_t const threads = static_cast<nk_size_t>(gridDim.x) * blockDim.x;
         for (nk_size_t unit = static_cast<nk_size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
              unit < arguments.cast.plan.units; unit += threads)
             nk_cast_unit_simt_(&arguments.cast, unit);
     }
-    else if constexpr (kernel == cuda_kernel_t::rmscast_k) {
+    else if constexpr (kernel_ == vram_kernel_t::rmscast_k) {
         // Only narrow floats take a unit-RMS import; every other dtype exports one never launched.
         if constexpr (dtype_ == nk_f16_k) nk_each_rmscast_f16_cuda_vectors_(arguments.rmscast);
         else if constexpr (dtype_ == nk_e4m3_k) nk_each_rmscast_e4m3_cuda_vectors_(arguments.rmscast);
@@ -533,11 +530,11 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
         else if constexpr (dtype_ == nk_e2m3_k) nk_each_rmscast_e2m3_cuda_vectors_(arguments.rmscast);
         else if constexpr (dtype_ == nk_e3m2_k) nk_each_rmscast_e3m2_cuda_vectors_(arguments.rmscast);
     }
-    else if constexpr (kernel == cuda_kernel_t::resolve_matches_k)
+    else if constexpr (kernel_ == vram_kernel_t::resolve_matches_k)
         vram_resolve_matches<cuda_warp_t>(arguments.matches.ids, arguments.matches.distances, arguments.matches.walked,
                                           arguments.matches.keys, arguments.matches.queries_count,
                                           vram_view(arguments.matches.ranking));
-    else if constexpr (kernel == cuda_kernel_t::merge_matches_k)
+    else if constexpr (kernel_ == vram_kernel_t::merge_matches_k)
         vram_merge_matches<cuda_warp_t>(vram_view(arguments.matches.gathered), arguments.matches.block_bytes,
                                         arguments.matches.shards, arguments.matches.queries_count,
                                         vram_view(arguments.matches.ranking));
@@ -546,17 +543,14 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
                                           arguments.attend.columns, arguments.attend.shards);
 }
 
-template <u32_t capabilities_, u32_t dtype_, std::size_t... rungs_>
+template <nk_capability_t capability_, nk_dtype_t dtype_, std::size_t... rungs_>
 __device__ void cuda_instantiate_rungs(std::index_sequence<rungs_...>) noexcept {
-    (static_cast<void>(&cuda_kernel<static_cast<u32_t>(cuda_rungs[rungs_].kernel), capabilities_, dtype_,
-                                    cuda_rungs[rungs_].slots, 0>),
-     ...);
+    (static_cast<void>(&cuda_kernel<cuda_rungs[rungs_].kernel, capability_, dtype_, cuda_rungs[rungs_].slots, 0>), ...);
 }
 
-template <u32_t capabilities_, u32_t dtype_, u32_t lookup_, std::size_t... rungs_>
+template <nk_capability_t capability_, nk_dtype_t dtype_, u32_t lookup_, std::size_t... rungs_>
 __device__ void cuda_instantiate_attends(std::index_sequence<rungs_...>) noexcept {
-    (static_cast<void>(&cuda_kernel<static_cast<u32_t>(cuda_kernel_t::attend_k), capabilities_, dtype_,
-                                    cuda_walk_rungs[rungs_], lookup_>),
+    (static_cast<void>(&cuda_kernel<vram_kernel_t::attend_k, capability_, dtype_, cuda_walk_rungs[rungs_], lookup_>),
      ...);
 }
 
@@ -565,10 +559,9 @@ __device__ void cuda_instantiate_attends(std::index_sequence<rungs_...>) noexcep
  *  addresses in device code makes NVCC emit them, while a host-only pass emits no launch stub. */
 template <nk_capability_t capability_, nk_dtype_t dtype_, u32_t... lookups_>
 __device__ void cuda_instantiate() noexcept {
-    constexpr u32_t capabilities = cuda_capability_bits(capability_), dtype = static_cast<u32_t>(dtype_);
-    cuda_instantiate_rungs<capabilities, dtype>(
+    cuda_instantiate_rungs<capability_, dtype_>(
         std::make_index_sequence<sizeof(cuda_rungs) / sizeof(cuda_rungs[0])> {});
-    (cuda_instantiate_attends<capabilities, dtype, lookups_>(
+    (cuda_instantiate_attends<capability_, dtype_, lookups_>(
          std::make_index_sequence<sizeof(cuda_walk_rungs) / sizeof(cuda_walk_rungs[0])> {}),
      ...);
 }

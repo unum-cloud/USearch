@@ -372,7 +372,7 @@ struct attention_rescoring {
         for (std::size_t head = 0; head != carry.size(); ++head) {
             f32_t const normalizer = carry[head].partition > 0 ? 1 / carry[head].partition : 0, zero = 0;
             f32_t* const row = outputs.row(head).data();
-            [[maybe_unused]] nk_status_t const scaled = elementwise_chain<capability_>::kit_t::scale(
+            [[maybe_unused]] nk_status_t const scaled = elementwise_ladder<capability_>::kit_t::scale(
                 row, columns, &normalizer, &zero, row, nullptr);
             assert(scaled == nk_success_k && "The serial tier scales on every CPU");
             carry[head].maximum_score *= std::numbers::ln2_v<f32_t>;
@@ -415,7 +415,7 @@ struct attention_rescoring {
                 vector_view_t const head_row = queries.row(first + head).as_vector();
                 // A compensated finalize reads the head's own row sum beside the keys' stored ones.
                 vector_norms_t head_norms {};
-                if constexpr (quads_compensated<typename quads_chain<scalar_type_, capability_>::kit_t>)
+                if constexpr (quads_compensated<typename quads_ladder<scalar_type_, capability_>::kit_t>)
                     if (first + head) head_norms = dense::norms<capability_>(head_row);
                 scores_result<dot_result_t, 4> const head_scores =
                     first + head
@@ -433,8 +433,8 @@ struct attention_rescoring {
                 state.maximum_score = maximum;
             }
             for (std::size_t lane = 0; lane != count; ++lane)
-                elementwise_chain<capability_>::kit_t::exp2(weights[lane]);
-            elementwise_chain<capability_>::kit_t::exp2(corrections);
+                elementwise_ladder<capability_>::kit_t::exp2(weights[lane]);
+            elementwise_ladder<capability_>::kit_t::exp2(corrections);
             for (std::size_t head = 0; head != group; ++head) {
                 softmax_state_t& state = carry[first + head];
                 state.partition *= corrections[head];
@@ -517,7 +517,7 @@ struct traversal_context {
     /** The visited set walks its slots with the kit the capability mask earns: sixteen at a
      *  time on the AVX-512 classes, one at a time below them. */
     using visited_set_t = growing_hash_set<node_id_t, std::hash<node_id_t>, visits_allocator_t,
-                                           typename visits_hash_set_chain<capability_>::kit_t>;
+                                           typename visits_hash_set_ladder<capability_>::kit_t>;
 
     /** Nodes we've already scored, kept ascending as the best results so far. */
     results_array_t results;
@@ -701,16 +701,16 @@ struct ram_index {
     template <typename, typename, typename, typename, typename, template <typename> class>
     friend struct sharded_indexes;
 
-    /** The capability bit of the distance kit the chain actually picked - lower than
+    /** The capability bit of the distance kit the ladder actually picked - lower than
      *  @c capability_ when no SIMD kit is adapted for this dtype yet. */
-    inline static constexpr nk_capability_t picked_quads_capability_k = quads_chain<scalar_t, capability_>::picked_k;
+    inline static constexpr nk_capability_t picked_quads_capability_k = quads_ladder<scalar_t, capability_>::picked_k;
 
-    /** The distance kit the chain picked; its step is the row pitch the chunks round to. */
-    using quads_kit_t = typename quads_chain<scalar_t, capability_>::kit_t;
+    /** The distance kit the ladder picked; its step is the row pitch the chunks round to. */
+    using quads_kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
 
     /** The matrix-engine kits an exact scan streams through, @c no_tiles_kit_t where no engine
      *  multiplies the scalar. */
-    using tiles_chain_t = tiles_chain<scalar_t, capability_>;
+    using tiles_ladder_t = tiles_ladder<scalar_t, capability_>;
 
     /** Each thread scanning the graph needs its own object like this. */
     using traversal_context_t = traversal_context<vector_dtype_, capability_, candidates_allocator_t>;
@@ -3439,9 +3439,9 @@ struct ram_index {
      *  the scalar and @p queries_count fills one, shared across @p threads up to the kit's pack;
      *  else one query. */
     static constexpr std::size_t scan_width(std::size_t queries_count, std::size_t threads) noexcept {
-        if constexpr (!tiles_chain_t::has_tiles_k) return 1;
+        if constexpr (!tiles_ladder_t::has_tiles_k) return 1;
         else {
-            using tiles_kit_t = typename tiles_chain_t::kit_t;
+            using tiles_kit_t = typename tiles_ladder_t::kit_t;
             if (queries_count < tiles_kit_t::tile_columns_k) return 1;
             std::size_t const share = divide_round_up(queries_count, max_of<std::size_t>(threads, 1));
             return min_of(round_up_to_multiple(share, tiles_kit_t::tile_columns_k), tiles_kit_t::pack_columns_k);
@@ -3464,7 +3464,7 @@ struct ram_index {
         if (!first_invisible_id) return status_t::success_k;
         // Every kernel takes its width from the geometry, so a narrower block would be over-read.
         if (block.columns != dimensions()) return status_t::config_mismatch_k;
-        if constexpr (tiles_chain_t::has_tiles_k)
+        if constexpr (tiles_ladder_t::has_tiles_k)
             if (block.rows > 1) return scan_tiles_(block, admits, land, context, first_invisible_id);
         if (failed(context.reserve_queries(staged_rows_bytes(vector_dtype_, 1, block.columns))))
             return status_t::bad_alloc_k;
@@ -3508,9 +3508,9 @@ struct ram_index {
     template <typename admits_type_, typename land_type_>
     status_t scan_tiles_(rows_view_t block, admits_type_& admits, land_type_& land, traversal_context_t& context,
                          node_id_t first_invisible_id) noexcept
-        requires tiles_chain_t::has_tiles_k
+        requires tiles_ladder_t::has_tiles_k
     {
-        using tiles_kit_t = typename tiles_chain_t::kit_t;
+        using tiles_kit_t = typename tiles_ladder_t::kit_t;
         std::size_t const columns = block.rows, dimensions = this->dimensions();
         // The pack lands past the imported rows, so both are sized before either lands.
         std::size_t const staged_bytes = staged_rows_bytes(vector_dtype_, columns, dimensions);

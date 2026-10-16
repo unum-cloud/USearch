@@ -14,17 +14,16 @@
  *  @section geospatial_ram_metric_kits Kits
  *
  *  A kit binds one ISA's 3D squares with the terrain kernels, which are serial on every ISA for
- *  now. @c geospatial_kit picks the widest kit this build compiled in under the requested
+ *  now. @c geospatial_ladder picks the widest kit this build compiled in under the requested
  *  capability mask, at compile time, so no capability is tested at run time.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
 
-#include <array>       // `std::array` - the query's three axes
-#include <limits>      // `std::numeric_limits` - the distance a failed round reports
-#include <span>        // `std::span`
-#include <type_traits> // `std::conditional_t`
+#include <array>  // `std::array` - the query's three axes
+#include <limits> // `std::numeric_limits` - the distance a failed round reports
+#include <span>   // `std::span`
 
 #include <numkong/geospatial.h> // `nk_sqeuclideans3d_i32_*`, `nk_clearances_packed_f32_*` and kin
 
@@ -38,14 +37,10 @@ using namespace unum::usearch::utilities;
 
 #pragma region Kits
 
-struct i32_neon_geospatial_kit_t;
-struct i32_haswell_geospatial_kit_t;
-struct i32_skylake_geospatial_kit_t;
-struct i32_rvv_geospatial_kit_t;
-struct i32_v128relaxed_geospatial_kit_t;
-
 /** The geospatial kernels for any CPU. */
 struct i32_serial_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_serial;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
@@ -57,11 +52,21 @@ struct i32_serial_geospatial_kit_t {
 
 /** The geospatial kernels for Arm NEON. */
 struct i32_neon_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_neon;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
     static constexpr auto terrain_heights = nk_terrain_heights_packed_f32_serial;
     static constexpr auto clearances = nk_clearances_packed_f32_serial;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+ *  of preprocessor branches. */
+struct i32_neon_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_NEON
 
@@ -69,11 +74,21 @@ struct i32_neon_geospatial_kit_t {
 
 /** The geospatial kernels for Intel Haswell AVX2. */
 struct i32_haswell_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_haswell;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
     static constexpr auto terrain_heights = nk_terrain_heights_packed_f32_serial;
     static constexpr auto clearances = nk_clearances_packed_f32_serial;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+ *  of preprocessor branches. */
+struct i32_haswell_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_HASWELL
 
@@ -81,11 +96,21 @@ struct i32_haswell_geospatial_kit_t {
 
 /** The geospatial kernels for Intel Skylake-X AVX-512. */
 struct i32_skylake_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_skylake;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
     static constexpr auto terrain_heights = nk_terrain_heights_packed_f32_serial;
     static constexpr auto clearances = nk_clearances_packed_f32_serial;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+ *  of preprocessor branches. */
+struct i32_skylake_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_SKYLAKE
 
@@ -93,11 +118,21 @@ struct i32_skylake_geospatial_kit_t {
 
 /** The geospatial kernels for the RISC-V Vector extension. */
 struct i32_rvv_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_rvv;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
     static constexpr auto terrain_heights = nk_terrain_heights_packed_f32_serial;
     static constexpr auto clearances = nk_clearances_packed_f32_serial;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+ *  of preprocessor branches. */
+struct i32_rvv_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
+    static constexpr bool compiled_k = false;
 };
 #endif // NUMKONG_TARGET_RVV
 
@@ -105,27 +140,44 @@ struct i32_rvv_geospatial_kit_t {
 
 /** The geospatial kernels for WebAssembly Relaxed SIMD. */
 struct i32_v128relaxed_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_v128relaxed;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
     static constexpr auto terrain_heights = nk_terrain_heights_packed_f32_serial;
     static constexpr auto clearances = nk_clearances_packed_f32_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+ *  of preprocessor branches. */
+struct i32_v128relaxed_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
-/** The widest geospatial kit this build compiled in among the backends @p capability_ admits,
- *  newest first; each row's flag is the backend's @c NUMKONG_TARGET_* and the mask's bit, so an
- *  unselected kit's body never has to exist. */
-template <nk_capability_t capability_>
-using geospatial_kit = typename first_available_kit<                                                            //
-    i32_serial_geospatial_kit_t,                                                                                //
-    chain_layer<NUMKONG_TARGET_SKYLAKE && (capability_ & nk_cap_skylake_k) != 0, i32_skylake_geospatial_kit_t>, //
-    chain_layer<NUMKONG_TARGET_HASWELL && (capability_ & nk_cap_haswell_k) != 0, i32_haswell_geospatial_kit_t>, //
-    chain_layer<NUMKONG_TARGET_NEON && (capability_ & nk_cap_neon_k) != 0, i32_neon_geospatial_kit_t>,          //
-    chain_layer<NUMKONG_TARGET_RVV && (capability_ & nk_cap_rvv_k) != 0, i32_rvv_geospatial_kit_t>,             //
-    chain_layer<NUMKONG_TARGET_V128RELAXED && (capability_ & nk_cap_v128relaxed_k) != 0,                        //
-                i32_v128relaxed_geospatial_kit_t>                                                               //
-    >::type;
+/** The widest geospatial kit this build compiled in among the backends @p caps_ admits, newest
+ *  first; each kit states its @c capability_k and its @c compiled_k, so an unselected kit's body
+ *  never has to exist. */
+template <nk_capability_t caps_>
+struct geospatial_ladder;
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct geospatial_ladder<caps_> {
+    using kit_t = typename highest_kit<  //
+        caps_,                           //
+        i32_serial_geospatial_kit_t,     //
+        i32_skylake_geospatial_kit_t,    //
+        i32_haswell_geospatial_kit_t,    //
+        i32_neon_geospatial_kit_t,       //
+        i32_rvv_geospatial_kit_t,        //
+        i32_v128relaxed_geospatial_kit_t //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
 
 #pragma endregion Kits
 
@@ -140,7 +192,7 @@ using geospatial_kit = typename first_available_kit<                            
  *  @ref query, which is how the octant selector learns the base node without the selector concept
  *  naming it.
  *
- *  @tparam kit_type_ The kernels, as one @c geospatial_kit names them.
+ *  @tparam kit_type_ The kernels, as one @c geospatial_ladder names them.
  *  @tparam allocator_type_ Places the staging and the kernel's squares.
  */
 template <typename kit_type_, typename allocator_type_ = forkunion_allocator_t>

@@ -211,7 +211,8 @@ status_t sequence_ram_variant<cpu_class_>::load(std::string_view path, executor_
 template <cpu_class_t cpu_class_>
 struct sequence_nvme_variant {
     using executor_t = nvme_executor_t;
-    using index_t = us::basic::nvme_index<us::sequence::codec_t, us::utilities::uuid_t, i64_t>;
+    using index_t = basic::nvme_index<us::sequence::codec_t, us::utilities::uuid_t, u32_t, i64_t, default_io_engine_t,
+                                      row_kit_of<cpu_class_>>;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr sz_capability_t capability_k = stringzilla_capabilities_of(cpu_class_);
 
@@ -246,11 +247,29 @@ expected<traversal_telemetry_t> sequence_nvme_variant<cpu_class_>::search(usearc
 
 #if USEARCH_ARCH_CUDA_
 
+/** The fatbin of every sequence kit, defined in @c src/sequence/vram_variants_nvidia.cu. */
+struct sequence_nvidia_fatbin_t {
+    static bytes_view_t bytes() noexcept;
+};
+
+/** The capabilities the sequence kits compile under on NVIDIA: StringZilla's CUDA floor, which one
+ *  cubin per class carries. */
+inline constexpr sz_capability_t sequence_nvidia_capabilities_k = sz_cap_cuda_k;
+
+/** The faces' members reading the kits, defined in @c src/sequence/vram_variants_nvidia.cu. */
+extern template struct us::sequence::vram_nvidia_index<sz_levenshtein_bytes_k, u32_t, sequence_nvidia_capabilities_k,
+                                                       sequence_nvidia_fatbin_t>;
+extern template struct us::sequence::vram_nvidia_index<sz_levenshtein_runes_k, u32_t, sequence_nvidia_capabilities_k,
+                                                       sequence_nvidia_fatbin_t>;
+
 /** The sequence alternative on one NVIDIA GPU: the basic VRAM index under Levenshtein over
- *  @p symbol_, bytes or UTF-8 runes. */
+ *  @p symbol_, bytes or UTF-8 runes, with 32-bit node IDs. */
 template <sz_levenshtein_symbol_t symbol_>
-struct sequence_vram_nvidia_variant : vram_nvidia_variant<us::sequence::vram_nvidia_index<symbol_>> {
-    using vram_nvidia_variant<us::sequence::vram_nvidia_index<symbol_>>::vram_nvidia_variant;
+struct sequence_vram_nvidia_variant
+    : vram_nvidia_variant<
+          us::sequence::vram_nvidia_index<symbol_, u32_t, sequence_nvidia_capabilities_k, sequence_nvidia_fatbin_t>> {
+    using vram_nvidia_variant<us::sequence::vram_nvidia_index<symbol_, u32_t, sequence_nvidia_capabilities_k,
+                                                              sequence_nvidia_fatbin_t>>::vram_nvidia_variant;
 
     sequence_geometry_t geometry;
 

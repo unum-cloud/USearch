@@ -450,7 +450,7 @@ static std::size_t check_positions_nvme(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
     using nvme_index_t =
-        us::basic::nvme_index<earth_observation_codec_t, us::utilities::uuid_t, i64_t, blocking_files_engine<>>;
+        us::basic::nvme_index<earth_observation_codec_t, us::utilities::uuid_t, u32_t, i64_t, blocking_files_engine<>>;
     allocation_ledger_t ledger;
     std::vector<earth_observation_t> const values = positions_fixture_t::make_values(64, stream_key(seed, "nvme"),
                                                                                      counting_allocator_t {ledger});

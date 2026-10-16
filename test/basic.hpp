@@ -3360,6 +3360,90 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
     return failures;
 }
 
+/**
+ *  @brief A monolith viewed from storage at its own node-ID width: @p count entries saved by a RAM
+ *      index, searched through @p nvme_index_type_, whose node IDs match the RAM index's, and
+ *      refused by @p mismatched_nvme_index_type_, whose node IDs do not.
+ *
+ *  Every entry finds itself at distance zero through a pool as wide as the graph, and the
+ *  mismatched view answers @c config_mismatch_k and stays empty, as the RAM loader refuses it.
+ *
+ *  @param[in] make_value Builds entry @c i on an allocator, as `make_value(i, allocator)`.
+ *  @param[in] make_metric Builds a row slot's metric, as @c nvme_index::search takes it.
+ *  @param[in] query_of Builds row @c i 's query from entry @c i, as @c nvme_index::search takes it.
+ */
+template <typename fixture_type_, typename nvme_index_type_, typename mismatched_nvme_index_type_,
+          typename make_value_type_, typename make_metric_type_, typename query_of_type_>
+std::size_t test_basic_nvme_node_ids(u64_t seed, std::size_t count, std::string_view metric_token,
+                                     make_value_type_&& make_value, make_metric_type_&& make_metric,
+                                     query_of_type_&& query_of) {
+    using index_t = typename fixture_type_::index_t;
+    using node_id_t = typename index_t::node_id_t;
+    using context_t = typename index_t::traversal_context_t;
+    using key_t = typename index_t::key_t;
+    using distance_t = typename nvme_index_type_::distance_t;
+    using executor_t = typename nvme_index_type_::executor_t;
+    static_assert(std::is_same_v<typename nvme_index_type_::node_id_t, node_id_t>);
+    static_assert(!std::is_same_v<typename mismatched_nvme_index_type_::node_id_t, node_id_t>);
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    char path[64];
+    std::snprintf(path, sizeof(path), "/tmp/usearch-nvme-ids-%08x.safegraphs",
+                  static_cast<unsigned>(stream_key(seed, "nvme_ids") ^ reinterpret_cast<std::uintptr_t>(&ledger)));
+    {
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
+        std::vector<typename index_t::value_t> values;
+        for (std::size_t entry = 0; entry != count; ++entry)
+            values.push_back(make_value(entry, counting_allocator_t {ledger}));
+        auto metric = fixture_type_::make_metric();
+        context_t context {stream_key(seed, "nvme_ids"), counting_allocator_t {ledger}};
+        std::vector<node_id_t> assigned_ids;
+        failures += expect(bool(index.reserve(count)));
+        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
+                                               keep_diverse_t {basic_connectivity_k});
+        serial_executor_t serial;
+        failures += expect_eq(safegraphs_write_index(std::string_view {path}, index, fixture_type_::make_codec(),
+                                                     serial, save_config_t {}, metric_token),
+                              status_t::success_k);
+    }
+
+    fu_topology_t topology = nullptr;
+    failures += expect(fu_topology_new(&topology) == fu_success_k);
+    {
+        io_engine_config_t config;
+        config.queue_depth = 64;
+        auto [executor, spawn_status] = executor_t::spawn(topology, 1, config);
+        failures += expect_eq(spawn_status, status_t::success_k);
+        nvme_index_type_ viewed {forkunion_allocator_t {}};
+        failures += expect_eq(viewed.view(path, {}, metric_token, executor), status_t::success_k);
+        failures += expect_eq(viewed.size(), count);
+
+        typename nvme_index_type_::search_config_t search_config;
+        search_config.expansion_factor = count;
+        std::vector<key_t> keys(count);
+        std::vector<distance_t> distances(count);
+        std::vector<std::size_t> counts(count);
+        auto const [found, search_status] = viewed.search(count, make_metric, query_of, executor, search_config,
+                                                          std::span<key_t> {keys}, std::span<distance_t> {distances},
+                                                          std::span<std::size_t> {counts});
+        failures += expect_eq(search_status, status_t::success_k);
+        failures += expect_eq(found.count, count);
+        for (std::size_t row = 0; row != count; ++row) {
+            failures += expect_eq(counts[row], 1u);
+            failures += basic_expect_distance<fixture_type_>(distances[row], distance_t {});
+        }
+
+        mismatched_nvme_index_type_ mismatched {forkunion_allocator_t {}};
+        failures += expect_eq(mismatched.view(path, {}, metric_token, executor), status_t::config_mismatch_k);
+        failures += expect_eq(mismatched.size(), 0u);
+    }
+    fu_topology_delete(topology);
+    std::remove(path);
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
 #pragma endregion Adapters
 
 /** The whole shared battery over one fixture, in file order - units add their own

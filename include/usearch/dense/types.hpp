@@ -22,10 +22,10 @@ using namespace unum::usearch::utilities;
 
 /** Capability cascade for every scalar, shared by all its metrics: each capability group - the
  *  CPU's in @c ram_metric.hpp, NVIDIA's in @c vram_nvidia_metric.cuh - specializes it under a
- *  constraint on @p caps_. Reading order is the priority order; the first row whose @c available
- *  flag is true wins, else the fallback does. */
+ *  constraint on @p caps_. Reading order is the priority order; the first kit this build compiled
+ *  whose @c capability_k @p caps_ admits wins, else the fallback does. */
 template <nk::numeric_dtype scalar_, nk_capability_t caps_>
-struct quads_chain;
+struct quads_ladder;
 
 /** The NumKong dtype a column of @p dtype stores, or @c nk_dtype_unknown_k where NumKong has
  *  none. */

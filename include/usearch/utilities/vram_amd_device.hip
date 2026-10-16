@@ -23,8 +23,8 @@ namespace unum::usearch::utilities {
  *
  *  A wavefront moves in lockstep, so the votes and shuffles take no participation mask, and
  *  @ref sync is a wave-scoped fence pair around the scheduling barrier. Masks are as wide as the
- *  wavefront, @c u64_t for the 64 lanes of CDNA3 and CDNA4. The width is the class's, which a kit
- *  takes from its chain, so one code object may carry kernels of either width.
+ *  wavefront, @c u64_t for the 64 lanes of CDNA3 and CDNA4. The width is the class's, which a
+ *  schedule takes from its ceiling, so one code object may carry kernels of either width.
  */
 template <u32_t width_>
 struct hip_warp {
@@ -58,7 +58,8 @@ struct hip_warp {
 
     /** The lanes holding the same @p value as this one, this lane included: one ballot per distinct
      *  value, since the ISA has no matching vote. */
-    static __device__ __forceinline__ mask_t match_any(u32_t value) noexcept {
+    template <typename value_type_>
+    static __device__ __forceinline__ mask_t match_any(value_type_ value) noexcept {
         mask_t unmatched = all_k, matched = 0;
         while (unmatched) {
             mask_t const same = ballot(shuffle(value, first(unmatched)) == value);
@@ -127,9 +128,5 @@ struct hip_warp {
             static_cast<byte_t*>(target)[offset] = static_cast<byte_t const*>(source)[offset];
     }
 };
-
-/** The warp policy of the class the ceiling @p capability_ names. */
-template <nk_capability_t capability_>
-using hip_warp_of = hip_warp<hip_wave_lanes(amd_class_of(capability_))>;
 
 } // namespace unum::usearch::utilities

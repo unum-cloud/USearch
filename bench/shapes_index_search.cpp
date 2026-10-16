@@ -146,7 +146,7 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, std:
         usearch_shapes_search(&arguments);
     };
 
-    using kit_t = shapes::shapes_kit<scalar_type_, nk_cap_any_k>;
+    using kit_t = typename shapes::shapes_ladder<scalar_type_, nk_cap_any_k>::kit_t;
     using distance_t = typename kit_t::distance_t;
     shapes::shapes_metric<kit_t, std::allocator<byte_t>> oracle {kind.kernel, {}};
     if (failed(oracle.init(shapes_round_k))) return fmt::println(stderr, "The exact scan could not size its rounds"), 1;

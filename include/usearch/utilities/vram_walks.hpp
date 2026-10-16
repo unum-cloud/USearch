@@ -15,8 +15,17 @@
 
 namespace unum::usearch::utilities {
 
-/** Bytes of one packed traversal candidate on the device, the kernels' scored node. */
-inline constexpr std::size_t gpu_scored_node_bytes_k = sizeof(u64_t);
+/** Bytes of one packed traversal candidate on the device, the kernels' scored node: one word for
+ *  @c u32_t node IDs, two for @c u64_t. */
+template <typename node_id_type_>
+inline constexpr std::size_t gpu_scored_node_bytes = sizeof(node_id_type_) == sizeof(u32_t) ? sizeof(u64_t)
+                                                                                            : 2 * sizeof(u64_t);
+
+/** Bytes of one @b {epoch,ID} slot of the device's visited set: one word for @c u32_t node IDs,
+ *  two for @c u64_t. */
+template <typename node_id_type_>
+inline constexpr std::size_t gpu_visited_slot_bytes = sizeof(node_id_type_) == sizeof(u32_t) ? sizeof(u64_t)
+                                                                                             : 2 * sizeof(u64_t);
 
 /** Layout of one warp's slice of the traversal arena, computed on the host: the exact visited set,
  *  the wide frontier's spill tail when it has one, then a builder's scratch when shared memory
@@ -27,9 +36,11 @@ struct gpu_arena_shape_t {
     u32_t tail_entries;
     u32_t cache_bytes;
 
-    /** A multiple of 16, as the kernels' twin rounds it. */
+    /** A multiple of 16, as the kernels' twin rounds it, for a walk over @p node_id_type_ IDs. */
+    template <typename node_id_type_>
     constexpr std::size_t slice_bytes() const noexcept {
-        std::size_t const bytes = visited_slots * sizeof(u64_t) + tail_entries * gpu_scored_node_bytes_k + cache_bytes;
+        std::size_t const bytes = visited_slots * gpu_visited_slot_bytes<node_id_type_> +
+                                  tail_entries * gpu_scored_node_bytes<node_id_type_> + cache_bytes;
         return (bytes + 15) & ~std::size_t {15};
     }
 };

@@ -89,7 +89,7 @@ template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 struct shapes_ram_variant {
     using executor_t = forkunion_executor_t;
     using scalar_t = scalar_type_;
-    using kit_t = us::shapes::shapes_kit<scalar_type_, numkong_capabilities_of(cpu_class_)>;
+    using kit_t = typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_class_)>::kit_t;
     using index_t =
         us::shapes::ram_index<kit_t, us::utilities::uuid_t, dummy_waiter_t, standard_atomic_ref, forkunion_allocator_t>;
     using value_t = typename index_t::value_t;
@@ -269,10 +269,11 @@ template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 struct shapes_nvme_variant {
     using executor_t = nvme_executor_t;
     using scalar_t = scalar_type_;
-    using kit_t = us::shapes::shapes_kit<scalar_type_, numkong_capabilities_of(cpu_class_)>;
+    using kit_t = typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_class_)>::kit_t;
     using codec_t = us::shapes::codec<kit_t>;
     using metric_t = us::shapes::shapes_metric<kit_t, thread_allocator_t>;
-    using index_t = us::basic::nvme_index<codec_t, us::utilities::uuid_t, typename kit_t::distance_t>;
+    using index_t = basic::nvme_index<codec_t, us::utilities::uuid_t, u32_t, typename kit_t::distance_t,
+                                      default_io_engine_t, row_kit_of<cpu_class_>>;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
 
@@ -322,15 +323,37 @@ expected<traversal_telemetry_t> shapes_nvme_variant<scalar_type_, cpu_class_>::s
 
 #if USEARCH_ARCH_CUDA_
 
+/** The fatbin of every shapes kit, defined in @c src/shapes/vram_variants_nvidia.cu. */
+struct shapes_nvidia_fatbin_t {
+    static bytes_view_t bytes() noexcept;
+};
+
+/** The capabilities the shapes kits compile under on NVIDIA: the Ampere floor, which one cubin per
+ *  class carries. */
+inline constexpr nk_capability_t shapes_nvidia_capabilities_k = nk_cap_cuda_k | nk_cap_ampere_k;
+
+/** The faces' members reading the kits, defined in @c src/shapes/vram_variants_nvidia.cu. */
+extern template struct us::shapes::vram_nvidia_index<nk::f16_t, u32_t, shapes_nvidia_capabilities_k,
+                                                     shapes_nvidia_fatbin_t>;
+extern template struct us::shapes::vram_nvidia_index<nk::f32_t, u32_t, shapes_nvidia_capabilities_k,
+                                                     shapes_nvidia_fatbin_t>;
+
 /** The shapes alternative on one NVIDIA GPU: the basic VRAM index over packs of @p scalar_type_
- *  scored by the kits @p kit_template_ names. A batch packs its clouds on the host end to end, as
- *  the RAM variants pack them. */
-template <nk::shapes_dtype scalar_type_, template <u32_t> class kit_template_>
-struct shapes_vram_nvidia_variant : vram_nvidia_variant<us::shapes::vram_nvidia_index<kit_template_>> {
-    using vram_nvidia_variant<us::shapes::vram_nvidia_index<kit_template_>>::vram_nvidia_variant;
+ *  under the kernel kind @p kernel_, Chamfer or Hausdorff, with 32-bit node IDs. A batch packs its
+ *  clouds on the host end to end through the serial kit, as the RAM variants pack them. */
+template <nk::shapes_dtype scalar_type_, nk_kernel_kind_t kernel_>
+struct shapes_vram_nvidia_variant
+    : vram_nvidia_variant<
+          us::shapes::vram_nvidia_index<scalar_type_, u32_t, shapes_nvidia_capabilities_k, shapes_nvidia_fatbin_t>> {
     using scalar_t = scalar_type_;
-    using pack_kit_t = kit_template_<32>;
+    using pack_kit_t = typename us::shapes::shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
+
+    /** Places the index on CUDA device @p device, scoring under @p kernel_. */
+    explicit shapes_vram_nvidia_variant(int device) noexcept
+        : vram_nvidia_variant<
+              us::shapes::vram_nvidia_index<scalar_type_, u32_t, shapes_nvidia_capabilities_k, shapes_nvidia_fatbin_t>>(
+              device, kernel_) {}
 
     shapes_geometry_t geometry;
 
@@ -374,11 +397,11 @@ struct shapes_vram_nvidia_variant : vram_nvidia_variant<us::shapes::vram_nvidia_
                    byte_t*& packed, std::size_t*& offsets) const noexcept;
 };
 
-template <nk::shapes_dtype scalar_type_, template <u32_t> class kit_template_>
-status_t shapes_vram_nvidia_variant<scalar_type_, kit_template_>::pack_(usearch_tape_view_t tape, std::size_t count,
-                                                                        growing_arena<forkunion_allocator_t>& pages,
-                                                                        byte_t*& packed,
-                                                                        std::size_t*& offsets) const noexcept {
+template <nk::shapes_dtype scalar_type_, nk_kernel_kind_t kernel_>
+status_t shapes_vram_nvidia_variant<scalar_type_, kernel_>::pack_(usearch_tape_view_t tape, std::size_t count,
+                                                                  growing_arena<forkunion_allocator_t>& pages,
+                                                                  byte_t*& packed,
+                                                                  std::size_t*& offsets) const noexcept {
     using raw_t = typename scalar_type_::raw_t;
     nk_dtype_t const from = nk_dtype_of(tape.scalar);
     std::size_t const from_bytes = nk_dtype_bits(from) / 8;
@@ -417,8 +440,8 @@ status_t shapes_vram_nvidia_variant<scalar_type_, kit_template_>::pack_(usearch_
     return status_t::success_k;
 }
 
-template <nk::shapes_dtype scalar_type_, template <u32_t> class kit_template_>
-expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, kit_template_>::insert(
+template <nk::shapes_dtype scalar_type_, nk_kernel_kind_t kernel_>
+expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, kernel_>::insert(
     usearch_shapes_insert_t const& arguments, progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
     usearch_tape_view_t const& shapes = arguments.shapes;
     std::size_t const count = arguments.count;
@@ -439,8 +462,8 @@ expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, kit_tem
     return landed;
 }
 
-template <nk::shapes_dtype scalar_type_, template <u32_t> class kit_template_>
-expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, kit_template_>::search(
+template <nk::shapes_dtype scalar_type_, nk_kernel_kind_t kernel_>
+expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, kernel_>::search(
     usearch_shapes_search_t const& arguments, growing_arena<forkunion_allocator_t>& pages, matches_landing_t& landing,
     progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
     byte_t* packed = nullptr;

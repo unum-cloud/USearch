@@ -15,7 +15,7 @@
  *  A kit binds one ISA's four kernels, Chamfer, Hausdorff, Wasserstein-Procrustes and
  *  Gromov-Wasserstein, with the two transport workspace sizes and the pack, unpack and pack-reading
  *  kernels, which every ISA shares, and the cast that brings a caller's coordinates into the stored
- *  scalar and back out. @c shapes_kit picks the widest kit this build compiled in under the
+ *  scalar and back out. @c shapes_ladder picks the widest kit this build compiled in under the
  *  requested capability mask, at compile time, so no capability is tested at run time.
  *
  *  @section shapes_ram_metric_bounds Bounds
@@ -36,10 +36,9 @@
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::uintptr_t` - where the next pack's boundary falls
 
-#include <limits>      // `std::numeric_limits` - the distance a failed round reports
-#include <memory>      // `std::align` - the workspace's start on the kernels' boundary
-#include <span>        // `std::span`
-#include <type_traits> // `std::conditional_t`, `std::is_same_v` - the kit choice
+#include <limits> // `std::numeric_limits` - the distance a failed round reports
+#include <memory> // `std::align` - the workspace's start on the kernels' boundary
+#include <span>   // `std::span`
 
 #include <numkong/cast.h>     // `nk_cast_serial` & kin - the kits' scalar casts
 #include <numkong/shapes.hpp> // `nk::shapes_packed`, and the per-backend kernels
@@ -75,20 +74,10 @@ inline status_t status_of(nk::status_t status) noexcept { return status_of(stati
 
 #pragma region Kits
 
-struct f32_neon_shapes_kit_t;
-struct f32_haswell_shapes_kit_t;
-struct f32_skylake_shapes_kit_t;
-struct f32_rvv_shapes_kit_t;
-struct f32_v128relaxed_shapes_kit_t;
-struct f16_neon_shapes_kit_t;
-struct f16_neonfhm_shapes_kit_t;
-struct f16_haswell_shapes_kit_t;
-struct f16_skylake_shapes_kit_t;
-struct f16_rvv_shapes_kit_t;
-struct f16_v128relaxed_shapes_kit_t;
-
 /** The f32 shape kernels for any CPU. */
 struct f32_serial_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_serial;
@@ -108,6 +97,8 @@ struct f32_serial_shapes_kit_t {
 
 /** The f32 shape kernels for Arm NEON. */
 struct f32_neon_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_neon;
@@ -122,12 +113,22 @@ struct f32_neon_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f32_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f32_neon_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEON
 
 #if NUMKONG_TARGET_HASWELL
 
 /** The f32 shape kernels for Intel Haswell AVX2. */
 struct f32_haswell_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_haswell;
@@ -142,12 +143,22 @@ struct f32_haswell_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f32_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f32_haswell_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
 
 /** The f32 shape kernels for Intel Skylake-X AVX-512. */
 struct f32_skylake_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_skylake;
@@ -162,12 +173,22 @@ struct f32_skylake_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f32_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f32_skylake_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SKYLAKE
 
 #if NUMKONG_TARGET_RVV
 
 /** The f32 shape kernels for the RISC-V Vector extension. */
 struct f32_rvv_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_rvv;
@@ -182,12 +203,22 @@ struct f32_rvv_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f32_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f32_rvv_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_RVV
 
 #if NUMKONG_TARGET_V128RELAXED
 
 /** The f32 shape kernels for WebAssembly Relaxed SIMD. */
 struct f32_v128relaxed_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f32_t;
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_v128relaxed;
@@ -202,10 +233,20 @@ struct f32_v128relaxed_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f32_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f32_v128relaxed_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
 /** The f16 shape kernels for any CPU. */
 struct f16_serial_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_serial;
@@ -225,6 +266,8 @@ struct f16_serial_shapes_kit_t {
 
 /** The f16 shape kernels for Arm NEON. */
 struct f16_neon_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_neon;
@@ -239,6 +282,14 @@ struct f16_neon_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f16_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_neon_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEON
 
 #if NUMKONG_TARGET_NEONFHM
@@ -246,6 +297,8 @@ struct f16_neon_shapes_kit_t {
 /** The f16 shape kernels for Arm NEON with FP16 multiply-accumulate: its own nearest-point kinds
  *  beside NEON's transport kinds. */
 struct f16_neonfhm_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_neon;
@@ -260,12 +313,22 @@ struct f16_neonfhm_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f16_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_neonfhm_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_NEONFHM
 
 #if NUMKONG_TARGET_HASWELL
 
 /** The f16 shape kernels for Intel Haswell AVX2. */
 struct f16_haswell_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_haswell;
@@ -280,12 +343,22 @@ struct f16_haswell_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f16_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_haswell_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
 
 /** The f16 shape kernels for Intel Skylake-X AVX-512. */
 struct f16_skylake_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_skylake;
@@ -300,12 +373,22 @@ struct f16_skylake_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f16_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_skylake_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_SKYLAKE
 
 #if NUMKONG_TARGET_RVV
 
 /** The f16 shape kernels for the RISC-V Vector extension. */
 struct f16_rvv_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_rvv;
@@ -320,12 +403,22 @@ struct f16_rvv_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f16_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_rvv_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_RVV
 
 #if NUMKONG_TARGET_V128RELAXED
 
 /** The f16 shape kernels for WebAssembly Relaxed SIMD. */
 struct f16_v128relaxed_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_v128relaxed;
@@ -340,33 +433,52 @@ struct f16_v128relaxed_shapes_kit_t {
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
     static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f16_serial;
 };
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_v128relaxed_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr bool compiled_k = false;
+};
 #endif // NUMKONG_TARGET_V128RELAXED
 
-/** The widest shapes kit of @p scalar_type_ this build compiled in among the backends
- *  @p capability_ admits, newest first; each row's flag is the backend's @c NUMKONG_TARGET_* and
- *  the mask's bit, so an unselected kit's body never has to exist. */
-template <nk::shapes_dtype scalar_type_, nk_capability_t capability_>
-using shapes_kit = std::conditional_t<
-    std::is_same_v<scalar_type_, nk::f16_t>,
-    typename first_available_kit<                                                                               //
-        f16_serial_shapes_kit_t,                                                                                //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (capability_ & nk_cap_skylake_k) != 0, f16_skylake_shapes_kit_t>, //
-        chain_layer<NUMKONG_TARGET_HASWELL && (capability_ & nk_cap_haswell_k) != 0, f16_haswell_shapes_kit_t>, //
-        chain_layer<NUMKONG_TARGET_NEONFHM && (capability_ & nk_cap_neonfhm_k) != 0, f16_neonfhm_shapes_kit_t>, //
-        chain_layer<NUMKONG_TARGET_NEON && (capability_ & nk_cap_neon_k) != 0, f16_neon_shapes_kit_t>,          //
-        chain_layer<NUMKONG_TARGET_RVV && (capability_ & nk_cap_rvv_k) != 0, f16_rvv_shapes_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (capability_ & nk_cap_v128relaxed_k) != 0,                    //
-                    f16_v128relaxed_shapes_kit_t>                                                               //
-        >::type,                                                                                                //
-    typename first_available_kit<                                                                               //
-        f32_serial_shapes_kit_t,                                                                                //
-        chain_layer<NUMKONG_TARGET_SKYLAKE && (capability_ & nk_cap_skylake_k) != 0, f32_skylake_shapes_kit_t>, //
-        chain_layer<NUMKONG_TARGET_HASWELL && (capability_ & nk_cap_haswell_k) != 0, f32_haswell_shapes_kit_t>, //
-        chain_layer<NUMKONG_TARGET_NEON && (capability_ & nk_cap_neon_k) != 0, f32_neon_shapes_kit_t>,          //
-        chain_layer<NUMKONG_TARGET_RVV && (capability_ & nk_cap_rvv_k) != 0, f32_rvv_shapes_kit_t>,             //
-        chain_layer<NUMKONG_TARGET_V128RELAXED && (capability_ & nk_cap_v128relaxed_k) != 0,                    //
-                    f32_v128relaxed_shapes_kit_t>                                                               //
-        >::type>;
+/** The widest shapes kit of @p scalar_ this build compiled in among the backends @p caps_ admits,
+ *  newest first; each kit states its @c capability_k and its @c compiled_k, so an unselected kit's
+ *  body never has to exist. Only the scalars some kit stores specialize it. */
+template <nk::shapes_dtype scalar_, nk_capability_t caps_>
+struct shapes_ladder;
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct shapes_ladder<nk::f16_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        f16_serial_shapes_kit_t,        //
+        f16_skylake_shapes_kit_t,       //
+        f16_haswell_shapes_kit_t,       //
+        f16_neonfhm_shapes_kit_t,       //
+        f16_neon_shapes_kit_t,          //
+        f16_rvv_shapes_kit_t,           //
+        f16_v128relaxed_shapes_kit_t    //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct shapes_ladder<nk::f32_t, caps_> {
+    using kit_t = typename highest_kit< //
+        caps_,                          //
+        f32_serial_shapes_kit_t,        //
+        f32_skylake_shapes_kit_t,       //
+        f32_haswell_shapes_kit_t,       //
+        f32_neon_shapes_kit_t,          //
+        f32_rvv_shapes_kit_t,           //
+        f32_v128relaxed_shapes_kit_t    //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
 
 #pragma endregion Kits
 
@@ -381,7 +493,7 @@ using shapes_kit = std::conditional_t<
  *  variants place them in the executor thread's arena. Packs are read in place, never copied: a
  *  candidate stays valid until its round drains, and the query until the next @c reset.
  *
- *  @tparam kit_type_ The kernels, as one @c shapes_kit names them.
+ *  @tparam kit_type_ The kernels, as one @c shapes_ladder names them.
  *  @tparam allocator_type_ Places the staging, the kernel's distances and the workspace.
  */
 template <typename kit_type_, typename allocator_type_ = forkunion_allocator_t>

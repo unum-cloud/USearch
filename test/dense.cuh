@@ -89,18 +89,13 @@ constexpr std::size_t dense_reader_minimal_searches_k = 16;
 
 #pragma region Shared Helpers
 
-/** Every NVIDIA capability, so a device test cell runs each kit its build compiled. */
-inline constexpr nk_capability_t dense_nvidia_capabilities_k = nk_cap_cuda_k | nk_cap_ampere_k | nk_cap_ada_k |
-                                                               nk_cap_hopper_k | nk_cap_blackwell_k |
-                                                               nk_cap_blackwellrtx_k | nk_cap_blackwellultra_k;
-
-/** Gate: a cell's kit is compiled once its requested ceiling is a bit some chain actually
+/** Gate: a cell's kit is compiled once its requested ceiling is a bit some ladder actually
  *  picked - a build without the kit must not pass its serial floor under a SIMD name. */
 template <nk_dtype_t dtype_, nk_capability_t caps_>
 concept dense_cell_compiled =
     caps_ == nk_cap_serial_k ||
-    std::bit_floor(caps_) == quads_chain<typename nk::type_for<dtype_>::type, caps_>::picked_k ||
-    std::bit_floor(caps_) == tiles_chain<typename nk::type_for<dtype_>::type, caps_>::picked_k;
+    std::bit_floor(caps_) == quads_ladder<typename nk::type_for<dtype_>::type, caps_>::picked_k ||
+    std::bit_floor(caps_) == tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::picked_k;
 
 /** Gate: a cell runs once its serial kit finalizes the kernel and its requested ceiling picked a
  *  kit. */
@@ -371,7 +366,7 @@ std::vector<f32_t> dense_widened_rows(nk::matrix_view<scalar_type_> view, nk_dty
     std::size_t const rows = view.extent(0), columns = view.extent(1);
     std::vector<f32_t> widened(rows * columns);
     for (std::size_t row = 0; row != rows; ++row) {
-        [[maybe_unused]] nk_status_t const cast = elementwise_chain<nk_cap_any_k>::kit_t::cast(
+        [[maybe_unused]] nk_status_t const cast = elementwise_ladder<nk_cap_any_k>::kit_t::cast(
             view.byte_data() + row * view.stride_bytes(0), dtype, widened.data() + row * columns, nk_f32_k, columns,
             nullptr);
         assert(cast == nk_success_k && "The serial tier casts every dtype pair");
@@ -874,7 +869,7 @@ dense_indexer_inputs<scalar_type_> dense_make_indexer_inputs(nk::matrix_view<sca
                                 inputs.widened.begin() + (heads_rows + 1) * inputs.dimensions);
     for (f32_t& value : inputs.heads_widened) value -= 4;
     inputs.heads_stored.resize(inputs.heads_widened.size());
-    [[maybe_unused]] nk_status_t const narrowed = elementwise_chain<nk_cap_any_k>::kit_t::cast(
+    [[maybe_unused]] nk_status_t const narrowed = elementwise_ladder<nk_cap_any_k>::kit_t::cast(
         inputs.heads_widened.data(), nk_f32_k, inputs.heads_stored.data(), scalar_type_::dtype(),
         inputs.heads_stored.size(), nullptr);
     assert(narrowed == nk_success_k && "The serial tier casts every dtype pair");

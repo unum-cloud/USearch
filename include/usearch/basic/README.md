@@ -9,7 +9,7 @@ Specialized optimizations, like lock-free readers and SIMD kernel kits, belong t
 
 - `ram_index.hpp`: the in-memory index, with the metric contract, the selectors, the codec and the plans described below.
 - `nvme_index.hpp`: the read-only view of a saved checkpoint on block storage, walked through the same storage engines as the dense tier.
-- `vram_nvidia_index.hpp` and `vram_nvidia_index.cuh`: the NVIDIA index, a host face in plain C++ over the kernels, scoring rows with the kits a modality hands it.
+- `vram_nvidia_index.hpp` and `vram_nvidia_index.cuh`: the NVIDIA base every modality's face derives from, in plain C++, and the kernel body every modality's kernels run with the kit their ladder picks.
 - `vram_index.cuh`: the vendor-neutral device bodies for the walk, the diversity selection, insertion and re-selection, which NVCC and HIP-Clang share.
   Only the NVIDIA host face exists so far, and AMD and Apple have no basic index yet.
 

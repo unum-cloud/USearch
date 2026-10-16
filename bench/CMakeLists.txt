@@ -125,8 +125,8 @@ usearch_setup_target(usearch_bench_dense_ram_metric HOST)
 target_include_directories(usearch_bench_dense_ram_metric PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_bench_dense_ram_metric PRIVATE fmt::fmt)
 
-# The CUDA benches compile with the host compiler; each entry unit compiles host-only through Clang's CUDA mode and once
-# more with NVCC device-only, into the binary's own fatbin of every ceiling's kernels.
+# The CUDA benches compile host-only through Clang's CUDA mode, shards and entry unit alike, and the entry once more
+# with NVCC device-only, into the binary's own fatbin of every ceiling's kernels.
 if (USEARCH_BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)
     enable_language(ASM)
@@ -146,6 +146,7 @@ if (USEARCH_BUILD_CUDA)
         target_compile_definitions(${target} PRIVATE "USEARCH_ARCH_CUDA_=1" ${bench_cuda_capabilities_})
         target_link_libraries(${target} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static ${CMAKE_DL_LIBS})
         usearch_gpu_bundle(${target} nvidia bench_vram_nvidia ${CMAKE_CURRENT_SOURCE_DIR}/${entry} ${bench_cuda_codes_})
+        usearch_gpu_host_only(${target} ${CMAKE_CURRENT_SOURCE_DIR}/${entry})
     endfunction ()
     usearch_dense_vram_bench(
         usearch_bench_dense_vram_index_search dense_vram_index_search.cu

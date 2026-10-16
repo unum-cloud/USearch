@@ -875,6 +875,17 @@ check_namespace_reopened() {
         "$file reopens namespace ${reopened##*namespace } - keep includes in the preamble and open each namespace once:"
 }
 
+# Utilities sit below every design: a header under `include/usearch/utilities/` includes, embeds or names nothing from
+# `dense/`, `basic/` or a modality's directory, whose headers include utilities, never the reverse. Whatever a utility
+# needs from a design moves down into utilities, or the design keeps it and the utility takes it as an argument.
+check_utilities_layering() {
+    local reaching
+    reaching=$(grep -nE '^[[:space:]]*#[[:space:]]*(include|embed)[[:space:]]*"usearch/[a-z_]+/' "$staged_blob" |
+        grep -vE '"usearch/utilities/')
+    [ -z "$reaching" ] || fail "$reaching" \
+        "$file reaches above utilities - a utility includes or embeds only utilities, never a design or a modality:"
+}
+
 # A class template never takes the `_t` suffix, nor a variable template `_k`: `_t` marks a concrete type or the alias a
 # template materializes, and `_k` a concrete constant, so `template <...> struct fold_run_t` reads as a type the reader
 # could name without arguments. Name the template bare - `humanized<value_type_>`, `device_resident<index_type_>` - and
@@ -894,7 +905,11 @@ check_template_type_suffixes() {
         "$file names a class template with the _t suffix - name the template bare, as in" \
         "            \`template <typename value_type_> struct humanized\`, and keep _t for its aliases:"
     variables=$(printf '%s\n' "$added" | awk '
-        function suffixed(line) { return line ~ /constexpr[[:space:]][^=(]*[[:space:]][A-Za-z0-9_]*_[kt][[:space:]]*=/ }
+        # A `static` member of a class template is not a variable template, though an unchanged `struct` line between
+        # them leaves only the `template` line and the member among the added lines.
+        function suffixed(line) {
+            return line ~ /constexpr[[:space:]][^=(]*[[:space:]][A-Za-z0-9_]*_[kt][[:space:]]*=/ && line !~ /[[:space:]]static[[:space:]]/
+        }
         /^\+[[:space:]]*template[[:space:]]*</ { if (suffixed($0)) print; else pending = 1; next }
         pending && /^\+[[:space:]]*requires/ { next }
         pending && suffixed($0) { print }
@@ -1707,6 +1722,9 @@ judge_path() {
     added_lines=$(< "$staged_lines_path")
     case " $core_files " in
     *" $file "*) check_dependency_free_core ;;
+    esac
+    case "$file" in
+    include/usearch/utilities/*) check_utilities_layering ;;
     esac
     case "$file" in
     # Every C and C++ source, wherever it lives: prose, Doxygen and the shared vocabulary.

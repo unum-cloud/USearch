@@ -15,6 +15,7 @@
  */
 #include <algorithm> // `std::nth_element`
 #include <array>     // `std::array` - the prototypes, one cloud a pack takes
+#include <limits>    // `std::numeric_limits` - the node-ID type's sentinel
 #include <span>      // `std::span`
 #include <vector>    // `std::vector` - clouds, the tape, offsets, matches
 
@@ -24,6 +25,15 @@
 #endif
 
 #include "harness.hpp"
+
+#if USEARCH_ARCH_CUDA_
+
+/** The library's fatbin of every shapes kit, defined in @c src/shapes/vram_variants_nvidia.cu. */
+struct shapes_nvidia_fatbin_t {
+    static us::utilities::bytes_view_t bytes() noexcept;
+};
+
+#endif
 
 namespace unum::usearch::test::shapes {
 using namespace unum::usearch::shapes;
@@ -98,18 +108,19 @@ static std::size_t matched_count(std::span<f64_t const> found, std::vector<dista
 }
 
 /**
- *  @brief One collection of @p count clouds of @p kind and @p queries_count held-out queries, built
- *      on the GPU under @p kit_template_ and in RAM under the CPU kit of @p kernel alike.
+ *  @brief One collection of @p count clouds of @p kind and @p queries_count held-out queries of
+ *      @p scalar_type_, built on the GPU and in RAM under the kits of @p kernel alike.
  *
  *  Every match the GPU reports must carry the pair's serial distance, ascending, and the GPU's
  *  recall at ten must reach the RAM index's at the same breadth, give or take a twentieth.
  */
-template <template <u32_t> class kit_template_, typename scalar_type_>
+template <typename scalar_type_>
 static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& executor, nk_kernel_kind_t kernel,
                                                 cloud_kind_t kind, std::size_t count, std::size_t queries_count) {
-    using vram_index_t = vram_nvidia_index<kit_template_>;
-    using kit_t = shapes_kit<scalar_type_, nk_cap_any_k>;
-    using serial_kit_t = shapes_kit<scalar_type_, nk_cap_serial_k>;
+    using vram_index_t =
+        vram_nvidia_index<scalar_type_, u32_t, nk_cap_cuda_k | nk_cap_ampere_k, shapes_nvidia_fatbin_t>;
+    using kit_t = typename shapes_ladder<scalar_type_, nk_cap_any_k>::kit_t;
+    using serial_kit_t = typename shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     using ram_index_t = ram_index<kit_t>;
     using value_t = typename ram_index_t::value_t;
     using distance_t = typename kit_t::distance_t;
@@ -170,7 +181,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     }
 
     int const device = executor.device(0);
-    vram_index_t vram_index {cuda_virtual_memory_allocator<byte_t> {device}};
+    vram_index_t vram_index {kernel, cuda_virtual_memory_allocator<byte_t> {device}};
     failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                           status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
@@ -209,7 +220,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
         std::vector<f64_t> found;
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             u32_t const id = ids[query * wanted_k + rank];
-            if (id == us::utilities::node_id_unknown_k) break;
+            if (id == std::numeric_limits<u32_t>::max()) break;
             f64_t const distance = distances[query * wanted_k + rank];
             failures += expect(id < count) || expect_near(distance, exact[query][id]);
             failures += expect(found.empty() || found.back() <= distance);
@@ -235,20 +246,20 @@ std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& de
     constexpr nk_kernel_kind_t chamfer_k = nk_kernel_chamfers_packed_k, hausdorff_k = nk_kernel_hausdorffs_packed_k;
     std::size_t failures = 0;
     failures += report("shapes_vram random",
-                       check_shapes_vram_collection<f16_ampere_chamfer_kit, nk::f16_t>(
-                           stream_key(settings.seed, "random"), executor, chamfer_k, cloud_kind_t::random_k, 1024, 64));
-    failures += report("shapes_vram coincident", check_shapes_vram_collection<f16_ampere_hausdorff_kit, nk::f16_t>(
-                                                     stream_key(settings.seed, "coincident"), executor, hausdorff_k,
-                                                     cloud_kind_t::coincident_k, 256, 16));
-    failures += report("shapes_vram collinear", check_shapes_vram_collection<f16_ampere_chamfer_kit, nk::f16_t>(
-                                                    stream_key(settings.seed, "collinear"), executor, chamfer_k,
-                                                    cloud_kind_t::collinear_k, 1024, 64));
-    failures += report("shapes_vram molecular", check_shapes_vram_collection<f16_ampere_hausdorff_kit, nk::f16_t>(
-                                                    stream_key(settings.seed, "molecular"), executor, hausdorff_k,
-                                                    cloud_kind_t::molecular_k, 1024, 64));
+                       check_shapes_vram_collection<nk::f16_t>(stream_key(settings.seed, "random"), executor, chamfer_k,
+                                                               cloud_kind_t::random_k, 1024, 64));
+    failures += report("shapes_vram coincident",
+                       check_shapes_vram_collection<nk::f16_t>(stream_key(settings.seed, "coincident"), executor,
+                                                               hausdorff_k, cloud_kind_t::coincident_k, 256, 16));
+    failures += report("shapes_vram collinear",
+                       check_shapes_vram_collection<nk::f16_t>(stream_key(settings.seed, "collinear"), executor,
+                                                               chamfer_k, cloud_kind_t::collinear_k, 1024, 64));
+    failures += report("shapes_vram molecular",
+                       check_shapes_vram_collection<nk::f16_t>(stream_key(settings.seed, "molecular"), executor,
+                                                               hausdorff_k, cloud_kind_t::molecular_k, 1024, 64));
     failures += report("shapes_vram f32",
-                       check_shapes_vram_collection<f32_ampere_chamfer_kit, nk::f32_t>(
-                           stream_key(settings.seed, "f32"), executor, chamfer_k, cloud_kind_t::molecular_k, 1024, 64));
+                       check_shapes_vram_collection<nk::f32_t>(stream_key(settings.seed, "f32"), executor, chamfer_k,
+                                                               cloud_kind_t::molecular_k, 1024, 64));
     return failures;
 }
 
