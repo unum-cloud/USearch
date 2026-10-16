@@ -377,9 +377,9 @@ using shapes_kit = std::conditional_t<
  *      pack's constants, @c push stages candidate packs, and @c drain bounds what it can and scores
  *      the rest in one 1×M call, exact up to the radius.
  *
- *  One instance belongs to one thread and owns its staging and the transport workspace; the C arms
- *  place them in the executor thread's arena. Packs are read in place, never copied: a candidate
- *  stays valid until its round drains, and the query until the next @c reset.
+ *  One instance belongs to one thread and owns its staging and the transport workspace; the C
+ *  variants place them in the executor thread's arena. Packs are read in place, never copied: a
+ *  candidate stays valid until its round drains, and the query until the next @c reset.
  *
  *  @tparam kit_type_ The kernels, as one @c shapes_kit names them.
  *  @tparam allocator_type_ Places the staging, the kernel's distances and the workspace.

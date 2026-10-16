@@ -2,7 +2,7 @@
  *  @file src/shapes/ram_variants_intel_haswell.cpp
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief The intel_haswell unit of the shapes arms: they inline the AVX2 kits, so the unit
+ *  @brief The intel_haswell unit of the shapes variants: they inline the AVX2 kits, so the unit
  *      compiles with them.
  */
 #include "shapes_specializations.cuh"

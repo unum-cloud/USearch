@@ -32,10 +32,6 @@
 #include "usearch/dense/vram_nvidia_indexes.hpp"
 #include "usearch/utilities/vram_device.hpp"
 
-#if defined(__CUDACC__)
-#include "usearch/dense/vram_nvidia_index.cuh"
-#endif
-
 #include "dense_search.cuh"
 #include "utilities/persisted_dataset.hpp"
 
@@ -74,28 +70,16 @@ inline bytes_view_t cuda_bench_fatbin() noexcept {
 inline constexpr nk_dtype_t cuda_dtypes_ladder_k[] = {nk_bf16_k, nk_u1_k, nk_i8_k, nk_e4m3_k, nk_f16_k, nk_u8_k,
                                                       nk_e5m2_k, nk_i4_k, nk_u4_k, nk_e3m2_k, nk_e2m3_k};
 
-#if defined(__CUDACC__)
+/** Resolves an ID, a node on one device or a key across the shards, to its value row in a device
+ *  table of rows @c pitch bytes apart; the entries' @c kernel_attention_lookup_t adds the call. */
+struct attention_value_lookup_t {
 
-/** Instantiates every ceiling's kernels for @p dtype_, with the attends over each of
- *  @p lookups_. */
-template <nk_dtype_t dtype_, u32_t... lookups_>
-__device__ void instantiate_cuda_ceilings() noexcept {
-    cuda_instantiate<cuda_ceiling_of(nk_cap_ampere_k), dtype_, lookups_...>();
-    [&]<std::size_t... rows_>(std::index_sequence<rows_...>) {
-        (cuda_instantiate<cuda_ceiling_of(cuda_compute_choices_k[rows_].bit), dtype_, lookups_...>(), ...);
-    }(std::make_index_sequence<std::size(cuda_compute_choices_k)> {});
-}
+    /** Names the lookup to the attend kernels the binary's fatbin carries. */
+    inline static constexpr u32_t device_lookup_k = 1;
 
-/** Instantiates the kernels of every compiled dtype under every ceiling, with the attends over each
- *  of @p lookups_ - what a binary's entry unit compiles into its fatbin. */
-template <u32_t... lookups_>
-__device__ void instantiate_cuda_kernels() noexcept {
-    [&]<std::size_t... dtypes_>(std::index_sequence<dtypes_...>) {
-        (instantiate_cuda_ceilings<cuda_dtypes_ladder_k[dtypes_], lookups_...>(), ...);
-    }(std::make_index_sequence<USEARCH_DENSE_DTYPES> {});
-}
-
-#endif // defined(__CUDACC__)
+    byte_t const* rows;
+    std::size_t pitch;
+};
 
 /** The device knobs the CUDA binaries parse beside @c settings_t, before any dtype is known; the
  *  devices themselves come from @c USEARCH_DEVICES. */

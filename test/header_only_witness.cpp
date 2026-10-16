@@ -214,7 +214,7 @@ int main() {
     plan.insert(0, planned_tags, planned_keys, metric, planned_context, basic::keep_closest_t {2});
     if (plan.finish() != status_t::success_k || index.size() != 11 || !index.contains(301)) return 1;
 
-    // All three search arms answer, ranked & settled-equal.
+    // All three search modes answer, ranked & settled-equal.
     auto const query = make_tag(0);
     auto const [concurrent_result, concurrent_status] = index.search(query, metric, context);
     auto const [immutable_result, immutable_status] = index.template search<synchronization_t::immutable_k>(

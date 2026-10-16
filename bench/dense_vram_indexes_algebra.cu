@@ -14,9 +14,18 @@
 #include <fmt/format.h>
 
 #include "dense/vram_indexes_algebra.cuh"
+#include "dense/vram_kernels.cuh"
 
-template __device__ void us::bench::dense::instantiate_cuda_kernels<us::dense::cuda_keyed_lookup<
-    us::utilities::u32_t, us::bench::dense::attention_value_lookup<uint4>>::device_lookup_k>();
+/** The key-level lookup each shard's attend kernels resolve rows through. */
+using attention_lookup_t =
+    us::dense::vram_keyed_lookup<us::utilities::u32_t, us::bench::dense::attention_value_lookup_t>;
+
+template <>
+struct us::dense::cuda_value_lookup_of<attention_lookup_t::device_lookup_k> {
+    using type = us::dense::vram_keyed_lookup<us::utilities::u32_t, us::bench::dense::kernel_attention_lookup_t>;
+};
+
+template __device__ void us::bench::dense::instantiate_cuda_kernels<attention_lookup_t::device_lookup_k>();
 
 namespace unum::usearch::bench {
 

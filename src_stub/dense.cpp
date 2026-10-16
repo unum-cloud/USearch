@@ -871,27 +871,16 @@ void usearch_dense_sample(usearch_dense_sample_t* arguments) {
 
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const anchor_bytes = anchors_count ? row_extent(anchors.scalar, dimensions) : 0;
-    std::vector<double> anchor_rows(anchors_count * dimensions);
+    std::vector<dense_payload_t> anchor_rows(anchors_count, dense_payload_t(dimensions));
     for (std::size_t anchor = 0; anchor != anchors_count; ++anchor)
         read_row(row_at<std::byte>(anchors.data, anchor, anchors.stride, anchor_bytes), anchors.scalar,
-                 std::span<double>(anchor_rows).subspan(anchor * dimensions, dimensions));
+                 anchor_rows[anchor]);
     auto const score = [&](std::span<double const> first, std::span<double const> second) {
         return distance(index.options.metric, first, second);
     };
-    // Every kind ranks nearest-first, the inner one as `1 - dot`, so a radius bounds from above.
-    usearch_distance_t const radius = arguments->radius;
-    auto const within = [&](std::size_t row) {
-        if (!anchors_count || radius == 0) return true;
-        for (std::size_t anchor = 0; anchor != anchors_count; ++anchor)
-            if (score(std::span<double const>(anchor_rows).subspan(anchor * dimensions, dimensions),
-                      index.entries[row].payload) <= radius)
-                return true;
-        return false;
-    };
-
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const order = drawing_order(index.entries.size(), arguments->seed, within);
-    land_sample(*arguments, std::span<dense_entry_t const>(index.entries), order, score, *arena, outcome);
+    land_sample(*arguments, std::span<dense_entry_t const>(index.entries),
+                std::span<dense_payload_t const>(anchor_rows), score, *arena, outcome);
 }
 
 void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {

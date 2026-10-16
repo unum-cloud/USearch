@@ -32,9 +32,6 @@ constant constexpr ulong metal_expanded_bit_k = 1ul << 32;
  *  HIP sets do. */
 constant constexpr uint metal_probe_budget_k = 64;
 
-/** Rounds a back-linker sweeps its held neighbors before abandoning them, as the CUDA and HIP ones do. */
-constant constexpr uint metal_back_link_rounds_k = 256;
-
 /** The counters words: the batch's assigned rows, the index's published rows, the changed nodes and the attend's
  *  miss word, then the telemetry, each tally a low and a high word. */
 enum metal_counter_t : uint {
@@ -766,142 +763,102 @@ inline uint metal_merge_sorted(thread metal_walk_t& walk, ulong value, uint coun
     return min(size + count, capacity);
 }
 
-/** Back-links @p new_node_id into each selected neighbor through the bounded slot-0 exchange: an append when a slot is
- *  free, else a diversity re-selection over the neighbors and the newcomer, ascending by distance to the target. */
-inline void metal_back_link(thread metal_walk_t& walk, uint new_node_id, norms_t new_norms, uint selected) {
-    uint const newcomer_row = metal_cache_rows_k - 1, target_row = metal_cache_rows_k - 2;
-    uint const connectivity = min(walk.connectivity, metal_cache_rows_k - 2);
-    // A held neighbor is never waited on: it is deferred past the others, every round retries the deferred ones once,
-    // and the ones still held after the last round are skipped.
-    uint pending = selected;
-    for (uint round = 0; pending && round != metal_back_link_rounds_k; ++round) {
-        uint deferred = 0;
-        for (uint pending_index = 0; pending_index != pending; ++pending_index) {
-            uint const target = walk.selected_ids[pending_index];
-            device uint* const row = walk.neighbors_for(target);
-            // A retry reads before it writes, so a held row's line is not hammered while its holder rewrites it.
-            uint const first_value = warp_t::shuffle(
-                walk.lane == 0 && (round == 0 || warp_t::load_acquire(row) != metal_unknown_k)
-                    ? warp_t::exchange_acquire(row, metal_unknown_k)
-                    : metal_unknown_k,
-                0);
-            warp_t::fence();
-            ++walk.lock_attempts;
-            if (first_value == metal_unknown_k) {
-                // The deferred prefix never passes the read cursor, so it compacts in place.
-                if (walk.lane == 0) walk.selected_ids[deferred] = target;
-                ++deferred;
-                continue;
-            }
-            if (first_value == target) {
-                if (walk.lane == 0) warp_t::store_release(row, new_node_id);
-                continue;
-            }
-            uint empty_slot = connectivity;
-            for (uint base = 0; base < connectivity; base += warp_t::width_k) {
-                uint const slot = base + walk.lane;
-                uint const slot_value = slot == 0             ? first_value
-                                        : slot < connectivity ? warp_t::load_acquire(row + slot)
-                                                              : metal_unknown_k;
-                if (slot < connectivity) walk.ids[slot] = slot_value;
-                uint const empty_mask = warp_t::ballot(slot < connectivity && slot_value == metal_unknown_k);
-                if (empty_mask && empty_slot == connectivity) empty_slot = base + ctz(empty_mask);
-            }
-            warp_t::sync();
-            warp_t::fence();
-            if (empty_slot != connectivity) {
-                if (walk.lane == 0) warp_t::store_relaxed(row + empty_slot, new_node_id);
-                warp_t::fence();
-                if (walk.lane == 0) warp_t::store_release(row, first_value);
-                continue;
-            }
+/** Back-links @p node_id, which a wave's newcomers picked, chasing their edges from @p link_heads through
+ *  @p link_next: appended into its free slots when they all fit, and otherwise re-selected over its live neighbors and
+ *  every newcomer, ascending by distance to the node, keeping the diverse picks alone as the CPU's reverse refine does:
+ *  a backfilled row stays full, so on a dot graph every later newcomer competes with the hubs and the small-norm nodes
+ *  lose their last in-links. Edge @b e is newcomer @p first_id + e / connectivity; newcomers past the cache stay
+ *  unlinked and are counted. The launch hands each node to one simdgroup, the only writer of its row. */
+inline void metal_back_link_one(thread metal_walk_t& walk, uint node_id, device uint const* link_heads,
+                                device uint const* link_next, uint first_id) {
+    uint const node_row = metal_cache_rows_k - 1;
+    uint const connectivity = min(walk.connectivity, node_row);
+    device uint* const row = walk.neighbors_for(node_id);
 
-            ++walk.reselections;
-            for (uint word = walk.lane; word < walk.row_fragments; word += warp_t::width_k) {
-                walk.cache_row(target_row)[word] = walk.vector_for(target)[word];
-                walk.cache_row(newcomer_row)[word] = walk.vector_for(new_node_id)[word];
-            }
-            warp_t::sync();
-            norms_t const target_norms = walk.norm_for(target);
-            dot_t self_dot = dot_t(0);
-            for (uint word = walk.lane; word < walk.row_fragments; word += warp_t::width_k)
-                self_dot = kit_t::accumulate_dot(walk.cache_row(newcomer_row)[word], walk.cache_row(target_row)[word],
-                                                 self_dot);
-            self_dot = simd_sum(self_dot);
-            float const newcomer_distance = kit_t::distance(walk.metric, self_dot, target_norms, new_norms);
-            walk.scored_count += connectivity + 1;
-
-            uint sorted_size = 0;
-            for (uint base = 0; base < connectivity; base += warp_t::width_k) {
-                uint const count = min(connectivity - base, warp_t::width_k);
-                ulong const scored = walk.score_batch(walk.cache_row(target_row), target_norms, walk.ids + base, count);
-                ulong const sorted = metal_sort_lanes(
-                    walk.lane < count ? metal_make(metal_distance_of(scored), base + walk.lane) : metal_sentinel_k,
-                    walk.lane);
-                sorted_size = metal_merge_sorted(walk, sorted, count, sorted_size, connectivity);
-            }
-            for (uint word = walk.lane; word < connectivity * walk.row_fragments; word += warp_t::width_k) {
-                uint const cache_row = walk.row_of_word(word), fragment_index = word - cache_row * walk.row_fragments;
-                walk.cache_row(cache_row)[fragment_index] = walk.vector_for(walk.ids[cache_row])[fragment_index];
-            }
-            for (uint cache_row = walk.lane; cache_row < connectivity; cache_row += warp_t::width_k)
-                walk.cache_norms[cache_row] = walk.norm_for(walk.ids[cache_row]);
-            if (walk.lane == 0) walk.cache_norms[newcomer_row] = new_norms;
-            warp_t::sync();
-
-            // The merge walk over the sorted neighbors and the newcomer, as cache rows, keeping the diverse picks
-            // alone as the CPU's reverse refine does: a backfilled row stays full, so on a dot graph every later
-            // newcomer competes with the hubs and the small-norm nodes lose their last in-links.
-            uint refined = 0, existing = 0;
-            bool newcomer_pending = true;
-            while (refined != connectivity) {
-                ulong const next_link = existing < sorted_size ? walk.sorted[existing] : metal_sentinel_k;
-                bool const take_newcomer = newcomer_pending && newcomer_distance < metal_distance_of(next_link);
-                if (!take_newcomer && existing >= sorted_size) break;
-                float const candidate_distance = take_newcomer ? newcomer_distance : metal_distance_of(next_link);
-                uint const position = take_newcomer ? newcomer_row : metal_id_of(next_link);
-                if (take_newcomer) newcomer_pending = false;
-                else ++existing;
-                bool diverse = true;
-                for (uint base = 0; base < refined && diverse; base += warp_t::width_k) {
-                    bool lane_diverse = true;
-                    if (base + walk.lane < refined) {
-                        uint const kept = walk.kept_positions[base + walk.lane];
-                        dot_t pair = dot_t(0);
-                        for (uint fragment_index = 0; fragment_index != walk.row_fragments; ++fragment_index)
-                            pair = kit_t::accumulate_dot(walk.cache_row(position)[fragment_index],
-                                                         walk.cache_row(kept)[fragment_index], pair);
-                        lane_diverse = kit_t::distance(walk.metric, pair, walk.cache_norms[position],
-                                                       walk.cache_norms[kept]) >= candidate_distance;
-                        ++walk.scored_count;
-                    }
-                    diverse = simd_all(lane_diverse);
-                }
-                if (!diverse) continue;
-                if (walk.lane == 0) walk.kept_positions[refined] = position;
-                ++refined;
-                warp_t::sync();
-            }
-            warp_t::sync();
-            for (uint slot = walk.lane; slot < connectivity; slot += warp_t::width_k) {
-                if (slot == 0) continue;
-                uint linked = metal_unknown_k;
-                if (slot < refined) {
-                    uint const kept = walk.kept_positions[slot];
-                    linked = kept == newcomer_row ? new_node_id : walk.ids[kept];
-                }
-                warp_t::store_relaxed(row + slot, linked);
-            }
-            warp_t::fence();
-            if (walk.lane == 0) {
-                uint const head = walk.kept_positions[0];
-                warp_t::store_release(row, head == newcomer_row ? new_node_id : walk.ids[head]);
-            }
-        }
-        pending = deferred;
-        warp_t::sync(); // The next round reads the IDs the leader compacted.
+    // The live neighbors first, a self-loop in slot 0 meaning none, then the newcomers.
+    uint live_count = 0;
+    for (uint base = 0; base < connectivity; base += warp_t::width_k) {
+        uint const slot = base + walk.lane;
+        uint const live_id = slot < connectivity ? warp_t::load_acquire(row + slot) : metal_unknown_k;
+        bool const usable = live_id != metal_unknown_k && live_id != node_id;
+        uint const usable_mask = warp_t::ballot(usable);
+        if (usable) walk.ids[live_count + popcount(usable_mask & warp_t::below(walk.lane))] = live_id;
+        live_count += popcount(usable_mask);
+        warp_t::sync();
     }
-    walk.lock_skips += pending;
+    // A chain is serial, so one lane follows it.
+    uint count = live_count, unlinked = 0;
+    if (walk.lane == 0)
+        for (uint edge = link_heads[node_id]; edge != metal_unknown_k; edge = link_next[edge]) {
+            if (count < node_row) walk.ids[count++] = first_id + edge / walk.connectivity;
+            else ++unlinked;
+        }
+    count = warp_t::shuffle(count, 0);
+    walk.lock_skips += warp_t::shuffle(unlinked, 0);
+    warp_t::sync();
+
+    if (count <= connectivity) {
+        for (uint slot = max(live_count, 1u) + walk.lane; slot < count; slot += warp_t::width_k)
+            warp_t::store_relaxed(row + slot, walk.ids[slot]);
+        warp_t::fence();
+        if (walk.lane == 0 && !live_count && count) warp_t::store_release(row, walk.ids[0]);
+        return;
+    }
+
+    ++walk.reselections;
+    for (uint word = walk.lane; word < walk.row_fragments; word += warp_t::width_k)
+        walk.cache_row(node_row)[word] = walk.vector_for(node_id)[word];
+    warp_t::sync();
+    norms_t const node_norms = walk.norm_for(node_id);
+    walk.scored_count += count;
+
+    uint sorted_size = 0;
+    for (uint base = 0; base < count; base += warp_t::width_k) {
+        uint const batch = min(count - base, warp_t::width_k);
+        ulong const scored = walk.score_batch(walk.cache_row(node_row), node_norms, walk.ids + base, batch);
+        ulong const sorted = metal_sort_lanes(
+            walk.lane < batch ? metal_make(metal_distance_of(scored), base + walk.lane) : metal_sentinel_k, walk.lane);
+        sorted_size = metal_merge_sorted(walk, sorted, batch, sorted_size, count);
+    }
+    for (uint word = walk.lane; word < count * walk.row_fragments; word += warp_t::width_k) {
+        uint const cache_row = walk.row_of_word(word), fragment_index = word - cache_row * walk.row_fragments;
+        walk.cache_row(cache_row)[fragment_index] = walk.vector_for(walk.ids[cache_row])[fragment_index];
+    }
+    for (uint cache_row = walk.lane; cache_row < count; cache_row += warp_t::width_k)
+        walk.cache_norms[cache_row] = walk.norm_for(walk.ids[cache_row]);
+    warp_t::sync();
+
+    // The merge walk over the union, ascending, as cache rows.
+    uint refined = 0;
+    for (uint existing = 0; existing != sorted_size && refined != connectivity; ++existing) {
+        float const candidate_distance = metal_distance_of(walk.sorted[existing]);
+        uint const position = metal_id_of(walk.sorted[existing]);
+        bool diverse = true;
+        for (uint base = 0; base < refined && diverse; base += warp_t::width_k) {
+            bool lane_diverse = true;
+            if (base + walk.lane < refined) {
+                uint const kept = walk.kept_positions[base + walk.lane];
+                dot_t pair = dot_t(0);
+                for (uint fragment_index = 0; fragment_index != walk.row_fragments; ++fragment_index)
+                    pair = kit_t::accumulate_dot(walk.cache_row(position)[fragment_index],
+                                                 walk.cache_row(kept)[fragment_index], pair);
+                lane_diverse = kit_t::distance(walk.metric, pair, walk.cache_norms[position],
+                                               walk.cache_norms[kept]) >= candidate_distance;
+                ++walk.scored_count;
+            }
+            diverse = simd_all(lane_diverse);
+        }
+        if (!diverse) continue;
+        if (walk.lane == 0) walk.kept_positions[refined] = position;
+        ++refined;
+        warp_t::sync();
+    }
+    warp_t::sync();
+    for (uint slot = walk.lane; slot < connectivity; slot += warp_t::width_k)
+        if (slot)
+            warp_t::store_relaxed(row + slot, slot < refined ? walk.ids[walk.kept_positions[slot]] : metal_unknown_k);
+    warp_t::fence();
+    if (walk.lane == 0) warp_t::store_release(row, walk.ids[walk.kept_positions[0]]);
 }
 
 /** Folds the walk's telemetry into the device counters, from its leader; a tally carries into its high word, since
@@ -982,11 +939,21 @@ inline norms_t metal_stage_query(thread metal_walk_t& walk, device uint4 const* 
 
 #pragma region Kernels
 
-/** One simdgroup inserts one node at a time, assigning itself IDs from the batch counter. */
+/** The chains a wave's newcomers thread their picks onto for the back-link launch behind them: each node's last edge,
+ *  unknown for none, the edge each was threaded before, and the nodes any newcomer picked with their count. */
+struct metal_links_t {
+    device uint* heads;
+    device uint* next;
+    device uint* touched_ids;
+    device atomic_uint* touched_count;
+};
+
+/** One simdgroup inserts one node at a time, assigning itself IDs from the batch counter, and threads its picks onto
+ *  @p links. */
 template <uint slots_>
 inline void metal_insert(constant metal_arguments_t& arguments, device uint4* vectors, device norms_t* norms,
                          device uint* neighbors, device uint4 const* staging, device uchar* arena,
-                         device atomic_uint* counters, uint slice, uint lane) {
+                         device atomic_uint* counters, metal_links_t links, uint slice, uint lane) {
     metal_walk_t walk = metal_open(arguments, vectors, norms, neighbors, arena, counters, slice, lane);
     while (true) {
         uint new_node_id = lane == 0 ? atomic_fetch_add_explicit(counters + metal_assigned_k, 1u, memory_order_relaxed)
@@ -1020,7 +987,33 @@ inline void metal_insert(constant metal_arguments_t& arguments, device uint4* ve
             warp_t::store_release(own, selected ? walk.selected_ids[0] : new_node_id);
             atomic_fetch_add_explicit(counters + metal_published_k, 1u, memory_order_relaxed);
         }
-        metal_back_link(walk, new_node_id, new_norms, selected);
+        for (uint slot = lane; slot < selected; slot += warp_t::width_k) {
+            uint const target = walk.selected_ids[slot];
+            uint const edge = (new_node_id - arguments.first_id) * walk.connectivity + slot;
+            uint const previous = warp_t::exchange_acquire(links.heads + target, edge);
+            links.next[edge] = previous;
+            if (previous == metal_unknown_k)
+                links.touched_ids[atomic_fetch_add_explicit(links.touched_count, 1u, memory_order_relaxed)] = target;
+        }
+        warp_t::sync();
+    }
+    metal_flush(walk);
+}
+
+/** One simdgroup back-links one node the wave before it touched at a time, assigning itself the touched list's offsets
+ *  from the launch counter, and resets the node's chain for the next wave. */
+inline void metal_back_link(constant metal_arguments_t& arguments, device uint4* vectors, device norms_t* norms,
+                            device uint* neighbors, device uchar* arena, device atomic_uint* counters,
+                            metal_links_t links, uint slice, uint lane) {
+    metal_walk_t walk = metal_open(arguments, vectors, norms, neighbors, arena, counters, slice, lane);
+    uint const touched = atomic_load_explicit(links.touched_count, memory_order_relaxed);
+    while (true) {
+        uint offset = lane == 0 ? atomic_fetch_add_explicit(counters + metal_assigned_k, 1u, memory_order_relaxed) : 0;
+        offset = warp_t::shuffle(offset, 0);
+        if (offset >= touched) break;
+        uint const node_id = links.touched_ids[offset];
+        metal_back_link_one(walk, node_id, links.heads, links.next, arguments.first_id);
+        if (lane == 0) links.heads[node_id] = metal_unknown_k;
     }
     metal_flush(walk);
 }
@@ -1167,38 +1160,44 @@ kernel void metal_insert_kernel(constant metal_arguments_t& arguments [[buffer(0
                                 device uint4* vectors [[buffer(1)]], device norms_t* norms [[buffer(2)]],
                                 device uint* neighbors [[buffer(3)]], device uint4 const* staging [[buffer(4)]],
                                 device uchar* arena [[buffer(5)]], device atomic_uint* counters [[buffer(6)]],
+                                device uint* link_heads [[buffer(7)]], device uint* link_next [[buffer(8)]],
+                                device uint* touched_ids [[buffer(9)]],
+                                device atomic_uint* touched_count [[buffer(10)]],
                                 uint group [[threadgroup_position_in_grid]],
                                 uint simdgroup [[simdgroup_index_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]]) {
     metal_insert<slots_>(arguments, vectors, norms, neighbors, staging, arena, counters,
-                         group * metal_simdgroups_k + simdgroup, lane);
+                         {link_heads, link_next, touched_ids, touched_count}, group * metal_simdgroups_k + simdgroup,
+                         lane);
 }
 
-template [[host_name("metal_insert_kernel_0")]] kernel void metal_insert_kernel<0>(constant metal_arguments_t&,
-                                                                                   device uint4*, device norms_t*,
-                                                                                   device uint*, device uint4 const*,
-                                                                                   device uchar*, device atomic_uint*,
-                                                                                   uint, uint, uint);
-template [[host_name("metal_insert_kernel_2")]] kernel void metal_insert_kernel<2>(constant metal_arguments_t&,
-                                                                                   device uint4*, device norms_t*,
-                                                                                   device uint*, device uint4 const*,
-                                                                                   device uchar*, device atomic_uint*,
-                                                                                   uint, uint, uint);
-template [[host_name("metal_insert_kernel_4")]] kernel void metal_insert_kernel<4>(constant metal_arguments_t&,
-                                                                                   device uint4*, device norms_t*,
-                                                                                   device uint*, device uint4 const*,
-                                                                                   device uchar*, device atomic_uint*,
-                                                                                   uint, uint, uint);
-template [[host_name("metal_insert_kernel_8")]] kernel void metal_insert_kernel<8>(constant metal_arguments_t&,
-                                                                                   device uint4*, device norms_t*,
-                                                                                   device uint*, device uint4 const*,
-                                                                                   device uchar*, device atomic_uint*,
-                                                                                   uint, uint, uint);
-template [[host_name("metal_insert_kernel_16")]] kernel void metal_insert_kernel<16>(constant metal_arguments_t&,
-                                                                                     device uint4*, device norms_t*,
-                                                                                     device uint*, device uint4 const*,
-                                                                                     device uchar*, device atomic_uint*,
-                                                                                     uint, uint, uint);
+template [[host_name("metal_insert_kernel_0")]] kernel void metal_insert_kernel<0>(
+    constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
+    device atomic_uint*, device uint*, device uint*, device uint*, device atomic_uint*, uint, uint, uint);
+template [[host_name("metal_insert_kernel_2")]] kernel void metal_insert_kernel<2>(
+    constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
+    device atomic_uint*, device uint*, device uint*, device uint*, device atomic_uint*, uint, uint, uint);
+template [[host_name("metal_insert_kernel_4")]] kernel void metal_insert_kernel<4>(
+    constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
+    device atomic_uint*, device uint*, device uint*, device uint*, device atomic_uint*, uint, uint, uint);
+template [[host_name("metal_insert_kernel_8")]] kernel void metal_insert_kernel<8>(
+    constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
+    device atomic_uint*, device uint*, device uint*, device uint*, device atomic_uint*, uint, uint, uint);
+template [[host_name("metal_insert_kernel_16")]] kernel void metal_insert_kernel<16>(
+    constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
+    device atomic_uint*, device uint*, device uint*, device uint*, device atomic_uint*, uint, uint, uint);
+
+/** One back-link launch per wave, over the nodes its insert launch touched. */
+[[host_name("metal_back_link_kernel")]] kernel void metal_back_link_kernel(
+    constant metal_arguments_t& arguments [[buffer(0)]], device uint4* vectors [[buffer(1)]],
+    device norms_t* norms [[buffer(2)]], device uint* neighbors [[buffer(3)]], device uchar* arena [[buffer(5)]],
+    device atomic_uint* counters [[buffer(6)]], device uint* link_heads [[buffer(7)]],
+    device uint* link_next [[buffer(8)]], device uint* touched_ids [[buffer(9)]],
+    device atomic_uint* touched_count [[buffer(10)]], uint group [[threadgroup_position_in_grid]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    metal_back_link(arguments, vectors, norms, neighbors, arena, counters,
+                    {link_heads, link_next, touched_ids, touched_count}, group * metal_simdgroups_k + simdgroup, lane);
+}
 
 template <uint slots_>
 kernel void metal_refine_kernel(constant metal_arguments_t& arguments [[buffer(0)]],

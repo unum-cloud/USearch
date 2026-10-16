@@ -2,7 +2,7 @@
  *  @file src/geospatial/ram_variants_alibaba_c930.cpp
  *  @author Ash Vardanian
  *  @date October 14, 2026
- *  @brief The alibaba_c930 unit of the geospatial arms: they inline the RVV kit, so the unit
+ *  @brief The alibaba_c930 unit of the geospatial variants: they inline the RVV kit, so the unit
  *      compiles with it.
  */
 #include "geospatial_specializations.cuh"

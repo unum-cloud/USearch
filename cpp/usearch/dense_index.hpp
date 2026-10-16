@@ -227,8 +227,8 @@ class dense_index_t {
         return answered_(usearch_dense_refine, arguments, &usearch_dense_refine_t::changed, executor);
     }
 
-    outcome<usearch_dense_reachability_t> health(usearch_dense_health_t arguments = {},
-                                                 executor_t const& executor = {}) noexcept {
+    outcome<usearch_reachability_t> health(usearch_dense_health_t arguments = {},
+                                           executor_t const& executor = {}) noexcept {
         return answered_(usearch_dense_health, arguments, &usearch_dense_health_t::reachability, executor);
     }
 

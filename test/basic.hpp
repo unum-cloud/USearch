@@ -1305,7 +1305,7 @@ std::size_t test_basic_snapshot_regions(u64_t seed) {
 #pragma region Plans and Holds
 
 /** Three rendezvous threads around one held save plan: every try-unique verb answers
- *  @c contended_k for the hold's whole span, the concurrent arm & wait-free readers
+ *  @c contended_k for the hold's whole span, the concurrent mode & wait-free readers
  *  stay fully served, and an inserter parked at the shared gate lands only after the
  *  plan's finish - with the planner never waiting on the parked inserter. */
 template <typename fixture_type_>
@@ -1396,7 +1396,7 @@ std::size_t test_basic_plan_race(u64_t seed) {
             if (index.template search<synchronization_t::exclusive_k>(query[0], prober_metric, prober_context).status !=
                 status_t::contended_k)
                 thread_failures.fetch_add(1);
-            // The concurrent arm and the wait-free readers stay fully served meanwhile.
+            // The concurrent mode and the wait-free readers stay fully served meanwhile.
             auto const [result, status] = index.search(query[0], prober_metric, prober_context);
             if (status != status_t::success_k) thread_failures.fetch_add(1);
             thread_failures.fetch_add(scored_failures(prober_context.results.data(), prober_context.results.size(),
@@ -1895,9 +1895,9 @@ std::size_t test_basic_health(u64_t seed) {
     return failures;
 }
 
-/** The certified arms at runtime: an exclusive build equals a concurrent
- *  single-threaded one, certified searches answer identically to the concurrent arm
- *  on a settled graph, and a parked insert makes both certified arms answer
+/** The certified modes at runtime: an exclusive build equals a concurrent
+ *  single-threaded one, certified searches answer identically to the concurrent mode
+ *  on a settled graph, and a parked insert makes both certified modes answer
  *  @c contended_k instead of tearing. */
 template <typename fixture_type_>
 std::size_t test_basic_certified(u64_t seed) {
@@ -1940,28 +1940,28 @@ std::size_t test_basic_certified(u64_t seed) {
         // Same data, same seeds, single-threaded: the lock elision must be invisible.
         failures += basic_expect_mirrored<fixture_type_>(exclusive_index, concurrent_index, nodes_k);
 
-        // Three search arms over the settled graph must agree bit-for-bit.
+        // Three search modes over the settled graph must agree bit-for-bit.
         auto queries = fixture_type_::make_values(4, stream_key(seed, "certified", 4), counting_allocator_t {ledger});
         for (auto const& query : queries) {
-            context_t concurrent_arm {stream_key(seed, "certified", 1), counting_allocator_t {ledger}};
-            context_t immutable_arm {stream_key(seed, "certified", 1), counting_allocator_t {ledger}};
-            context_t exclusive_arm {stream_key(seed, "certified", 1), counting_allocator_t {ledger}};
-            auto arm_metric = fixture_type_::make_metric();
-            auto const [concurrent_result, concurrent_status] = exclusive_index.search(query, arm_metric,
-                                                                                       concurrent_arm);
+            context_t concurrent_mode {stream_key(seed, "certified", 1), counting_allocator_t {ledger}};
+            context_t immutable_mode {stream_key(seed, "certified", 1), counting_allocator_t {ledger}};
+            context_t exclusive_mode {stream_key(seed, "certified", 1), counting_allocator_t {ledger}};
+            auto mode_metric = fixture_type_::make_metric();
+            auto const [concurrent_result, concurrent_status] = exclusive_index.search(query, mode_metric,
+                                                                                       concurrent_mode);
             auto const [immutable_result, immutable_status] =
-                exclusive_index.template search<synchronization_t::immutable_k>(query, arm_metric, immutable_arm);
+                exclusive_index.template search<synchronization_t::immutable_k>(query, mode_metric, immutable_mode);
             auto const [exclusive_result, exclusive_status] =
-                exclusive_index.template search<synchronization_t::exclusive_k>(query, arm_metric, exclusive_arm);
+                exclusive_index.template search<synchronization_t::exclusive_k>(query, mode_metric, exclusive_mode);
             failures += expect_eq(immutable_status, concurrent_status);
             failures += expect_eq(exclusive_status, concurrent_status);
             failures += expect_eq(immutable_result.count, concurrent_result.count);
             failures += expect_eq(exclusive_result.count, concurrent_result.count);
             for (std::size_t position = 0; position != concurrent_result.count; ++position) {
-                failures += expect_eq(immutable_arm.results[position].node_id,
-                                      concurrent_arm.results[position].node_id);
-                failures += expect_eq(exclusive_arm.results[position].node_id,
-                                      concurrent_arm.results[position].node_id);
+                failures += expect_eq(immutable_mode.results[position].node_id,
+                                      concurrent_mode.results[position].node_id);
+                failures += expect_eq(exclusive_mode.results[position].node_id,
+                                      concurrent_mode.results[position].node_id);
             }
         }
 
@@ -2848,7 +2848,7 @@ std::size_t test_basic_cursor(u64_t seed) {
         failures += expect_eq(static_cast<std::size_t>(parked_cursor.id()), index.size());
         failures += expect_eq(parked_cursor.seek(0), status_t::success_k);
 
-        // The certified arm agrees with the concurrent one on a settled graph.
+        // The certified mode agrees with the concurrent one on a settled graph.
         ram_cursor<index_t, synchronization_t::immutable_k, counting_allocator_t> settled_cursor {
             index, counting_allocator_t {ledger}};
         failures += expect_eq(settled_cursor.seek(0), status_t::success_k);

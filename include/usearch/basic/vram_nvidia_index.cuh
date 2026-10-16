@@ -23,7 +23,7 @@
 #include <utility>     // `std::index_sequence` - every rung of one kit
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_scatter_back_links`, `cuda_bitset_contains`
+#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`
 #include "usearch/basic/vram_index.cuh"
 #include "usearch/basic/vram_nvidia_index.hpp"
 
@@ -194,10 +194,10 @@ __device__ __forceinline__ void cuda_insert(vram_build_view const& view) {
         });
 }
 
-/** One walker merges one touched node's reverse bucket into its live neighbors, assigning itself
- *  node IDs from the pass counter over @b [first_id,end_id). */
+/** One walker back-links one node the walk launch before it touched, assigning itself the touched
+ *  list's offsets from the launch counter, and resets the node's chain for the next walk launch. */
 template <vram_basic_kit kit_, typename selector_>
-__device__ __forceinline__ void cuda_merge_back_links(vram_build_view const& view) {
+__device__ __forceinline__ void cuda_back_link(vram_build_view const& view) {
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ u32_t candidate_ids[vram_warps_per_block_k][vram_cache_rows_k];
     __shared__ vram_scored_node_t scored_entries[vram_warps_per_block_k][vram_cache_rows_k];
@@ -211,13 +211,13 @@ __device__ __forceinline__ void cuda_merge_back_links(vram_build_view const& vie
                                               candidate_distances[warp]};
     cuda_schedule<kit_> schedule {schedule_state};
     cuda_for_each_assigned<kit_>( //
-        schedule, view.storage, view.assigned_rows, view.first_id, view.end_id, slice, [&](node_id_t node_id) {
-            // A row no pick of the wave named keeps its neighbors.
-            if (!cuda_bitset_contains({view.touched}, node_id)) return;
+        schedule, view.storage, view.assigned_rows, 0, *view.touched_count, slice, [&](u32_t offset) {
+            node_id_t const node_id = view.touched_ids[offset];
             vram_telemetry_t telemetry;
-            vram_merge_back_links_one<kit_, selector_>( //
+            vram_back_link_one<kit_, selector_>( //
                 view, schedule, node_id, slice.scratch, slice.scratch + view.span_bytes, candidate_ids[warp], selection,
                 telemetry, lane);
+            if (lane == 0) view.link_heads[node_id] = node_id_unknown_k;
             telemetry.template flush<cuda_warp_t, vram_traversal_t::inserting_k>(view.telemetry, lane);
         });
 }
@@ -255,23 +255,11 @@ __device__ __forceinline__ vram_ragged_view cuda_view(cuda_ragged_storage_t cons
     return {storage.values, storage.offsets, storage.neighbors, storage.connectivity};
 }
 __device__ __forceinline__ vram_build_view cuda_view(cuda_build_t const& build) noexcept {
-    return {cuda_view(build.storage),
-            build.staged_offsets,
-            build.tape_first,
-            build.end_id,
-            build.scratch_bytes_per_warp,
-            build.span_bytes,
-            build.first_id,
-            build.arena,
-            cuda_arena_shape(build.arena_shape),
-            build.expansion,
-            build.epoch_base,
-            build.telemetry,
-            build.assigned_rows,
-            build.bucket_ids,
-            build.bucket_counts,
-            build.touched,
-            build.bucket_width};
+    return {cuda_view(build.storage),     build.staged_offsets, build.tape_first, build.end_id,
+            build.scratch_bytes_per_warp, build.span_bytes,     build.first_id,   build.arena,
+            vram_view(build.arena_shape), build.expansion,      build.epoch_base, build.telemetry,
+            build.assigned_rows,          build.link_heads,     build.link_next,  build.touched_ids,
+            build.touched_count};
 }
 __device__ __forceinline__ vram_search_view cuda_view(cuda_search_t const& search) noexcept {
     return {cuda_view(search.storage),
@@ -282,7 +270,7 @@ __device__ __forceinline__ vram_search_view cuda_view(cuda_search_t const& searc
             search.scratch_bytes_per_warp,
             search.expansion,
             search.arena,
-            cuda_arena_shape(search.arena_shape),
+            vram_view(search.arena_shape),
             search.epoch_base,
             search.telemetry,
             search.assigned_queries,
@@ -296,16 +284,10 @@ __device__ __forceinline__ vram_search_view cuda_view(cuda_search_t const& searc
 #pragma region Kernels
 
 /** Blocks of each kernel resident per multiprocessor, the register budget its launch bounds set:
- *  the builders' and the merge's saturating count, a walk's by its rung, and one for the
- *  scatter. */
+ *  the builders' and the back-link's saturating count, and a walk's by its rung. */
 constexpr u32_t cuda_resident_blocks(cuda_kernel_t kernel, u32_t slots) noexcept {
-    switch (kernel) {
-    case cuda_kernel_t::insert_k:
-    case cuda_kernel_t::reselect_k:
-    case cuda_kernel_t::merge_back_links_k: return cuda_insert_blocks_per_multiprocessor_k;
-    case cuda_kernel_t::search_k: return slots <= 8 ? 4 : 3;
-    default: return 1;
-    }
+    if (kernel == cuda_kernel_t::search_k) return slots <= 8 ? 4 : 3;
+    return cuda_insert_blocks_per_multiprocessor_k;
 }
 
 /** Every NVIDIA basic kernel: @p kernel_ picks the body, @p kit_ the kit through @ref cuda_kit_of,
@@ -320,12 +302,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     cuda_build_t const& build = arguments.build;
     if constexpr (kernel == cuda_kernel_t::insert_k || kernel == cuda_kernel_t::reselect_k)
         cuda_insert<kit_t, selector_t, slots_, kernel>(cuda_view(build));
-    else if constexpr (kernel == cuda_kernel_t::scatter_back_links_k)
-        cuda_scatter_back_links(build.storage.neighbors, build.end_id, build.first_id, build.end_id - build.first_id,
-                                nullptr, build.storage.connectivity, build.bucket_width, build.bucket_ids,
-                                build.bucket_counts, {build.touched});
-    else if constexpr (kernel == cuda_kernel_t::merge_back_links_k)
-        cuda_merge_back_links<kit_t, selector_t>(cuda_view(build));
+    else if constexpr (kernel == cuda_kernel_t::back_link_k) cuda_back_link<kit_t, selector_t>(cuda_view(build));
     else cuda_walk<kit_t, slots_>(cuda_view(arguments.search));
 }
 

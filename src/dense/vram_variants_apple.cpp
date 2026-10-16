@@ -2,7 +2,7 @@
  *  @file src/dense/vram_variants_apple.cpp
  *  @author Ash Vardanian
  *  @date October 11, 2026
- *  @brief The Apple unit: one arm per dtype serving every Apple class, Apple7 through Apple10,
+ *  @brief The Apple unit: one variant per dtype serving every Apple class, Apple7 through Apple10,
  *      until a family's kernels differ.
  */
 #include "dense_specializations.cuh"

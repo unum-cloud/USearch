@@ -917,9 +917,9 @@ struct cuda_event_t {
     cuda_event_handle_t handle_ = nullptr;
 };
 
-/** Device memory that one call at a time rewinds and refills, on one device: the NVIDIA arm of
- *  @ref gpu_arena_t, where the C layer lands a VRAM call's outputs. It grows, uploads and frees in
- *  the order of the first stream of the executor that made it, so it never waits on the device
+/** Device memory that one call at a time rewinds and refills, on one device: the NVIDIA alternative
+ *  of @ref gpu_arena_t, where the C layer lands a VRAM call's outputs. It grows, uploads and frees
+ *  in the order of the first stream of the executor that made it, so it never waits on the device
  *  until @ref drain, and must die before that executor. */
 struct cuda_device_arena_t {
 
@@ -1201,40 +1201,9 @@ status_t cuda_launch(cuda_function_handle_t function, u32_t blocks, u32_t thread
 
 static_assert(cuda_reservable_allocator<cuda_virtual_memory_allocator<byte_t>>);
 
-/** Bytes of one packed traversal candidate on the device, the kernels' scored node. */
-inline constexpr std::size_t cuda_scored_node_bytes_k = sizeof(u64_t);
-
-/** Layout of one warp's slice of the traversal arena, computed on the host: the exact visited set,
- *  the wide frontier's spill tail when it has one, then a builder's scratch when shared memory
- *  cannot seat it. The kernels carry it as their own @c vram_arena_shape_t. */
-struct cuda_arena_shape_t {
-    u32_t visited_slots;
-    u32_t visited_hash_shift;
-    u32_t tail_entries;
-    u32_t cache_bytes;
-
-    /** A multiple of 16, as the kernels' twin rounds it. */
-    constexpr std::size_t slice_bytes() const noexcept {
-        std::size_t const bytes = visited_slots * sizeof(u64_t) + tail_entries * cuda_scored_node_bytes_k + cache_bytes;
-        return (bytes + 15) & ~std::size_t {15};
-    }
-};
-
 /** Insertion and refinement blocks per multiprocessor: two, the most whose share of the register
  *  file holds the walk and its selection without spilling. */
 inline constexpr u32_t cuda_insert_blocks_per_multiprocessor_k = 2;
-
-/** One bit per row over device-resident words, marked concurrently by a whole grid. */
-struct cuda_bitset_t {
-    u32_t* words = nullptr;
-};
-
-/** Rungs per kernel: the arena frontier's zero, then 2, 4, 8 and 16 slots. */
-inline constexpr std::size_t cuda_rungs_per_kernel_k = 5;
-
-constexpr std::size_t cuda_rung_index(u32_t slots) noexcept {
-    return slots == 0 ? 0 : slots == 2 ? 1 : slots == 4 ? 2 : slots == 8 ? 3 : 4;
-}
 
 inline constexpr std::size_t cuda_kernel_name_capacity_k = 160;
 
@@ -1397,6 +1366,23 @@ struct cuda_traversal_context {
      *  calls. @return The base, or null on exhaustion. */
     byte_t* ensure_arena(std::size_t bytes) noexcept { return ensure_(arena_, arena_bytes_, bytes); }
 
+    /** Takes @p count epochs off the floor for one launch's walks, zeroing the arena first when it
+     *  grew past the @p before bytes it held or the 32-bit epoch space would wrap, never per
+     *  launch; a refused zeroing spends the arena, so a retry zeroes it again. @return The first
+     *  epoch. */
+    expected<u32_t> take_epochs(std::size_t count, std::size_t before) noexcept {
+        if (arena_bytes_ != before || epoch_floor_ + count > 0xFFFFFFFEull) {
+            if (cuda_fill_async(arena_.get(), 0, arena_bytes_, stream()) != cuda_success_k) {
+                arena_bytes_ = 0;
+                return {0, status_t::device_error_k};
+            }
+            epoch_floor_ = 0;
+        }
+        u32_t const first = static_cast<u32_t>(epoch_floor_);
+        epoch_floor_ += count;
+        return {first, status_t::success_k};
+    }
+
     /** Grow-only staging for one batch's device transport: an insert's padded vectors, or a
      *  search's queries and result landing. */
     byte_t* ensure_staging(std::size_t bytes) noexcept { return ensure_(staging_, staging_bytes_, bytes); }
@@ -1418,10 +1404,52 @@ static_assert(cuda_allocator<cuda_device_allocator_t>);
 static_assert(cuda_allocator<cuda_arena_allocator_t>);
 static_assert(cuda_allocator<cuda_pinned_allocator_t>);
 
+/** The NVIDIA types and driver calls a vendor-neutral VRAM index declares itself with and queues
+ *  through; every copy tells its direction apart by unified addressing. */
+struct cuda_vendor_t {
+    using stream_handle_t = cuda_stream_handle_t;
+    using event_t = cuda_event_t;
+    using landings_t = cuda_landings_t;
+    using pinned_allocator_t = cuda_pinned_allocator_t;
+    using device_specs_t = cuda_device_specs_t;
+    using address_space_t = cuda_address_space_t;
+    using executor_t = cuda_executor_t;
+
+    template <typename allocator_type_>
+    using traversal_context = cuda_traversal_context<allocator_type_>;
+
+    /** Makes the primary context of device @p ordinal current on the calling thread. */
+    static status_t select(int ordinal) noexcept { return verdict_(cuda_set_device(ordinal)); }
+
+    static status_t copy(void* to, void const* from, std::size_t bytes, stream_handle_t stream) noexcept {
+        return verdict_(cuda_copy_async(to, from, bytes, stream));
+    }
+    static status_t copy_2d(void* to, std::size_t to_pitch, void const* from, std::size_t from_pitch, std::size_t width,
+                            std::size_t height, stream_handle_t stream) noexcept {
+        return verdict_(cuda_copy_2d_async(to, to_pitch, from, from_pitch, width, height, stream));
+    }
+    static status_t fill(void* to, u8_t value, std::size_t bytes, stream_handle_t stream) noexcept {
+        return verdict_(cuda_fill_async(to, value, bytes, stream));
+    }
+    static status_t fill_words(void* to, u32_t value, std::size_t count, stream_handle_t stream) noexcept {
+        return verdict_(cuda_api().fill_words_async(cuda_address(to), value, count, stream));
+    }
+
+    /** Queues on @p stream a wait for everything @p event marked last. */
+    static status_t follow(stream_handle_t stream, event_t const& event) noexcept {
+        return verdict_(cuda_api().stream_wait_event(stream, event, 0));
+    }
+
+  private:
+    static status_t verdict_(cuda_result_t result) noexcept {
+        return result == cuda_success_k ? status_t::success_k : status_t::device_error_k;
+    }
+};
+
 /** The class whose unit carries cubins for a device of compute capability @p arch; any generation
  *  without a class of its own runs the Ampere unit, natively on 8.x and through its PTX past
  *  that. */
-constexpr gpu_class_t gpu_class_of(cuda_arch_t arch) noexcept {
+constexpr gpu_class_t nvidia_class_of(cuda_arch_t arch) noexcept {
     switch (arch / 100) {
     case 8: return arch >= cuda_arch_ada_k ? gpu_class_t::nvidia_ada_k : gpu_class_t::nvidia_ampere_k;
     case 9: return gpu_class_t::nvidia_hopper_k;
@@ -1448,7 +1476,7 @@ inline std::span<gpu_device_t const> nvidia_gpu_devices() noexcept {
             auto const [specs, status] = cuda_device_specs_t::query(ordinal);
             if (failed(status) || specs.arch() < cuda_arch_ampere_k) continue;
             gpu_device_t& device = found.devices[found.count++];
-            device = {gpu_vendor_t::nvidia_k, static_cast<u32_t>(ordinal), gpu_class_of(specs.arch()),
+            device = {gpu_vendor_t::nvidia_k, static_cast<u32_t>(ordinal), nvidia_class_of(specs.arch()),
                       specs.multiprocessor_count, specs.vram_bytes};
             int handle = 0;
             if (api.get_device(&handle, ordinal) == cuda_success_k)

@@ -5,7 +5,7 @@
  *  @brief Compile-time-dispatched 1-to-1, 1-to-4, and 16×16 tiled distance kernels backed by
  *      NumKong.
  *
- *  This header is the hot inner loop of @c basic_dense_hindex - everything called per
+ *  This header is the hot inner loop of @c ram_index - everything called per
  *  graph-traversal step, per query, per candidate. Its job is to turn NumKong's stateful
  *  ISA-specific dot-product primitives into clean @c distance and @c distances entry
  *  points that callers can reach without naming an ISA, a state type, or a vector width.
@@ -53,8 +53,8 @@
  *
  *  @section Design Goals & Decisions
  *
- *  1. @b Avoid-call-overhead. The arms build NumKong header-only, so every capability kernel and kit inlines
- *  into the arm, and no call crosses into the shared library.
+ *  1. @b Avoid-call-overhead. The variants build NumKong header-only, so every capability kernel
+ *     and kit inlines into the variant, and no call crosses into the shared library.
  *
  *  2. @b Amortize-arithmetic-reductions. Both Euclidean (L2) and Angular (Cos) distances
  *  can be inferred from the inner product if the norms are known. This means @b 2-by-D

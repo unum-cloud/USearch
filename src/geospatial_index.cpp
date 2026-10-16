@@ -2,13 +2,13 @@
  *  @file src/geospatial_index.cpp
  *  @author Ash Vardanian
  *  @date October 14, 2026
- *  @brief The geospatial modality's C surface: the variant over every compiled geospatial arm, the
- *      traits its verbs differ in, every exported entry point as one forward apiece, and the
- *      containment walk only this modality takes.
+ *  @brief The geospatial modality's C surface: the variant over every compiled geospatial
+ *      alternative, the traits its verbs differ in, every exported entry point as one forward
+ *      apiece, and the containment walk only this modality takes.
  *
- *  Arms are ordered newest class first, the serial floor last. Their bodies compile in the basic
- *  class units, never here: the @c extern declarations below keep them out, as the dense dispatch
- *  unit keeps its own.
+ *  Variants are ordered newest class first, the serial floor last. Their bodies compile in the
+ *  basic class units, never here: the @c extern declarations below keep them out, as the dense
+ *  dispatch unit keeps its own.
  */
 #include <cmath> // `std::isnan`
 
@@ -55,7 +55,7 @@ extern template struct geospatial_nvme_variant<cpu_class_t::serial_k>;
 
 #pragma region Handles
 
-/** Every geospatial arm this build compiled: the basic index over observations scored with one
+/** Every geospatial variant this build compiled: the basic index over observations scored with one
  *  class's kit, a read-only view of a checkpoint on storage scored and judged with the same, or the
  *  basic index on a GPU. */
 using geospatial_variant_t = std::variant< //
@@ -131,18 +131,18 @@ static bool accepts_observations(usearch_geospatial_observation_t const* observa
     return true;
 }
 
-/** Whether @p relation names one of the four, and @c visible only on @p arm with terrain; false
+/** Whether @p relation names one of the four, and @c visible only on @p variant with terrain; false
  *  once @p outcome records why not. */
-template <typename arm_type_>
-static bool accepts_relation(arm_type_ const& arm, usearch_geospatial_relation_t relation,
+template <typename variant_type_>
+static bool accepts_relation(variant_type_ const& variant, usearch_geospatial_relation_t relation,
                              usearch_outcome_t* outcome) noexcept {
     if (relation != usearch_geospatial_relation_near_k && relation != usearch_geospatial_relation_visible_k &&
         relation != usearch_geospatial_relation_sees_k && relation != usearch_geospatial_relation_seen_k)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "Unknown geospatial relation");
     if (relation != usearch_geospatial_relation_visible_k) return true;
-    if constexpr (is_vram_index<arm_type_>)
+    if constexpr (is_vram_index<variant_type_>)
         return propagate_error(usearch_status_unsupported_k, outcome, "A GPU geospatial index tests no lines of sight");
-    else if (arm.terrain.empty())
+    else if (variant.terrain.empty())
         return propagate_error(usearch_status_unsupported_k, outcome, "Lines of sight need a handle with terrain");
     return true;
 }
@@ -189,22 +189,22 @@ struct geospatial_traits_t {
         return index.connectivity == donor.connectivity;
     }
 
-    /** Takes @p geometry into @p arm, a zero connectivity taking the cone winners and long links of
-     *  the default, rounded up to the power of two a GPU row takes; a CPU arm adopts the terrain,
-     *  and a GPU arm loads its judging kernel. */
-    template <typename arm_type_, typename arguments_type_>
-    static bool freeze(arm_type_& arm, geometry_t const& geometry, arguments_type_ const& arguments,
+    /** Takes @p geometry into @p variant, a zero connectivity taking the cone winners and long
+     *  links of the default, rounded up to the power of two a GPU row takes; a CPU variant adopts
+     *  the terrain, and a GPU variant loads its judging kernel. */
+    template <typename variant_type_, typename arguments_type_>
+    static bool freeze(variant_type_& variant, geometry_t const& geometry, arguments_type_ const& arguments,
                        usearch_outcome_t* outcome) noexcept {
         std::size_t const connectivity = geometry.connectivity ? geometry.connectivity
                                                                : us::geospatial::surface_keep_octants_t {}.connectivity;
-        if constexpr (is_vram_index<arm_type_>) {
-            arm.geometry.connectivity = std::bit_ceil(connectivity);
-            if (status_t const loaded = arm.load_admit(); failed(loaded))
+        if constexpr (is_vram_index<variant_type_>) {
+            variant.geometry.connectivity = std::bit_ceil(connectivity);
+            if (status_t const loaded = variant.load_admit(); failed(loaded))
                 return propagate_error(loaded, outcome, "The GPU kernels could not be loaded");
         }
         else {
-            arm.geometry.connectivity = connectivity;
-            if (status_t const adopted = arm.adopt_terrain(terrain_of(arguments.terrain)); failed(adopted))
+            variant.geometry.connectivity = connectivity;
+            if (status_t const adopted = variant.adopt_terrain(terrain_of(arguments.terrain)); failed(adopted))
                 return propagate_error(adopted, outcome, "The terrain could not be adopted");
         }
         return true;
@@ -212,7 +212,7 @@ struct geospatial_traits_t {
 
 #if USEARCH_ARCH_CUDA_
     template <typename make_type_>
-    static void with_vram_arm(geometry_t const&, make_type_&& make) noexcept {
+    static void with_vram_variant(geometry_t const&, make_type_&& make) noexcept {
         make(std::type_identity<geospatial_vram_nvidia_variant> {});
     }
 #endif
@@ -221,21 +221,21 @@ struct geospatial_traits_t {
         return {geometry.connectivity};
     }
 
-    template <typename arm_type_>
-    static void describe(arm_type_ const& arm, usearch_geospatial_index_description_t& description) noexcept {
-        description.metadata = metadata_of(arm.geometry);
-        if constexpr (!is_vram_index<arm_type_>) description.memory_usage += arm.terrain_pack.memory_usage();
+    template <typename variant_type_>
+    static void describe(variant_type_ const& variant, usearch_geospatial_index_description_t& description) noexcept {
+        description.metadata = metadata_of(variant.geometry);
+        if constexpr (!is_vram_index<variant_type_>) description.memory_usage += variant.terrain_pack.memory_usage();
     }
 
     static bool accepts(usearch_geospatial_insert_t const& arguments, usearch_outcome_t* outcome) noexcept {
         return accepts_observations(arguments.observations, arguments.count, outcome);
     }
 
-    template <typename arm_type_>
-    static bool accepts(arm_type_ const& arm, usearch_geospatial_search_t const& arguments,
+    template <typename variant_type_>
+    static bool accepts(variant_type_ const& variant, usearch_geospatial_search_t const& arguments,
                         usearch_outcome_t* outcome) noexcept {
         return accepts_observations(arguments.queries, arguments.count, outcome) &&
-               accepts_relation(arm, arguments.relation, outcome);
+               accepts_relation(variant, arguments.relation, outcome);
     }
 
     /** Where a get or a pull hands its observations out, null when a pull wants none. */
@@ -250,8 +250,8 @@ struct geospatial_traits_t {
     }
 
     /** Lands @p count observations, the @c i th as @p value_at hands it, in @p memory. */
-    template <typename arm_type_, typename value_at_type_, typename arguments_type_>
-    static bool land(arm_type_ const&, std::size_t count, value_at_type_&& value_at,
+    template <typename variant_type_, typename value_at_type_, typename arguments_type_>
+    static bool land(variant_type_ const&, std::size_t count, value_at_type_&& value_at,
                      growing_arena<forkunion_allocator_t>& memory, arguments_type_ const& arguments,
                      usearch_outcome_t* outcome) noexcept {
         usearch_geospatial_observation_t* const observations = carve<usearch_geospatial_observation_t>(memory, count);
@@ -336,17 +336,18 @@ USEARCH_EXPORT void usearch_geospatial_within(usearch_geospatial_within_t* argum
         propagate_error(usearch_status_unsupported_k, outcome, "An NVMe view walks no radius yet");
     };
     if (visit_nvme_variant(*arguments->index, refuse_nvme)) return;
-    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        if (!accepts_relation(arm, arguments->relation, outcome)) return;
+    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        if (!accepts_relation(variant, arguments->relation, outcome)) return;
         usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
         if (!executor) return;
         progress_ticks_t ticks {arguments->progress, count};
         usearch_matches_tape_view_t matches {};
         std::size_t written = 0;
-        if (!crossed(arm.within(arguments->queries, count, static_cast<us::geospatial::relation_t>(arguments->relation),
-                                arguments->tolerance, arguments->predicate, arena->memory, matches, written, ticks,
-                                *executor),
+        if (!crossed(variant.within(arguments->queries, count,
+                                    static_cast<us::geospatial::relation_t>(arguments->relation), arguments->tolerance,
+                                    arguments->predicate, arena->memory, matches, written, ticks, *executor),
                      arguments->stats, outcome))
             return;
         *arguments->matches = matches;

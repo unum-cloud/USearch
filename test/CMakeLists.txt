@@ -57,7 +57,7 @@ add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_
 
 # The one VRAM runner: one object library compiles the per-dtype test shards once, each instantiating every vendor its
 # `USEARCH_ARCH_<VENDOR>_` carries, and each carried vendor's entry registers with the runner, which names none of them.
-# The library links in too, so the runner reaches every class arm it compiled through the C interface.
+# The library links in too, so the runner reaches every class variant it compiled through the C interface.
 add_library(usearch_test_vram_shards OBJECT dense/vram_indexes.cpp sequence/vram_index.cpp shapes/vram_index.cpp)
 target_sources(usearch_test_vram_shards PRIVATE geospatial/vram_index.cpp)
 usearch_dense_dtype_sources(

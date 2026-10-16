@@ -208,7 +208,7 @@ struct nvme_indexes {
      *  @param[out] keys Merged rankings, one query per row, as many matches as its width.
      *  @param[out] distances The same rankings' distances as @p score_type_, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
-     *  @param[out] latencies Steady-clock nanoseconds per query row, from its first armed walk to
+     *  @param[out] latencies Steady-clock nanoseconds per query row, from its first primed walk to
      *      its final write; empty collects none.
      *
      *  A failed read stops the call: the engines drain, every buffer returns, and the call answers
@@ -638,7 +638,7 @@ struct nvme_indexes {
             return status_t::success_k;
         }
 
-        void arm(std::size_t new_row) noexcept {
+        void prime(std::size_t new_row) noexcept {
             row = new_row;
             found = 0;
             query = import_staged_rows<capability_, scalar_t>(inputs.queries, row, 1, inputs.kernel, staged)
@@ -725,7 +725,7 @@ struct nvme_indexes {
             return !staged || failed(locators.resize_uninitialized(inputs.keys.extent(1))) ? status_t::bad_alloc_k
                                                                                            : status_t::success_k;
         }
-        void arm(std::size_t new_row) noexcept {
+        void prime(std::size_t new_row) noexcept {
             row = new_row;
             // A product walks by dot, which never narrows at unit RMS.
             query = import_staged_rows<capability_, scalar_t>(inputs.left, row, 1, nk_kernel_dot_k, staged)
@@ -817,7 +817,7 @@ struct nvme_indexes {
         status_t reserve(std::size_t, std::size_t) noexcept {
             return staged ? status_t::success_k : status_t::bad_alloc_k;
         }
-        void arm(std::size_t new_token) noexcept {
+        void prime(std::size_t new_token) noexcept {
             token = new_token;
             status = status_t::success_k;
             // Attention walks by dot, which never narrows at unit RMS.
@@ -2162,8 +2162,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
 
         status_t reserve(std::size_t, std::size_t) noexcept { return status_t::success_k; }
 
-        /** Arms @p new_row; its pool keeps what earlier walks of the batch kept. */
-        void arm(std::size_t new_row) noexcept {
+        /** Primes @p new_row; its pool keeps what earlier walks of the batch kept. */
+        void prime(std::size_t new_row) noexcept {
             row = new_row;
             query = inputs.queries.row(row).as_vector();
         }

@@ -2,11 +2,12 @@
  *  @file src/sequence_index.cpp
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief The sequence modality's C surface: the variant over every compiled sequence arm, the
- *      traits its verbs differ in, and every exported entry point as one forward apiece.
+ *  @brief The sequence modality's C surface: the variant over every compiled sequence
+ *      alternative, the traits its verbs differ in, and every exported entry point as one forward
+ *      apiece.
  *
- *  Arms are ordered newest class first, the serial floor last. Their bodies compile in the basic
- *  class units, never here: the @c extern declarations below keep them out.
+ *  Variants are ordered newest class first, the serial floor last. Their bodies compile in the
+ *  basic class units, never here: the @c extern declarations below keep them out.
  */
 #include <cstring> // `std::memcpy` - strings landing in an arena
 
@@ -45,7 +46,7 @@ extern template struct sequence_nvme_variant<cpu_class_t::serial_k>;
 
 #pragma region Handles
 
-/** Every sequence arm this build compiled: the basic index over owned strings scored with one
+/** Every sequence variant this build compiled: the basic index over owned strings scored with one
  *  class's kits, a read-only view of a checkpoint on storage scored with the same, or the basic
  *  index on a GPU. */
 using sequence_variant_t = std::variant< //
@@ -199,19 +200,21 @@ struct sequence_traits_t {
         return true;
     }
 
-    /** Moves @p geometry into @p arm, a zero connectivity taking the default. */
-    template <typename arm_type_, typename arguments_type_>
-    static bool freeze(arm_type_& arm, geometry_t& geometry, arguments_type_ const&, usearch_outcome_t*) noexcept {
+    /** Moves @p geometry into @p variant, a zero connectivity taking the default. */
+    template <typename variant_type_, typename arguments_type_>
+    static bool freeze(variant_type_& variant, geometry_t& geometry, arguments_type_ const&,
+                       usearch_outcome_t*) noexcept {
         if (!geometry.connectivity) geometry.connectivity = connectivity_32_k;
-        arm.geometry = std::move(geometry);
+        variant.geometry = std::move(geometry);
         return true;
     }
 
 #if USEARCH_ARCH_CUDA_
 
-    /** Calls @p make with the GPU arm Levenshtein over the kind's symbols takes: bytes or runes. */
+    /** Calls @p make with the GPU variant Levenshtein over the kind's symbols takes: bytes or
+     *  runes. */
     template <typename make_type_>
-    static void with_vram_arm(geometry_t const& geometry, make_type_&& make) noexcept {
+    static void with_vram_variant(geometry_t const& geometry, make_type_&& make) noexcept {
         if (geometry.metric == usearch_sequence_metric_levenshtein_utf8_k)
             make(std::type_identity<sequence_vram_nvidia_variant<sz_levenshtein_runes_k>> {});
         else make(std::type_identity<sequence_vram_nvidia_variant<sz_levenshtein_bytes_k>> {});
@@ -222,17 +225,17 @@ struct sequence_traits_t {
         return {geometry.metric, geometry.connectivity};
     }
 
-    template <typename arm_type_>
-    static void describe(arm_type_ const& arm, usearch_sequence_index_description_t& description) noexcept {
-        description.metadata = metadata_of(arm.geometry);
+    template <typename variant_type_>
+    static void describe(variant_type_ const& variant, usearch_sequence_index_description_t& description) noexcept {
+        description.metadata = metadata_of(variant.geometry);
     }
 
     static bool accepts(usearch_sequence_insert_t const& arguments, usearch_outcome_t* outcome) noexcept {
         return accepts_sequences(arguments.sequences, arguments.count, outcome);
     }
 
-    template <typename arm_type_>
-    static bool accepts(arm_type_ const&, usearch_sequence_search_t const& arguments,
+    template <typename variant_type_>
+    static bool accepts(variant_type_ const&, usearch_sequence_search_t const& arguments,
                         usearch_outcome_t* outcome) noexcept {
         return accepts_sequences(arguments.queries, arguments.count, outcome);
     }
@@ -248,8 +251,8 @@ struct sequence_traits_t {
     }
 
     /** Lands @p count strings, the @c i th as @p value_at hands it, as one u8 tape in @p memory. */
-    template <typename arm_type_, typename value_at_type_, typename arguments_type_>
-    static bool land(arm_type_ const&, std::size_t count, value_at_type_&& value_at,
+    template <typename variant_type_, typename value_at_type_, typename arguments_type_>
+    static bool land(variant_type_ const&, std::size_t count, value_at_type_&& value_at,
                      growing_arena<forkunion_allocator_t>& memory, arguments_type_ const& arguments,
                      usearch_outcome_t* outcome) noexcept {
         std::size_t* const offsets = carve<std::size_t>(memory, count + 1);

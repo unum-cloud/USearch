@@ -29,22 +29,6 @@ static_assert(hip_reservable_allocator<counting_hip_allocator_t>);
  *  code object apart from the library's CDNA3 one the runner also links. */
 inline constexpr nk_capability_t dense_amd_capabilities_k = nk_cap_cdna3_k;
 
-/** A device lookup over a value table whose rows sit a 16-byte pitch apart: an ID below @c count
- *  names its row, a node ID on one GPU and a key on shards, and any other has none. */
-struct dense_hip_value_lookup_t {
-
-    /** Names the lookup to the attend kernels the suite's code object carries. */
-    inline static constexpr u32_t device_lookup_k = 1;
-
-    byte_t const* rows;
-    std::size_t pitch;
-    std::size_t count;
-
-#if defined(__HIP__)
-    __device__ void const* operator()(u32_t id) const noexcept { return id < count ? rows + id * pitch : nullptr; }
-#endif
-};
-
 /** The AMD index of one (dtype, kernel) cell over the ledgered flat matrices and its sharded
  *  collection, built over the stream of the executor the ROCm entry opened; device attention runs
  *  in @c vram_amd.hip instead of the shared composers. */

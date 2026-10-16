@@ -7,8 +7,9 @@
  *      its exported entry points to.
  *
  *  A modality's traits supply only what its verbs differ in: the geometry an init or a checkpoint
- *  states and its freezing into an arm, the check of a call's values, the landing of stored values
- *  into an arena, and the statistics of one key's entries. The arms take a call's arguments whole.
+ *  states and its freezing into a variant, the check of a call's values, the landing of stored
+ *  values into an arena, and the statistics of one key's entries. The variants take a call's
+ *  arguments whole.
  */
 #pragma once
 
@@ -31,10 +32,10 @@
 
 /**
  *  @brief The one dynamically-typed index of a modality every binding consumes: a variant over the
- *      arms this build compiled, and the class or device whose kits the chosen one scores with.
+ *      variants this build compiled, and the class or device whose kits the chosen one scores with.
  *
- *  @tparam variant_type_ The arms, each residency's CPU classes newest first and the serial floor
- *      last, which is the order the ladder tries them in.
+ *  @tparam variant_type_ The variants, each residency's CPU classes newest first and the serial
+ *      floor last, which is the order the ladder tries them in.
  *  @tparam traits_type_ What the modality's verbs differ in.
  */
 template <typename variant_type_, typename traits_type_>
@@ -42,25 +43,26 @@ struct basic_handle {
     using variant_t = variant_type_;
     using traits_t = traits_type_;
 
-    variant_t variants;
+    variant_t variant;
 
-    /** The class or device whose kits the arm scores with, named once at construction. */
+    /** The class or device whose kits the variant scores with, named once at construction. */
     char capabilities_string[32] {};
 
-    /** Builds the arm @p arm_type_ over @p placement: a CPU arm's allocator, or a GPU arm's
-     *  device. */
-    template <typename arm_type_, typename placement_type_>
-    basic_handle(std::in_place_type_t<arm_type_> tag, placement_type_ const& placement) noexcept
-        : variants(tag, placement) {}
+    /** Builds the variant @p alternative_type_ over @p placement: a CPU variant's allocator, or a
+     *  GPU variant's device. */
+    template <typename alternative_type_, typename placement_type_>
+    basic_handle(std::in_place_type_t<alternative_type_> tag, placement_type_ const& placement) noexcept
+        : variant(tag, placement) {}
 };
 
-/** The snapshot cursor over the index of the RAM arm @p arm_type_, which no class changes. */
-template <typename arm_type_>
+/** The snapshot cursor over the index of the RAM variant @p variant_type_, which no class
+ *  changes. */
+template <typename variant_type_>
 using ram_cursor_of =
-    basic::ram_cursor<typename arm_type_::index_t, synchronization_t::concurrent_k, forkunion_allocator_t>;
+    basic::ram_cursor<typename variant_type_::index_t, synchronization_t::concurrent_k, forkunion_allocator_t>;
 
-/** The cursor over a modality's handle: a RAM arm's snapshot, one of @p cursor_types_, or the next
- *  row of an NVMe view, whose rows never change. */
+/** The cursor over a modality's handle: a RAM variant's snapshot, one of @p cursor_types_, or the
+ *  next row of an NVMe view, whose rows never change. */
 template <typename handle_type_, typename... cursor_types_>
 struct basic_cursor {
     std::variant<std::monostate, cursor_types_..., std::size_t> cursor;
@@ -76,36 +78,37 @@ struct basic_cursor {
 template <typename arguments_type_>
 using handle_of = std::remove_pointer_t<std::remove_pointer_t<decltype(std::declval<arguments_type_&>().index)>>;
 
-/** Visits the arm of @p index with @p visitor when it lives in RAM; a GPU arm serves the
+/** Visits the variant of @p index with @p visitor when it lives in RAM; a GPU variant serves the
  *  reservation, insertion, search and description verbs alone, and refuses the rest, and an NVMe
  *  view refuses as read-only whatever its verbs don't serve first. */
 template <typename handle_type_, typename visitor_type_>
 void visit_ram_variant(handle_type_& index, usearch_outcome_t* outcome, visitor_type_&& visitor) noexcept {
     std::visit(
-        [&]<typename arm_type_>(arm_type_& arm) noexcept {
-            if constexpr (is_ram_index<arm_type_>) visitor(arm);
-            else if constexpr (is_nvme_index<arm_type_>)
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if constexpr (is_ram_index<variant_type_>) visitor(variant);
+            else if constexpr (is_nvme_index<variant_type_>)
                 propagate_error(usearch_status_read_only_k, outcome, "An NVMe view never mutates");
             else propagate_error(usearch_status_unsupported_k, outcome, "A GPU index serves no such verb yet");
         },
-        index.variants);
+        index.variant);
 }
 
-/** Visits the arm of @p index with @p visitor when it is an NVMe view, answering whether it was. */
+/** Visits the variant of @p index with @p visitor when it is an NVMe view, answering whether it
+ *  was. */
 template <typename handle_type_, typename visitor_type_>
 bool visit_nvme_variant(handle_type_& index, visitor_type_&& visitor) noexcept {
     return std::visit(
-        [&]<typename arm_type_>(arm_type_& arm) noexcept {
-            if constexpr (is_nvme_index<arm_type_>) return visitor(arm), true;
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if constexpr (is_nvme_index<variant_type_>) return visitor(variant), true;
             else return false;
         },
-        index.variants);
+        index.variant);
 }
 
-/** The GPU ordinal @p arm computes on, where a call's arena must live, or the host's. */
-template <typename arm_type_>
-int device_of(arm_type_ const& arm) noexcept {
-    if constexpr (is_vram_index<arm_type_>) return arm.index.device_specs().ordinal;
+/** The GPU ordinal @p variant computes on, where a call's arena must live, or the host's. */
+template <typename variant_type_>
+int device_of(variant_type_ const& variant) noexcept {
+    if constexpr (is_vram_index<variant_type_>) return variant.index.device_specs().ordinal;
     else return host_device_k;
 }
 
@@ -115,21 +118,22 @@ inline void const* address_of(usearch_tape_view_t const& tape) noexcept { return
 /** Where a call's run of queries starts, which the arena it rewinds must not hold. */
 inline void const* address_of(void const* values) noexcept { return values; }
 
-/** Whether @p arm_type_ stores values in the scalar @p geometry names, as an arm storing them in
- *  one scalar must; an arm storing no scalar fits any geometry. */
-template <typename arm_type_, typename geometry_type_>
+/** Whether @p variant_type_ stores values in the scalar @p geometry names, as a variant storing
+ *  them in one scalar must; a variant storing no scalar fits any geometry. */
+template <typename variant_type_, typename geometry_type_>
 bool stores_scalar_of(geometry_type_ const& geometry) noexcept {
-    if constexpr (requires { arm_type_::dtype_k; }) return nk_dtype_of(geometry.quantization) == arm_type_::dtype_k;
+    if constexpr (requires { variant_type_::dtype_k; })
+        return nk_dtype_of(geometry.quantization) == variant_type_::dtype_k;
     else return true;
 }
 
 /**
- *  @brief Lowers @p geometry, frozen with @p arguments, onto the first CPU arm of @p handle_type_
- *      driven by @p executor_type_, RAM or NVMe, whose class the machine admits and whose scalar,
- *      if it stores one, the geometry names; null once @p outcome records why not.
+ *  @brief Lowers @p geometry, frozen with @p arguments, onto the first CPU variant of
+ *      @p handle_type_ driven by @p executor_type_; null once @p outcome records why not.
  *
- *  The variant lists each residency's classes newest first and the serial floor last, and never a
- *  class the build left out, so its order is the ladder.
+ *  The variant is RAM or NVMe, its class is one the machine admits, and its scalar, if it stores
+ *  one, is the one the geometry names. The variant lists each residency's classes newest first
+ *  and the serial floor last, and never a class the build left out, so its order is the ladder.
  */
 template <typename handle_type_, typename executor_type_, typename arguments_type_>
 handle_type_* make_cpu_handle(typename handle_type_::traits_t::geometry_t& geometry, arguments_type_ const& arguments,
@@ -143,25 +147,26 @@ handle_type_* make_cpu_handle(typename handle_type_::traits_t::geometry_t& geome
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
     handle_type_* handle = nullptr;
     bool picked = false;
-    auto rung = [&]<typename arm_type_>(std::type_identity<arm_type_>) noexcept {
-        if constexpr (std::is_same_v<typename arm_type_::executor_t, executor_type_>) {
+    auto rung = [&]<typename variant_type_>(std::type_identity<variant_type_>) noexcept {
+        if constexpr (std::is_same_v<typename variant_type_::executor_t, executor_type_>) {
             if (picked) return;
-            if (arm_type_::cpu_class_k != cpu_class_t::serial_k && !numkong_admits(available, arm_type_::cpu_class_k))
+            if (variant_type_::cpu_class_k != cpu_class_t::serial_k &&
+                !numkong_admits(available, variant_type_::cpu_class_k))
                 return;
-            if (!stores_scalar_of<arm_type_>(geometry)) return;
+            if (!stores_scalar_of<variant_type_>(geometry)) return;
             picked = true;
             handle = new (std::nothrow)
-                handle_type_(std::in_place_type<arm_type_>, forkunion_allocator_t {no_memory_domain_k});
+                handle_type_(std::in_place_type<variant_type_>, forkunion_allocator_t {no_memory_domain_k});
             if (!handle)
                 return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), void();
-            if (!traits_t::freeze(std::get<arm_type_>(handle->variants), geometry, arguments, outcome))
+            if (!traits_t::freeze(std::get<variant_type_>(handle->variant), geometry, arguments, outcome))
                 return delete handle, handle = nullptr, void();
             std::snprintf(handle->capabilities_string, sizeof(handle->capabilities_string), "%s",
-                          usearch_cpu_class_name(static_cast<usearch_cpu_class_t>(arm_type_::cpu_class_k)));
+                          usearch_cpu_class_name(static_cast<usearch_cpu_class_t>(variant_type_::cpu_class_k)));
         }
     };
-    [&]<typename... arm_types_>(std::type_identity<std::variant<arm_types_...>>) noexcept {
-        (rung(std::type_identity<arm_types_> {}), ...);
+    [&]<typename... variant_types_>(std::type_identity<std::variant<variant_types_...>>) noexcept {
+        (rung(std::type_identity<variant_types_> {}), ...);
     }(std::type_identity<typename handle_type_::variant_t> {});
     return handle;
 }
@@ -207,11 +212,11 @@ void basic_init_vram(arguments_type_* arguments) noexcept {
     if (device.vendor != gpu_vendor_t::nvidia_k)
         return propagate_error(usearch_status_device_k, outcome, "No basic GPU kernels serve this vendor yet"), void();
     handle_t* index = nullptr;
-    traits_t::with_vram_arm(geometry, [&]<typename arm_type_>(std::type_identity<arm_type_>) noexcept {
-        index = new (std::nothrow) handle_t(std::in_place_type<arm_type_>, static_cast<int>(device.vendor_ordinal));
+    traits_t::with_vram_variant(geometry, [&]<typename variant_type_>(std::type_identity<variant_type_>) noexcept {
+        index = new (std::nothrow) handle_t(std::in_place_type<variant_type_>, static_cast<int>(device.vendor_ordinal));
         if (!index)
             return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), void();
-        if (!traits_t::freeze(std::get<arm_type_>(index->variants), geometry, *arguments, outcome))
+        if (!traits_t::freeze(std::get<variant_type_>(index->variant), geometry, *arguments, outcome))
             return delete index, index = nullptr, void();
         std::snprintf(index->capabilities_string, sizeof(index->capabilities_string), "%s",
                       usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)));
@@ -238,12 +243,13 @@ void basic_load_ram(arguments_type_* arguments) noexcept {
                                                                             outcome);
     if (!index) return;
     bool loaded = false;
-    visit_ram_variant(*index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
+    visit_ram_variant(*index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
         if (!executor) return;
         progress_ticks_t ticks {arguments->progress, executor->size()};
-        loaded = propagate_error(arm.load(path, *executor, ticks), outcome);
+        loaded = propagate_error(variant.load(path, *executor, ticks), outcome);
     });
     if (!loaded) return delete index, void();
     *arguments->index = index;
@@ -276,10 +282,10 @@ void basic_view_nvme(arguments_type_* arguments) noexcept {
                                                                        outcome);
     if (!index) return;
     bool viewed = false;
-    visit_nvme_variant(*index, [&](auto& arm) noexcept {
+    visit_nvme_variant(*index, [&](auto& variant) noexcept {
         usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
-        viewed = executor && propagate_error(arm.view(path, to_span(paths), *executor), outcome);
+        nvme_executor_t* const executor = executor_of(variant, arguments->executor, call_executor, outcome);
+        viewed = executor && propagate_error(variant.view(path, to_span(paths), *executor), outcome);
     });
     if (!viewed) return delete index, void();
     *arguments->index = index;
@@ -296,9 +302,9 @@ template <auto verb_, typename arguments_type_>
 void basic_reserve(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    visit_writable(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        if constexpr (is_vram_index<arm_type_>) propagate_error(arm.reserve(*arguments), outcome);
-        else propagate_error(arm.index.reserve(arguments->entries).status, outcome);
+    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        if constexpr (is_vram_index<variant_type_>) propagate_error(variant.reserve(*arguments), outcome);
+        else propagate_error(variant.index.reserve(arguments->entries).status, outcome);
     });
 }
 
@@ -306,7 +312,8 @@ template <auto verb_, typename arguments_type_>
 void basic_clear(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    visit_ram_variant(*arguments->index, outcome, [&](auto& arm) noexcept { propagate_error(arm.clear(), outcome); });
+    visit_ram_variant(*arguments->index, outcome,
+                      [&](auto& variant) noexcept { propagate_error(variant.clear(), outcome); });
 }
 
 /** Refuses a verb the interface declares and no basic residency serves yet, zeroing what it
@@ -328,34 +335,34 @@ void basic_unserved(arguments_type_* arguments) noexcept {
 
 #pragma region Refinement
 
-/** The plan of a RAM arm with the donors it lands: their arms, whose handles a call frees once
- *  landed, their indexes, which the plan nulls as it lands them, and where the calls stand. Every
- *  other arm refines nothing. */
-template <typename arm_type_>
+/** The plan of a RAM variant with the donors it lands: their variants, whose handles a call frees
+ *  once landed, their indexes, which the plan nulls as it lands them, and where the calls stand.
+ *  Every other variant refines nothing. */
+template <typename variant_type_>
 struct basic_refinement_of {
     using type = std::monostate;
 };
-template <typename arm_type_>
-    requires is_ram_index<arm_type_>
-struct basic_refinement_of<arm_type_> {
+template <typename variant_type_>
+    requires is_ram_index<variant_type_>
+struct basic_refinement_of<variant_type_> {
     struct type {
-        growing_buffer<arm_type_*, forkunion_allocator_t> donors;
-        growing_buffer<typename arm_type_::index_t*, forkunion_allocator_t> landing;
-        typename arm_type_::refine_plan_t plan;
+        growing_buffer<variant_type_*, forkunion_allocator_t> donors;
+        growing_buffer<typename variant_type_::index_t*, forkunion_allocator_t> landing;
+        typename variant_type_::refine_plan_t plan;
         refine_cursor_t cursor {};
     };
 };
 
-/** The refinements of every arm of @p variant_type_, as one variant of their own. */
+/** The refinements of every variant of @p variant_type_, as one variant of their own. */
 template <typename variant_type_>
 struct basic_refinements_of;
-template <typename... arm_types_>
-struct basic_refinements_of<std::variant<arm_types_...>> {
-    using type = std::variant<std::monostate, typename basic_refinement_of<arm_types_>::type...>;
+template <typename... variant_types_>
+struct basic_refinements_of<std::variant<variant_types_...>> {
+    using type = std::variant<std::monostate, typename basic_refinement_of<variant_types_>::type...>;
 };
 
-/** What a modality's refinement handle owns: one RAM arm's plan, which keeps its index closed until
- *  it dies, and the caller's donor slots it nulls. */
+/** What a modality's refinement handle owns: one RAM variant's plan, which keeps its index closed
+ *  until it dies, and the caller's donor slots it nulls. */
 template <typename handle_type_>
 struct basic_refinement {
     typename basic_refinements_of<typename handle_type_::variant_t>::type refining;
@@ -370,15 +377,15 @@ struct basic_refinement {
     std::size_t count = 0;
 };
 
-/** Opens @p arm 's refinement of @p index after the @p count @p donors land, each checked against
- *  the arm's type and geometry once no deferred call names it; empty once @p outcome records why
- *  not. */
-template <typename handle_type_, typename arm_type_>
-std::optional<typename basic_refinement_of<arm_type_>::type> basic_open_refinement(
-    handle_type_ const* index, arm_type_& arm, handle_type_** donors, std::size_t count, std::size_t expansion,
+/** Opens @p variant 's refinement of @p index after the @p count @p donors land, each checked
+ *  against the variant's type and geometry once no deferred call names it; empty once @p outcome
+ *  records why not. */
+template <typename handle_type_, typename variant_type_>
+std::optional<typename basic_refinement_of<variant_type_>::type> basic_open_refinement(
+    handle_type_ const* index, variant_type_& variant, handle_type_** donors, std::size_t count, std::size_t expansion,
     usearch_outcome_t* outcome) noexcept {
     using traits_t = typename handle_type_::traits_t;
-    using refining_t = typename basic_refinement_of<arm_type_>::type;
+    using refining_t = typename basic_refinement_of<variant_type_>::type;
     forkunion_allocator_t const allocator {no_memory_domain_k};
     decltype(refining_t::donors) typed_donors {allocator};
     decltype(refining_t::landing) landing {allocator};
@@ -392,8 +399,8 @@ std::optional<typename basic_refinement_of<arm_type_>::type> basic_open_refineme
         if (donor == index)
             return propagate_error(usearch_status_config_mismatch_k, outcome, "An index cannot absorb itself"),
                    std::nullopt;
-        arm_type_* const typed = std::get_if<arm_type_>(&donor->variants);
-        if (!typed || !traits_t::matches(arm.geometry, typed->geometry))
+        variant_type_* const typed = std::get_if<variant_type_>(&donor->variant);
+        if (!typed || !traits_t::matches(variant.geometry, typed->geometry))
             return propagate_error(usearch_status_config_mismatch_k, outcome,
                                    "A donor must share the index's residency, class and geometry"),
                    std::nullopt;
@@ -402,18 +409,19 @@ std::optional<typename basic_refinement_of<arm_type_>::type> basic_open_refineme
         landing.push_back_reserved(&typed->index);
     }
     // The plan borrows the landing slots, whose storage moves along with the buffer.
-    auto [plan, status] = arm.plan_refine(to_writable_span(landing), expansion);
+    auto [plan, status] = variant.plan_refine(to_writable_span(landing), expansion);
     if (failed(status)) return propagate_error(status, outcome), std::nullopt;
     return refining_t {std::move(typed_donors), std::move(landing), std::move(plan)};
 }
 
-/** Frees the handles of the donors @p refining landed, folding what their arms count into @p arm
- *  first, and nulls the caller's slots. */
-template <typename handle_type_, typename arm_type_, typename refining_type_>
-void basic_free_landed(arm_type_& arm, refining_type_& refining, handle_type_** donors) noexcept {
+/** Frees the handles of the donors @p refining landed, folding what their variants count into
+ *  @p variant first, and nulls the caller's slots. */
+template <typename handle_type_, typename variant_type_, typename refining_type_>
+void basic_free_landed(variant_type_& variant, refining_type_& refining, handle_type_** donors) noexcept {
     for (std::size_t position = 0; position != refining.landing.size(); ++position) {
         if (refining.landing[position] || !donors[position]) continue;
-        if constexpr (requires { arm.absorbed(*refining.donors[position]); }) arm.absorbed(*refining.donors[position]);
+        if constexpr (requires { variant.absorbed(*refining.donors[position]); })
+            variant.absorbed(*refining.donors[position]);
         delete std::exchange(donors[position], nullptr);
     }
 }
@@ -433,8 +441,8 @@ void basic_report_refined(us::basic::refine_result_t const& refined, arguments_t
 
 /** Skips the re-selection @p refining left, heals what it strands, and reports; a refinement whose
  *  donors have not all landed heals nothing and reports zeros. */
-template <typename arm_type_, typename refining_type_, typename arguments_type_>
-status_t basic_finish_refinement(arm_type_& arm, refining_type_& refining, arguments_type_ const& arguments,
+template <typename variant_type_, typename refining_type_, typename arguments_type_>
+status_t basic_finish_refinement(variant_type_& variant, refining_type_& refining, arguments_type_ const& arguments,
                                  forkunion_executor_t& executor) noexcept {
     auto& plan = refining.plan;
     if (plan.landing()) return status_t::success_k;
@@ -442,7 +450,8 @@ status_t basic_finish_refinement(arm_type_& arm, refining_type_& refining, argum
     plan.stop();
     if (plan.reselecting()) refining.cursor.taken = plan.steps().size();
     progress_ticks_t heal_alone {{}, 0};
-    if (status_t const healed = arm.refine(plan, refining.cursor, heal_alone, executor); failed(healed)) return healed;
+    if (status_t const healed = variant.refine(plan, refining.cursor, heal_alone, executor); failed(healed))
+        return healed;
     auto const [refined, status] = plan.finish();
     if (succeeded(status)) basic_report_refined(refined, arguments);
     return status;
@@ -458,19 +467,21 @@ void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** 
     if (arguments->stats) *arguments->stats = {};
     if (count && !donors)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
-    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
+    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
         if (!executor) return;
-        auto refining = basic_open_refinement(arguments->index, arm, donors, count, arguments->expansion_factor,
+        auto refining = basic_open_refinement(arguments->index, variant, donors, count, arguments->expansion_factor,
                                               outcome);
         if (!refining) return;
         progress_ticks_t ticks {arguments->progress, refining->plan.audit.visible};
-        status_t const ran = arm.refine(refining->plan, refining->cursor, ticks, *executor);
-        basic_free_landed(arm, *refining, donors);
+        status_t const ran = variant.refine(refining->plan, refining->cursor, ticks, *executor);
+        basic_free_landed(variant, *refining, donors);
         if (failed(ran) && ran != status_t::cancelled_k) return propagate_error(ran, outcome), void();
         // A stopped pass still heals, so its report stands beside the cancel.
-        if (status_t const finished = basic_finish_refinement(arm, *refining, *arguments, *executor); failed(finished))
+        if (status_t const finished = basic_finish_refinement(variant, *refining, *arguments, *executor);
+            failed(finished))
             return propagate_error(finished, outcome), void();
         propagate_error(ran, outcome);
     });
@@ -498,11 +509,11 @@ void basic_refinement_init(arguments_type_* arguments) noexcept {
                void();
     if (arguments->count && !arguments->donors)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
-    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        using refining_t = typename basic_refinement_of<arm_type_>::type;
+    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        using refining_t = typename basic_refinement_of<variant_type_>::type;
         usearch_executor_handle_t call_executor;
-        if (!executor_of(arm, arguments->executor, call_executor, outcome)) return;
-        auto refining = basic_open_refinement(arguments->index, arm, arguments->donors, arguments->count,
+        if (!executor_of(variant, arguments->executor, call_executor, outcome)) return;
+        auto refining = basic_open_refinement(arguments->index, variant, arguments->donors, arguments->count,
                                               arguments->expansion_factor, outcome);
         if (!refining) return;
         refinement_t* const refinement = new (std::nothrow) refinement_t {};
@@ -519,8 +530,9 @@ void basic_refinement_init(arguments_type_* arguments) noexcept {
     });
 }
 
-/** Visits the arm the refinement @p arguments name was opened on with its plan, refusing a call
- *  naming another index or executor; the refinement serves one arm, so any other is refused too. */
+/** Visits the variant the refinement @p arguments name was opened on with its plan, refusing a call
+ *  naming another index or executor; the refinement serves one variant, so any other is refused
+ *  too. */
 template <typename arguments_type_, typename visitor_type_>
 void visit_refinement(arguments_type_ const& arguments, usearch_outcome_t* outcome, visitor_type_&& visitor) noexcept {
     auto* const refinement = arguments.refinement;
@@ -530,15 +542,16 @@ void visit_refinement(arguments_type_ const& arguments, usearch_outcome_t* outco
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The refinement was opened on another index or executor"),
                void();
-    visit_ram_variant(*arguments.index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        auto* const refining = std::get_if<typename basic_refinement_of<arm_type_>::type>(&refinement->refining);
+    visit_ram_variant(*arguments.index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        auto* const refining = std::get_if<typename basic_refinement_of<variant_type_>::type>(&refinement->refining);
         if (!refining)
-            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another arm"),
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another variant"),
                    void();
         usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments.executor, call_executor, outcome);
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments.executor, call_executor,
+                                                                         outcome);
         if (!executor) return;
-        visitor(arm, *refining, *executor);
+        visitor(variant, *refining, *executor);
     });
 }
 
@@ -549,10 +562,10 @@ void basic_refinement_next(arguments_type_* arguments) noexcept {
     if (arguments->visited) *arguments->visited = 0;
     if (arguments->changed) *arguments->changed = 0;
     if (arguments->stats) *arguments->stats = {};
-    visit_refinement(*arguments, outcome, [&](auto& arm, auto& refining, auto& executor) noexcept {
+    visit_refinement(*arguments, outcome, [&](auto& variant, auto& refining, auto& executor) noexcept {
         progress_ticks_t ticks {arguments->progress, refining.plan.audit.visible};
-        status_t const ran = arm.refine(refining.plan, refining.cursor, ticks, executor);
-        basic_free_landed(arm, refining, arguments->refinement->donors);
+        status_t const ran = variant.refine(refining.plan, refining.cursor, ticks, executor);
+        basic_free_landed(variant, refining, arguments->refinement->donors);
         // Running totals, so a cancelled or failed call still says how far the pass got.
         basic_report_refined(refining.plan.finish().value, *arguments);
         propagate_error(ran, outcome);
@@ -569,8 +582,8 @@ void basic_refinement_finish(arguments_type_* arguments) noexcept {
     if (arguments->reachability) *arguments->reachability = {};
     // Freed whatever the call answers; a plan dying unfinished reopens its index.
     std::unique_ptr<refinement_t> const refinement {arguments->refinement};
-    visit_refinement(*arguments, outcome, [&](auto& arm, auto& refining, auto& executor) noexcept {
-        propagate_error(basic_finish_refinement(arm, refining, *arguments, executor), outcome);
+    visit_refinement(*arguments, outcome, [&](auto& variant, auto& refining, auto& executor) noexcept {
+        propagate_error(basic_finish_refinement(variant, refining, *arguments, executor), outcome);
     });
 }
 
@@ -585,15 +598,15 @@ void basic_describe(arguments_type_* arguments) noexcept {
     call_outcome_t outcome(arguments->outcome);
     auto* const index = arguments->index;
     std::visit(
-        [&](auto& arm) noexcept {
+        [&](auto& variant) noexcept {
             auto& description = *arguments->description;
-            description.size = arm.index.size();
-            description.capacity = arm.index.capacity();
-            description.memory_usage = sizeof(*index) + arm.index.memory_usage();
+            description.size = variant.index.size();
+            description.capacity = variant.index.capacity();
+            description.memory_usage = sizeof(*index) + variant.index.memory_usage();
             description.capabilities = index->capabilities_string;
-            traits_t::describe(arm, description);
+            traits_t::describe(variant, description);
         },
-        index->variants);
+        index->variant);
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
@@ -619,11 +632,11 @@ void basic_count(arguments_type_* arguments) noexcept {
     *arguments->key_stats = {};
     stats_t& stats = *arguments->key_stats;
     std::array<us::utilities::uuid_t, 1> const identities {uuid_of(arguments->key)};
-    auto count_nvme = [&]<typename arm_type_>(arm_type_& arm) noexcept {
+    auto count_nvme = [&]<typename variant_type_>(variant_type_& variant) noexcept {
         usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
+        nvme_executor_t* const executor = executor_of(variant, arguments->executor, call_executor, outcome);
         if (!executor) return;
-        using view_t = decltype(typename arm_type_::index_t::codec_t {}.view(bytes_view_t {}));
+        using view_t = decltype(typename variant_type_::index_t::codec_t {}.view(bytes_view_t {}));
         if constexpr (tallies<traits_t, stats_t, view_t>) {
             auto take_count = [&](std::size_t entries) noexcept {
                 return stats.entries = entries, status_t::success_k;
@@ -631,20 +644,20 @@ void basic_count(arguments_type_* arguments) noexcept {
             auto measure = [&](std::size_t, std::size_t, std::size_t, view_t const& value) noexcept {
                 tally_entry<traits_t>(stats, value);
             };
-            propagate_error(values_under(arm.index, arguments->key, *executor, take_count, measure), outcome);
+            propagate_error(values_under(variant.index, arguments->key, *executor, take_count, measure), outcome);
         }
         else {
             std::array<std::size_t, 1> entries {};
-            status_t const counted = arm.index.count(identities, entries, *executor);
+            status_t const counted = variant.index.count(identities, entries, *executor);
             stats.entries = entries[0];
             propagate_error(counted, outcome);
         }
     };
     if (visit_nvme_variant(*arguments->index, count_nvme)) return;
-    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        arm.index.find_each(identities[0], [&](typename arm_type_::index_t::node_id_t node) noexcept {
+    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        variant.index.find_each(identities[0], [&](typename variant_type_::index_t::node_id_t node) noexcept {
             ++stats.entries;
-            tally_entry<traits_t>(stats, arm.index.published_value_of(node));
+            tally_entry<traits_t>(stats, variant.index.published_value_of(node));
         });
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
@@ -668,12 +681,13 @@ void basic_insert(arguments_type_* arguments) noexcept {
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The key stride is shorter than a key"),
                void();
     if (!traits_t::accepts(*arguments, outcome)) return;
-    visit_writable(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
+    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
         if (!executor) return;
         progress_ticks_t ticks {arguments->progress, count};
-        if (crossed(arm.insert(*arguments, ticks, *executor), arguments->stats, outcome))
+        if (crossed(variant.insert(*arguments, ticks, *executor), arguments->stats, outcome))
             propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -687,38 +701,38 @@ void basic_search(arguments_type_* arguments) noexcept {
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
     std::visit(
-        [&]<typename arm_type_>(arm_type_& arm) noexcept {
-            if (is_vram_index<arm_type_> && arguments->predicate.callback)
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if (is_vram_index<variant_type_> && arguments->predicate.callback)
                 return propagate_error(usearch_status_device_k, outcome,
                                        "A host predicate cannot narrow a device walk"),
                        void();
             // Matches land on host pages, which a device arena takes over and a host one keeps.
             bool const host_landing = arguments->arena && arguments->arena->device == host_device_k;
             usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                              host_landing ? host_device_k : device_of(arm),
+                                                              host_landing ? host_device_k : device_of(variant),
                                                               {address_of(arguments->queries)}, outcome);
             if (!arena) return;
             if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-            if (!traits_t::accepts(arm, *arguments, outcome)) return;
+            if (!traits_t::accepts(variant, *arguments, outcome)) return;
             matches_landing_t landing;
             if (!carve_matches(arena->memory, count, wanted, landing, outcome)) return;
             usearch_executor_handle_t call_executor;
-            typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor,
-                                                                         outcome);
+            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
+                                                                             call_executor, outcome);
             if (!executor) return;
             progress_ticks_t ticks {arguments->progress, count};
             // A device walk stages its queries on the arena's host pages, where its matches land.
             auto const searched = [&]() noexcept {
-                if constexpr (requires { arm.search(*arguments, arena->memory, landing, ticks, *executor); })
-                    return arm.search(*arguments, arena->memory, landing, ticks, *executor);
-                else return arm.search(*arguments, landing, ticks, *executor);
+                if constexpr (requires { variant.search(*arguments, arena->memory, landing, ticks, *executor); })
+                    return variant.search(*arguments, arena->memory, landing, ticks, *executor);
+                else return variant.search(*arguments, landing, ticks, *executor);
             }();
             if (!crossed(searched, arguments->stats, outcome) || !publish_matches(*arena, count, landing, outcome))
                 return;
             *arguments->matches = landing.view();
             propagate_error(usearch_status_success_k, outcome, nullptr);
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 /** Exports a key's entries into the arena, in insertion order; a view's values land in its threads'
@@ -736,9 +750,9 @@ void basic_get(arguments_type_* arguments) noexcept {
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                       host_device_k, {}, outcome);
     if (!arena) return;
-    auto get_nvme = [&](auto& arm) noexcept {
+    auto get_nvme = [&](auto& variant) noexcept {
         usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
+        nvme_executor_t* const executor = executor_of(variant, arguments->executor, call_executor, outcome);
         if (!executor) return;
         std::size_t held = 0;
         kept_t* kept = nullptr;
@@ -752,28 +766,30 @@ void basic_get(arguments_type_* arguments) noexcept {
         auto keep = [&](std::size_t, std::size_t rank, std::size_t thread, auto const& value) noexcept {
             keep_first_failure(keeping, traits_t::keep(*executor, thread, value, kept[rank]));
         };
-        if (status_t const read = values_under(arm.index, arguments->key, *executor, carve_entries, keep); failed(read))
+        if (status_t const read = values_under(variant.index, arguments->key, *executor, carve_entries, keep);
+            failed(read))
             return propagate_error(read, outcome), void();
         if (failed(keeping)) return propagate_error(keeping, outcome), void();
         if (!held) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
         auto kept_at = [&](std::size_t entry) noexcept -> decltype(auto) { return kept[entry]; };
-        if (!traits_t::land(arm, held, kept_at, arena->memory, *arguments, outcome)) return;
+        if (!traits_t::land(variant, held, kept_at, arena->memory, *arguments, outcome)) return;
         if (arguments->written) *arguments->written = held;
         propagate_error(usearch_status_success_k, outcome, nullptr);
     };
     if (visit_nvme_variant(*arguments->index, get_nvme)) return;
-    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
+    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
         if (!executor) return;
         if (status_t const rewound = executor->reserve(0); failed(rewound))
             return propagate_error(rewound, outcome), void();
-        auto const ids = ids_under(arm.index, arguments->key, thread_allocator_t {executor->arena(0)});
+        auto const ids = ids_under(variant.index, arguments->key, thread_allocator_t {executor->arena(0)});
         if (ids.empty()) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
         auto value_at = [&](std::size_t entry) noexcept -> decltype(auto) {
-            return arm.index.published_value_of(ids[entry]);
+            return variant.index.published_value_of(ids[entry]);
         };
-        if (!traits_t::land(arm, ids.size(), value_at, arena->memory, *arguments, outcome)) return;
+        if (!traits_t::land(variant, ids.size(), value_at, arena->memory, *arguments, outcome)) return;
         if (arguments->written) *arguments->written = ids.size();
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
@@ -797,15 +813,15 @@ void basic_cursor_init(arguments_type_* arguments) noexcept {
     cursor->index = arguments->index;
     auto open_nvme = [&](auto&) noexcept { cursor->cursor.template emplace<std::size_t>(0); };
     if (!visit_nvme_variant(*arguments->index, open_nvme))
-        visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
-            auto& opened = cursor->cursor.template emplace<ram_cursor_of<arm_type_>>(
-                arm.index, forkunion_allocator_t {no_memory_domain_k});
+        visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            auto& opened = cursor->cursor.template emplace<ram_cursor_of<variant_type_>>(
+                variant.index, forkunion_allocator_t {no_memory_domain_k});
             // Stands on the first entry, so every pull copies from where it stands; an empty
             // snapshot stays past the end.
             if (opened.visible_count()) [[maybe_unused]]
                 status_t const entered = opened.seek(0);
         });
-    // A GPU arm opened nothing, and the outcome says why.
+    // A GPU variant opened nothing, and the outcome says why.
     if (std::holds_alternative<std::monostate>(cursor->cursor)) return delete cursor, void();
     *arguments->cursor = cursor;
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -831,13 +847,13 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
         return propagate_error(usearch_status_contended_k, outcome, "Another pull holds the cursor"), void();
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                       host_device_k, {}, outcome);
-    auto next_nvme = [&](auto& arm) noexcept {
+    auto next_nvme = [&](auto& variant) noexcept {
         std::size_t* const row = std::get_if<std::size_t>(&cursor->cursor);
-        if (!row) return propagate_error(usearch_status_internal_k, outcome, "The cursor lost its arm"), void();
+        if (!row) return propagate_error(usearch_status_internal_k, outcome, "The cursor lost its variant"), void();
         usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
+        nvme_executor_t* const executor = executor_of(variant, arguments->executor, call_executor, outcome);
         if (!executor) return;
-        std::size_t const taking = min_of(arm.index.size() - *row, arguments->wanted);
+        std::size_t const taking = min_of(variant.index.size() - *row, arguments->wanted);
         if (!taking) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
         usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, taking);
         kept_t* const kept = output ? carve<kept_t>(arena->memory, taking) : nullptr;
@@ -848,20 +864,20 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
             if (kept) keep_first_failure(keeping, traits_t::keep(*executor, thread, value, kept[entry]));
         };
         std::span<us::utilities::uuid_t> const identities {reinterpret_cast<us::utilities::uuid_t*>(keys), taking};
-        if (status_t const read = arm.index.read_rows(*row, identities, *executor, keep); failed(read))
+        if (status_t const read = variant.index.read_rows(*row, identities, *executor, keep); failed(read))
             return propagate_error(read, outcome), void();
         if (failed(keeping)) return propagate_error(keeping, outcome), void();
         auto kept_at = [&](std::size_t entry) noexcept -> decltype(auto) { return kept[entry]; };
-        if (output && !traits_t::land(arm, taking, kept_at, arena->memory, *arguments, outcome)) return;
+        if (output && !traits_t::land(variant, taking, kept_at, arena->memory, *arguments, outcome)) return;
         *row += taking;
         *arguments->keys = {keys, sizeof(usearch_key_t)};
         *arguments->written = taking;
         propagate_error(usearch_status_success_k, outcome, nullptr);
     };
-    auto next_ram = [&]<typename arm_type_>(arm_type_& arm) noexcept {
-        using node_id_t = typename arm_type_::index_t::node_id_t;
-        auto* const typed = std::get_if<ram_cursor_of<arm_type_>>(&cursor->cursor);
-        if (!typed) return propagate_error(usearch_status_internal_k, outcome, "The cursor lost its arm"), void();
+    auto next_ram = [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        using node_id_t = typename variant_type_::index_t::node_id_t;
+        auto* const typed = std::get_if<ram_cursor_of<variant_type_>>(&cursor->cursor);
+        if (!typed) return propagate_error(usearch_status_internal_k, outcome, "The cursor lost its variant"), void();
         std::size_t const remaining = *typed ? typed->visible_count() - typed->id() : 0;
         std::size_t const taking = min_of(remaining, arguments->wanted);
         usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, taking);
@@ -869,11 +885,12 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
             return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
         node_id_t const first = typed->id();
         for (std::size_t entry = 0; entry != taking; ++entry)
-            keys[entry] = std::bit_cast<usearch_key_t>(arm.index.key_of(static_cast<node_id_t>(first + entry)).value);
+            keys[entry] = std::bit_cast<usearch_key_t>(
+                variant.index.key_of(static_cast<node_id_t>(first + entry)).value);
         auto value_at = [&](std::size_t entry) noexcept -> decltype(auto) {
-            return arm.index.published_value_of(static_cast<node_id_t>(first + entry));
+            return variant.index.published_value_of(static_cast<node_id_t>(first + entry));
         };
-        if (output && !traits_t::land(arm, taking, value_at, arena->memory, *arguments, outcome)) return;
+        if (output && !traits_t::land(variant, taking, value_at, arena->memory, *arguments, outcome)) return;
         for (std::size_t step = 0; step != taking; ++step) ++*typed;
         *arguments->keys = {keys, sizeof(usearch_key_t)};
         *arguments->written = taking;
@@ -899,12 +916,13 @@ void basic_save(arguments_type_* arguments) noexcept {
         propagate_error(usearch_status_unsupported_k, outcome, "An NVMe view already is its checkpoint");
     };
     if (visit_nvme_variant(*arguments->index, refuse_nvme)) return;
-    visit_ram_variant(*arguments->index, outcome, [&]<typename arm_type_>(arm_type_& arm) noexcept {
+    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         usearch_executor_handle_t call_executor;
-        typename arm_type_::executor_t* const executor = executor_of(arm, arguments->executor, call_executor, outcome);
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
         if (!executor) return;
         progress_ticks_t ticks {arguments->progress, executor->size()};
-        propagate_error(arm.save(path, *executor, ticks), outcome);
+        propagate_error(variant.save(path, *executor, ticks), outcome);
     });
 }
 

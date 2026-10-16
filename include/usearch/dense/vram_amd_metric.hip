@@ -5,20 +5,22 @@
  *  @brief Device metric kits for the dense VRAM indexes on AMD GPUs - the HIP twin of
  *      @c vram_nvidia_metric.cuh.
  *
- *  A kit binds one storage dtype to one AMD generation, named @b dtype_generation_quads_kit_t, and
+ *  A kit binds one storage dtype to one AMD generation, named @b dtype_generation_quads_kit, and
  *  the generation slot names the oldest tier whose instructions the kit needs: @c rocm for what
  *  every ROCm device runs, @c cdna3 for @c v_dot4_i32_i8 and @c v_dot2_f32_f16, which MI400
  *  dropped, @c cdna4 for @c v_dot2_f32_bf16 and the OCP fp8 conversions, and @c cdna5 for
  *  @c v_dot4_i32_iu8. Each class unit compiles for its own processor with that tier's
  *  @c NUMKONG_TARGET_* alone, so a tier's kits compile only where its instructions exist, and the
  *  chains pick among them under the class's ceiling. MI300's fp8 conversions read the FNUZ
- *  encodings rather than the OCP ones the vectors matrix stores, so CDNA3 widens fp8 in software, through
- *  NumKong's converters.
+ *  encodings rather than the OCP ones the vectors matrix stores, so CDNA3 widens fp8 in software,
+ *  through NumKong's converters.
  *
  *  Fragments are 16 bytes, rows and the metric are runtime state of the flat view, and the
- *  cross-lane reductions live in @c vram_index.cuh over @ref hip_warp_t, exactly as on NVIDIA; the
- *  arithmetic lives in named device primitives, and a kit binds them. Only HIP-Clang's device pass
- *  sees past the guard: the host classes take their scalar layouts from the dtype alone.
+ *  cross-lane reductions live in @c vram_index.cuh over the kit's @ref hip_warp, exactly as on
+ *  NVIDIA. Each kit takes the warp policy of the class its chain picks it under, so the same kit
+ *  runs 64-lane wavefronts on CDNA3 and CDNA4 and 32-lane ones on CDNA5. The arithmetic lives in
+ *  named device primitives, and a kit binds them. Only HIP units include it: the host classes take
+ *  their scalar layouts from the dtype alone.
  *
  *  How a wavefront's candidate rows reach shared memory is a separate @b schedule, picked under the
  *  same ceiling: LDS DMA on CDNA3 and CDNA4, register copies elsewhere.
@@ -36,107 +38,12 @@
 #include "usearch/dense/types.hpp"
 #include "usearch/dense/vram_index.cuh"
 
-#if NUMKONG_ARCH_ROCM_
-
-#include <hip/hip_runtime.h>     // `__shfl`, `__ballot`, `__lane_id` & the agent-scope atomics
 #include <hip/hip_fp16.h>        // `__half2` packed math
 #include <numkong/cast/simt.cuh> // `nk_e4m3_to_f32_simt_` & the other software widenings
 
+#include "usearch/utilities/vram_amd_device.hip" // `hip_warp_of`, each kit's warp policy
+
 namespace unum::usearch::dense {
-
-/*  A wavefront spans 32 lanes on the GFX12 parts, MI400, and 64 on the GFX9 ones, MI300 and MI350.
- *  HIP-Clang learns the wavefront size only after code generation, so the width comes from the
- *  processor family each code object is compiled for. */
-#if defined(__GFX12__)
-inline constexpr u32_t hip_device_wave_lanes_k = 32;
-#else
-inline constexpr u32_t hip_device_wave_lanes_k = 64;
-#endif // defined(__GFX12__)
-
-/**
- *  @brief The AMD warp policy the shared walk code is written against, the twin of
- *      @c cuda_warp_t: wavefronts as wide as the processor's and agent-scope atomics.
- *
- *  A wavefront moves in lockstep, so the votes and shuffles take no participation mask, and
- *  @ref sync is a wave-scoped fence pair around the scheduling barrier. Masks are as wide as the
- *  wavefront, @c u64_t on CDNA3 and CDNA4.
- */
-struct hip_warp_t {
-    inline static constexpr u32_t width_k = hip_device_wave_lanes_k;
-    using mask_t = std::conditional_t<width_k == 64, u64_t, u32_t>;
-    inline static constexpr mask_t all_k = ~mask_t(0);
-
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ shuffle(value_type_ value, u32_t source_lane) noexcept {
-        return __shfl(value, source_lane, width_k);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ shuffle_xor(value_type_ value, u32_t lane_mask) noexcept {
-        return __shfl_xor(value, lane_mask, width_k);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ shuffle_up(value_type_ value, u32_t delta) noexcept {
-        return __shfl_up(value, delta, width_k);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ shuffle_down(value_type_ value, u32_t delta,
-                                                               u32_t width = width_k) noexcept {
-        return __shfl_down(value, delta, width);
-    }
-    // The predicates are `int`, as the vote intrinsics take them, so any nonzero lane votes.
-    static __device__ __forceinline__ mask_t ballot(int predicate) noexcept { return __ballot(predicate); }
-    static __device__ __forceinline__ bool any(int predicate) noexcept { return __any(predicate) != 0; }
-    static __device__ __forceinline__ bool all(int predicate) noexcept { return __all(predicate) != 0; }
-    static __device__ __forceinline__ void sync() noexcept { __syncwarp(); }
-
-    /** The lanes holding the same @p value as this one, this lane included: one ballot per distinct
-     *  value, since the ISA has no matching vote. */
-    static __device__ __forceinline__ mask_t match_any(u32_t value) noexcept {
-        mask_t unmatched = all_k, matched = 0;
-        while (unmatched) {
-            mask_t const same = ballot(shuffle(value, first(unmatched)) == value);
-            if ((same >> __lane_id()) & 1u) matched = same;
-            unmatched &= ~same;
-        }
-        return matched;
-    }
-
-    static __device__ __forceinline__ u32_t count(mask_t mask) noexcept { return std::popcount(mask); }
-
-    /** The lowest lane of a non-empty @p mask. */
-    static __device__ __forceinline__ u32_t first(mask_t mask) noexcept { return std::countr_zero(mask); }
-
-    /** The lanes strictly below @p lane. */
-    static __device__ __forceinline__ mask_t below(u32_t lane) noexcept { return (mask_t(1) << lane) - 1; }
-
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ load_relaxed(value_type_& word) noexcept {
-        return __hip_atomic_load(&word, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ load_acquire(value_type_& word) noexcept {
-        return __hip_atomic_load(&word, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ void store_relaxed(value_type_& word, value_type_ value) noexcept {
-        __hip_atomic_store(&word, value, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ void store_release(value_type_& word, value_type_ value) noexcept {
-        __hip_atomic_store(&word, value, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ exchange_acquire(value_type_& word, value_type_ value) noexcept {
-        return __hip_atomic_exchange(&word, value, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT);
-    }
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ fetch_add_relaxed(value_type_& word, value_type_ value) noexcept {
-        return __hip_atomic_fetch_add(&word, value, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-    }
-
-    /** Orders every store before it ahead of any store after it, for readers across the device. */
-    static __device__ __forceinline__ void fence_release() noexcept { __threadfence(); }
-};
 
 /** Two halves or two brain floats, as the dot-of-pairs instructions take them. */
 using hip_f16x2_t = _Float16 __attribute__((ext_vector_type(2)));
@@ -178,23 +85,40 @@ __device__ __forceinline__ distance_t hip_convert_to_distance(nk_kernel_kind_t k
 #pragma endregion Metrics
 
 /** The kits every chain names, declared whether or not their tier is compiled in. */
-struct f16_rocm_quads_kit_t;
-struct f16_cdna3_quads_kit_t;
-struct bf16_rocm_quads_kit_t;
-struct bf16_cdna4_quads_kit_t;
-struct i8_cdna3_quads_kit_t;
-struct i8_cdna5_quads_kit_t;
-struct u8_rocm_quads_kit_t;
-struct e5m2_rocm_quads_kit_t;
-struct e5m2_cdna4_quads_kit_t;
-struct e4m3_rocm_quads_kit_t;
-struct e4m3_cdna4_quads_kit_t;
-struct e3m2_rocm_quads_kit_t;
-struct e2m3_rocm_quads_kit_t;
-struct i4x2_cdna3_quads_kit_t;
-struct i4x2_cdna5_quads_kit_t;
-struct u4x2_rocm_quads_kit_t;
-struct u1x8_rocm_quads_kit_t;
+template <typename warp_type_>
+struct f16_rocm_quads_kit;
+template <typename warp_type_>
+struct f16_cdna3_quads_kit;
+template <typename warp_type_>
+struct bf16_rocm_quads_kit;
+template <typename warp_type_>
+struct bf16_cdna4_quads_kit;
+template <typename warp_type_>
+struct i8_cdna3_quads_kit;
+template <typename warp_type_>
+struct i8_cdna5_quads_kit;
+template <typename warp_type_>
+struct u8_rocm_quads_kit;
+template <typename warp_type_>
+struct e5m2_rocm_quads_kit;
+template <typename warp_type_>
+struct e5m2_cdna4_quads_kit;
+template <typename warp_type_>
+struct e4m3_rocm_quads_kit;
+template <typename warp_type_>
+struct e4m3_cdna4_quads_kit;
+template <typename warp_type_>
+struct e3m2_rocm_quads_kit;
+template <typename warp_type_>
+struct e2m3_rocm_quads_kit;
+template <typename warp_type_>
+struct i4x2_cdna3_quads_kit;
+template <typename warp_type_>
+struct i4x2_cdna5_quads_kit;
+template <typename warp_type_>
+struct u4x2_rocm_quads_kit;
+template <typename warp_type_>
+struct u1x8_rocm_quads_kit;
 
 #pragma region Half Precision Floats
 
@@ -250,9 +174,10 @@ __device__ __forceinline__ std::array<f32_t, 8> hip_weighted_halves_rocm( //
 }
 
 /** f16 kit - every ROCm device, widening into f32 multiply-adds. */
-struct f16_rocm_quads_kit_t {
+template <typename warp_type_>
+struct f16_rocm_quads_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -284,9 +209,10 @@ struct f16_rocm_quads_kit_t {
 };
 
 /** bf16 kit - every ROCm device, widening into f32 multiply-adds. */
-struct bf16_rocm_quads_kit_t {
+template <typename warp_type_>
+struct bf16_rocm_quads_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -330,9 +256,10 @@ __device__ __forceinline__ f32_t hip_dot_f16x8_cdna3(uint4 a, uint4 b, f32_t sum
 }
 
 /** f16 kit - CDNA3 and CDNA4, @c v_dot2_f32_f16. */
-struct f16_cdna3_quads_kit_t {
+template <typename warp_type_>
+struct f16_cdna3_quads_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -378,9 +305,10 @@ __device__ __forceinline__ f32_t hip_dot_bf16x8_cdna4(uint4 a, uint4 b, f32_t su
 }
 
 /** bf16 kit - CDNA4, @c v_dot2_f32_bf16. */
-struct bf16_cdna4_quads_kit_t {
+template <typename warp_type_>
+struct bf16_cdna4_quads_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -489,9 +417,10 @@ __device__ __forceinline__ int hip_dot_i8x4_cdna3(u32_t a, u32_t b, int sum) noe
 }
 
 /** i8 kit - CDNA3 and CDNA4, @c v_dot4_i32_i8. */
-struct i8_cdna3_quads_kit_t {
+template <typename warp_type_>
+struct i8_cdna3_quads_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -532,9 +461,10 @@ __device__ __forceinline__ int hip_dot_i8x4_cdna5(u32_t a, u32_t b, int sum) noe
 }
 
 /** i8 kit - CDNA5, @c v_dot4_i32_iu8. */
-struct i8_cdna5_quads_kit_t {
+template <typename warp_type_>
+struct i8_cdna5_quads_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -568,9 +498,10 @@ struct i8_cdna5_quads_kit_t {
 #endif // NUMKONG_TARGET_CDNA5
 
 /** u8 kit - every ROCm device, @c v_dot4_u32_u8. */
-struct u8_rocm_quads_kit_t {
+template <typename warp_type_>
+struct u8_rocm_quads_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -676,10 +607,10 @@ using e2m3_rocm_widening_t = hip_software_widening<nk_e2m3_to_f32_simt_>;
 
 /** The quads kit of a minifloat scalar @p scalar_type_ widened by @p widening_type_ at
  *  @p capability_. */
-template <typename scalar_type_, typename widening_type_, nk_capability_t capability_>
+template <typename warp_type_, typename scalar_type_, typename widening_type_, nk_capability_t capability_>
 struct hip_minifloats_quads_kit {
     inline static constexpr nk_capability_t capability_k = capability_;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = scalar_type_;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -711,16 +642,20 @@ struct hip_minifloats_quads_kit {
 };
 
 /** e5m2 kit - every ROCm device, widening in software. */
-struct e5m2_rocm_quads_kit_t : hip_minifloats_quads_kit<nk::e5m2_t, e5m2_rocm_widening_t, nk_cap_rocm_k> {};
+template <typename warp_type_>
+struct e5m2_rocm_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e5m2_t, e5m2_rocm_widening_t, nk_cap_rocm_k> {};
 
 /** e4m3 kit - every ROCm device, widening in software. */
-struct e4m3_rocm_quads_kit_t : hip_minifloats_quads_kit<nk::e4m3_t, e4m3_rocm_widening_t, nk_cap_rocm_k> {};
+template <typename warp_type_>
+struct e4m3_rocm_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e4m3_t, e4m3_rocm_widening_t, nk_cap_rocm_k> {};
 
 /** e3m2 kit - every ROCm device, widening in software. */
-struct e3m2_rocm_quads_kit_t : hip_minifloats_quads_kit<nk::e3m2_t, e3m2_rocm_widening_t, nk_cap_rocm_k> {};
+template <typename warp_type_>
+struct e3m2_rocm_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e3m2_t, e3m2_rocm_widening_t, nk_cap_rocm_k> {};
 
 /** e2m3 kit - every ROCm device, widening in software. */
-struct e2m3_rocm_quads_kit_t : hip_minifloats_quads_kit<nk::e2m3_t, e2m3_rocm_widening_t, nk_cap_rocm_k> {};
+template <typename warp_type_>
+struct e2m3_rocm_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e2m3_t, e2m3_rocm_widening_t, nk_cap_rocm_k> {};
 
 #if NUMKONG_TARGET_CDNA4 || NUMKONG_TARGET_CDNA5
 
@@ -741,10 +676,14 @@ struct e5m2_cdna4_widening_t {
 };
 
 /** e5m2 kit - CDNA4 and CDNA5, widening through the conversion. */
-struct e5m2_cdna4_quads_kit_t : hip_minifloats_quads_kit<nk::e5m2_t, e5m2_cdna4_widening_t, nk_cap_cdna4_k> {};
+template <typename warp_type_>
+struct e5m2_cdna4_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e5m2_t, e5m2_cdna4_widening_t, nk_cap_cdna4_k> {
+};
 
 /** e4m3 kit - CDNA4 and CDNA5, widening through the conversion. */
-struct e4m3_cdna4_quads_kit_t : hip_minifloats_quads_kit<nk::e4m3_t, e4m3_cdna4_widening_t, nk_cap_cdna4_k> {};
+template <typename warp_type_>
+struct e4m3_cdna4_quads_kit : hip_minifloats_quads_kit<warp_type_, nk::e4m3_t, e4m3_cdna4_widening_t, nk_cap_cdna4_k> {
+};
 
 #endif // NUMKONG_TARGET_CDNA4 || NUMKONG_TARGET_CDNA5
 
@@ -855,10 +794,10 @@ __device__ __forceinline__ std::array<f32_t, 32> hip_weighted_u4x32_rocm( //
 }
 
 /** The quads kit of signed nibbles over the signed byte dot @p dot_, at @p capability_. */
-template <int (*dot_)(u32_t, u32_t, int), nk_capability_t capability_>
+template <typename warp_type_, int (*dot_)(u32_t, u32_t, int), nk_capability_t capability_>
 struct hip_i4x2_quads_kit {
     inline static constexpr nk_capability_t capability_k = capability_;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -892,21 +831,24 @@ struct hip_i4x2_quads_kit {
 #if NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
 
 /** i4x2 kit - CDNA3 and CDNA4, the byte engine over unpacked nibbles. */
-struct i4x2_cdna3_quads_kit_t : hip_i4x2_quads_kit<hip_dot_i8x4_cdna3, nk_cap_cdna3_k> {};
+template <typename warp_type_>
+struct i4x2_cdna3_quads_kit : hip_i4x2_quads_kit<warp_type_, hip_dot_i8x4_cdna3, nk_cap_cdna3_k> {};
 
 #endif // NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
 
 #if NUMKONG_TARGET_CDNA5
 
 /** i4x2 kit - CDNA5, the byte engine over unpacked nibbles. */
-struct i4x2_cdna5_quads_kit_t : hip_i4x2_quads_kit<hip_dot_i8x4_cdna5, nk_cap_cdna5_k> {};
+template <typename warp_type_>
+struct i4x2_cdna5_quads_kit : hip_i4x2_quads_kit<warp_type_, hip_dot_i8x4_cdna5, nk_cap_cdna5_k> {};
 
 #endif // NUMKONG_TARGET_CDNA5
 
 /** u4x2 kit - every ROCm device, the byte engine over unpacked nibbles. */
-struct u4x2_rocm_quads_kit_t {
+template <typename warp_type_>
+struct u4x2_rocm_quads_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -961,9 +903,10 @@ __device__ __forceinline__ std::array<f32_t, 128> hip_weighted_u1x128_rocm( //
 
 /** u1x8 kit - every ROCm device: the "dot" is the intersection popcount, and the norms store each
  *  row's set-bit count, the currency of Jaccard's union, mirrored into both fields. */
-struct u1x8_rocm_quads_kit_t {
+template <typename warp_type_>
+struct u1x8_rocm_quads_kit {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = hip_warp_t;
+    using warp_t = warp_type_;
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1031,11 +974,12 @@ struct rocm_registers_schedule_t {
     static __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids,
                                                       u32_t rows, u32_t lane) noexcept {
         if (cache.ids_) return;
-        for (u32_t word = lane; word < rows * storage.row_fragments; word += hip_warp_t::width_k) {
+        using warp_t = typename storage_::warp_t;
+        for (u32_t word = lane; word < rows * storage.row_fragments; word += warp_t::width_k) {
             u32_t const row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, row);
             cache.at(row, fragment) = storage.vector_for(ids[row], fragment);
         }
-        hip_warp_t::sync();
+        warp_t::sync();
     }
 
     __device__ __forceinline__ void await_rows(u32_t) noexcept {}
@@ -1086,7 +1030,7 @@ struct rocm_lds_schedule {
         constexpr u32_t units_per_fragment_k = sizeof(typename storage_::fragment_t) / lane_bytes_;
         u32_t const row_units = storage.row_fragments * units_per_fragment_k, units = rows * row_units;
         byte_t* const cache_bytes = reinterpret_cast<byte_t*>(cache.row(0));
-        for (u32_t base = 0; base < units; base += hip_warp_t::width_k) {
+        for (u32_t base = 0; base < units; base += storage_::warp_t::width_k) {
             u32_t const unit = base + lane;
             if (unit >= units) break;
             u32_t const row = storage.row_of_word(unit / units_per_fragment_k);
@@ -1119,16 +1063,16 @@ struct quads_chain<nk::f16_t, caps_> {
     using kit_t = std::conditional_t<!(NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0) &&
                                          ((NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0) ||
                                           (NUMKONG_TARGET_CDNA3 && (caps_ & nk_cap_cdna3_k) != 0)),
-                                     f16_cdna3_quads_kit_t, f16_rocm_quads_kit_t>;
+                                     f16_cdna3_quads_kit<hip_warp_of<caps_>>, f16_rocm_quads_kit<hip_warp_of<caps_>>>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                    //
-        bf16_rocm_quads_kit_t,                                                                     //
-        chain_layer<NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0, bf16_cdna4_quads_kit_t> //
+    using kit_t = typename first_available_kit<                                                                      //
+        bf16_rocm_quads_kit<hip_warp_of<caps_>>,                                                                     //
+        chain_layer<NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0, bf16_cdna4_quads_kit<hip_warp_of<caps_>>> //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -1136,9 +1080,9 @@ struct quads_chain<nk::bf16_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit<                                                  //
-        i8_cdna3_quads_kit_t,                                                                    //
-        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, i8_cdna5_quads_kit_t> //
+    using kit_t = typename first_available_kit<                                                                    //
+        i8_cdna3_quads_kit<hip_warp_of<caps_>>,                                                                    //
+        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, i8_cdna5_quads_kit<hip_warp_of<caps_>>> //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -1146,7 +1090,7 @@ struct quads_chain<nk::i8_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::u8_t, caps_> {
-    using kit_t = u8_rocm_quads_kit_t;
+    using kit_t = u8_rocm_quads_kit<hip_warp_of<caps_>>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -1155,7 +1099,7 @@ template <nk_capability_t caps_>
 struct quads_chain<nk::e5m2_t, caps_> {
     using kit_t = std::conditional_t<(NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0) ||
                                          (NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0),
-                                     e5m2_cdna4_quads_kit_t, e5m2_rocm_quads_kit_t>;
+                                     e5m2_cdna4_quads_kit<hip_warp_of<caps_>>, e5m2_rocm_quads_kit<hip_warp_of<caps_>>>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -1164,30 +1108,30 @@ template <nk_capability_t caps_>
 struct quads_chain<nk::e4m3_t, caps_> {
     using kit_t = std::conditional_t<(NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0) ||
                                          (NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0),
-                                     e4m3_cdna4_quads_kit_t, e4m3_rocm_quads_kit_t>;
+                                     e4m3_cdna4_quads_kit<hip_warp_of<caps_>>, e4m3_rocm_quads_kit<hip_warp_of<caps_>>>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::e3m2_t, caps_> {
-    using kit_t = e3m2_rocm_quads_kit_t;
+    using kit_t = e3m2_rocm_quads_kit<hip_warp_of<caps_>>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::e2m3_t, caps_> {
-    using kit_t = e2m3_rocm_quads_kit_t;
+    using kit_t = e2m3_rocm_quads_kit<hip_warp_of<caps_>>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::i4x2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                    //
-        i4x2_cdna3_quads_kit_t,                                                                    //
-        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, i4x2_cdna5_quads_kit_t> //
+    using kit_t = typename first_available_kit<                                                                      //
+        i4x2_cdna3_quads_kit<hip_warp_of<caps_>>,                                                                    //
+        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, i4x2_cdna5_quads_kit<hip_warp_of<caps_>>> //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -1195,14 +1139,14 @@ struct quads_chain<nk::i4x2_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::u4x2_t, caps_> {
-    using kit_t = u4x2_rocm_quads_kit_t;
+    using kit_t = u4x2_rocm_quads_kit<hip_warp_of<caps_>>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_rocm_k) != 0)
 struct quads_chain<nk::u1x8_t, caps_> {
-    using kit_t = u1x8_rocm_quads_kit_t;
+    using kit_t = u1x8_rocm_quads_kit<hip_warp_of<caps_>>;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
@@ -1217,5 +1161,3 @@ using rocm_schedule_of =
 #pragma endregion Chains
 
 } // namespace unum::usearch::dense
-
-#endif // NUMKONG_ARCH_ROCM_

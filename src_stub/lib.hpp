@@ -499,7 +499,8 @@ inline double read_minifloat(u8_t bits, minifloat_t format) {
         return mantissa ? std::numeric_limits<double>::quiet_NaN() : sign * std::numeric_limits<double>::infinity();
     if (exponent == saturated && mantissa == mantissa_span - 1 && format.specials == minifloat_specials_t::nan_only_k)
         return std::numeric_limits<double>::quiet_NaN();
-    // A zero exponent field is the subnormal step, so the arms differ only in the implied leading bit.
+    // A zero exponent field is the subnormal step, so the two branches differ only in the implied
+    // leading bit.
     unsigned const significand = exponent ? mantissa + mantissa_span : mantissa;
     int const scale = static_cast<int>(exponent ? exponent : 1) - bias - static_cast<int>(format.mantissa_bits);
     return sign * std::ldexp(static_cast<double>(significand), scale);
@@ -901,17 +902,26 @@ std::vector<std::size_t> drawing_order(std::size_t rows, u64_t seed, within_ con
 }
 
 /**
- *  @brief The body of every modality's @c sample: lands the draws ranked @c offset onward in
- *      @p order, at most @c wanted, each linked to its @c links_per_draw nearest earlier draws.
+ *  @brief The body of every modality's @c sample: lands the draws ranked @c offset onward, at most
+ *      @c wanted, each linked to its @c links_per_draw nearest earlier draws.
  *
+ *  The region is every entry, or with a nonzero @c radius those within it of some of @p anchors.
  *  Earlier means every draw ranked before it, those an earlier call wrote included, so successive
  *  calls extend one sample. Equidistant draws link in the order they were drawn. The outputs of
  *  @p arguments are written only once every draw landed, so a cancelled call leaves them reset.
  */
-template <typename arguments_, typename payload_, typename score_>
+template <typename arguments_, typename payload_, typename anchor_, typename score_>
 void land_sample(arguments_ const& arguments, std::span<entry<payload_> const> entries,
-                 std::span<std::size_t const> order, score_ const& score, usearch_arena_handle_t& arena,
+                 std::span<anchor_ const> anchors, score_ const& score, usearch_arena_handle_t& arena,
                  usearch_outcome_t* outcome) {
+    // Every kind ranks nearest-first, inner products as `1 - dot` and alignments by their negated
+    // scores, so a radius bounds from above.
+    bool const bounded = !anchors.empty() && arguments.radius != 0;
+    std::vector<std::size_t> const order = drawing_order(entries.size(), arguments.seed, [&](std::size_t row) {
+        return !bounded || std::any_of(anchors.begin(), anchors.end(), [&](anchor_ const& anchor) {
+            return score(anchor, entries[row].payload) <= arguments.radius;
+        });
+    });
     std::size_t const first = std::min(arguments.offset, order.size());
     std::size_t const drawn = std::min(arguments.wanted, order.size() - first);
     std::size_t links_count = 0;

@@ -2,8 +2,8 @@
  *  @file src/shapes/ram_variants_apple_m2.cpp
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief The apple_m2 unit of the shapes arms: the f16 ones widen through the NEONFHM kits, and
- *      the f32 ones fall back to the NEON kits they inline like aws_g2.
+ *  @brief The apple_m2 unit of the shapes variants: the f16 ones widen through the NEONFHM kits,
+ *      and the f32 ones fall back to the NEON kits they inline like aws_g2.
  */
 #include "shapes_specializations.cuh"
 

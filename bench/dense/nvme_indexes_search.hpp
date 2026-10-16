@@ -8,7 +8,7 @@
  *  No graph is built or loaded in RAM: `--view` names the manifest or the monolith, and the first
  *  part's header names the stored dtype and the metric the cascade instantiates, and the factor the
  *  producer rescaled its rows by. Every query is answered from storage in one batched call, each
- *  timed by the verb from its first armed walk to its final write, and every read counted by
+ *  timed by the verb from its first primed walk to its final write, and every read counted by
  *  purpose. Keys are dataset rows, so the merged rankings judge directly against
  *  `--query-neighbors`.
  *
@@ -309,7 +309,7 @@ void report_storage_metrics(std::string_view unit, std::size_t rows_count, doubl
         fmt::println("  latency/{}: p50 {:.0f} µs · p99 {:.0f} µs", unit, percentile_us(0.50), percentile_us(0.99));
 }
 
-/** Answers every query from storage in one batched @c search call, which arms as many rows as the
+/** Answers every query from storage in one batched @c search call, which primes as many rows as the
  *  queue depth holds, the merged rankings landing straight in the judgment matrices. */
 template <typename streamed_dataset_type_>
 bool run_nvme_search(streamed_dataset_type_& streamed) {

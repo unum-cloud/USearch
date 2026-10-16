@@ -2,12 +2,12 @@
  *  @file src/shapes_index.cpp
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief The shapes modality's C surface: the variant over every compiled shapes arm, the traits
- *      its verbs differ in, and every exported entry point as one forward apiece.
+ *  @brief The shapes modality's C surface: the variant over every compiled shapes alternative,
+ *      the traits its verbs differ in, and every exported entry point as one forward apiece.
  *
- *  Arms are ordered newest class first inside each scalar, the serial floor last. Their bodies
- *  compile in the basic class units, never here: the @c extern declarations below keep them out, as
- *  the dense dispatch unit keeps its own.
+ *  Variants are ordered newest class first inside each scalar, the serial floor last. Their
+ *  bodies compile in the basic class units, never here: the @c extern declarations below keep
+ *  them out, as the dense dispatch unit keeps its own.
  */
 #include <string_view> // `std::string_view` - checkpoint paths and fields
 #include <variant>     // `std::variant`
@@ -58,9 +58,9 @@ extern template struct shapes_nvme_variant<nk::f16_t, cpu_class_t::serial_k>;
 
 #pragma region Handles
 
-/** Every shapes arm this build compiled: the basic index over one scalar's packs scored with one
- *  class's kits, a read-only view of a checkpoint on storage scored with the same, or the basic
- *  index on a GPU. */
+/** Every shapes variant this build compiled: the basic index over one scalar's packs scored with
+ *  one class's kits, a read-only view of a checkpoint on storage scored with the same, or the
+ *  basic index on a GPU. */
 using shapes_variant_t = std::variant< //
 #if USEARCH_ARCH_CUDA_
     shapes_vram_nvidia_variant<nk::f16_t, us::shapes::f16_ampere_chamfer_kit>,   //
@@ -109,8 +109,8 @@ using shapes_variant_t = std::variant< //
     shapes_ram_variant<nk::f32_t, cpu_class_t::serial_k>,  //
     shapes_ram_variant<nk::f16_t, cpu_class_t::serial_k>>;
 
-/** Whether @p shapes holds @p count entries of points in a scalar the arms cast from, its offsets
- *  counting points; false once @p outcome records why not. */
+/** Whether @p shapes holds @p count entries of points in a scalar the variants cast from, its
+ *  offsets counting points; false once @p outcome records why not. */
 static bool accepts_shapes(usearch_tape_view_t const& shapes, std::size_t count, usearch_outcome_t* outcome) noexcept {
     if (!shapes.data || !monotone_offsets(shapes, count))
         return propagate_error(usearch_status_invalid_argument_k, outcome,
@@ -148,7 +148,7 @@ struct shapes_traits_t {
         return status;
     }
 
-    /** Refuses the kinds and scalars no CPU arm serves. */
+    /** Refuses the kinds and scalars no CPU variant serves. */
     template <typename arguments_type_>
     static bool admits(geometry_t const& geometry, arguments_type_ const&, usearch_outcome_t* outcome) noexcept {
         if (token_of(geometry.metric).empty())
@@ -181,19 +181,20 @@ struct shapes_traits_t {
                index.points == donor.points && index.connectivity == donor.connectivity;
     }
 
-    /** Copies @p geometry into @p arm, a zero connectivity taking the default. */
-    template <typename arm_type_, typename arguments_type_>
-    static bool freeze(arm_type_& arm, geometry_t& geometry, arguments_type_ const&, usearch_outcome_t*) noexcept {
+    /** Copies @p geometry into @p variant, a zero connectivity taking the default. */
+    template <typename variant_type_, typename arguments_type_>
+    static bool freeze(variant_type_& variant, geometry_t& geometry, arguments_type_ const&,
+                       usearch_outcome_t*) noexcept {
         if (!geometry.connectivity) geometry.connectivity = connectivity_32_k;
-        arm.geometry = geometry;
+        variant.geometry = geometry;
         return true;
     }
 
 #if USEARCH_ARCH_CUDA_
 
-    /** Calls @p make with the GPU arm over the stored scalar whose kits score the kind. */
+    /** Calls @p make with the GPU variant over the stored scalar whose kits score the kind. */
     template <typename make_type_>
-    static void with_vram_arm(geometry_t const& geometry, make_type_&& make) noexcept {
+    static void with_vram_variant(geometry_t const& geometry, make_type_&& make) noexcept {
         bool const hausdorff = geometry.metric == usearch_shapes_metric_hausdorff_k;
         if (geometry.quantization == usearch_scalar_f16_k) {
             if (hausdorff)
@@ -211,19 +212,19 @@ struct shapes_traits_t {
         return {geometry.metric, geometry.quantization, geometry.points, geometry.connectivity};
     }
 
-    template <typename arm_type_>
-    static void describe(arm_type_ const& arm, usearch_shapes_index_description_t& description) noexcept {
-        description.metadata = metadata_of(arm.geometry);
+    template <typename variant_type_>
+    static void describe(variant_type_ const& variant, usearch_shapes_index_description_t& description) noexcept {
+        description.metadata = metadata_of(variant.geometry);
         description.total_points =
-            standard_atomic_ref<std::size_t const>(arm.total_points).load(std::memory_order_relaxed);
+            standard_atomic_ref<std::size_t const>(variant.total_points).load(std::memory_order_relaxed);
     }
 
     static bool accepts(usearch_shapes_insert_t const& arguments, usearch_outcome_t* outcome) noexcept {
         return accepts_shapes(arguments.shapes, arguments.count, outcome);
     }
 
-    template <typename arm_type_>
-    static bool accepts(arm_type_ const&, usearch_shapes_search_t const& arguments,
+    template <typename variant_type_>
+    static bool accepts(variant_type_ const&, usearch_shapes_search_t const& arguments,
                         usearch_outcome_t* outcome) noexcept {
         return accepts_shapes(arguments.queries, arguments.count, outcome);
     }
@@ -250,20 +251,20 @@ struct shapes_traits_t {
     }
 
     /** Lands @p count clouds, the @c i th as @p value_at hands it, as points in the scalar the call
-     *  asks for in @p memory, their offsets counting points; an arm's own values are packs, which
-     *  unpack through @p memory too where the scalar is not the stored one. */
-    template <typename arm_type_, typename value_at_type_, typename arguments_type_>
-    static bool land(arm_type_ const& arm, std::size_t count, value_at_type_&& value_at,
+     *  asks for in @p memory, their offsets counting points; a variant's own values are packs,
+     *  which unpack through @p memory too where the scalar is not the stored one. */
+    template <typename variant_type_, typename value_at_type_, typename arguments_type_>
+    static bool land(variant_type_ const& variant, std::size_t count, value_at_type_&& value_at,
                      growing_arena<forkunion_allocator_t>& memory, arguments_type_ const& arguments,
                      usearch_outcome_t* outcome) noexcept {
-        using raw_t = typename arm_type_::scalar_t::raw_t;
+        using raw_t = typename variant_type_::scalar_t::raw_t;
         nk_dtype_t const exported = nk_dtype_of(arguments.outputs_scalar);
         std::size_t const element_bytes = nk_dtype_bits(exported) / 8;
         std::size_t* const offsets = carve<std::size_t>(memory, count + 1);
         if (!offsets) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
         offsets[0] = 0;
         for (std::size_t entry = 0; entry != count; ++entry)
-            if constexpr (is_nvme_index<arm_type_>)
+            if constexpr (is_nvme_index<variant_type_>)
                 offsets[entry + 1] = offsets[entry] + value_at(entry).size() / (3 * sizeof(raw_t));
             else offsets[entry + 1] = offsets[entry] + value_at(entry).max_points();
         byte_t* const points = carve<byte_t>(memory, offsets[count] * 3 * element_bytes);
@@ -273,17 +274,17 @@ struct shapes_traits_t {
         for (std::size_t entry = 0; entry != count; ++entry) {
             byte_t* const output = points + offsets[entry] * 3 * element_bytes;
             status_t exported_status;
-            if constexpr (is_nvme_index<arm_type_>)
-                exported_status = arm.export_points(value_at(entry), exported, output);
-            else exported_status = arm.export_points(value_at(entry), exported, output, scratch);
+            if constexpr (is_nvme_index<variant_type_>)
+                exported_status = variant.export_points(value_at(entry), exported, output);
+            else exported_status = variant.export_points(value_at(entry), exported, output, scratch);
             if (failed(exported_status)) return propagate_error(exported_status, outcome);
         }
         *arguments.shapes = {points, offsets, arguments.outputs_scalar};
         return true;
     }
 
-    /** Adds one entry's points to a key's statistics, from any thread: an arm's packs count their
-     *  points, and a view's clouds hold a row per point. */
+    /** Adds one entry's points to a key's statistics, from any thread: a variant's packs count
+     *  their points, and a view's clouds hold a row per point. */
     template <typename cloud_type_>
     static void tally(usearch_shapes_key_stats_t& stats, cloud_type_ const& cloud) noexcept {
         std::size_t points = 0;

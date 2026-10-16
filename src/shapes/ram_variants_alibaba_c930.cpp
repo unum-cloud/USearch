@@ -2,8 +2,8 @@
  *  @file src/shapes/ram_variants_alibaba_c930.cpp
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief The alibaba_c930 unit of the shapes arms: they inline the RVV kits, so the unit compiles
- *      with them.
+ *  @brief The alibaba_c930 unit of the shapes variants: they inline the RVV kits, so the unit
+ *      compiles with them.
  */
 #include "shapes_specializations.cuh"
 

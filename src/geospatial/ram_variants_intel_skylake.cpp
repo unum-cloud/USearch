@@ -2,8 +2,8 @@
  *  @file src/geospatial/ram_variants_intel_skylake.cpp
  *  @author Ash Vardanian
  *  @date October 14, 2026
- *  @brief The intel_skylake unit of the geospatial arms: they inline the AVX-512 kit, so the unit
- *      compiles with it.
+ *  @brief The intel_skylake unit of the geospatial variants: they inline the AVX-512 kit, so the
+ *      unit compiles with it.
  */
 #include "geospatial_specializations.cuh"
 

@@ -25,24 +25,6 @@ namespace unum::usearch::bench::dense {
 
 #pragma region Pipeline
 
-/** Resolves an ID, a node on one device or a key across the shards, to its value row in a device table of rows
- *  @c pitch bytes apart. */
-template <typename fragment_type_>
-struct attention_value_lookup {
-
-    /** Names the lookup to the attend kernels the binary's fatbin carries. */
-    inline static constexpr u32_t device_lookup_k = 1;
-
-    byte_t const* rows;
-    std::size_t pitch;
-
-#if defined(__CUDACC__)
-    __device__ fragment_type_ const* operator()(std::size_t id) const noexcept {
-        return reinterpret_cast<fragment_type_ const*>(rows + id * pitch);
-    }
-#endif
-};
-
 /** Both phases over every query, batched: graph products landed on the host, then attention of each token's
  *  `--head-count` heads over every key their shared walk scores, value rows looked up by node ID in a device-resident
  *  table, into device rows. The first `--oracle-queries` rows are judged against the exact oracle. */
@@ -101,7 +83,7 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
         fmt::println("Failed to place {:.2f} GB of values on device {}", gigabytes(nodes_count * pitch), bench.device);
         return false;
     }
-    attention_value_lookup<typename index_t::fragment_t> const lookup {device_values.get(), pitch};
+    attention_value_lookup_t const lookup {device_values.get(), pitch};
     std::vector<softmax_state_t> carry(attend_rows);
     auto judged_outputs = nk::matrix<f32_t>::zeros({judged, columns}).value;
     nk::matrix_span<f32_t> const outputs {reinterpret_cast<f32_t*>(device_outputs.get()), attend_rows, columns};
@@ -165,8 +147,3 @@ int run_algebra_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_ty
 #pragma endregion
 
 } // namespace unum::usearch::bench::dense
-
-template <>
-struct us::dense::cuda_value_lookup_of<us::bench::dense::attention_value_lookup<uint4>::device_lookup_k> {
-    using type = us::bench::dense::attention_value_lookup<uint4>;
-};

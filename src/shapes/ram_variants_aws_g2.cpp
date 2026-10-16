@@ -2,8 +2,8 @@
  *  @file src/shapes/ram_variants_aws_g2.cpp
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief The aws_g2 unit of the shapes arms: they inline the NEON kits, so the unit compiles with
- *      them.
+ *  @brief The aws_g2 unit of the shapes variants: they inline the NEON kits, so the unit compiles
+ *      with them.
  */
 #include "shapes_specializations.cuh"
 

@@ -257,7 +257,7 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
 }
 
 /** The class a refused rung degrades to - the next one down its own lineage, which is the class an
- *  arm must be distinct from to earn instantiation. On x86 the AVX-512 P-cores and the AVX-VNNI
+ *  variant must be distinct from to earn instantiation. On x86 the AVX-512 P-cores and the AVX-VNNI
  *  E-cores share the Haswell floor. */
 constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
@@ -351,7 +351,7 @@ struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
 };
 #endif
 
-/** The waiter a CPU class pairs, spelled short for the arms' explicit instantiations. */
+/** The waiter a CPU class pairs, spelled short for the variants' explicit instantiations. */
 template <cpu_class_t cpu_class_>
 using waiter_of = typename waiter_for_cpu_class<cpu_class_>::type;
 
@@ -590,7 +590,7 @@ inline constexpr bool is_gpu_executor = requires { executor_type_::vendor_k; };
 template <typename multi_type_>
 inline constexpr bool is_vram_index = is_gpu_executor<typename multi_type_::executor_t>;
 
-/** The vendor a VRAM arm's devices belong to, and @c unknown_k for every other residency. */
+/** The vendor a VRAM variant's devices belong to, and @c unknown_k for every other residency. */
 template <typename multi_type_>
 constexpr gpu_vendor_t gpu_vendor_of_index() noexcept {
     if constexpr (is_vram_index<multi_type_>) return multi_type_::vendor_k;
@@ -600,7 +600,7 @@ constexpr gpu_vendor_t gpu_vendor_of_index() noexcept {
 template <typename multi_type_>
 inline constexpr bool is_nvme_index = std::is_same_v<typename multi_type_::executor_t, nvme_executor_t>;
 
-/** Visits the arm of @p index with @p mutate when it is writable; an NVMe view serves its
+/** Visits the variant of @p index with @p mutate when it is writable; an NVMe view serves its
  *  checkpoint in place, so it refuses every mutation with @c usearch_status_read_only_k. */
 template <typename handle_type_, typename mutate_type_>
 void visit_writable(handle_type_& index, usearch_outcome_t* outcome, mutate_type_&& mutate) noexcept {
@@ -610,7 +610,7 @@ void visit_writable(handle_type_& index, usearch_outcome_t* outcome, mutate_type
                 propagate_error(usearch_status_read_only_k, outcome, "An NVMe view never mutates");
             else mutate(variant);
         },
-        index.variants);
+        index.variant);
 }
 
 /** Whether @p alternative_type_ is listed in @p variant_type_ - the membership fact the ladder
@@ -801,7 +801,7 @@ inline executor_type_* residency_executor(usearch_executor_handle_t& executor) n
 /** The typed executor behind the C handle, or null with @c usearch_status_device_k on a kind
  *  mismatch. A null handle builds @p call_executor for this call alone, through the overload of
  *  @c call_executor_for its residency names, the VRAM ones defined beside the dense and the basic
- *  GPU arms. */
+ *  GPU variants. */
 template <typename multi_type_>
 inline typename multi_type_::executor_t* executor_of(multi_type_& variant, usearch_executor_t executor,
                                                      usearch_executor_handle_t& call_executor,

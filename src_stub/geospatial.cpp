@@ -801,18 +801,10 @@ void usearch_geospatial_sample(usearch_geospatial_sample_t* arguments) {
                                                       outcome);
     if (!arena) return;
 
-    std::span<usearch_geospatial_observation_t const> const anchors {arguments->anchors, anchors_count};
-    usearch_distance_t const radius = arguments->radius;
-    auto const within = [&](std::size_t row) {
-        if (anchors.empty() || radius == 0) return true;
-        for (usearch_geospatial_observation_t const& anchor : anchors)
-            if (chord_between(anchor, index.entries[row].payload) <= radius) return true;
-        return false;
-    };
-
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const order = drawing_order(index.entries.size(), arguments->seed, within);
-    land_sample(*arguments, std::span<geospatial_entry_t const>(index.entries), order, chord_between, *arena, outcome);
+    land_sample(*arguments, std::span<geospatial_entry_t const>(index.entries),
+                std::span<usearch_geospatial_observation_t const>(arguments->anchors, anchors_count), chord_between,
+                *arena, outcome);
 }
 
 void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {

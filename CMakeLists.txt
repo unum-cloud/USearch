@@ -59,9 +59,9 @@ option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 int
 option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
 option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
-option(USEARCH_BUILD_CUDA "Compile the NVIDIA index arms, tests and benchmarks with NVCC" ${USEARCH_CAN_BUILD_CUDA})
-option(USEARCH_BUILD_ROCM "Compile the AMD index arms and tests with ROCm's Clang" ${USEARCH_CAN_BUILD_ROCM})
-option(USEARCH_BUILD_METAL "Compile the Apple index arms and tests over Metal" ${USEARCH_CAN_BUILD_METAL})
+option(USEARCH_BUILD_CUDA "Compile the NVIDIA index variants, tests and benchmarks with NVCC" ${USEARCH_CAN_BUILD_CUDA})
+option(USEARCH_BUILD_ROCM "Compile the AMD index variants and tests with ROCm's Clang" ${USEARCH_CAN_BUILD_ROCM})
+option(USEARCH_BUILD_METAL "Compile the Apple index variants and tests over Metal" ${USEARCH_CAN_BUILD_METAL})
 option(USEARCH_BUILD_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
 
 # Clang keeps a unit's host and device halves apart, through the host-only passes of its CUDA and HIP modes, where other
@@ -85,9 +85,9 @@ endif ()
 
 # The library compiles one unit per GPU class, each for its own architecture alone - "80" with its PTX for every GPU
 # without a class, "89", "90a", "100f" and "120f" - and only the classes this list names, with or without "-real", so
-# "100f-real" builds the Blackwell kernels alone and "native" builds every class. The CUDA tests, benchmarks and the dispatch
-# unit compile one pass per entry, and a NumKong GPU capability turns on in them only when every entry runs it, so
-# iterate on one GPU with its family code, like "100f-real", to test that generation's kits. The "-real" entries skip
+# "100f-real" builds the Blackwell kernels alone and "native" builds every class. The CUDA tests, benchmarks and the
+# dispatch unit compile one pass per entry, and a NumKong GPU capability turns on in them only when every entry runs it,
+# so iterate on one GPU with its family code, like "100f-real", to test that generation's kits. The "-real" entries skip
 # the PTX, which would triple the objects of builds that never meet an unknown GPU.
 set(USEARCH_CUDA_ARCHITECTURES
     "80-real;89-real;90a-real;100f-real;120f-real"
@@ -596,7 +596,7 @@ if (USEARCH_IS_MAIN_PROJECT)
     enable_testing()
 endif ()
 
-# The arms, their dispatch and the suites below all read one ladder length.
+# The variants, their dispatch and the suites below all read one ladder length.
 add_compile_definitions(USEARCH_DENSE_DTYPES=${USEARCH_DENSE_DTYPES})
 
 # Every consumer of the pre-instantiated library needs this, the C interface included - its implementation is

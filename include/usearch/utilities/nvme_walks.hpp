@@ -16,7 +16,7 @@
  *  - @c row_offset_ and @c row_length_, which locate any row of a part's key, value or neighbors
  *    column;
  *  - @c walk_t, one walk's pools, and @c walk_shape_t, the call's sizes;
- *  - @c arm_scoring_, which prepares a row's query once the row arms;
+ *  - @c prime_scoring_, which prepares a row's query once the row primes;
  *  - @c score_staged_, which scores a walk's staged flights, folds and releases them, and ranks the
  *    rest through the walker's @c rank_.
  *
@@ -214,7 +214,7 @@ enum class nvme_key_reads_t : u8_t {
 /** Where a walk stands between its reads. */
 enum class nvme_walk_stage_t : u8_t {
 
-    /** Finished, its pool merged into its row, or never armed. */
+    /** Finished, its pool merged into its row, or never primed. */
     finished_k,
 
     /** Its landmarks are in flight in hop slot zero, and every row that lands enters the
@@ -300,9 +300,9 @@ struct nvme_row_slot_t {
     /** The batch row the slot holds. */
     std::size_t row = 0;
 
-    /** When the row's walks armed, which its latency counts from; unset when the call collects
+    /** When the row's walks primed, which its latency counts from; unset when the call collects
      *  none. */
-    std::chrono::steady_clock::time_point armed;
+    std::chrono::steady_clock::time_point primed;
 };
 
 /** One call's hold on an executor: the claim, then the media, which detach before the claim
@@ -421,7 +421,7 @@ class row_walker {
         return status_t::success_k;
     }
 
-    /** Arms rows until the batch runs out, keeping every slot's walks in flight, and drains the
+    /** Primes rows until the batch runs out, keeping every slot's walks in flight, and drains the
      *  engine before it returns, whatever happened; a failure on any thread stops this one too.
      *  Answers the first row that refused, since a failure is published to every thread
      *  instead. */
@@ -429,7 +429,7 @@ class row_walker {
         while (true) {
             if (succeeded(failure_)) {
                 if (status_t const shared = shared_failure_(); failed(shared)) failure_ = shared;
-                else arm_rows_();
+                else prime_rows_();
             }
             if (failed(failure_) && !outstanding_) break;
             if (succeeded(failure_)) {
@@ -467,7 +467,7 @@ class row_walker {
     /** What the thread counted. */
     search_result_t const& telemetry() const noexcept { return telemetry_; }
 
-    /** Records the thread's first failure and publishes it, so every thread stops arming
+    /** Records the thread's first failure and publishes it, so every thread stops priming
      *  rows. */
     void fail(status_t failure) noexcept {
         if (succeeded(failure_)) failure_ = failure;
@@ -622,7 +622,7 @@ class row_walker {
     }
 
     /** Takes the next rows of the batch into every idle slot and seeds all of their walks. */
-    void arm_rows_() noexcept {
+    void prime_rows_() noexcept {
         std::size_t const parts = parts_.size();
         for (u32_t slot_index = 0; slot_index != slots_.size(); ++slot_index) {
             nvme_row_slot_t& slot = slots_[slot_index];
@@ -631,11 +631,11 @@ class row_walker {
                 std::atomic_ref<std::size_t>(*shape_.cursor).fetch_add(1, std::memory_order_relaxed);
             if (row >= shape_.rows_count) return;
             slot = nvme_row_slot_t {static_cast<u32_t>(parts), 0, 0, 0, nvme_row_stage_t::walking_k, row, {}};
-            if (!shape_.latencies.empty()) slot.armed = std::chrono::steady_clock::now();
+            if (!shape_.latencies.empty()) slot.primed = std::chrono::steady_clock::now();
             ++rows_in_flight_;
-            row_t& armed = rows_[slot_index];
-            armed.arm(row);
-            tier_t::arm_scoring_(shape_, armed);
+            row_t& primed = rows_[slot_index];
+            primed.prime(row);
+            tier_t::prime_scoring_(shape_, primed);
             for (u32_t shard = 0; shard != parts; ++shard) {
                 u32_t const walk_index = slot_index * static_cast<u32_t>(parts) + shard;
                 walk_t& walk = walks_[walk_index];
@@ -845,7 +845,7 @@ class row_walker {
         if (status_t const finished = row.finish(); failed(finished) && succeeded(refusal_)) refusal_ = finished;
         if (!shape_.latencies.empty())
             shape_.latencies[slot.row] = static_cast<u64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slot.armed)
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slot.primed)
                     .count());
         slot.stage = nvme_row_stage_t::idle_k;
         --rows_in_flight_;

@@ -103,7 +103,7 @@ def test_construction_reports_its_geometry(dimensions: int, metric: DenseMetric)
         ({"metric": 99}, UnknownKindError),  # An integer no enumerator carries.
         ({"quantization": Scalar.F32}, UnknownKindError),  # Rows cross the boundary as `f32` but are never stored so.
         ({"residency": Scalar.F32}, TypeError),  # The factory chooses the residency; no keyword does.
-        ({"devices": [0]}, TypeError),  # An arm belonging to another residency.
+        ({"devices": [0]}, TypeError),  # A variant belonging to another residency.
         ({"threads": 2}, TypeError),  # An index owns rows; an `Executor` owns workers.
         ({"expansion_add": 64}, TypeError),  # A keyword the surface does not have.
         ({"ndim": 8}, TypeError),  # Renamed to 'dimensions'.

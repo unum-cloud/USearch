@@ -145,7 +145,7 @@ A single index also loads a sharded checkpoint, its parts appended in order, whi
 Both `nvme_indexes` binaries build nothing: they view a checkpoint and take only the flags a view and its queries need.
 The first part's header names the metric they dispatch on and the stored dtype, and its `scale` is what the queries are staged under.
 The search judges its hits against `--query-neighbors` directly, and refuses a ground truth that names a row past the ones the parts hold.
-Every query is answered from storage in one batched call, which arms as many rows per thread as the queue depth holds, and the verb times each query from its first armed walk to its final write.
+Every query is answered from storage in one batched call, which primes as many rows per thread as the queue depth holds, and the verb times each query from its first primed walk to its final write.
 The `Storage` block names the parts and the transport the engines opened, then each phase reports reads and kilobytes per query by purpose, the round trips, the IOPS and bandwidth it sustained, and the latency percentiles.
 
 - `--view` is required: the monolith, or the manifest of the parts.

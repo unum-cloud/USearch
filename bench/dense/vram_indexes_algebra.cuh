@@ -23,13 +23,6 @@
 #include "dense/vram_index_algebra.cuh"
 #include "dense/vram_indexes_search.cuh"
 
-/** The key-level lookup each shard's attend kernels resolve rows through. */
-template <>
-struct us::dense::cuda_value_lookup_of<us::dense::cuda_keyed_lookup<
-    us::utilities::u32_t, us::bench::dense::attention_value_lookup<uint4>>::device_lookup_k> {
-    using type = us::dense::cuda_keyed_lookup<us::utilities::u32_t, us::bench::dense::attention_value_lookup<uint4>>;
-};
-
 namespace unum::usearch::bench::dense {
 
 #pragma region Pipeline
@@ -101,7 +94,7 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
         fmt::println("Failed to place {:.2f} GB of values in managed memory", gigabytes(nodes_count * pitch));
         return false;
     }
-    attention_value_lookup<typename index_t::fragment_t> const lookup {device_values.base(), pitch};
+    attention_value_lookup_t const lookup {device_values.base(), pitch};
     std::vector<softmax_state_t> carry(attend_rows);
     auto judged_outputs = nk::matrix<f32_t>::zeros({judged, columns}).value;
     nk::matrix_span<f32_t> const outputs {reinterpret_cast<f32_t*>(device_outputs.get()), attend_rows, columns};

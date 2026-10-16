@@ -297,9 +297,9 @@ constexpr nk_dtype_t dtype_of() noexcept {
  *  @brief Rows in any scalar NumKong casts, @b [rows,columns] in logical values, @c stride bytes
  *      apart; a zero stride repeats the first row.
  *
- *  Every verb takes its input rows this way and imports them into its arm's scalar per thread, so
- *  a typed view converts and passes untouched when it already holds that scalar. Sub-byte rows
- *  fill whole bytes, as NumKong casts them and sub-byte indexes store them.
+ *  Every verb takes its input rows this way and imports them into its variant's scalar per
+ *  thread, so a typed view converts and passes untouched when it already holds that scalar.
+ *  Sub-byte rows fill whole bytes, as NumKong casts them and sub-byte indexes store them.
  */
 struct rows_view_t {
     byte_t const* data = nullptr;

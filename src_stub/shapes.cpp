@@ -810,17 +810,9 @@ void usearch_shapes_sample(usearch_shapes_sample_t* arguments) {
     auto const score = [&](shapes_payload_t const& first, shapes_payload_t const& second) {
         return distance(index, first, second);
     };
-    usearch_distance_t const radius = arguments->radius;
-    auto const within = [&](std::size_t row) {
-        if (!anchors_count || radius == 0) return true;
-        for (shapes_payload_t const& anchor : anchor_shapes)
-            if (score(anchor, index.entries[row].payload) <= radius) return true;
-        return false;
-    };
-
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const order = drawing_order(index.entries.size(), arguments->seed, within);
-    land_sample(*arguments, std::span<shapes_entry_t const>(index.entries), order, score, *arena, outcome);
+    land_sample(*arguments, std::span<shapes_entry_t const>(index.entries),
+                std::span<shapes_payload_t const>(anchor_shapes), score, *arena, outcome);
 }
 
 void usearch_shapes_save(usearch_shapes_save_t* arguments) {

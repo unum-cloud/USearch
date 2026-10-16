@@ -2,10 +2,11 @@
  *  @file src/sequence_specializations.cuh
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief What one sequence arm is spelled with and compiled through: the CPU classes' StringZilla
- *      capabilities, the geometry every sequence arm freezes, and the arms over the basic indexes.
+ *  @brief What one sequence variant is spelled with and compiled through: the CPU classes'
+ *      StringZilla capabilities, the geometry every sequence variant freezes, and the variants
+ *      over the basic indexes.
  *
- *  Every sequence class unit in @c src/sequence/ includes this to instantiate its arms, and
+ *  Every sequence class unit in @c src/sequence/ includes this to instantiate its variants, and
  *  @c sequence_index.cpp adds the variant, the traits and the exported C entry points on top of it.
  */
 #pragma once
@@ -22,7 +23,7 @@
 
 #include "basic_specializations.cuh"
 
-#pragma region Sequence Arms
+#pragma region Sequence Variants
 
 /** Lowers one CPU class onto StringZilla's capability bits, which name backends rather than
  *  accumulate, so each class spells every backend its kits may pick, and a class adding none
@@ -59,7 +60,7 @@ inline usearch_sequence_metric_t sequence_metric_of(std::string_view token) noex
 }
 
 /** The kind, window widths and connectivity a sequence handle freezes, as an init or a checkpoint
- *  states them; every arm holds one. */
+ *  states them; every variant holds one. */
 struct sequence_geometry_t {
     usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
 
@@ -204,9 +205,9 @@ status_t sequence_ram_variant<cpu_class_>::load(std::string_view path, executor_
     return safegraphs_read_index(path, index, us::sequence::codec_t {}, executor, load_config_t {}, ticks);
 }
 
-/** One sequence alternative on block storage: the basic NVMe index over the strings a RAM arm
- *  saved, read-only, scored with the RAM arm's metrics and the kits @p cpu_class_ picks. Its verbs
- *  are instantiated in the class's unit, as the RAM arm's are. */
+/** One sequence alternative on block storage: the basic NVMe index over the strings a RAM variant
+ *  saved, read-only, scored with the RAM variant's metrics and the kits @p cpu_class_ picks. Its
+ *  verbs are instantiated in the class's unit, as the RAM variant's are. */
 template <cpu_class_t cpu_class_>
 struct sequence_nvme_variant {
     using executor_t = nvme_executor_t;
@@ -284,4 +285,4 @@ struct sequence_vram_nvidia_variant : vram_nvidia_variant<us::sequence::vram_nvi
 
 #endif
 
-#pragma endregion Sequence Arms
+#pragma endregion Sequence Variants

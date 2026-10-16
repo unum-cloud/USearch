@@ -14,9 +14,16 @@
 #include <fmt/format.h>
 
 #include "dense/vram_index_algebra.cuh"
+#include "dense/vram_kernels.cuh"
+
+/** The attend kernels resolve rows by node ID on the one device. */
+template <>
+struct us::dense::cuda_value_lookup_of<us::bench::dense::attention_value_lookup_t::device_lookup_k> {
+    using type = us::bench::dense::kernel_attention_lookup_t;
+};
 
 template __device__ void
-us::bench::dense::instantiate_cuda_kernels<us::bench::dense::attention_value_lookup<uint4>::device_lookup_k>();
+us::bench::dense::instantiate_cuda_kernels<us::bench::dense::attention_value_lookup_t::device_lookup_k>();
 
 namespace unum::usearch::bench {
 

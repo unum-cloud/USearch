@@ -161,7 +161,7 @@ static_assert(transparent_metric<levenshtein_metric_t>);
 static_assert(query<std::string_view, levenshtein_metric_t, std::string>);
 static_assert(value_codec<sentence_codec_t, std::string>);
 
-/** The transparency arm: a @c string_view query - never a stored value - opens the
+/** The transparency case: a @c string_view query - never a stored value - opens the
  *  metric's rounds, and its self-match still lands at distance zero. */
 static std::size_t check_sentences_transparent_search(u64_t seed) {
     std::size_t failures = 0;

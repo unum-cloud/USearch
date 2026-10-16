@@ -2,11 +2,11 @@
  *  @file src/shapes_specializations.cuh
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief What one shapes arm is spelled with and compiled through: the kinds' tokens and kernels,
- *      the geometry every shapes arm freezes, the metric factory, the packing of clouds, and the
- *      arms over the basic indexes.
+ *  @brief What one shapes variant is spelled with and compiled through: the kinds' tokens and
+ *      kernels, the geometry every shapes variant freezes, the metric factory, the packing of
+ *      clouds, and the variants over the basic indexes.
  *
- *  Every shapes class unit in @c src/shapes/ includes this to instantiate its arms, and
+ *  Every shapes class unit in @c src/shapes/ includes this to instantiate its variants, and
  *  @c shapes_index.cpp adds the variant, the traits and the exported C entry points on top of it.
  */
 #pragma once
@@ -25,7 +25,7 @@
 
 #include "basic_specializations.cuh"
 
-#pragma region Shapes Arms
+#pragma region Shapes Variants
 
 /** The checkpoint token of one shapes kind, spelled as NumKong spells its kernels. */
 inline std::string_view token_of(usearch_shapes_metric_t metric) noexcept {
@@ -58,7 +58,7 @@ constexpr nk_kernel_kind_t kernel_of(usearch_shapes_metric_t metric) noexcept {
 }
 
 /** The kind, scalar, point count and connectivity a shapes handle freezes, as an init or a
- *  checkpoint states them; every arm holds one. */
+ *  checkpoint states them; every variant holds one. */
 struct shapes_geometry_t {
     usearch_shapes_metric_t metric = usearch_shapes_metric_unknown_k;
 
@@ -84,7 +84,7 @@ auto shapes_metric_factory(usearch_shapes_metric_t metric) noexcept {
 }
 
 /** One shapes alternative: the basic index over packs of @p scalar_type_, the kind it scores with,
- *  and the kits @p cpu_class_ picks; verbs defined below the class, as the sequence arm's are. */
+ *  and the kits @p cpu_class_ picks; verbs defined below the class, like the sequence ones. */
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 struct shapes_ram_variant {
     using executor_t = forkunion_executor_t;
@@ -262,9 +262,9 @@ status_t shapes_ram_variant<scalar_type_, cpu_class_>::load(std::string_view pat
 }
 
 /** One shapes alternative on block storage: the basic NVMe index over the clouds of @p scalar_type_
- *  a RAM arm saved, read-only, each row its points as saved, scored with the RAM arm's metric and
- *  the kits @p cpu_class_ picks. Its verbs are instantiated in the class's unit, as the RAM arm's
- *  are. */
+ *  a RAM variant saved, read-only, each row its points as saved, scored with the RAM variant's
+ *  metric and the kits @p cpu_class_ picks. Its verbs are instantiated in the class's unit, as the
+ *  RAM variant's are. */
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 struct shapes_nvme_variant {
     using executor_t = nvme_executor_t;
@@ -324,7 +324,7 @@ expected<traversal_telemetry_t> shapes_nvme_variant<scalar_type_, cpu_class_>::s
 
 /** The shapes alternative on one NVIDIA GPU: the basic VRAM index over packs of @p scalar_type_
  *  scored by the kits @p kit_template_ names. A batch packs its clouds on the host end to end, as
- *  the RAM arms pack them. */
+ *  the RAM variants pack them. */
 template <nk::shapes_dtype scalar_type_, template <u32_t> class kit_template_>
 struct shapes_vram_nvidia_variant : vram_nvidia_variant<us::shapes::vram_nvidia_index<kit_template_>> {
     using vram_nvidia_variant<us::shapes::vram_nvidia_index<kit_template_>>::vram_nvidia_variant;
@@ -456,4 +456,4 @@ expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, kit_tem
 
 #endif
 
-#pragma endregion Shapes Arms
+#pragma endregion Shapes Variants

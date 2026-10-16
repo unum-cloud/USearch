@@ -1779,7 +1779,7 @@ struct ram_index {
         context.frontier.clear();
         context.visited.clear();
 
-        // One watermark snapshot bounds the whole walk; a certified arm proves its own
+        // One watermark snapshot bounds the whole walk; a certified mode proves its own
         // certification through the shared mutex's wait-free probes instead of trusting it.
         node_id_t first_invisible_id = 0;
         [[maybe_unused]] u64_t entry_generation = 0;
@@ -3023,7 +3023,7 @@ struct ram_index {
  *
  *  Strictly read-only under every contract, so readers never stall writers. One watermark snapshot,
  *  captured at construction and widened by @c refresh, bounds everything: keys & values below it
- *  are immutable and read wait-free, rows are staged under the row lock on the concurrent arm and
+ *  are immutable and read wait-free, rows are staged under the row lock on the concurrent mode and
  *  as plain copies on the certified ones. A staged row may name IDs at or past this cursor's
  *  snapshot - fresh back-links - and @c follow refuses those with @c malformed_k until a @c refresh
  *  admits them. The cursor starts past the end; @c seek(0) enters the graph.

@@ -2,8 +2,8 @@
  *  @file src/shapes/ram_variants_wasm64_extended.cpp
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief The wasm64_extended unit of the shapes arms: they inline the relaxed-SIMD kits, so the
- *      unit compiles with them.
+ *  @brief The wasm64_extended unit of the shapes variants: they inline the relaxed-SIMD kits, so
+ *      the unit compiles with them.
  */
 #include "shapes_specializations.cuh"
 

@@ -25,6 +25,7 @@
 #pragma once
 
 #include "usearch/utilities/types.hpp"
+#include "usearch/utilities/vram_walks.hpp" // `gpu_arena_shape_t`, the host twin of the arena shape
 
 namespace unum::usearch::utilities {
 
@@ -197,7 +198,8 @@ struct vram_sorted_pool {
                     entries_[base] = lower_entry < upper_entry ? lower_entry : upper_entry;
                     entries_[base | stride] = lower_entry < upper_entry ? upper_entry : lower_entry;
                 }
-#pragma unroll
+        // A rolled stride keeps the network's code small, while the slot loop below stays unrolled.
+#pragma unroll 1
         for (u32_t partner_stride = width_k / 2; partner_stride; partner_stride >>= 1) {
             bool const lower = (lane & partner_stride) == 0;
 #pragma unroll
@@ -382,7 +384,18 @@ struct vram_register_frontier {
      *  itself, so nothing is folded. */
     template <typename emit_type_>
     __device__ __forceinline__ void for_each_rank(u32_t count, u32_t lane, emit_type_&& emit) const noexcept {
-        for (u32_t base = 0; base < count; base += warp_t::width_k) emit(base + lane, ranks_.rank_entry(base + lane));
+        // Up to eight slots, slot by slot at compile time keeps the pool in registers; sixteen fit
+        // better in local memory.
+        if constexpr (slots_ <= 8) {
+#pragma unroll
+            for (u32_t slot = 0; slot < slots_; ++slot)
+                if (slot * warp_t::width_k < count) emit(slot * warp_t::width_k + lane, ranks_.entries_[slot]);
+            for (u32_t base = slots_ * warp_t::width_k; base < count; base += warp_t::width_k)
+                emit(base + lane, vram_scored_node_t::sentinel());
+        }
+        else
+            for (u32_t base = 0; base < count; base += warp_t::width_k)
+                emit(base + lane, ranks_.rank_entry(base + lane));
     }
 
     /** The ranks are the container itself, so nothing settles before a selection reads them. */
@@ -916,6 +929,13 @@ struct vram_arena_shape_t {
         return reinterpret_cast<byte_t*>(tail_span(base, warp_index) + tail_entries);
     }
 };
+
+static_assert(sizeof(gpu_arena_shape_t) == sizeof(vram_arena_shape_t));
+
+/** The device twin of the host's arena shape, field by field. */
+constexpr vram_arena_shape_t vram_view(gpu_arena_shape_t shape) noexcept {
+    return {shape.visited_slots, shape.visited_hash_shift, shape.tail_entries, shape.cache_bytes};
+}
 
 /** One warp's slice of a launch: its coordinates, its scratch - dynamic shared memory, or its arena
  *  slice's cache span when shared memory cannot seat it - and its arena visited span, the shared

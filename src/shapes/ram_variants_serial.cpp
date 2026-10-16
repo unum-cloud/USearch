@@ -2,7 +2,7 @@
  *  @file src/shapes/ram_variants_serial.cpp
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief The serial unit of the shapes arms: the floor every ladder ends on, at the baseline
+ *  @brief The serial unit of the shapes variants: the floor every ladder ends on, at the baseline
  *      flags.
  */
 #include "shapes_specializations.cuh"

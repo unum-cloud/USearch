@@ -19,12 +19,25 @@
 
 namespace unum::usearch::dense {
 
+/** A device lookup over a value table whose rows sit a 16-byte pitch apart: an ID below @c count
+ *  names its row, a node ID on one GPU and a key on shards, and any other has none. */
+struct cuda_test_lookup_t {
+
+    /** Names the lookup to the attend kernels the suite's fatbin carries. */
+    inline static constexpr u32_t device_lookup_k = 1;
+
+    byte_t const* rows;
+    std::size_t pitch;
+    std::size_t count;
+
+    __device__ void const* operator()(u32_t id) const noexcept { return id < count ? rows + id * pitch : nullptr; }
+};
+
 using test::dense_nvidia_capabilities_k;
 using test::dense::counting_cuda_allocator_t;
 
 /** The lookups the suite attends through: by node ID on one GPU, and by key on shards. */
-using cuda_test_lookup_t = test::dense::dense_cuda_value_lookup<uint4>;
-using cuda_test_keyed_lookup_t = cuda_keyed_lookup<u32_t, cuda_test_lookup_t>;
+using cuda_test_keyed_lookup_t = vram_keyed_lookup<u32_t, cuda_test_lookup_t>;
 
 template <>
 struct cuda_value_lookup_of<cuda_test_lookup_t::device_lookup_k> {
@@ -135,7 +148,7 @@ namespace unum::usearch::test::dense {
 /** A value table copied onto the device, its rows a 16-byte pitch apart; null rows when the copy
  *  failed. */
 struct dense_cuda_value_table_t {
-    using lookup_t = dense_cuda_value_lookup<cuda_fragment_t>;
+    using lookup_t = cuda_test_lookup_t;
 
     cuda_unique_ptr<byte_t> rows;
     std::size_t pitch;

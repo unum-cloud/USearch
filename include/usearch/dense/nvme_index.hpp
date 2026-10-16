@@ -458,10 +458,10 @@ struct nvme_index {
         /** The next row any thread takes. */
         std::size_t* cursor = nullptr;
 
-        /** The first failure any thread met, which stops every thread arming rows. */
+        /** The first failure any thread met, which stops every thread priming rows. */
         status_t* failure = nullptr;
 
-        /** Nanoseconds per row from its first armed walk to its final write; empty collects
+        /** Nanoseconds per row from its first primed walk to its final write; empty collects
          *  none. */
         std::span<u64_t> latencies;
     };
@@ -525,9 +525,9 @@ struct nvme_index {
         return shape;
     }
 
-    /** Prepares the query of an armed @p row: the norms the call's kernel reads of it. */
+    /** Prepares the query of a primed @p row: the norms the call's kernel reads of it. */
     template <typename row_type_>
-    static void arm_scoring_(walk_shape_t const& shape, row_type_& row) noexcept {
+    static void prime_scoring_(walk_shape_t const& shape, row_type_& row) noexcept {
         row.query_norms = norms_(shape.kernel, row.query);
     }
 
@@ -629,7 +629,7 @@ struct nvme_index {
         node_search_row(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
         status_t reserve(std::size_t, std::size_t) noexcept { return status_t::success_k; }
 
-        void arm(std::size_t new_row) noexcept {
+        void prime(std::size_t new_row) noexcept {
             row = new_row;
             query = inputs.queries.row(row).as_vector();
             inputs.counts[row] = 0;

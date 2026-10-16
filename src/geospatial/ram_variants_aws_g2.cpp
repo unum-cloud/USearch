@@ -2,8 +2,8 @@
  *  @file src/geospatial/ram_variants_aws_g2.cpp
  *  @author Ash Vardanian
  *  @date October 14, 2026
- *  @brief The aws_g2 unit of the geospatial arms: they inline the NEON kit, so the unit compiles
- *      with it.
+ *  @brief The aws_g2 unit of the geospatial variants: they inline the NEON kit, so the unit
+ *      compiles with it.
  */
 #include "geospatial_specializations.cuh"
 

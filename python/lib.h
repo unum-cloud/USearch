@@ -575,7 +575,7 @@ int usearch_py_register_error_types(PyObject* module);
 /**
  *  @brief Reads a sequence of NUMA node IDs or device ordinals into a caller-freed array.
  *
- *  Residency arms borrow their arrays only for the duration of the factory call, so the
+ *  Residency variants borrow their arrays only for the duration of the factory call, so the
  *  allocation lives no longer than the constructor that made it.
  *
  *  @param[out] ordinals Receives a @c PyMem_Free -able array; @c NULL when @p object is NULL or @c None.

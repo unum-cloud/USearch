@@ -79,7 +79,7 @@
 
 /*  GPU backends compiled into this unit: USEARCH_ARCH_CUDA_, USEARCH_ARCH_ROCM_,
  *  USEARCH_ARCH_METAL_. CMake defines each from its `USEARCH_BUILD_*` option, since the toolchain
- *  alone cannot tell a dispatch unit that carries a vendor's arms from one that merely sees its
+ *  alone cannot tell a dispatch unit that carries a vendor's variants from one that merely sees its
  *  headers. */
 #if !defined(USEARCH_ARCH_CUDA_)
 #define USEARCH_ARCH_CUDA_ 0

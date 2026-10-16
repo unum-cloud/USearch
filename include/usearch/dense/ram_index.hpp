@@ -2081,10 +2081,10 @@ struct ram_index {
      *      chunks it hands out to any number of threads. Vectors and sentinel-padded neighbor rows
      *      are what a snapshot holds, and the norms when the columns carry one for them.
      *
-     *  A checkpointing reader, not a mutator: concurrent searches keep running on every arm.
+     *  A checkpointing reader, not a mutator: concurrent searches keep running on every mode.
      *  Under @c concurrent_k every row is copied under its slot-zero lock, as writers edit it, and
      *  @ref finish probes for settlement across the whole plan, since a later insert back-linking
-     *  itself edits an earlier row; the certified arms read plain, and a violated certification
+     *  itself edits an earlier row; the certified modes read plain, and a violated certification
      *  surfaces as @c contended_k rather than a silently torn snapshot.
      */
     struct [[nodiscard]] save_plan_t {

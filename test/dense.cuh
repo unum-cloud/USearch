@@ -1258,7 +1258,7 @@ std::size_t dense_expect_save_load_roundtrip(make_index_type_ const& make_index,
     failures += expect_eq(restored.size(), shape.nodes);
 
     // A restored index must re-save on every contract: the settlement counters arrive
-    // fully released, so the optimistic arm's probe sees a quiescent chain, and the
+    // fully released, so the optimistic mode's probe sees a quiescent chain, and the
     // re-saved bytes mirror the originals exactly.
     auto resaved_vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
     auto resaved_neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
@@ -1269,7 +1269,7 @@ std::size_t dense_expect_save_load_roundtrip(make_index_type_ const& make_index,
                           status_t::success_k);
     failures += expect_eq(dense_save(restored, make_index, resaved, synchronization_t::immutable_k, scratch.span()),
                           status_t::success_k);
-    // A device index refuses the concurrent arm by contract; the RAM index settles it.
+    // A device index refuses the concurrent mode by contract; the RAM index settles it.
     failures += expect_eq(dense_save(restored, make_index, resaved, synchronization_t::concurrent_k, scratch.span()),
                           dense_device_resident<index_type_> ? status_t::config_mismatch_k : status_t::success_k);
     failures += expect(std::memcmp(resaved_vectors.data(), saved_vectors.data(),
@@ -1277,7 +1277,7 @@ std::size_t dense_expect_save_load_roundtrip(make_index_type_ const& make_index,
     failures += expect(std::memcmp(resaved_neighbors.data(), saved_neighbors.data(),
                                    dense_rows_bytes(saved_neighbors.view(), shape.nodes)) == 0);
 
-    // Lanes take chunks from one plan only where the residency admits the concurrent arm.
+    // Lanes take chunks from one plan only where the residency admits the concurrent mode.
     if constexpr (!dense_device_resident<index_type_>)
         failures += dense_expect_pooled_save(restored, shape, saved_vectors, saved_neighbors);
 
@@ -2450,7 +2450,7 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
             return node_id % 2 == 1 ? admission_t::admit_k : admission_t::reject_k;
         };
         // The predicated sibling runs only where the backend exposes the verb - the GPU joins
-        // this arm the moment a device-side search_if lands.
+        // this branch the moment a device-side search_if lands.
         constexpr bool predicable_k = requires(typename index_type_::vector_view_t query) {
             index.search_if(query, odd_only, threads.contexts[0]);
         };
@@ -3618,7 +3618,7 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
     return failures;
 }
 
-/** The optimistic save arm under fire: a saver thread loops concurrent-arm saves
+/** The optimistic save mode under fire: a saver thread loops concurrent-mode saves
  *  against two inserter threads & a searcher, classifying every answer as @c contended_k
  *  or @c success_k - and every settled payload must be structurally sane and reload
  *  into a fresh index whose recall holds. Inserters keep trickling spare rows until
@@ -3790,7 +3790,7 @@ std::size_t test_dense_save_race(make_index_type_ const& make_index, u64_t seed)
 
 #pragma region Readers
 
-/** On a quiesced graph the @c immutable_k search arm reproduces the concurrent arm
+/** On a quiesced graph the @c immutable_k search mode reproduces the concurrent mode
  *  bit for bit - fresh identically-seeded contexts, so the landmark draws align - at
  *  the default expansion and at an explicit one. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
@@ -3808,7 +3808,7 @@ std::size_t dense_expect_immutable_parity(make_index_type_ const& make_index, al
     auto novel_queries = make_vectors<scalar_t>(novel_queries_count, dimensions,
                                                 stream_key(seed, "immutable_parity", 1));
 
-    auto compare_arms = [&](auto query, std::size_t expansion_factor) noexcept {
+    auto compare_modes = [&](auto query, std::size_t expansion_factor) noexcept {
         typename index_type_::traversal_context_t concurrent_context {{}}, immutable_context {{}};
         typename index_type_::search_config_t concurrent_config {};
         concurrent_config.expansion_factor = static_cast<decltype(concurrent_config.expansion_factor)>( //
@@ -3826,9 +3826,9 @@ std::size_t dense_expect_immutable_parity(make_index_type_ const& make_index, al
     };
     for (std::size_t expansion_factor : {std::size_t {0}, std::size_t {64}}) {
         for (std::size_t sample = 0; sample != stored_queries_count; ++sample)
-            compare_arms(vectors.view().row((sample * 31) % nodes_count).as_vector(), expansion_factor);
+            compare_modes(vectors.view().row((sample * 31) % nodes_count).as_vector(), expansion_factor);
         for (std::size_t sample = 0; sample != novel_queries_count; ++sample)
-            compare_arms(novel_queries.view().row(sample).as_vector(), expansion_factor);
+            compare_modes(novel_queries.view().row(sample).as_vector(), expansion_factor);
     }
     return failures;
 }
@@ -3844,7 +3844,7 @@ std::size_t test_dense_immutable_parity(make_index_type_ const& make_index, u64_
 /** The external reader's cursor, exercised across chunk seams: full-prefix parity
  *  of IDs & vector bytes, follow semantics on the staged row, refresh stickiness -
  *  past the end stays past the end - a thread racing live inserters, and the immutable
- *  arm agreeing with the concurrent one on the settled graph. */
+ *  mode agreeing with the concurrent one on the settled graph. */
 template <typename index_type_, typename concurrent_cursor_type_, typename immutable_cursor_type_,
           typename make_index_type_>
 std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
@@ -3948,7 +3948,7 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
     failures += expect_eq(static_cast<std::size_t>(parked_cursor.id()), index.size());
     failures += expect_eq(parked_cursor.seek(0), status_t::success_k);
 
-    // The immutable arm sweeps the settled graph to the same count & the same rows.
+    // The immutable mode sweeps the settled graph to the same count & the same rows.
     immutable_cursor_type_ settled_cursor {index};
     failures += expect_eq(settled_cursor.reserve(counting_allocator<byte_t> {ledger}), status_t::success_k);
     failures += expect_eq(settled_cursor.seek(0), status_t::success_k);

@@ -12,7 +12,7 @@
  *
  *  Plain C++ needing no ROCm SDK: the few runtime types, constants and prototypes USearch calls are
  *  spelled here, copied from HIP's stable ABI, so any host compiler builds it. The warp policy the
- *  shared walk code is written against lives beside the kits in @c vram_amd_metric.hip.
+ *  shared walk code is written against lives in its device twin, @c vram_amd_device.hip.
  */
 #pragma once
 
@@ -24,6 +24,8 @@
 #include <span>        // `std::span` - the device list an executor opens over, a code object's bytes
 #include <type_traits> // `std::is_trivially_copyable_v` - a launch's arguments travel as bytes
 #include <utility>     // `std::move`, `std::exchange`
+
+#include <numkong/capabilities.h> // `nk_capability_t` - the ceilings the classes grant
 
 #include <forkunion/topology.hpp> // `fu::volume_ram` - the managed storage's host-memory budget
 #include <forkunion/types.hpp>    // `fu::round_up_to_multiple`, `fu::spin_mutex_t` - the hold
@@ -264,7 +266,7 @@ inline int hip_device_of(void const* pointer) noexcept {
 /** The class whose kernels run on an AMD GPU of @c gfx processor version @p major. @p minor: 9.4
  *  is MI300's @c gfx942, 9.5 is MI350's @c gfx950, and 12.5 is MI400's @c gfx1250 and @c gfx1251;
  *  any other has no code object to load. */
-constexpr gpu_class_t hip_gpu_class_of(int major, int minor) noexcept {
+constexpr gpu_class_t amd_class_of(int major, int minor) noexcept {
     if (major == 9 && minor == 4) return gpu_class_t::amd_cdna3_k;
     if (major == 9 && minor == 5) return gpu_class_t::amd_cdna4_k;
     if (major == 12 && minor == 5) return gpu_class_t::amd_cdna5_k;
@@ -275,6 +277,23 @@ constexpr gpu_class_t hip_gpu_class_of(int major, int minor) noexcept {
 constexpr u32_t hip_wave_lanes(gpu_class_t gpu_class) noexcept {
     return gpu_class == gpu_class_t::amd_cdna5_k ? 32u : 64u;
 }
+
+/** The AMD class a capability ceiling names. */
+constexpr gpu_class_t amd_class_of(nk_capability_t capability) noexcept {
+    return capability & nk_cap_cdna5_k   ? gpu_class_t::amd_cdna5_k
+           : capability & nk_cap_cdna4_k ? gpu_class_t::amd_cdna4_k
+                                         : gpu_class_t::amd_cdna3_k;
+}
+
+/** The ceiling a class's kits are chosen under, as @c numkong_capabilities_of grants it. */
+constexpr nk_capability_t amd_capabilities_of(gpu_class_t gpu_class) noexcept {
+    nk_capability_t const cdna3 = nk_cap_rocm_k | nk_cap_cdna3_k, cdna4 = cdna3 | nk_cap_cdna4_k;
+    return gpu_class == gpu_class_t::amd_cdna5_k   ? cdna4 | nk_cap_cdna5_k
+           : gpu_class == gpu_class_t::amd_cdna4_k ? cdna4
+                                                   : cdna3;
+}
+
+inline constexpr std::size_t amd_kernel_name_capacity_k = 160;
 
 /** One AMD GPU's hardware specification - the facts runtime dispatch consults; hardware only, never
  *  derived policy. */
@@ -311,7 +330,7 @@ struct hip_device_specs_t {
             return {{ordinal}, status_t::device_error_k};
         specs.multiprocessor_count = static_cast<u32_t>(multiprocessors);
         specs.shared_memory_per_block_bytes = static_cast<std::size_t>(shared_memory_per_block);
-        specs.gpu_class = hip_gpu_class_of(major, minor);
+        specs.gpu_class = amd_class_of(major, minor);
         return {specs, status_t::success_k};
     }
 };
@@ -805,10 +824,10 @@ struct hip_event_t {
     hip_event_handle_t handle_ = nullptr;
 };
 
-/** Device memory that one call at a time rewinds and refills, on one AMD device: the AMD arm of
- *  @c gpu_arena_t, where the C layer lands a VRAM call's outputs. It grows, uploads and frees in
- *  the order of the first stream of the executor that made it, so it never waits on the device
- *  until @ref drain, and must die before that executor. */
+/** Device memory that one call at a time rewinds and refills, on one AMD device: the AMD
+ *  alternative of @c gpu_arena_t, where the C layer lands a VRAM call's outputs. It grows, uploads
+ *  and frees in the order of the first stream of the executor that made it, so it never waits on
+ *  the device until @ref drain, and must die before that executor. */
 struct hip_device_arena_t {
 
     /** Rides the executor's @p stream on the device it names, and drains through its event; a
@@ -973,6 +992,13 @@ struct hip_executor_t {
     /** The HIP ordinal stream @p index drives - what a caller pairs its shards against. */
     int device(std::size_t index) const noexcept { return streams_[index].device; }
 
+    /** The first stream on @p device, or null when the executor drives none there. */
+    stream_t* stream_on(int device) noexcept {
+        for (stream_t& opened : streams_)
+            if (opened.device == device) return &opened;
+        return nullptr;
+    }
+
     /** Streams this executor drives, one per device. */
     std::size_t size() const noexcept { return streams_.size(); }
 
@@ -1059,5 +1085,241 @@ static_assert(hip_reservable_allocator<hip_managed_allocator<byte_t>>);
 static_assert(hip_allocator<hip_device_allocator_t>);
 static_assert(hip_allocator<hip_arena_allocator_t>);
 static_assert(hip_allocator<hip_pinned_allocator_t>);
+
+/** One stream's device-side scratch for driving an AMD index: the traversal arena, the batch
+ *  staging, the telemetry counters and the attend miss word, riding the stream its allocator names
+ *  and never opening one. Two contexts on one index share only the storage and the published
+ *  counter, never scratch. Callers observe it through @c results, @ref spent and @ref missed, its
+ *  scratch being the index's verbs' alone. */
+template <hip_allocator allocator_type_ = hip_device_allocator_t>
+struct hip_traversal_context {
+    using allocator_t = allocator_type_;
+
+    /** The single-query verb's landing, grown to the walk's breadth in pinned pages: the ascending
+     *  matches, then, past them, the IDs and distances the device copies back. */
+    struct results_t {
+        growing_buffer<scored_node_t, hip_pinned_allocator_t> entries_ {hip_pinned_allocator_t {}};
+        std::size_t count_ = 0;
+
+        scored_node_t* data() noexcept { return entries_.data(); }
+        scored_node_t const* data() const noexcept { return entries_.data(); }
+        scored_node_t& operator[](std::size_t rank) noexcept { return entries_[rank]; }
+        scored_node_t const& operator[](std::size_t rank) const noexcept { return entries_[rank]; }
+        std::size_t size() const noexcept { return count_; }
+    };
+
+    results_t results;
+
+    /** Binds this context to @p allocator's stream and device, selecting that device first, since
+     *  the event is born on the current device, allocates only the fixed-size counters, and takes
+     *  their host twins from the stream's pinned landings; sized buffers wait for a verb. */
+    hip_traversal_context(allocator_t allocator = {}) noexcept
+        : allocator_ {(hip_set_device(allocator.device()), allocator)}, //
+          telemetry_ {hip_make_unique(telemetry_allocator_t {allocator_}, 1)},
+          assigned_rows_ {hip_make_unique(counter_allocator_t {allocator_}, 1)},
+          missed_ {hip_make_unique(counter_allocator_t {allocator_}, 1)},
+          host_counters_ {take_counters_(allocator_.landings())},
+          arena_ {nullptr, hip_deleter<allocator_t> {allocator_, 0}},
+          staging_ {nullptr, hip_deleter<allocator_t> {allocator_, 0}} {
+        if (telemetry_) hip_api().fill_async(telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream());
+        if (missed_) hip_api().fill_async(missed_.get(), 0, sizeof(u32_t), stream());
+    }
+
+    hip_traversal_context(hip_traversal_context const&) = delete;
+    hip_traversal_context& operator=(hip_traversal_context const&) = delete;
+
+    /** Every owned resource frees in stream order, so a move is a member-wise steal and destruction
+     *  needs no drain. */
+    hip_traversal_context(hip_traversal_context&&) noexcept = default;
+    ~hip_traversal_context() noexcept = default;
+
+    hip_stream_handle_t stream() const noexcept { return allocator_.stream(); }
+    int device() const noexcept { return allocator_.device(); }
+
+    /** Whether this context can walk at all: every device-side word and its host twin claimed, and
+     *  its event born. */
+    explicit operator bool() const noexcept {
+        return telemetry_ && assigned_rows_ && missed_ && host_counters_ && event_;
+    }
+
+    /** Waits for every transfer and launch queued on this context's stream - one stream's
+     *  completion, the executor's @c drain being the fleet's - sleeping on the context's event
+     *  instead of spinning a core. Selects the context's device first, since an event records only
+     *  on its own device. */
+    status_t drain() noexcept {
+        if (hip_set_device(device()) != hip_success_k) return status_t::device_error_k;
+        if (status_t const recorded = record(); failed(recorded)) return recorded;
+        return event_.drain();
+    }
+
+    /** Marks everything queued on this context's stream so far as the submission @ref landed
+     *  polls, behind the copies of the counters @ref spent and @ref missed read; the context's
+     *  device must be current. */
+    status_t record() noexcept {
+        hip_api_t const& runtime = hip_api();
+        if (!host_counters_ ||
+            runtime.copy_async(&host_counters_->telemetry, telemetry_.get(), sizeof(vram_telemetry_block_t),
+                               hip_copy_device_to_host_k, stream()) != hip_success_k ||
+            runtime.copy_async(&host_counters_->missed, missed_.get(), sizeof(u32_t), hip_copy_device_to_host_k,
+                               stream()) != hip_success_k)
+            return status_t::device_error_k;
+        return event_.record(stream());
+    }
+
+    /** Polls whether the submission @ref record marked finished - @c success_k once it has,
+     *  @c deferred_k while any of it runs - without blocking, so one host thread awaits whichever
+     *  of several streams lands first. */
+    status_t landed() const noexcept { return event_.landed(); }
+
+    /** Queues on this context's stream a wait for everything @p other marked last, so work here
+     *  follows work there without the host waiting; the two may sit on different devices. */
+    status_t follow(hip_traversal_context const& other) noexcept {
+        return hip_api().stream_wait_event(stream(), other.event_, 0) == hip_success_k ? status_t::success_k
+                                                                                       : status_t::device_error_k;
+    }
+
+    /** The telemetry of the last submission, zeroed when it was queued; read once it landed. */
+    vram_telemetry_block_t spent() const noexcept {
+        return host_counters_ ? host_counters_->telemetry : vram_telemetry_block_t {};
+    }
+
+    /** Whether the last attend met a node its value lookup had no row for, which refuses it; read
+     *  once it landed. */
+    bool missed() const noexcept { return host_counters_ && host_counters_->missed != 0; }
+
+    using telemetry_allocator_t = typename allocator_t::template rebind<vram_telemetry_block_t>::other;
+    using counter_allocator_t = typename allocator_t::template rebind<u32_t>::other;
+    using bytes_ptr_t = hip_unique_ptr<byte_t, allocator_t>;
+
+    /** The host's twins of the device counters, landed behind each @ref record. */
+    struct host_counters_t {
+        vram_telemetry_block_t telemetry;
+        u32_t missed;
+    };
+    static_assert(sizeof(host_counters_t) <= hip_landings_t::slot_bytes_k &&
+                      alignof(host_counters_t) <= hip_landings_t::slot_bytes_k,
+                  "A context's counters fit one landing slot");
+
+    /** Gives a context's counters back to the landings of the stream they came from. */
+    struct counters_return_t {
+        hip_landings_t* landings = nullptr;
+        void operator()(host_counters_t* counters) const noexcept { landings->give_back(counters); }
+    };
+    using host_counters_ptr_t = std::unique_ptr<host_counters_t, counters_return_t>;
+
+    /** Zeroed counters in a slot of @p landings, or null when there are none or it cannot pin. */
+    static host_counters_ptr_t take_counters_(hip_landings_t* landings) noexcept {
+        void* const slot = landings ? landings->take() : nullptr;
+        return {slot ? new (slot) host_counters_t {} : nullptr, counters_return_t {landings}};
+    }
+
+    allocator_t allocator_;
+
+    /** Monotone epoch floor over the arena's visited slots, so the arena is zeroed only when
+     *  freshly allocated or when the 32-bit epoch space wraps, never per launch. */
+    u64_t epoch_floor_ = 0;
+
+    /** The device-side counters of the last submission, zeroed when it was queued. */
+    hip_unique_ptr<vram_telemetry_block_t, telemetry_allocator_t> telemetry_;
+
+    /** Rows of the current launch's batch warps have assigned themselves so far: a builder's rows,
+     *  or a walk's queries. */
+    hip_unique_ptr<u32_t, counter_allocator_t> assigned_rows_;
+
+    /** Raised by the last attend's walks at a node their value lookup had no row for, zeroed when
+     *  it was queued. */
+    hip_unique_ptr<u32_t, counter_allocator_t> missed_;
+
+    /** Borrowed from the stream's page-locked landings, so the copies @ref record queues into it
+     *  never wait on the device, and no context pins memory of its own. */
+    host_counters_ptr_t host_counters_;
+    bytes_ptr_t arena_;
+    std::size_t arena_bytes_ = 0;
+    bytes_ptr_t staging_;
+    std::size_t staging_bytes_ = 0;
+
+    /** The point on the stream @ref drain and @ref landed await. */
+    hip_event_t event_;
+
+    /** Grow-only traversal arena for @p bytes: the exact visited sets and spill tails of every
+     *  resident warp, and a builder's scratch when shared memory cannot seat it, kept across
+     *  calls. @return The base, or null on exhaustion. */
+    byte_t* ensure_arena(std::size_t bytes) noexcept { return ensure_(arena_, arena_bytes_, bytes); }
+
+    /** Takes @p count epochs off the floor for one launch's walks, zeroing the arena first when it
+     *  grew past the @p before bytes it held or the 32-bit epoch space would wrap, never per
+     *  launch; a refused zeroing spends the arena, so a retry zeroes it again. @return The first
+     *  epoch. */
+    expected<u32_t> take_epochs(std::size_t count, std::size_t before) noexcept {
+        if (arena_bytes_ != before || epoch_floor_ + count > 0xFFFFFFFEull) {
+            if (hip_api().fill_async(arena_.get(), 0, arena_bytes_, stream()) != hip_success_k) {
+                arena_bytes_ = 0;
+                return {0, status_t::device_error_k};
+            }
+            epoch_floor_ = 0;
+        }
+        u32_t const first = static_cast<u32_t>(epoch_floor_);
+        epoch_floor_ += count;
+        return {first, status_t::success_k};
+    }
+
+    /** Grow-only staging for one batch's device transport: an insert's padded vectors, or a
+     *  search's queries and result landing. */
+    byte_t* ensure_staging(std::size_t bytes) noexcept { return ensure_(staging_, staging_bytes_, bytes); }
+
+    /** Grows @p buffer to @p bytes when @p capacity falls short; @return the base, or null. */
+    byte_t* ensure_(bytes_ptr_t& buffer, std::size_t& capacity, std::size_t bytes) noexcept {
+        if (bytes <= capacity) return buffer.get();
+        // The deleter already carries this context's allocator, so only the run and its count
+        // change.
+        buffer.reset(allocator_.allocate(bytes));
+        buffer.get_deleter().count = bytes;
+        capacity = buffer ? bytes : 0;
+        return buffer.get();
+    }
+};
+
+/** The AMD types and HIP calls a vendor-neutral VRAM index declares itself with and queues
+ *  through; every copy tells its direction apart by unified addressing. */
+struct hip_vendor_t {
+    using stream_handle_t = hip_stream_handle_t;
+    using event_t = hip_event_t;
+    using landings_t = hip_landings_t;
+    using pinned_allocator_t = hip_pinned_allocator_t;
+    using device_specs_t = hip_device_specs_t;
+    using address_space_t = hip_address_space_t;
+    using executor_t = hip_executor_t;
+
+    template <typename allocator_type_>
+    using traversal_context = hip_traversal_context<allocator_type_>;
+
+    /** Makes HIP ordinal @p ordinal current on the calling thread. */
+    static status_t select(int ordinal) noexcept { return verdict_(hip_set_device(ordinal)); }
+
+    static status_t copy(void* to, void const* from, std::size_t bytes, stream_handle_t stream) noexcept {
+        return verdict_(hip_api().copy_async(to, from, bytes, hip_copy_default_k, stream));
+    }
+    static status_t copy_2d(void* to, std::size_t to_pitch, void const* from, std::size_t from_pitch, std::size_t width,
+                            std::size_t height, stream_handle_t stream) noexcept {
+        return verdict_(
+            hip_api().copy_2d_async(to, to_pitch, from, from_pitch, width, height, hip_copy_default_k, stream));
+    }
+    static status_t fill(void* to, u8_t value, std::size_t bytes, stream_handle_t stream) noexcept {
+        return verdict_(hip_api().fill_async(to, value, bytes, stream));
+    }
+    static status_t fill_words(void* to, u32_t value, std::size_t count, stream_handle_t stream) noexcept {
+        return verdict_(hip_api().fill_words_async(to, static_cast<int>(value), count, stream));
+    }
+
+    /** Queues on @p stream a wait for everything @p event marked last. */
+    static status_t follow(stream_handle_t stream, event_t const& event) noexcept {
+        return verdict_(hip_api().stream_wait_event(stream, event, 0));
+    }
+
+  private:
+    static status_t verdict_(hip_result_t result) noexcept {
+        return result == hip_success_k ? status_t::success_k : status_t::device_error_k;
+    }
+};
 
 } // namespace unum::usearch::utilities

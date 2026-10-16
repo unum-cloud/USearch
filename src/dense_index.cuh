@@ -6,11 +6,11 @@
  *      owning the chosen one, and every exported entry point as one visit apiece.
  *
  *  Compiled once, as @c dense_index.cpp by the host compiler, with @c USEARCH_ARCH_CUDA_,
- *  @c USEARCH_ARCH_ROCM_ and @c USEARCH_ARCH_METAL_ deciding which vendors' VRAM arms join the
+ *  @c USEARCH_ARCH_ROCM_ and @c USEARCH_ARCH_METAL_ deciding which vendors' VRAM variants join the
  *  variant and @c USEARCH_DENSE_DTYPES how many storage dtypes every class contributes to it.
- *  Arms are ordered newest-capability-first inside each dtype cell, since a machine reporting
+ *  Variants are ordered newest-capability-first inside each dtype cell, since a machine reporting
  *  Ice Lake also reports Haswell and Skylake; the serial floor is last and unconditional. The
- *  arms' bodies compile in the per-class units, never here.
+ *  variants' bodies compile in the per-class units, never here.
  */
 #pragma once
 
@@ -48,9 +48,9 @@
  *      compiled multi-index alternatives, plus the geometry & capability metadata no shard
  *      answers.
  *
- *  Arms exist per wired @c (dtype,capability) cell - those whose NumKong kernel kits are
- *  adapted - never the full cross product: an unwired cell would not compile, and advertising
- *  it would only move the failure from the build to the caller. Each arm keeps its metric as a
+ *  Variants exist per wired @c (dtype,capability) cell - those whose NumKong kernel kits are
+ *  adapted - never the full cross product: an unwired cell would not compile, and advertising it
+ *  would only move the failure from the build to the caller. Each variant keeps its metric as a
  *  runtime field, since only the distance epilogue reads it. The VRAM siblings join per GPU vendor
  *  the build carries, and the read-only NVMe siblings wherever a CPU class picks a kit of its own.
  */
@@ -58,7 +58,7 @@ struct usearch_dense_index_handle_t {
 
     using dense_variant_t = std::variant<
 #if USEARCH_TARGET_INTEL_HASWELL
-        // intel_haswell over serial by haswell: every dtype, 11 arms
+        // intel_haswell over serial by haswell: every dtype, 11 variants
         ram_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>, //
@@ -94,7 +94,7 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_TARGET_INTEL_SIERRA
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
         // intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd:
-        // bf16 u1 e4m3 f16 e5m2 i4 u4 e3m2, 8 arms
+        // bf16 u1 e4m3 f16 e5m2 i4 u4 e3m2, 8 variants
         ram_indexes<nk_bf16_k, cpu_class_t::intel_sierra_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::intel_sierra_k>, //
@@ -119,7 +119,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
     // intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd, alder, sierra:
-    // i8 u8 e2m3, 3 arms
+    // i8 u8 e2m3, 3 variants
 #if USEARCH_DENSE_DTYPES >= 3
         ram_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>, //
 #endif
@@ -131,7 +131,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_TARGET_INTEL_SIERRA
 #if USEARCH_TARGET_INTEL_SKYLAKE
-        // intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms
+        // intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 variants
         ram_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
         ram_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>, //
@@ -150,7 +150,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_TARGET_INTEL_SKYLAKE
 #if USEARCH_TARGET_INTEL_ICELAKE
-    // intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms
+    // intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 variants
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>, //
 #endif
@@ -168,7 +168,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_TARGET_INTEL_ICELAKE
 #if USEARCH_TARGET_AMD_GENOA
-        // amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms
+        // amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 variants
         ram_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
         ram_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>, //
@@ -179,7 +179,7 @@ struct usearch_dense_index_handle_t {
 #endif // USEARCH_TARGET_AMD_GENOA
 #if USEARCH_TARGET_INTEL_SAPPHIRE
 #if NUMKONG_TARGET_SAPPHIREAMX
-        // intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms
+        // intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 variants
         ram_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>, //
 #if USEARCH_DENSE_DTYPES >= 3
         ram_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>, //
@@ -202,7 +202,7 @@ struct usearch_dense_index_handle_t {
 #endif // NUMKONG_TARGET_SAPPHIREAMX
 #endif // USEARCH_TARGET_INTEL_SAPPHIRE
 #if USEARCH_TARGET_INTEL_GRANITE
-    // intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms
+    // intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 variants
 #if USEARCH_DENSE_DTYPES >= 5
         ram_indexes<nk_f16_k, cpu_class_t::intel_granite_k>, //
 #endif
@@ -213,7 +213,7 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_TARGET_INTEL_DIAMOND
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
         // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd:
-        // bf16 u1 f16 i4 u4 e3m2, 6 arms
+        // bf16 u1 f16 i4 u4 e3m2, 6 variants
         ram_indexes<nk_bf16_k, cpu_class_t::intel_diamond_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::intel_diamond_k>, //
@@ -232,7 +232,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
-    // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, diamond: e4m3 e5m2, 2 arms
+    // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, diamond: e4m3 e5m2, 2 variants
 #if USEARCH_DENSE_DTYPES >= 4
         ram_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>, //
 #endif
@@ -242,7 +242,7 @@ struct usearch_dense_index_handle_t {
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
     // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, alder, sierra:
-    // i8 u8 e2m3, 3 arms
+    // i8 u8 e2m3, 3 variants
 #if USEARCH_DENSE_DTYPES >= 3
         ram_indexes<nk_i8_k, cpu_class_t::intel_diamond_k>, //
 #endif
@@ -256,7 +256,7 @@ struct usearch_dense_index_handle_t {
        // NUMKONG_TARGET_SIERRA
 #endif // USEARCH_TARGET_INTEL_DIAMOND
 #if USEARCH_TARGET_AWS_G2
-        // aws_g2 over serial by neon: bf16 u1 f16, 3 arms
+        // aws_g2 over serial by neon: bf16 u1 f16, 3 variants
         ram_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::aws_g2_k>, //
@@ -267,11 +267,11 @@ struct usearch_dense_index_handle_t {
 #endif // USEARCH_TARGET_AWS_G2
 #if USEARCH_TARGET_APPLE_M2
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONBFDOT
-        // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 1 arm
+        // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 1 variant
         ram_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
-    // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonfhm: e4m3 f16 e5m2, 3 arms
+    // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonfhm: e4m3 f16 e5m2, 3 variants
 #if USEARCH_DENSE_DTYPES >= 4
         ram_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>, //
 #endif
@@ -283,7 +283,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
-    // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 arms
+    // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 variants
 #if USEARCH_DENSE_DTYPES >= 3
         ram_indexes<nk_i8_k, cpu_class_t::apple_m2_k>, //
 #endif
@@ -304,7 +304,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
-    // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc: u1, 1 arm
+    // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc: u1, 1 variant
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::apple_m2_k>, //
 #endif
@@ -312,7 +312,7 @@ struct usearch_dense_index_handle_t {
 #endif // USEARCH_TARGET_APPLE_M2
 #if USEARCH_TARGET_APPLE_M4
 #if NUMKONG_TARGET_SME
-        // apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms
+        // apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants
         ram_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>, //
 #if USEARCH_DENSE_DTYPES >= 3
         ram_indexes<nk_i8_k, cpu_class_t::apple_m4_k>, //
@@ -343,14 +343,14 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // NUMKONG_TARGET_SME
 #if NUMKONG_TARGET_SMEBI32
-    // apple_m4 over apple_m2 by smebi32: u1, 1 arm
+    // apple_m4 over apple_m2 by smebi32: u1, 1 variant
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::apple_m4_k>, //
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
 #endif // USEARCH_TARGET_APPLE_M4
 #if USEARCH_TARGET_AWS_G5
-        // aws_g5 over apple_m2 by arm64_wfet: every dtype, 11 arms
+        // aws_g5 over apple_m2 by arm64_wfet: every dtype, 11 variants
         ram_indexes<nk_bf16_k, cpu_class_t::aws_g5_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::aws_g5_k>, //
@@ -384,7 +384,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_TARGET_AWS_G5
 #if USEARCH_TARGET_NVIDIA_VERA
-    // nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms
+    // nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 variants
 #if USEARCH_DENSE_DTYPES >= 4
         ram_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>, //
 #endif
@@ -400,7 +400,7 @@ struct usearch_dense_index_handle_t {
 #endif // USEARCH_TARGET_NVIDIA_VERA
 #if USEARCH_TARGET_ALIBABA_C930
 #if FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
-        // alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 11 arms
+        // alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 11 variants
         ram_indexes<nk_bf16_k, cpu_class_t::alibaba_c930_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::alibaba_c930_k>, //
@@ -435,7 +435,7 @@ struct usearch_dense_index_handle_t {
 #endif // FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
 #endif // USEARCH_TARGET_ALIBABA_C930
 #if USEARCH_TARGET_WASM32_V128
-        // wasm32_v128 over serial by v128: bf16 u1 i8 u8, 4 arms
+        // wasm32_v128 over serial by v128: bf16 u1 i8 u8, 4 variants
         ram_indexes<nk_bf16_k, cpu_class_t::wasm32_v128_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         ram_indexes<nk_u1_k, cpu_class_t::wasm32_v128_k>, //
@@ -449,7 +449,7 @@ struct usearch_dense_index_handle_t {
 #endif // USEARCH_TARGET_WASM32_V128
 #if USEARCH_TARGET_WASM64_EXTENDED
         // wasm64_extended over wasm32_v128 by v128relaxed:
-        // bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms
+        // bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants
         ram_indexes<nk_bf16_k, cpu_class_t::wasm64_extended_k>, //
 #if USEARCH_DENSE_DTYPES >= 3
         ram_indexes<nk_i8_k, cpu_class_t::wasm64_extended_k>, //
@@ -480,7 +480,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_TARGET_WASM64_EXTENDED
 #if USEARCH_TARGET_INTEL_HASWELL
-        // NVMe intel_haswell over serial by haswell: every dtype, 11 arms
+        // NVMe intel_haswell over serial by haswell: every dtype, 11 variants
         nvme_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         nvme_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>, //
@@ -515,7 +515,7 @@ struct usearch_dense_index_handle_t {
 #endif // USEARCH_TARGET_INTEL_HASWELL
 #if USEARCH_TARGET_INTEL_SIERRA
 #if NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-    // NVMe intel_sierra over intel_haswell by alder, sierra: i8 u8 e2m3, 3 arms
+    // NVMe intel_sierra over intel_haswell by alder, sierra: i8 u8 e2m3, 3 variants
 #if USEARCH_DENSE_DTYPES >= 3
         nvme_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>, //
 #endif
@@ -528,7 +528,8 @@ struct usearch_dense_index_handle_t {
 #endif // NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 #endif // USEARCH_TARGET_INTEL_SIERRA
 #if USEARCH_TARGET_INTEL_SKYLAKE
-        // NVMe intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms
+        // NVMe intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3,
+        // 6 variants
         nvme_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
         nvme_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>, //
@@ -547,7 +548,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_TARGET_INTEL_SKYLAKE
 #if USEARCH_TARGET_INTEL_ICELAKE
-    // NVMe intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms
+    // NVMe intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 variants
 #if USEARCH_DENSE_DTYPES >= 2
         nvme_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>, //
 #endif
@@ -565,7 +566,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_TARGET_INTEL_ICELAKE
 #if USEARCH_TARGET_AMD_GENOA
-        // NVMe amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms
+        // NVMe amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 variants
         nvme_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
         nvme_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>, //
@@ -576,7 +577,8 @@ struct usearch_dense_index_handle_t {
 #endif // USEARCH_TARGET_AMD_GENOA
 #if USEARCH_TARGET_INTEL_SAPPHIRE
 #if NUMKONG_TARGET_SAPPHIREAMX
-        // NVMe intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms
+        // NVMe intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3,
+        // 7 variants
         nvme_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>, //
 #if USEARCH_DENSE_DTYPES >= 3
         nvme_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>, //
@@ -599,7 +601,7 @@ struct usearch_dense_index_handle_t {
 #endif // NUMKONG_TARGET_SAPPHIREAMX
 #endif // USEARCH_TARGET_INTEL_SAPPHIRE
 #if USEARCH_TARGET_INTEL_GRANITE
-    // NVMe intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms
+    // NVMe intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 variants
 #if USEARCH_DENSE_DTYPES >= 5
         nvme_indexes<nk_f16_k, cpu_class_t::intel_granite_k>, //
 #endif
@@ -609,7 +611,7 @@ struct usearch_dense_index_handle_t {
 #endif // USEARCH_TARGET_INTEL_GRANITE
 #if USEARCH_TARGET_INTEL_DIAMOND
 #if NUMKONG_TARGET_DIAMOND
-    // NVMe intel_diamond over intel_granite by diamond: e4m3 e5m2, 2 arms
+    // NVMe intel_diamond over intel_granite by diamond: e4m3 e5m2, 2 variants
 #if USEARCH_DENSE_DTYPES >= 4
         nvme_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>, //
 #endif
@@ -619,7 +621,7 @@ struct usearch_dense_index_handle_t {
 #endif // NUMKONG_TARGET_DIAMOND
 #endif // USEARCH_TARGET_INTEL_DIAMOND
 #if USEARCH_TARGET_AWS_G2
-        // NVMe aws_g2 over serial by neon: bf16 u1 f16, 3 arms
+        // NVMe aws_g2 over serial by neon: bf16 u1 f16, 3 variants
         nvme_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         nvme_indexes<nk_u1_k, cpu_class_t::aws_g2_k>, //
@@ -630,11 +632,11 @@ struct usearch_dense_index_handle_t {
 #endif // USEARCH_TARGET_AWS_G2
 #if USEARCH_TARGET_APPLE_M2
 #if NUMKONG_TARGET_NEONBFDOT
-        // NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 1 arm
+        // NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 1 variant
         nvme_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if NUMKONG_TARGET_NEONFHM
-    // NVMe apple_m2 over aws_g2 by neonfhm: e4m3 f16 e5m2, 3 arms
+    // NVMe apple_m2 over aws_g2 by neonfhm: e4m3 f16 e5m2, 3 variants
 #if USEARCH_DENSE_DTYPES >= 4
         nvme_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>, //
 #endif
@@ -646,7 +648,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // NUMKONG_TARGET_NEONFHM
 #if NUMKONG_TARGET_NEONSDOT
-    // NVMe apple_m2 over aws_g2 by neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 arms
+    // NVMe apple_m2 over aws_g2 by neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 variants
 #if USEARCH_DENSE_DTYPES >= 3
         nvme_indexes<nk_i8_k, cpu_class_t::apple_m2_k>, //
 #endif
@@ -669,7 +671,7 @@ struct usearch_dense_index_handle_t {
 #endif // USEARCH_TARGET_APPLE_M2
 #if USEARCH_TARGET_APPLE_M4
 #if NUMKONG_TARGET_SME
-        // NVMe apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms
+        // NVMe apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants
         nvme_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>, //
 #if USEARCH_DENSE_DTYPES >= 3
         nvme_indexes<nk_i8_k, cpu_class_t::apple_m4_k>, //
@@ -700,14 +702,14 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // NUMKONG_TARGET_SME
 #if NUMKONG_TARGET_SMEBI32
-    // NVMe apple_m4 over apple_m2 by smebi32: u1, 1 arm
+    // NVMe apple_m4 over apple_m2 by smebi32: u1, 1 variant
 #if USEARCH_DENSE_DTYPES >= 2
         nvme_indexes<nk_u1_k, cpu_class_t::apple_m4_k>, //
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
 #endif // USEARCH_TARGET_APPLE_M4
 #if USEARCH_TARGET_NVIDIA_VERA
-    // NVMe nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms
+    // NVMe nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 variants
 #if USEARCH_DENSE_DTYPES >= 4
         nvme_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>, //
 #endif
@@ -722,7 +724,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_TARGET_NVIDIA_VERA
 #if USEARCH_ARCH_CUDA_
-        // nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 arms
+        // nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 variants
         vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>, //
@@ -754,7 +756,7 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
-        // nvidia_blackwell over nvidia_ampere by "100f": every cell, 11 arms
+        // nvidia_blackwell over nvidia_ampere by "100f": every cell, 11 variants
         vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwell_k>, //
@@ -786,7 +788,7 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
-        // nvidia_hopper over nvidia_ampere by "90a": every cell, 11 arms
+        // nvidia_hopper over nvidia_ampere by "90a": every cell, 11 variants
         vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_hopper_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_hopper_k>, //
@@ -818,7 +820,7 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
-        // nvidia_ada over nvidia_ampere by "89": every cell, 11 arms
+        // nvidia_ada over nvidia_ampere by "89": every cell, 11 variants
         vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ada_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ada_k>, //
@@ -851,7 +853,7 @@ struct usearch_dense_index_handle_t {
         vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ada_k>, //
 #endif
         // nvidia_ampere, the floor by "80", its PTX serving every GPU without a class:
-        // every cell, 11 arms
+        // every cell, 11 variants
         vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ampere_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ampere_k>, //
@@ -885,7 +887,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_ARCH_CUDA_
 #if USEARCH_ARCH_ROCM_
-        // amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 arms
+        // amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 variants
         vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna5_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna5_k>, //
@@ -917,7 +919,7 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna5_k>, //
 #endif
-        // amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 arms
+        // amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 variants
         vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna4_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna4_k>, //
@@ -950,7 +952,7 @@ struct usearch_dense_index_handle_t {
         vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 
-        // amd_cdna3, the AMD floor by "gfx942": every cell, 11 arms
+        // amd_cdna3, the AMD floor by "gfx942": every cell, 11 variants
         vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna3_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna3_k>, //
@@ -984,7 +986,7 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_ARCH_ROCM_
 #if USEARCH_ARCH_METAL_
-        // apple, serving every Apple class until a family's kernels differ: every cell, 11 arms
+        // apple, serving every Apple class until a family's kernels differ: every cell, 11 variants
         vram_apple_indexes<nk_bf16_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
         vram_apple_indexes<nk_u1_k>, //
@@ -1086,7 +1088,7 @@ struct usearch_dense_index_handle_t {
 
     /** The chosen backend - one alternative of the compiled grid, selected once at construction.
      *  Residency, quantization and compute tier all live in the alternative's own type. */
-    dense_variant_t variants;
+    dense_variant_t variant;
 
     /** The dimensionality the init arguments requested, consumed by the first @c reserve; once any shard
      *  froze real geometry, the variant answers and this stops mattering. */
@@ -1102,13 +1104,13 @@ struct usearch_dense_index_handle_t {
     template <typename variant_type_, typename... arguments_types_>
     explicit usearch_dense_index_handle_t(std::in_place_type_t<variant_type_> tag,
                                           arguments_types_... arguments) noexcept
-        : variants(tag, arguments...) {}
+        : variant(tag, arguments...) {}
 };
 
-/** The arms' explicit instantiation declarations: every body compiles in its class's unit, so this
- *  unit only visits. */
+/** The variants' explicit instantiation declarations: every body compiles in its class's unit, so
+ *  this unit only visits. */
 #if USEARCH_TARGET_INTEL_HASWELL
-/* intel_haswell over serial by haswell: every dtype, 11 arms */
+/* intel_haswell over serial by haswell: every dtype, 11 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>>;
@@ -1144,7 +1146,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::int
 #if USEARCH_TARGET_INTEL_SIERRA
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 /* intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd:
- * bf16 u1 e4m3 f16 e5m2 i4 u4 e3m2, 8 arms */
+ * bf16 u1 e4m3 f16 e5m2 i4 u4 e3m2, 8 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_sierra_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_sierra_k>>;
@@ -1169,7 +1171,7 @@ extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::int
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 /* intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd, alder, sierra:
- * i8 u8 e2m3, 3 arms */
+ * i8 u8 e2m3, 3 variants */
 #if USEARCH_DENSE_DTYPES >= 3
 extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>>;
 #endif
@@ -1181,7 +1183,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::int
 #endif
 #endif // USEARCH_TARGET_INTEL_SIERRA
 #if USEARCH_TARGET_INTEL_SKYLAKE
-/* intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms */
+/* intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>>;
@@ -1200,7 +1202,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::int
 #endif
 #endif // USEARCH_TARGET_INTEL_SKYLAKE
 #if USEARCH_TARGET_INTEL_ICELAKE
-/* intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms */
+/* intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 variants */
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>>;
 #endif
@@ -1218,7 +1220,7 @@ extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel
 #endif
 #endif // USEARCH_TARGET_INTEL_ICELAKE
 #if USEARCH_TARGET_AMD_GENOA
-/* amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms */
+/* amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>>;
@@ -1229,7 +1231,7 @@ extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::amd
 #endif // USEARCH_TARGET_AMD_GENOA
 #if USEARCH_TARGET_INTEL_SAPPHIRE
 #if NUMKONG_TARGET_SAPPHIREAMX
-/* intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms */
+/* intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
 #if USEARCH_DENSE_DTYPES >= 3
 extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>>;
@@ -1252,7 +1254,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::int
 #endif // NUMKONG_TARGET_SAPPHIREAMX
 #endif // USEARCH_TARGET_INTEL_SAPPHIRE
 #if USEARCH_TARGET_INTEL_GRANITE
-/* intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms */
+/* intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 variants */
 #if USEARCH_DENSE_DTYPES >= 5
 extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_granite_k>>;
 #endif
@@ -1262,7 +1264,8 @@ extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::int
 #endif // USEARCH_TARGET_INTEL_GRANITE
 #if USEARCH_TARGET_INTEL_DIAMOND
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-/* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd: bf16 u1 f16 i4 u4 e3m2, 6 arms */
+/* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd: bf16 u1 f16 i4 u4 e3m2,
+ * 6 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_diamond_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_diamond_k>>;
@@ -1281,7 +1284,7 @@ extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::int
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
-/* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, diamond: e4m3 e5m2, 2 arms */
+/* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, diamond: e4m3 e5m2, 2 variants */
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>>;
 #endif
@@ -1291,7 +1294,7 @@ extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::int
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 /* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, alder, sierra:
- * i8 u8 e2m3, 3 arms */
+ * i8 u8 e2m3, 3 variants */
 #if USEARCH_DENSE_DTYPES >= 3
 extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_diamond_k>>;
 #endif
@@ -1305,7 +1308,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::int
        // NUMKONG_TARGET_SIERRA
 #endif // USEARCH_TARGET_INTEL_DIAMOND
 #if USEARCH_TARGET_AWS_G2
-/* aws_g2 over serial by neon: bf16 u1 f16, 3 arms */
+/* aws_g2 over serial by neon: bf16 u1 f16, 3 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::aws_g2_k>>;
@@ -1316,11 +1319,11 @@ extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::aws_
 #endif // USEARCH_TARGET_AWS_G2
 #if USEARCH_TARGET_APPLE_M2
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONBFDOT
-/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 1 arm */
+/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 1 variant */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
-/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonfhm: e4m3 f16 e5m2, 3 arms */
+/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonfhm: e4m3 f16 e5m2, 3 variants */
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>>;
 #endif
@@ -1332,7 +1335,7 @@ extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::app
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
-/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 arms */
+/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 variants */
 #if USEARCH_DENSE_DTYPES >= 3
 extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::apple_m2_k>>;
 #endif
@@ -1353,7 +1356,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::app
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
-/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc: u1, 1 arm */
+/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc: u1, 1 variant */
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::apple_m2_k>>;
 #endif
@@ -1361,7 +1364,7 @@ extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::apple
 #endif // USEARCH_TARGET_APPLE_M2
 #if USEARCH_TARGET_APPLE_M4
 #if NUMKONG_TARGET_SME
-/* apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms */
+/* apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>>;
 #if USEARCH_DENSE_DTYPES >= 3
 extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::apple_m4_k>>;
@@ -1392,14 +1395,14 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::app
 #endif
 #endif // NUMKONG_TARGET_SME
 #if NUMKONG_TARGET_SMEBI32
-/* apple_m4 over apple_m2 by smebi32: u1, 1 arm */
+/* apple_m4 over apple_m2 by smebi32: u1, 1 variant */
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::apple_m4_k>>;
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
 #endif // USEARCH_TARGET_APPLE_M4
 #if USEARCH_TARGET_AWS_G5
-/* aws_g5 over apple_m2 by arm64_wfet: every dtype, 11 arms */
+/* aws_g5 over apple_m2 by arm64_wfet: every dtype, 11 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::aws_g5_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::aws_g5_k>>;
@@ -1433,7 +1436,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::aws
 #endif
 #endif // USEARCH_TARGET_AWS_G5
 #if USEARCH_TARGET_NVIDIA_VERA
-/* nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms */
+/* nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 variants */
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>>;
 #endif
@@ -1449,7 +1452,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::nvi
 #endif // USEARCH_TARGET_NVIDIA_VERA
 #if USEARCH_TARGET_ALIBABA_C930
 #if FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
-/* alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 11 arms */
+/* alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 11 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::alibaba_c930_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::alibaba_c930_k>>;
@@ -1484,7 +1487,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::ali
 #endif // FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
 #endif // USEARCH_TARGET_ALIBABA_C930
 #if USEARCH_TARGET_WASM32_V128
-/* wasm32_v128 over serial by v128: bf16 u1 i8 u8, 4 arms */
+/* wasm32_v128 over serial by v128: bf16 u1 i8 u8, 4 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::wasm32_v128_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::wasm32_v128_k>>;
@@ -1498,7 +1501,7 @@ extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::wasm3
 #endif // USEARCH_TARGET_WASM32_V128
 #if USEARCH_TARGET_WASM64_EXTENDED
 /* wasm64_extended over wasm32_v128 by v128relaxed:
- * bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms */
+ * bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants */
 extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::wasm64_extended_k>>;
 #if USEARCH_DENSE_DTYPES >= 3
 extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::wasm64_extended_k>>;
@@ -1529,7 +1532,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::was
 #endif
 #endif // USEARCH_TARGET_WASM64_EXTENDED
 #if USEARCH_ARCH_CUDA_
-/* nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 arms */
+/* nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 variants */
 extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>>;
@@ -1561,7 +1564,7 @@ extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_clas
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
-/* nvidia_blackwell over nvidia_ampere by "100f": every cell, 11 arms */
+/* nvidia_blackwell over nvidia_ampere by "100f": every cell, 11 variants */
 extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwell_k>>;
@@ -1593,7 +1596,7 @@ extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_clas
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
-/* nvidia_hopper over nvidia_ampere by "90a": every cell, 11 arms */
+/* nvidia_hopper over nvidia_ampere by "90a": every cell, 11 variants */
 extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_hopper_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_hopper_k>>;
@@ -1625,7 +1628,7 @@ extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_clas
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
-/* nvidia_ada over nvidia_ampere by "89": every cell, 11 arms */
+/* nvidia_ada over nvidia_ampere by "89": every cell, 11 variants */
 extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ada_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ada_k>>;
@@ -1658,7 +1661,7 @@ extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_clas
 extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 /* nvidia_ampere, the floor by "80", its PTX serving every GPU without a class:
- * every cell, 11 arms */
+ * every cell, 11 variants */
 extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ampere_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ampere_k>>;
@@ -1692,7 +1695,7 @@ extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_clas
 #endif
 #endif // USEARCH_ARCH_CUDA_
 #if USEARCH_ARCH_ROCM_
-/* amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 arms */
+/* amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 variants */
 extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna5_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna5_k>>;
@@ -1724,7 +1727,7 @@ extern template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna5_k>>;
 #endif
-/* amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 arms */
+/* amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 variants */
 extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna4_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna4_k>>;
@@ -1756,7 +1759,7 @@ extern template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna4_k>>;
 #endif
-/* amd_cdna3, the AMD floor by "gfx942": every cell, 11 arms */
+/* amd_cdna3, the AMD floor by "gfx942": every cell, 11 variants */
 extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna3_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna3_k>>;
@@ -1790,7 +1793,7 @@ extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t
 #endif
 #endif // USEARCH_ARCH_ROCM_
 #if USEARCH_ARCH_METAL_
-/* apple, serving every Apple class until a family's kernels differ: every cell, 11 arms */
+/* apple, serving every Apple class until a family's kernels differ: every cell, 11 variants */
 extern template struct specialized_index<vram_apple_indexes<nk_bf16_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<vram_apple_indexes<nk_u1_k>>;
@@ -1824,7 +1827,7 @@ extern template struct specialized_index<vram_apple_indexes<nk_e2m3_k>>;
 #endif
 #endif // USEARCH_ARCH_METAL_
 #if USEARCH_TARGET_INTEL_HASWELL
-/* NVMe intel_haswell over serial by haswell: every dtype, 11 arms */
+/* NVMe intel_haswell over serial by haswell: every dtype, 11 variants */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>>;
@@ -1859,7 +1862,7 @@ extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::in
 #endif // USEARCH_TARGET_INTEL_HASWELL
 #if USEARCH_TARGET_INTEL_SIERRA
 #if NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-/* NVMe intel_sierra over intel_haswell by alder, sierra: i8 u8 e2m3, 3 arms */
+/* NVMe intel_sierra over intel_haswell by alder, sierra: i8 u8 e2m3, 3 variants */
 #if USEARCH_DENSE_DTYPES >= 3
 extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>>;
 #endif
@@ -1872,7 +1875,7 @@ extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::in
 #endif // NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 #endif // USEARCH_TARGET_INTEL_SIERRA
 #if USEARCH_TARGET_INTEL_SKYLAKE
-/* NVMe intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms */
+/* NVMe intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 variants */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>>;
@@ -1891,7 +1894,7 @@ extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::in
 #endif
 #endif // USEARCH_TARGET_INTEL_SKYLAKE
 #if USEARCH_TARGET_INTEL_ICELAKE
-/* NVMe intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms */
+/* NVMe intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 variants */
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>>;
 #endif
@@ -1909,7 +1912,7 @@ extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::inte
 #endif
 #endif // USEARCH_TARGET_INTEL_ICELAKE
 #if USEARCH_TARGET_AMD_GENOA
-/* NVMe amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms */
+/* NVMe amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 variants */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>>;
@@ -1920,7 +1923,7 @@ extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::am
 #endif // USEARCH_TARGET_AMD_GENOA
 #if USEARCH_TARGET_INTEL_SAPPHIRE
 #if NUMKONG_TARGET_SAPPHIREAMX
-/* NVMe intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms */
+/* NVMe intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 variants */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
 #if USEARCH_DENSE_DTYPES >= 3
 extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>>;
@@ -1943,7 +1946,7 @@ extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::in
 #endif // NUMKONG_TARGET_SAPPHIREAMX
 #endif // USEARCH_TARGET_INTEL_SAPPHIRE
 #if USEARCH_TARGET_INTEL_GRANITE
-/* NVMe intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms */
+/* NVMe intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 variants */
 #if USEARCH_DENSE_DTYPES >= 5
 extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::intel_granite_k>>;
 #endif
@@ -1953,7 +1956,7 @@ extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::in
 #endif // USEARCH_TARGET_INTEL_GRANITE
 #if USEARCH_TARGET_INTEL_DIAMOND
 #if NUMKONG_TARGET_DIAMOND
-/* NVMe intel_diamond over intel_granite by diamond: e4m3 e5m2, 2 arms */
+/* NVMe intel_diamond over intel_granite by diamond: e4m3 e5m2, 2 variants */
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>>;
 #endif
@@ -1963,7 +1966,7 @@ extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::in
 #endif // NUMKONG_TARGET_DIAMOND
 #endif // USEARCH_TARGET_INTEL_DIAMOND
 #if USEARCH_TARGET_AWS_G2
-/* NVMe aws_g2 over serial by neon: bf16 u1 f16, 3 arms */
+/* NVMe aws_g2 over serial by neon: bf16 u1 f16, 3 variants */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::aws_g2_k>>;
@@ -1974,11 +1977,11 @@ extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::aws
 #endif // USEARCH_TARGET_AWS_G2
 #if USEARCH_TARGET_APPLE_M2
 #if NUMKONG_TARGET_NEONBFDOT
-/* NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 1 arm */
+/* NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 1 variant */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if NUMKONG_TARGET_NEONFHM
-/* NVMe apple_m2 over aws_g2 by neonfhm: e4m3 f16 e5m2, 3 arms */
+/* NVMe apple_m2 over aws_g2 by neonfhm: e4m3 f16 e5m2, 3 variants */
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>>;
 #endif
@@ -1990,7 +1993,7 @@ extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::ap
 #endif
 #endif // NUMKONG_TARGET_NEONFHM
 #if NUMKONG_TARGET_NEONSDOT
-/* NVMe apple_m2 over aws_g2 by neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 arms */
+/* NVMe apple_m2 over aws_g2 by neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 variants */
 #if USEARCH_DENSE_DTYPES >= 3
 extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::apple_m2_k>>;
 #endif
@@ -2013,7 +2016,7 @@ extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::ap
 #endif // USEARCH_TARGET_APPLE_M2
 #if USEARCH_TARGET_APPLE_M4
 #if NUMKONG_TARGET_SME
-/* NVMe apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms */
+/* NVMe apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants */
 extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>>;
 #if USEARCH_DENSE_DTYPES >= 3
 extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::apple_m4_k>>;
@@ -2044,14 +2047,14 @@ extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::ap
 #endif
 #endif // NUMKONG_TARGET_SME
 #if NUMKONG_TARGET_SMEBI32
-/* NVMe apple_m4 over apple_m2 by smebi32: u1, 1 arm */
+/* NVMe apple_m4 over apple_m2 by smebi32: u1, 1 variant */
 #if USEARCH_DENSE_DTYPES >= 2
 extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::apple_m4_k>>;
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
 #endif // USEARCH_TARGET_APPLE_M4
 #if USEARCH_TARGET_NVIDIA_VERA
-/* NVMe nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms */
+/* NVMe nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 variants */
 #if USEARCH_DENSE_DTYPES >= 4
 extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>>;
 #endif
@@ -2262,7 +2265,7 @@ static usearch_dense_index_t make_punned_dense_index(usearch_dense_metadata_t co
     handle->requested_connectivity = geometry.connectivity ? static_cast<connectivity_t>(geometry.connectivity)
                                                            : connectivity_32_k;
     // Placement is init's job, so a bad domain fails here rather than at the first reservation.
-    variant_type_& variant = std::get<variant_type_>(handle->variants);
+    variant_type_& variant = std::get<variant_type_>(handle->variant);
     if (status_t const placed = place_shards(variant, placement); failed(placed))
         return delete handle, propagate_error(placed, outcome), nullptr;
     compose_capabilities(*handle, variant);
@@ -2305,7 +2308,7 @@ static usearch_dense_index_t descend_ram_ladder(usearch_dense_metadata_t const& 
     }
     else {
         static_assert(!variant_carries<ram_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::dense_variant_t>,
-                      "This rung no longer advances past the one below - drop its arm from the variant list");
+                      "This rung no longer advances past the one below - drop it from the variant list");
     }
     return descend_ram_ladder<dtype_, lower_classes_...>(geometry, ram, kernel, available, outcome);
 }
@@ -2379,12 +2382,12 @@ static usearch_dense_index_t descend_nvme_ladder(usearch_dense_metadata_t const&
             return make_punned_dense_index<nvme_indexes<dtype_, cpu_class_>>(geometry, nvme, kernel, outcome);
     }
     else {
-        // A class sharing its parent's mask names the parent's very arm, which the variant rightly
-        // carries.
+        // A class sharing its parent's mask names the parent's very variant, which the variant
+        // rightly carries.
         static_assert(
             numkong_capabilities_of(cpu_class_) == numkong_capabilities_of(parent_class_of(cpu_class_)) ||
                 !variant_carries<nvme_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::dense_variant_t>,
-            "This NVMe rung no longer advances past the one below - drop its arm from the variant list");
+            "This NVMe rung no longer advances past the one below - drop it from the variant list");
     }
     return descend_nvme_ladder<dtype_, lower_classes_...>(geometry, nvme, kernel, available, outcome);
 }
@@ -2424,8 +2427,8 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
 }
 
 /** The class every named device shares, read off the process listing: an index spans one vendor,
- *  since its shards merge through peer copies, and one generation, since its arms run one class's
- *  kernels. Mixed vendors or generations refuse with @c config_mismatch_k, and an unlisted
+ *  since its shards merge through peer copies, and one generation, since its variants run one
+ *  class's kernels. Mixed vendors or generations refuse with @c config_mismatch_k, and an unlisted
  *  ordinal with @c device_error_k. */
 static expected<gpu_class_t> shared_gpu_class(usearch_vram_options_t const& vram) noexcept {
     std::span<gpu_device_t const> const devices = gpu_devices();
@@ -2441,9 +2444,10 @@ static expected<gpu_class_t> shared_gpu_class(usearch_vram_options_t const& vram
     return {shared.gpu_class, status_t::success_k};
 }
 
-/** The VRAM sibling of the RAM @ref make_index: the devices' class picks the arm, whose unit alone
- *  carries kernels for them, the way the CPU ladder picks the class the machine reports; every
- *  dtype has a kit there, and @ref with_metric admits only the metrics its family scores by. */
+/** The VRAM sibling of the RAM @ref make_index: the devices' class picks the variant, whose unit
+ *  alone carries kernels for them, the way the CPU ladder picks the class the machine reports;
+ *  every dtype has a kit there, and @ref with_metric admits only the metrics its family scores
+ *  by. */
 template <nk_dtype_t dtype_>
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, usearch_vram_options_t const& vram,
                                         nk_kernel_kind_t kernel, usearch_outcome_t* outcome) noexcept {
@@ -2625,8 +2629,8 @@ static nk_dtype_t rows_dtype_of(usearch_scalar_t scalar, std::size_t columns, us
 }
 
 /**
- *  @brief The one loop every row verb drives on an arm that serves it: hands @p rows to @p sink
- *      chunk by chunk, each arm importing its rows into its own scalar.
+ *  @brief The one loop every row verb drives on a variant that serves it: hands @p rows to @p sink
+ *      chunk by chunk, each variant importing its rows into its own scalar.
  *
  *  Chunks hold whole queries of @p rows_per_query rows, one per step of @p progress, or the whole
  *  call without a handler, as each engine bounds its own scratch; progress counts queries. Finishes
@@ -2668,7 +2672,7 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
     return true;
 }
 
-/** The matching verbs' sink on one serving arm: keys and scores land in @p landing as the walk
+/** The matching verbs' sink on one serving variant: keys and scores land in @p landing as the walk
  *  writes them, viewed as one row of @c wanted per output row; @p rows_per_query input rows share
  *  one output row, and @p count output rows land. */
 template <typename variant_type_, typename verb_type_>
@@ -2697,7 +2701,8 @@ static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor
 
 #pragma endregion Multi Verbs
 
-/** The cursor of a RAM or NVMe arm; a VRAM arm reads its rows through a search and has none. */
+/** The cursor of a RAM or NVMe variant; a VRAM variant reads its rows through a search and has
+ *  none. */
 template <typename variant_type_>
 struct cursor_of {
     using type = std::monostate;
@@ -2708,15 +2713,16 @@ struct cursor_of<variant_type_> {
     using type = typename variant_type_::cursor_t;
 };
 
-/** @brief The cursors of every arm of @p variants_type_, as one variant of their own. */
-template <typename variants_type_>
+/** The cursors of every variant of @p variant_type_, as one variant of their own. */
+template <typename variant_type_>
 struct cursors_of;
 template <typename... alternatives_>
 struct cursors_of<std::variant<alternatives_...>> {
     using type = std::variant<std::monostate, typename cursor_of<alternatives_>::type...>;
 };
 
-/** What @c usearch_dense_cursor_t owns: the walk state of one arm, with no hold on its index. */
+/** What @c usearch_dense_cursor_t owns: the walk state of one variant, with no hold on its
+ *  index. */
 struct usearch_dense_cursor_handle_t {
     typename cursors_of<usearch_dense_index_handle_t::dense_variant_t>::type walk;
 
@@ -2727,7 +2733,7 @@ struct usearch_dense_cursor_handle_t {
     std::atomic_flag busy;
 };
 
-/** The plan of a writable arm with the donors it lands; an NVMe view refines nothing. */
+/** The plan of a writable variant with the donors it lands; an NVMe view refines nothing. */
 template <typename variant_type_>
 struct refinement_of {
     using type = std::monostate;
@@ -2744,16 +2750,16 @@ struct refinement_of<variant_type_> {
     };
 };
 
-/** The refinements of every arm of @p variants_type_, as one variant of their own. */
-template <typename variants_type_>
+/** The refinements of every variant of @p variant_type_, as one variant of their own. */
+template <typename variant_type_>
 struct refinements_of;
 template <typename... alternatives_>
 struct refinements_of<std::variant<alternatives_...>> {
     using type = std::variant<std::monostate, typename refinement_of<alternatives_>::type...>;
 };
 
-/** What @c usearch_dense_refinement_t owns: one arm's plan, which keeps its index closed until it
- *  dies, and the caller's donor slots it nulls. */
+/** What @c usearch_dense_refinement_t owns: one variant's plan, which keeps its index closed
+ *  until it dies, and the caller's donor slots it nulls. */
 struct usearch_dense_refinement_handle_t {
     typename refinements_of<usearch_dense_index_handle_t::dense_variant_t>::type refining;
 
@@ -2805,7 +2811,7 @@ static void load_dense_index(source_type_ source, placement_type_ const& placeme
     if (!loaded) return;
     bool const filled = std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            // A load places RAM or VRAM arms alone, so a view's arm never reaches here.
+            // A load places RAM or VRAM variants alone, so a view's variant never reaches here.
             if constexpr (is_nvme_index<variant_type_>)
                 return propagate_error(usearch_status_internal_k, outcome, "A load never builds a view");
             else {
@@ -2818,7 +2824,7 @@ static void load_dense_index(source_type_ source, placement_type_ const& placeme
                 return succeeded(status) || propagate_error(status, outcome);
             }
         },
-        loaded->variants);
+        loaded->variant);
     if (!filled) return delete loaded, void();
     *index = loaded;
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -2956,7 +2962,7 @@ USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) 
                 view.memory_usage(),
                 index->capabilities_string};
         },
-        index->variants);
+        index->variant);
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
@@ -2975,7 +2981,7 @@ USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
             // its key columns.
             propagate_error(specialized_index {variant}.count({&key, 1}, {arguments->entries, 1}, *executor), outcome);
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 #pragma endregion Introspection
@@ -2987,7 +2993,7 @@ USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
 static bool rejects_columns(usearch_dense_index_handle_t& index, std::size_t count, std::size_t columns,
                             usearch_outcome_t* outcome) noexcept {
     std::size_t const reserved = std::visit(
-        [](auto& variant) noexcept { return specialized_index {variant}.dimensions(); }, index.variants);
+        [](auto& variant) noexcept { return specialized_index {variant}.dimensions(); }, index.variant);
     std::size_t const frozen = reserved ? reserved : index.requested_dimensions;
     if (count && !frozen)
         return !propagate_error(usearch_status_uninitialized_k, outcome, "The geometry was never frozen");
@@ -3075,7 +3081,7 @@ USEARCH_EXPORT void usearch_dense_health(usearch_dense_health_t* arguments) {
             *arguments->reachability = {audit.audited_nodes, audit.reachable_nodes, audit.sweeps};
             propagate_error(usearch_status_success_k, outcome, nullptr);
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
@@ -3133,7 +3139,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
@@ -3191,7 +3197,7 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
             if (arguments->written) *arguments->written = min_of(total, entries);
             propagate_error(usearch_status_success_k, outcome, nullptr);
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 USEARCH_EXPORT void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {
@@ -3239,7 +3245,7 @@ USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* argum
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
@@ -3271,8 +3277,8 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
                 using key_t = typename cursor_type_::key_t;
                 using indexes_t = typename cursor_type_::indexes_t;
                 static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
-                // A handle never changes its arm, so it is still the one the cursor was opened on.
-                auto& indexes = std::get<indexes_t>(arguments->index->variants);
+                // A handle never changes its variant, so it is still the one the cursor opened on.
+                auto& indexes = std::get<indexes_t>(arguments->index->variant);
                 std::size_t const dimensions = indexes.dimensions();
                 nk_dtype_t const target_dtype = vectors ? rows_dtype_of(arguments->outputs_scalar, dimensions, outcome)
                                                         : nk_dtype_unknown_k;
@@ -3341,9 +3347,9 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
             if (donor == arguments->index)
                 return propagate_error(usearch_status_config_mismatch_k, outcome, "An index cannot absorb itself"),
                        void();
-            // Every scalar, class and residency is an arm of its own, so a donor of another shape
-            // is another arm.
-            variant_type_* const typed = std::get_if<variant_type_>(&donor->variants);
+            // Every scalar, class and residency is a variant of its own, so a donor of another
+            // shape is another variant.
+            variant_type_* const typed = std::get_if<variant_type_>(&donor->variant);
             if (!typed)
                 return propagate_error(usearch_status_config_mismatch_k, outcome,
                                        "A donor must share the index's residency, scalar and class"),
@@ -3397,7 +3403,7 @@ USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_
             if (donor == arguments->index)
                 return propagate_error(usearch_status_config_mismatch_k, outcome, "An index cannot absorb itself"),
                        void();
-            variant_type_* const typed = std::get_if<variant_type_>(&donor->variants);
+            variant_type_* const typed = std::get_if<variant_type_>(&donor->variant);
             if (!typed)
                 return propagate_error(usearch_status_config_mismatch_k, outcome,
                                        "A donor must share the index's residency, scalar and class"),
@@ -3439,7 +3445,7 @@ USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_
     visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         auto* const refining = std::get_if<typename refinement_of<variant_type_>::type>(&refinement->refining);
         if (!refining)
-            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another arm"),
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another variant"),
                    void();
         usearch_executor_handle_t call_executor;
         typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
@@ -3476,7 +3482,7 @@ USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_fin
     visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         auto* const refining = std::get_if<typename refinement_of<variant_type_>::type>(&refinement->refining);
         if (!refining)
-            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another arm"),
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another variant"),
                    void();
         usearch_executor_handle_t call_executor;
         typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
@@ -3590,7 +3596,7 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 static_assert(sizeof(us::dense::softmax_state_t) == sizeof(usearch_dense_softmax_state_t));
@@ -3662,7 +3668,7 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
@@ -3700,7 +3706,7 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 #pragma endregion Linear Algebra
@@ -3771,7 +3777,7 @@ USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
                 propagate_error(specialized_index {variant}.save(as_text(arguments->path), *executor, ticks), outcome);
             }
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
@@ -3807,7 +3813,7 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
-        arguments->index->variants);
+        arguments->index->variant);
 }
 
 USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* arguments) {

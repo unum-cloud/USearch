@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 11, 2026
  *  @brief Host-side vocabulary for driving one Apple GPU - specs, streams, shared buffers,
- *      pipelines.
+ *      pipelines, launch counters and the traversal context.
  *
  *  Metal's API is Objective-C, reached here through @c objc_msgSend cast to each call's exact
  *  prototype, so a plain C++ unit drives it, with no SDK header: the few runtime prototypes are
@@ -110,7 +110,7 @@ inline constexpr std::size_t metal_language_version_k = (3u << 16) | 2u;
 
 /** The class whose unit runs on @p device: the newest Apple family it supports, or @c unknown_k for
  *  a GPU older than the Apple7 floor or not Apple's own. */
-inline gpu_class_t gpu_class_of_metal(void* device) noexcept {
+inline gpu_class_t apple_class_of(void* device) noexcept {
     auto const supports = [&](metal_family_t family) noexcept {
         return metal_send<bool>(device, "supportsFamily:", static_cast<std::size_t>(family));
     };
@@ -191,7 +191,7 @@ struct metal_contexts_t {
         std::size_t const listed_count = metal_send<std::size_t>(listed, "count");
         for (std::size_t position = 0; position != listed_count && count != gpu_devices_capacity_k; ++position) {
             void* const device = metal_send(listed, "objectAtIndex:", position);
-            gpu_class_t const gpu_class = gpu_class_of_metal(device);
+            gpu_class_t const gpu_class = apple_class_of(device);
             void* const queue = gpu_class != gpu_class_t::unknown_k ? metal_send(device, "newCommandQueue") : nullptr;
             if (!queue) continue;
             metal_context_t& context = contexts[count];
@@ -430,9 +430,9 @@ struct metal_launch_t {
     }
 };
 
-/** Memory that one call at a time rewinds and refills for one Apple device: the Apple arm of
- *  @ref gpu_arena_t. Memory is unified, so host pages are the device's and an upload is a copy; it
- *  still serves only the executor that made it, as every vendor's arena does. */
+/** Memory that one call at a time rewinds and refills for one Apple device: the Apple alternative
+ *  of @ref gpu_arena_t. Memory is unified, so host pages are the device's and an upload is a copy;
+ *  it still serves only the executor that made it, as every vendor's arena does. */
 struct metal_device_arena_t {
 
     /** Takes the device of the executor's @p stream; a template only because that @c stream_t is
@@ -583,6 +583,13 @@ struct metal_executor_t {
     /** The Apple ordinal stream @p index submits to - what a caller pairs its shards against. */
     int device(std::size_t index) const noexcept { return streams_[index].handle.device; }
 
+    /** The first stream on @p device, or null when the executor drives none there. */
+    stream_t* stream_on(int device) noexcept {
+        for (stream_t& opened : streams_)
+            if (opened.handle.device == device) return &opened;
+        return nullptr;
+    }
+
     /** Streams this executor drives, one per device. */
     std::size_t size() const noexcept { return streams_.size(); }
 
@@ -592,6 +599,171 @@ struct metal_executor_t {
 
     /** The ceiling on every stream's scratch bytes; zero lets scratch grow as geometry asks. */
     std::size_t scratch_limit_ = 0;
+};
+
+/** One context's reachability audit on the host, grown to the widest index it audited and kept, so
+ *  a heal's rounds and later calls allocate nothing. */
+struct metal_audit_t {
+
+    /** The reached set and the two frontiers, a byte per row each. */
+    growing_buffer<u8_t> reached {global_allocator};
+    growing_buffer<u8_t> frontier {global_allocator};
+    growing_buffer<u8_t> next_frontier {global_allocator};
+
+    /** The rows the last audit never reached. */
+    growing_buffer<u32_t> islands {global_allocator};
+
+    /** The reached rows pointing at each row, counted before a reconnection takes any. */
+    growing_buffer<u32_t> in_links {global_allocator};
+
+    /** Levels the last audit swept to convergence. */
+    std::size_t sweeps = 0;
+};
+
+/** The counter words a launch binds: the batch's assigned rows, the published rows, the changed
+ *  nodes and the word an attend raises when a node has no value row, then the walks' telemetry,
+ *  each tally a low and a high word, so a batch's totals outgrow 32 bits as on CUDA and HIP. */
+enum metal_counter_t : u32_t {
+    metal_assigned_k = 0,
+    metal_published_k = 1,
+    metal_changed_k = 2,
+    metal_missed_k = 3,
+    metal_hops_k = 4,
+    metal_scored_k = 6,
+    metal_restarts_k = 8,
+    metal_lock_attempts_k = 10,
+    metal_lock_skips_k = 12,
+    metal_reselections_k = 14,
+    metal_locked_drops_k = 16,
+    metal_saturations_k = 18,
+    metal_tail_drops_k = 20,
+    metal_counter_words_k = 24,
+};
+
+/** The tally at @p counter in @p words: its low word joined with the high word it carries into. */
+inline u64_t metal_tally(u32_t const* words, u32_t counter) noexcept {
+    return words[counter] | u64_t {words[counter + 1]} << 32;
+}
+
+/** The counter words @p counters holds, @c metal_counter_words_k of them. */
+inline u32_t* metal_words(metal_buffer_t const& counters) noexcept { return reinterpret_cast<u32_t*>(counters.host); }
+
+/** One caller's scratch for driving an Apple index: the walks' arena, the staging of one batch, the
+ *  telemetry counters and the single-query landing. Two contexts on one index share only the
+ *  storage. */
+template <typename buffers_allocator_type_ = metal_shared_allocator_t>
+struct metal_traversal_context {
+
+    /** The stream the context submits to, named an allocator because the residency-level harnesses
+     *  build every context from its @c allocator_t. */
+    using allocator_t = metal_stream_t;
+
+    /** The backend of the arena, the staging and the counters, on the stream's device. */
+    using buffers_allocator_t = buffers_allocator_type_;
+
+    /** The single-query verb's landing, grown to the walk's breadth: the ascending matches, then,
+     *  past them, the IDs and distances read back from the staging. */
+    struct results_t {
+        growing_buffer<scored_node_t> entries_ {global_allocator};
+        std::size_t count_ = 0;
+
+        scored_node_t* data() noexcept { return entries_.data(); }
+        scored_node_t const* data() const noexcept { return entries_.data(); }
+        scored_node_t& operator[](std::size_t rank) noexcept { return entries_[rank]; }
+        scored_node_t const& operator[](std::size_t rank) const noexcept { return entries_[rank]; }
+        std::size_t size() const noexcept { return count_; }
+    };
+
+    results_t results;
+
+    /** Binds the context to @p stream's device; buffers wait for the first verb. */
+    metal_traversal_context(allocator_t stream = {}) noexcept
+        : stream_(std::move(stream)), context_(metal_context(stream_.device)), buffers_allocator_(stream_.device) {
+        if (context_) counters_ = buffers_allocator_.allocate(metal_counter_words_k * sizeof(u32_t));
+    }
+    metal_traversal_context(metal_traversal_context&&) noexcept = default;
+    metal_traversal_context(metal_traversal_context const&) = delete;
+    metal_traversal_context& operator=(metal_traversal_context const&) = delete;
+
+    int device() const noexcept { return stream_.device; }
+    void* stream() const noexcept { return stream_.handle() ? stream_.handle() : context_->queue; }
+    explicit operator bool() const noexcept { return context_ && counters_; }
+
+    /** Waits for the last command buffer this context committed - one stream's completion, the
+     *  executor's @c drain being the fleet's. */
+    status_t drain() noexcept { return committed_.drain(); }
+
+    /** Polls whether the last command buffer this context committed finished - @c success_k once
+     *  it has, @c deferred_k while it runs - without blocking, so one host thread awaits whichever
+     *  of several streams lands first. */
+    status_t landed() const noexcept { return committed_.landed(); }
+
+    /** The telemetry of the last submission, zeroed when it was staged; read once it landed. */
+    vram_telemetry_block_t spent() const noexcept {
+        u32_t const* const words = metal_words(counters_);
+        vram_telemetry_block_t block {};
+        block.hops = metal_tally(words, metal_hops_k);
+        block.scored = metal_tally(words, metal_scored_k);
+        block.restarts = metal_tally(words, metal_restarts_k);
+        block.lock_attempts = metal_tally(words, metal_lock_attempts_k);
+        block.lock_skips = metal_tally(words, metal_lock_skips_k);
+        block.reselections = metal_tally(words, metal_reselections_k);
+        block.locked_drops = metal_tally(words, metal_locked_drops_k);
+        block.visited_saturations = metal_tally(words, metal_saturations_k);
+        block.changed_nodes = words[metal_changed_k];
+        block.tail_drops = metal_tally(words, metal_tail_drops_k);
+        return block;
+    }
+
+    /** Whether the last attend met a node its value lookup had no row for, which refuses it; read
+     *  once it landed. */
+    bool missed() const noexcept {
+        u32_t const* const words = metal_words(counters_);
+        return words[metal_missed_k] != 0;
+    }
+
+    /** Where the last walk left its outputs in the staging, read back once the context lands. */
+    struct landing_t {
+        std::size_t rows = 0, count = 0;
+        std::size_t first_offset = 0, second_offset = 0, third_offset = 0;
+    };
+
+    allocator_t stream_;
+    metal_context_t* context_ = nullptr;
+    buffers_allocator_t buffers_allocator_;
+    metal_buffer_t counters_;
+    metal_buffer_t arena_;
+    metal_buffer_t staging_;
+    landing_t landing_;
+
+    /** The host-side audit a refine heals by and a health check reports, grown like the staging. */
+    metal_audit_t audit_;
+
+    /** The last command buffer submitted through this context; its stream runs them in commit
+     *  order, so this one landing means every earlier one did. */
+    metal_launch_t committed_;
+
+    /** Monotone epoch floor over the arena's visited slots, so the arena zeroes only when fresh or
+     *  wrapped. */
+    u64_t epoch_floor_ = 0;
+
+    /** Dispatches @p launch over @p groups threadgroups of @p threads and keeps it as the command
+     *  buffer the context awaits. */
+    status_t submit_(metal_launch_t& launch, std::size_t groups, std::size_t threads) noexcept {
+        if (status_t const submitted = launch.submit(groups, threads); failed(submitted)) return submitted;
+        committed_ = std::move(launch);
+        return status_t::success_k;
+    }
+
+    /** Grows @p buffer to at least @p bytes; answers whether it was reallocated, zeroed by
+     *  Metal. */
+    status_t ensure_(metal_buffer_t& buffer, std::size_t bytes, bool& fresh) noexcept {
+        fresh = false;
+        if (bytes <= buffer.bytes) return status_t::success_k;
+        buffer = buffers_allocator_.allocate(bytes);
+        fresh = true;
+        return buffer ? status_t::success_k : status_t::bad_alloc_k;
+    }
 };
 
 } // namespace unum::usearch::utilities

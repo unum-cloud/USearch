@@ -2,14 +2,15 @@
  *  @file src/basic_specializations.cuh
  *  @author Ash Vardanian
  *  @date October 13, 2026
- *  @brief What every basic modality's arms share, whatever they store: the crossings of keys and
- *      tapes, the fan-outs over the executor's threads, and the base of every arm on a GPU.
+ *  @brief What every basic modality's variants share, whatever they store: the crossings of keys
+ *      and tapes, the fan-outs over the executor's threads, and the base of every variant on a
+ *      GPU.
  *
- *  Each modality's @c <modality>_specializations.cuh spells its arms on top of this, and its class
- *  units in @c src/<modality>/ instantiate them; @c basic_index.cuh adds the handle and the verbs
- *  every modality's dispatch unit forwards its exported C entry points to. The basic index is the
- *  same type in every class, so a class differs only in the kits its metrics score with, and the
- *  arms keep the index's default waiter and atomic reference.
+ *  Each modality's @c <modality>_specializations.cuh spells its variants on top of this, and its
+ *  class units in @c src/<modality>/ instantiate them; @c basic_index.cuh adds the handle and the
+ *  verbs every modality's dispatch unit forwards its exported C entry points to. The basic index
+ *  is the same type in every class, so a class differs only in the kits its metrics score with,
+ *  and the variants keep the index's default waiter and atomic reference.
  */
 #pragma once
 
@@ -437,10 +438,10 @@ inline status_t keep_row(nvme_executor_t& executor, std::size_t thread, bytes_vi
 #pragma endregion Crossings and Fan Outs
 
 #if USEARCH_ARCH_CUDA_
-#pragma region GPU Arms
+#pragma region GPU Variants
 
-/** The executor a null handle runs a GPU arm's work on: a stream of its own on the index's device,
- *  never a legacy default stream. */
+/** The executor a null handle runs a GPU variant's work on: a stream of its own on the index's
+ *  device, never a legacy default stream. */
 template <typename variant_type_>
     requires is_vram_index<variant_type_>
 inline usearch_executor_t call_executor_for(variant_type_& variant, usearch_executor_handle_t& call_executor,
@@ -564,5 +565,5 @@ struct vram_nvidia_variant {
     }
 };
 
-#pragma endregion GPU Arms
+#pragma endregion GPU Variants
 #endif

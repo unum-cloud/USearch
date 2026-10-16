@@ -2,11 +2,11 @@
  *  @file src/geospatial_specializations.cuh
  *  @author Ash Vardanian
  *  @date October 14, 2026
- *  @brief What one geospatial arm is spelled with and compiled through: the crossings of an
- *      observation, the geometry every geospatial arm freezes, the terrain and the judging of
- *      relations, and the arms over the basic indexes.
+ *  @brief What one geospatial variant is spelled with and compiled through: the crossings of an
+ *      observation, the geometry every geospatial variant freezes, the terrain and the judging of
+ *      relations, and the variants over the basic indexes.
  *
- *  Every geospatial class unit in @c src/geospatial/ includes this to instantiate its arms, and
+ *  Every geospatial class unit in @c src/geospatial/ includes this to instantiate its variants, and
  *  @c geospatial_index.cpp adds the variant, the traits and the exported C entry points on top of
  *  it.
  */
@@ -28,7 +28,7 @@
 
 #include "basic_specializations.cuh"
 
-#pragma region Geospatial Arms
+#pragma region Geospatial Variants
 
 /** The engine's form of a C observation, field by field. */
 inline us::geospatial::geodetic_observation_t geodetic_of(
@@ -70,8 +70,8 @@ struct geospatial_within_match_t {
     usearch_distance_t score;
 };
 
-/** The connectivity a geospatial handle freezes, as an init or a checkpoint states it; every arm
- *  holds one. */
+/** The connectivity a geospatial handle freezes, as an init or a checkpoint states it; every
+ *  variant holds one. */
 struct geospatial_geometry_t {
 
     /** Neighbors per node: a winner per cone and long links for the rest, rounded up to a power of
@@ -83,13 +83,13 @@ struct geospatial_geometry_t {
 inline std::string_view token_of(geospatial_geometry_t const&) noexcept { return "chord"; }
 
 /**
- *  @brief What every geospatial arm on the host shares, whatever holds its observations: the
+ *  @brief What every geospatial variant on the host shares, whatever holds its observations: the
  *      metric one class's kit scores with, the terrain its lines of sight run over, and the tests
  *      a quad of stored observations passes.
  *
  *  A borrowed terrain is packed once, at @ref adopt_terrain, and read in place by every call; a
  *  terrain filled by a callback is filled and packed per call, over the window the call's positions
- *  span. Its verbs are instantiated in the class's unit beside the arms deriving from it.
+ *  span. Its verbs are instantiated in the class's unit beside the variants deriving from it.
  */
 template <cpu_class_t cpu_class_>
 struct geospatial_terrain {
@@ -110,7 +110,7 @@ struct geospatial_terrain {
 
   protected:
 
-    /** A factory of the arm's metric over a thread's arena, sized for a round of candidates. */
+    /** A factory of the variant's metric over a thread's arena, sized for a round of candidates. */
     static auto metric_factory_() noexcept {
         return [](thread_allocator_t const& allocator, std::size_t staging) noexcept {
             metric_t made {allocator};
@@ -136,7 +136,7 @@ struct geospatial_terrain {
                        thread_allocator_t const& scratch) const noexcept;
 };
 
-/** One geospatial arm: the basic index over observations, scored with one class's kit, with the
+/** One geospatial variant: the basic index over observations, scored with one class's kit, with the
  *  terrain its lines of sight run over. */
 template <cpu_class_t cpu_class_>
 struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
@@ -617,9 +617,9 @@ status_t geospatial_ram_variant<cpu_class_>::load(std::string_view path, executo
 }
 
 /** One geospatial alternative on block storage: the basic NVMe index over the observations a RAM
- *  arm saved, read-only, scored with the RAM arm's metric and judged by its relations over the same
- *  terrain, each landed row tested before its read buffer recycles. Its verbs are instantiated in
- *  the class's unit, as the RAM arm's are. */
+ *  variant saved, read-only, scored with the RAM variant's metric and judged by its relations over
+ *  the same terrain, each landed row tested before its read buffer recycles. Its verbs are
+ *  instantiated in the class's unit, as the RAM variant's are. */
 template <cpu_class_t cpu_class_>
 struct geospatial_nvme_variant : geospatial_terrain<cpu_class_> {
     using executor_t = nvme_executor_t;
@@ -689,8 +689,8 @@ expected<traversal_telemetry_t> geospatial_nvme_variant<cpu_class_>::search(
 
 /** The geospatial alternative on one NVIDIA GPU: the basic VRAM index over observations under the
  *  squared chord, and the kernel judging each walk's pool under a search's relation. A batch
- *  encodes its observations on the host, as the RAM arms do. It holds no terrain, so lines of sight
- *  stay the RAM arms'. */
+ *  encodes its observations on the host, as the RAM variants do. It holds no terrain, so lines of
+ *  sight stay the RAM variants'. */
 struct geospatial_vram_nvidia_variant : vram_nvidia_variant<us::geospatial::vram_nvidia_index> {
     using vram_nvidia_variant::vram_nvidia_variant;
     using value_t = us::geospatial::earth_observation_t;
@@ -841,4 +841,4 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
 
 #endif
 
-#pragma endregion Geospatial Arms
+#pragma endregion Geospatial Variants

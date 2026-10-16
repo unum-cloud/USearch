@@ -22,25 +22,6 @@ using counting_cuda_allocator_t = counting_device_allocator<cuda_virtual_memory_
 
 static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
 
-/** A device lookup over a value table whose rows sit a 16-byte pitch apart: an ID below @c count
- *  names its row, a node ID on one GPU and a key on shards, and any other has none. */
-template <typename fragment_type_>
-struct dense_cuda_value_lookup {
-
-    /** Names the lookup to the attend kernels the suite's fatbin carries. */
-    inline static constexpr u32_t device_lookup_k = 1;
-
-    byte_t const* rows;
-    std::size_t pitch;
-    std::size_t count;
-
-#if defined(__CUDACC__)
-    __device__ fragment_type_ const* operator()(u32_t id) const noexcept {
-        return id < count ? reinterpret_cast<fragment_type_ const*>(rows + id * pitch) : nullptr;
-    }
-#endif
-};
-
 /** The NVIDIA index of one (dtype, kernel) cell over the ledgered flat matrices and its sharded
  *  collection, built over the stream of the executor the CUDA entry opened; device attention
  *  runs in @c vram_nvidia.cu instead of the shared composers. */

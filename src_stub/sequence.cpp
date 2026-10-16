@@ -983,20 +983,13 @@ void usearch_sequence_sample(usearch_sequence_sample_t* arguments) {
                                                       {anchors.data, anchors.offsets}, outcome);
     if (!arena) return;
 
+    std::vector<bytes_view_t> anchor_views(anchors_count);
+    for (std::size_t anchor = 0; anchor != anchors_count; ++anchor) anchor_views[anchor] = viewed(anchors, anchor);
     sequence_search_scratch_t scratch;
     auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
-    // Every kind ranks nearest-first, an alignment by its negated score, so a radius bounds above.
-    usearch_distance_t const radius = arguments->radius;
-    auto const within = [&](std::size_t row) {
-        if (!anchors_count || radius == 0) return true;
-        for (std::size_t anchor = 0; anchor != anchors_count; ++anchor)
-            if (score(viewed(anchors, anchor), index.entries[row].payload) <= radius) return true;
-        return false;
-    };
-
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const order = drawing_order(index.entries.size(), arguments->seed, within);
-    land_sample(*arguments, std::span<sequence_entry_t const>(index.entries), order, score, *arena, outcome);
+    land_sample(*arguments, std::span<sequence_entry_t const>(index.entries),
+                std::span<bytes_view_t const>(anchor_views), score, *arena, outcome);
 }
 
 void usearch_sequence_save(usearch_sequence_save_t* arguments) {

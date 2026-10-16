@@ -13,6 +13,7 @@
 #include <fmt/format.h>
 
 #include "dense/vram_index_search.cuh"
+#include "dense/vram_kernels.cuh"
 
 template __device__ void us::bench::dense::instantiate_cuda_kernels<>();
 

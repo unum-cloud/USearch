@@ -570,10 +570,10 @@ class nvme_index {
         /** The next row any thread takes. */
         std::size_t* cursor = nullptr;
 
-        /** The first failure any thread met, which stops every thread arming rows. */
+        /** The first failure any thread met, which stops every thread priming rows. */
         status_t* failure = nullptr;
 
-        /** Nanoseconds per row from its first armed walk to its final write; empty collects
+        /** Nanoseconds per row from its first primed walk to its final write; empty collects
          *  none. */
         std::span<u64_t> latencies;
     };
@@ -652,9 +652,10 @@ class nvme_index {
         return row_walker<nvme_index, row_type_>::run_walks(media, parts, executor, shape, inputs, counts, {});
     }
 
-    /** Opens the round of an armed @p row on its query, which every walk of the row then reuses. */
+    /** Opens the round of a primed @p row on its query, which every walk of the row then
+     *  reuses. */
     template <typename row_type_>
-    static void arm_scoring_(walk_shape_t const&, row_type_& row) noexcept {
+    static void prime_scoring_(walk_shape_t const&, row_type_& row) noexcept {
         if (succeeded(row.status)) row.metric.reset(row.query);
     }
 
@@ -776,7 +777,7 @@ class nvme_index {
                 return status_t::bad_alloc_k;
             return status_t::success_k;
         }
-        void arm(std::size_t new_row) noexcept {
+        void prime(std::size_t new_row) noexcept {
             row = new_row;
             found = 0;
             inputs.counts[row] = 0;

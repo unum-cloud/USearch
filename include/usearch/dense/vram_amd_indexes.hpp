@@ -135,7 +135,7 @@ struct vram_amd_indexes : sharded_indexes<vram_amd_indexes<key_type_, vector_dty
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
                                      f32_t score_scale, rows_span_t outputs, std::span<softmax_state_t> carry,
                                      executor_t& executor, search_config_t config = {}) noexcept {
-        using shard_lookup_t = amd_keyed_lookup<key_t, std::remove_cvref_t<value_lookup_type_>>;
+        using shard_lookup_t = vram_keyed_lookup<key_t, std::remove_cvref_t<value_lookup_type_>>;
         std::size_t const rows_count = queries.rows, shards = shards_.size();
         if (this->kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = this->pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
@@ -362,23 +362,23 @@ struct vram_amd_indexes : sharded_indexes<vram_amd_indexes<key_type_, vector_dty
         std::size_t const block_bytes = round_up_to_multiple<std::size_t>(
             counts_bytes + scores_bytes + queries_count * width * sizeof(key_t), sizeof(std::size_t));
         auto ranking_of = [&](byte_t* block) noexcept {
-            return amd_ranking_t {block + counts_bytes + scores_bytes,
-                                  block + counts_bytes,
-                                  reinterpret_cast<std::size_t*>(block),
-                                  width * sizeof(key_t),
-                                  width * sizeof(score_type_),
-                                  width,
-                                  sizeof(key_t),
-                                  sizeof(score_type_)};
+            return vram_ranking_t {block + counts_bytes + scores_bytes,
+                                   block + counts_bytes,
+                                   reinterpret_cast<std::size_t*>(block),
+                                   width * sizeof(key_t),
+                                   width * sizeof(score_type_),
+                                   width,
+                                   sizeof(key_t),
+                                   sizeof(score_type_)};
         };
-        amd_ranking_t const merged {reinterpret_cast<byte_t*>(keys.data()),
-                                    reinterpret_cast<byte_t*>(distances.data()),
-                                    counts.data(),
-                                    static_cast<std::size_t>(keys.stride_bytes(0)),
-                                    static_cast<std::size_t>(distances.stride_bytes(0)),
-                                    width,
-                                    sizeof(key_t),
-                                    sizeof(score_type_)};
+        vram_ranking_t const merged {reinterpret_cast<byte_t*>(keys.data()),
+                                     reinterpret_cast<byte_t*>(distances.data()),
+                                     counts.data(),
+                                     static_cast<std::size_t>(keys.stride_bytes(0)),
+                                     static_cast<std::size_t>(distances.stride_bytes(0)),
+                                     width,
+                                     sizeof(key_t),
+                                     sizeof(score_type_)};
 
         // Every shard lands its walks, then its own ranking, in device memory of the call on its
         // own stream, the first shard every shard's ranking; a single shard resolves straight

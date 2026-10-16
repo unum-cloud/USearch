@@ -2,10 +2,10 @@
  *  @file src/dense_specializations.cuh
  *  @author Ash Vardanian
  *  @date August 14, 2026
- *  @brief What one dense arm is spelled with and compiled through: the GPU classes, the residency
- *      aliases, and the @c specialized_index view every class unit instantiates.
+ *  @brief What one dense variant is spelled with and compiled through: the GPU classes, the
+ *      residency aliases, and the @c specialized_index view every class unit instantiates.
  *
- *  Every class unit includes this to instantiate its arms; @c dense_index.cuh adds the variant
+ *  Every class unit includes this to instantiate its variants; @c dense_index.cuh adds the variant
  *  grid, the handle and the exported C entry points on top of it. The scalar tables, the CPU
  *  classes and the call scaffolding every modality shares come from @c lib.hpp.
  */
@@ -33,8 +33,8 @@
 
 #include "lib.hpp"
 
-/** How many storage dtypes the arms cover, from the front of the ladder bf16, u1, i8, e4m3, f16,
- *  u8, e5m2, i4, u4, e3m2, e2m3. CMake passes it, so only builds that bypass CMake take this
+/** How many storage dtypes the variants cover, from the front of the ladder bf16, u1, i8, e4m3,
+ *  f16, u8, e5m2, i4, u4, e3m2, e2m3. CMake passes it, so only builds that bypass CMake take this
  *  default. */
 #if !defined(USEARCH_DENSE_DTYPES)
 #define USEARCH_DENSE_DTYPES 4
@@ -77,10 +77,10 @@ inline constexpr gpu_class_name_t gpu_class_names_k[] = {
     {gpu_class_t::apple_metal10_k, "apple-metal10"},
 };
 
-/** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, as
- *  @c nk_cuda_capabilities_detected reports them, the Ampere & Ada bits accumulate, while Hopper,
- *  Blackwell & RTX Blackwell each run only their own kits, and Rubin rides the Blackwell kits until
- *  its own land. AMD and Apple generations accumulate over their vendor's floor. */
+/** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, the Ampere & Ada bits
+ *  accumulate, while Hopper, Blackwell & RTX Blackwell each run only their own kits, and Rubin
+ *  rides the Blackwell kits until its own land. AMD and Apple generations accumulate over their
+ *  vendor's floor. */
 constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcept {
     nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k, ada = ampere | nk_cap_ada_k;
     nk_capability_t const cdna3 = nk_cap_rocm_k | nk_cap_cdna3_k, cdna4 = cdna3 | nk_cap_cdna4_k;
@@ -163,7 +163,8 @@ struct value_lookup_t {
     }
 };
 
-/** The C value lookup called on the device, one scored key at a time inside a GPU walk. */
+/** The C value lookup a GPU walk calls one scored key at a time, as the host records it; the GPU
+ *  entries' @c kernel_value_lookup_t adds the call. */
 struct device_value_lookup_t {
 
     /** Names the lookup to the attend kernels the NVIDIA and AMD units instantiate over it. */
@@ -173,44 +174,19 @@ struct device_value_lookup_t {
     void* state;
     usearch_scalar_t scalar;
     std::size_t dimensions;
-
-#if defined(__CUDACC__) || defined(__HIP__)
-    __device__ void const* operator()(us::utilities::uuid_t key) const noexcept {
-        usearch_key_t const scored = std::bit_cast<usearch_key_t>(key);
-        void const* row = nullptr;
-        callback(state, &scored, 1, scalar, dimensions, &row);
-        return row;
-    }
-#endif
 };
 
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_
 
 /** What each shard of a VRAM attend resolves rows through: the C lookup behind the shard's keys. */
-using nvidia_attend_lookup_t = us::dense::cuda_keyed_lookup<us::utilities::uuid_t, device_value_lookup_t>;
-
-template <>
-struct us::dense::cuda_value_lookup_of<nvidia_attend_lookup_t::device_lookup_k> {
-    using type = nvidia_attend_lookup_t;
-};
+using vram_attend_lookup_t = us::dense::vram_keyed_lookup<us::utilities::uuid_t, device_value_lookup_t>;
 #endif
 
-#if USEARCH_ARCH_ROCM_
-
-/** What each shard of an AMD attend resolves rows through: the C lookup behind the shard's keys. */
-using amd_attend_lookup_t = us::dense::amd_keyed_lookup<us::utilities::uuid_t, device_value_lookup_t>;
-
-template <>
-struct us::dense::amd_value_lookup_of<amd_attend_lookup_t::device_lookup_k> {
-    using type = amd_attend_lookup_t;
-};
-#endif
-
-/** One arm's verbs, fixed to the C layer's callback types and wrapped as non-template members of a
- *  view over the index: an explicit instantiation compiles exactly these bodies in the arm's unit,
- *  and an @c extern one keeps every arm body out of the dispatch unit. The members are defined
- *  outside the class because in-class ones would be inline, which an explicit instantiation
- *  declaration does not restrain. */
+/** One variant's verbs, fixed to the C layer's callback types and wrapped as non-template members
+ *  of a view over the index: an explicit instantiation compiles exactly these bodies in the
+ *  variant's unit, and an @c extern one keeps every variant body out of the dispatch unit. The
+ *  members are defined outside the class because in-class ones would be inline, which an explicit
+ *  instantiation declaration does not restrain. */
 template <typename index_type_>
 struct specialized_index {
     using key_t = typename index_type_::key_t;
@@ -485,7 +461,7 @@ save_config_t specialized_index<index_type_>::save_config_of(std::string_view pa
     return config;
 }
 
-/** One NVMe arm's verbs: the read verbs alone, since a view of parts on storage never mutates,
+/** One NVMe variant's verbs: the read verbs alone, since a view of parts on storage never mutates,
  *  defined outside the class for the same reason as the primary's. */
 template <typename index_type_>
     requires is_nvme_index<index_type_>

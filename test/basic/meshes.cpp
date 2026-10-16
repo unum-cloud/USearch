@@ -243,7 +243,7 @@ static_assert(metric<spectra_metric_t, mesh_t, f64_t>);
 static_assert(!transparent_metric<spectra_metric_t>);
 static_assert(value_codec<mesh_codec_t, mesh_t>);
 
-/** The invariance arm: a rigidly moved cloud must sit at spectra distance zero
+/** The invariance case: a rigidly moved cloud must sit at spectra distance zero
  *  from its original - the property that makes the metric a GW lower bound. */
 static std::size_t check_meshes_rigid_invariance() {
     std::size_t failures = 0;

@@ -19,15 +19,28 @@
 
 namespace unum::usearch::dense {
 
+/** A device lookup over a value table whose rows sit a 16-byte pitch apart: an ID below @c count
+ *  names its row, a node ID on one GPU and a key on shards, and any other has none. */
+struct hip_test_lookup_t {
+
+    /** Names the lookup to the attend kernels the suite's code object carries. */
+    inline static constexpr u32_t device_lookup_k = 1;
+
+    byte_t const* rows;
+    std::size_t pitch;
+    std::size_t count;
+
+    __device__ void const* operator()(u32_t id) const noexcept { return id < count ? rows + id * pitch : nullptr; }
+};
+
 using test::dense::dense_amd_capabilities_k;
-using test::dense::dense_hip_value_lookup_t;
 
 /** The lookups the suite attends through: by node ID on one GPU, and by key on shards. */
-using hip_test_keyed_lookup_t = amd_keyed_lookup<u32_t, dense_hip_value_lookup_t>;
+using hip_test_keyed_lookup_t = vram_keyed_lookup<u32_t, hip_test_lookup_t>;
 
 template <>
-struct amd_value_lookup_of<dense_hip_value_lookup_t::device_lookup_k> {
-    using type = dense_hip_value_lookup_t;
+struct amd_value_lookup_of<hip_test_lookup_t::device_lookup_k> {
+    using type = hip_test_lookup_t;
 };
 template <>
 struct amd_value_lookup_of<hip_test_keyed_lookup_t::device_lookup_k> {
@@ -47,37 +60,37 @@ bytes_view_t amd_code_object<dense_amd_capabilities_k>() noexcept {
 inline constexpr gpu_class_t dense_amd_class_k = amd_class_of(dense_amd_capabilities_k);
 
 // Every cell's kernels and attends, and the keyed attends of the sharded suite's collection.
-template void amd_instantiate<dense_amd_class_k, nk_bf16_k, dense_hip_value_lookup_t::device_lookup_k,
+template void amd_instantiate<dense_amd_class_k, nk_bf16_k, hip_test_lookup_t::device_lookup_k,
                               hip_test_keyed_lookup_t::device_lookup_k>();
 #if USEARCH_DENSE_DTYPES >= 2
-template void amd_instantiate<dense_amd_class_k, nk_u1_k, dense_hip_value_lookup_t::device_lookup_k>();
+template void amd_instantiate<dense_amd_class_k, nk_u1_k, hip_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-template void amd_instantiate<dense_amd_class_k, nk_i8_k, dense_hip_value_lookup_t::device_lookup_k>();
+template void amd_instantiate<dense_amd_class_k, nk_i8_k, hip_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-template void amd_instantiate<dense_amd_class_k, nk_e4m3_k, dense_hip_value_lookup_t::device_lookup_k>();
+template void amd_instantiate<dense_amd_class_k, nk_e4m3_k, hip_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-template void amd_instantiate<dense_amd_class_k, nk_f16_k, dense_hip_value_lookup_t::device_lookup_k>();
+template void amd_instantiate<dense_amd_class_k, nk_f16_k, hip_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-template void amd_instantiate<dense_amd_class_k, nk_u8_k, dense_hip_value_lookup_t::device_lookup_k>();
+template void amd_instantiate<dense_amd_class_k, nk_u8_k, hip_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-template void amd_instantiate<dense_amd_class_k, nk_e5m2_k, dense_hip_value_lookup_t::device_lookup_k>();
+template void amd_instantiate<dense_amd_class_k, nk_e5m2_k, hip_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-template void amd_instantiate<dense_amd_class_k, nk_i4_k, dense_hip_value_lookup_t::device_lookup_k>();
+template void amd_instantiate<dense_amd_class_k, nk_i4_k, hip_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-template void amd_instantiate<dense_amd_class_k, nk_u4_k, dense_hip_value_lookup_t::device_lookup_k>();
+template void amd_instantiate<dense_amd_class_k, nk_u4_k, hip_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-template void amd_instantiate<dense_amd_class_k, nk_e3m2_k, dense_hip_value_lookup_t::device_lookup_k>();
+template void amd_instantiate<dense_amd_class_k, nk_e3m2_k, hip_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-template void amd_instantiate<dense_amd_class_k, nk_e2m3_k, dense_hip_value_lookup_t::device_lookup_k>();
+template void amd_instantiate<dense_amd_class_k, nk_e2m3_k, hip_test_lookup_t::device_lookup_k>();
 #endif
 
 } // namespace unum::usearch::dense
@@ -87,7 +100,7 @@ namespace unum::usearch::test::dense {
 /** A value table copied onto the device, its rows a 16-byte pitch apart; null rows when the copy
  *  failed. */
 struct dense_hip_value_table_t {
-    using lookup_t = dense_hip_value_lookup_t;
+    using lookup_t = hip_test_lookup_t;
 
     hip_unique_ptr<byte_t> rows;
     std::size_t pitch;
