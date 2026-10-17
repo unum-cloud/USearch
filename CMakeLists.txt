@@ -60,6 +60,7 @@ option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 int
 option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
 option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
+option(USEARCH_BUILD_DISTRIBUTED "Compile the MPI drivers in distributed/" OFF)
 option(USEARCH_BUILD_CUDA "Compile the NVIDIA index variants, tests and benchmarks with NVCC" ${USEARCH_CAN_BUILD_CUDA})
 option(USEARCH_BUILD_ROCM "Compile the AMD index variants and tests with ROCm's Clang" ${USEARCH_CAN_BUILD_ROCM})
 option(USEARCH_BUILD_METAL "Compile the Apple index variants and tests over Metal" ${USEARCH_CAN_BUILD_METAL})
@@ -133,6 +134,7 @@ set(usearch_build_punned_ OFF)
 if (USEARCH_BUILD_TEST
     OR USEARCH_BUILD_BENCH
     OR USEARCH_BUILD_LIB_C
+    OR USEARCH_BUILD_DISTRIBUTED
 )
     set(usearch_build_punned_ ON)
 endif ()
@@ -288,8 +290,14 @@ include(smashtable)
 if (usearch_build_punned_)
     include(yyjson)
 endif ()
-if (USEARCH_BUILD_TEST OR USEARCH_BUILD_BENCH)
+if (USEARCH_BUILD_TEST
+    OR USEARCH_BUILD_BENCH
+    OR USEARCH_BUILD_DISTRIBUTED
+)
     include(fmt)
+endif ()
+if (USEARCH_BUILD_DISTRIBUTED)
+    include(mpi)
 endif ()
 if (USEARCH_USE_JEMALLOC)
     include(jemalloc)
@@ -534,6 +542,9 @@ endif ()
 if (USEARCH_BUILD_LIB_C)
     add_subdirectory(c)
     add_subdirectory(cpp)
+endif ()
+if (USEARCH_BUILD_DISTRIBUTED)
+    add_subdirectory(distributed)
 endif ()
 if (USEARCH_BUILD_LIB_PYTHON)
     add_subdirectory(python)
