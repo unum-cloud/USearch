@@ -44,20 +44,36 @@ struct vram_row_t {
 
 /** What a basic VRAM kit binds: one modality's distance on one GPU generation, with the warp policy
  *  its walks shuffle through and the selector its rows keep neighbors by. @c prepare lays a row out
- *  as a query in a span, every lane of the warp taking part; @c bound answers a lower bound from
- *  the two rows' headers alone. Its @c score runs on its lanes per row, every one of them returning
- *  the distance, exact within the radius and above it past: @c lanes_per_row_k of them and a plain
- *  @c score, or, for a kit whose split follows a rung, @c lanes_per_row of the rung and a @c score
- *  templated on it, which @ref vram_lanes_per_row and @ref vram_score tell apart. */
+ *  as a query in a span, every lane of the warp taking part, from the row alone or, for a kit with
+ *  runtime parameters, from the storage's @c parameters too, which @ref vram_prepare tells apart;
+ *  @c bound answers a lower bound from the two rows' headers alone. Its @c score runs on its lanes
+ *  per row, every one of them returning the distance, exact within the radius and above it past:
+ *  @c lanes_per_row_k of them and a plain @c score, or, for a kit whose split follows a rung,
+ *  @c lanes_per_row of the rung and a @c score templated on it, which @ref vram_lanes_per_row and
+ *  @ref vram_score tell apart. */
 template <typename kit_>
 concept vram_basic_kit = requires(typename kit_::query_t const& query, vram_row_t row, byte_t* span,
-                                  nk_kernel_kind_t kernel, u32_t lane) {
+                                  byte_t const* parameters, nk_kernel_kind_t kernel, u32_t lane) {
     typename kit_::warp_t;
     typename kit_::query_t;
     typename kit_::selector_t;
-    { kit_::prepare(row, span, lane) } -> std::same_as<typename kit_::query_t>;
+    requires requires {
+        { kit_::prepare(row, span, lane) } -> std::same_as<typename kit_::query_t>;
+    } || requires {
+        { kit_::prepare(parameters, row, span, lane) } -> std::same_as<typename kit_::query_t>;
+    };
     { kit_::bound(kernel, query, row) } -> std::same_as<distance_t>;
 };
+
+/** Lays @p row out as @p kit_ 's query in @p span, handing a kit with runtime parameters the
+ *  ones at @p parameters; every lane of the warp calls it. */
+template <vram_basic_kit kit_>
+__device__ __forceinline__ typename kit_::query_t vram_prepare(byte_t const* parameters, vram_row_t row, byte_t* span,
+                                                               u32_t lane) noexcept {
+    if constexpr (requires { kit_::prepare(parameters, row, span, lane); })
+        return kit_::prepare(parameters, row, span, lane);
+    else return kit_::prepare(row, span, lane);
+}
 
 /** Lanes @p kit_ scores one row with on @p rung_: its @c lanes_per_row_k at rung zero, its
  *  @c lanes_per_row of the rung past it. */
@@ -97,6 +113,9 @@ struct vram_ragged_view {
 
     /** The metric a kit covering several picks among, unknown for a kit of one. */
     nk_kernel_kind_t kernel;
+
+    /** The kit's runtime parameters, as its face laid them out; null for a kit taking none. */
+    byte_t const* parameters;
 
     __device__ __forceinline__ vram_row_t row(node_id_type_ node_id) const noexcept {
         u64_t const first = offsets[node_id];
@@ -402,9 +421,11 @@ struct vram_keep_diverse_t {
         for (u32_t candidate_index = 0; candidate_index < candidates_count && kept_count < storage.connectivity;
              ++candidate_index) {
             f32_t const to_query = candidate_distances[candidate_index];
-            typename kit_::query_t const pivot = kept_count ? kit_::prepare(storage.row(candidate_ids[candidate_index]),
-                                                                            pivot_span, lane)
-                                                            : typename kit_::query_t {};
+            typename kit_::query_t const pivot = kept_count
+                                                     ? vram_prepare<kit_>(storage.parameters,
+                                                                          storage.row(candidate_ids[candidate_index]),
+                                                                          pivot_span, lane)
+                                                     : typename kit_::query_t {};
             bool diverse = true;
             for (u32_t base = 0; base < kept_count && diverse; base += warp_t::width_k) { // Warp-uniform bounds.
                 node_id_type_ const kept_id = base + lane < kept_count ? candidate_ids[kept_positions[base + lane]]
@@ -517,8 +538,8 @@ __device__ __forceinline__ void vram_insert_one( //
         warp_t::store_relaxed(storage.offsets[new_node_id], row_begin);
         warp_t::store_relaxed(storage.offsets[new_node_id + 1], row_end);
     }
-    typename kit_::query_t const query = kit_::prepare(
-        {storage.values + row_begin, static_cast<u32_t>(row_end - row_begin)}, query_span, lane);
+    typename kit_::query_t const query = vram_prepare<kit_>(
+        storage.parameters, {storage.values + row_begin, static_cast<u32_t>(row_end - row_begin)}, query_span, lane);
 
     // A virgin index publishes an empty node instead of walking.
     if (new_node_id != 0)
@@ -554,7 +575,7 @@ __device__ __forceinline__ void vram_reselect_one( //
     using warp_t = typename kit_::warp_t;
     constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
     vram_ragged_view<node_id_type_> const& storage = view.storage;
-    typename kit_::query_t const query = kit_::prepare(storage.row(node_id), query_span, lane);
+    typename kit_::query_t const query = vram_prepare<kit_>(storage.parameters, storage.row(node_id), query_span, lane);
     context.frontier.reset(lane);
     visited.test_and_set(node_id, lane);
 
@@ -661,7 +682,7 @@ __device__ __forceinline__ void vram_back_link_one( //
         return;
     }
 
-    typename kit_::query_t const query = kit_::prepare(storage.row(node_id), query_span, lane);
+    typename kit_::query_t const query = vram_prepare<kit_>(storage.parameters, storage.row(node_id), query_span, lane);
     vram_sorted_buffer<warp_t, node_id_type_> sorted_candidates {selection.scored_entries, 0, vram_cache_rows_k};
     for (u32_t slot_base = 0; slot_base < candidates_count; slot_base += warp_t::width_k) {
         u32_t const slot = slot_base + lane;
@@ -707,7 +728,7 @@ __device__ __forceinline__ void vram_walk_one( //
     u64_t const first = view.query_offsets[query_index] - origin;
     vram_row_t const row {view.queries + first,
                           static_cast<u32_t>(view.query_offsets[query_index + 1] - origin - first)};
-    typename kit_::query_t const query = kit_::prepare(row, query_span, lane);
+    typename kit_::query_t const query = vram_prepare<kit_>(view.storage.parameters, row, query_span, lane);
 
     vram_warp_context<frontier_> context;
     context.frontier = frontier;

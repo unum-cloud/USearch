@@ -51,8 +51,9 @@ extern template struct sequence_nvme_variant<cpu_class_t::serial_k>;
  *  index on a GPU. */
 using sequence_variant_t = std::variant< //
 #if USEARCH_ARCH_CUDA_
-    sequence_vram_nvidia_variant<sz_levenshtein_bytes_k>, //
-    sequence_vram_nvidia_variant<sz_levenshtein_runes_k>, //
+    sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_bytes_k>, //
+    sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k>,  //
+    sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k>,           //
 #endif
 #if USEARCH_TARGET_INTEL_SKYLAKE
     sequence_ram_variant<cpu_class_t::intel_skylake_k>,  //
@@ -101,8 +102,8 @@ struct sequence_traits_t {
 
     /** Takes the kind, widths and connectivity an init states, keeping the widths; false once
      *  @p outcome records why not. */
-    static bool state(usearch_sequence_init_ram_t const& arguments, geometry_t& geometry,
-                      usearch_outcome_t* outcome) noexcept {
+    template <typename arguments_type_>
+    static bool state(arguments_type_ const& arguments, geometry_t& geometry, usearch_outcome_t* outcome) noexcept {
         if (arguments.window_widths_count && !arguments.window_widths)
             return propagate_error(usearch_status_invalid_argument_k, outcome, "The window widths must not be null");
         geometry.metric = arguments.metric;
@@ -111,14 +112,6 @@ struct sequence_traits_t {
             return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to keep the widths");
         for (std::size_t window = 0; window != arguments.window_widths_count; ++window)
             geometry.window_widths.push_back_reserved(arguments.window_widths[window]);
-        return true;
-    }
-
-    /** Takes the kind and connectivity a GPU init states; its widths are refused, never kept. */
-    static bool state(usearch_sequence_init_vram_t const& arguments, geometry_t& geometry,
-                      usearch_outcome_t*) noexcept {
-        geometry.metric = arguments.metric;
-        geometry.connectivity = arguments.connectivity;
         return true;
     }
 
@@ -144,7 +137,7 @@ struct sequence_traits_t {
         return failed(status) ? status : widths_status;
     }
 
-    /** Refuses the kinds no CPU kit serves and the parameters a kind does not take. */
+    /** Refuses the kinds no CPU or GPU kit serves and the parameters a kind does not take. */
     template <typename arguments_type_>
     static bool admits(geometry_t const& geometry, arguments_type_ const& arguments,
                        usearch_outcome_t* outcome) noexcept {
@@ -170,25 +163,6 @@ struct sequence_traits_t {
         return true;
     }
 
-    /** Refuses the kinds no device kit serves and the parameters Levenshtein does not take. */
-    static bool admits(geometry_t const& geometry, usearch_sequence_init_vram_t const& arguments,
-                       usearch_outcome_t* outcome) noexcept {
-        switch (geometry.metric) {
-        case usearch_sequence_metric_levenshtein_bytes_k:
-        case usearch_sequence_metric_levenshtein_utf8_k: break;
-        case usearch_sequence_metric_overlap_k:
-        case usearch_sequence_metric_needleman_wunsch_k:
-        case usearch_sequence_metric_needleman_wunsch_gotoh_k:
-        case usearch_sequence_metric_smith_waterman_k:
-        case usearch_sequence_metric_smith_waterman_gotoh_k:
-            return propagate_error(usearch_status_unsupported_k, outcome, "No GPU kit serves this sequence kind yet");
-        default: return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown sequence metric");
-        }
-        if (arguments.weights || arguments.window_widths_count)
-            return propagate_error(usearch_status_config_mismatch_k, outcome, "Levenshtein takes no parameters");
-        return true;
-    }
-
     /** Whether a donor of @p donor geometry lands in an index of @p index geometry: the same kind,
      *  window widths and connectivity. */
     static bool matches(geometry_t const& index, geometry_t const& donor) noexcept {
@@ -211,13 +185,31 @@ struct sequence_traits_t {
 
 #if USEARCH_ARCH_CUDA_
 
-    /** Calls @p make with the GPU variant Levenshtein over the kind's symbols takes: bytes or
-     *  runes. */
+    /** Moves @p geometry into the GPU @p variant and hands its index the window widths, which its
+     *  first reservation uploads. */
+    template <typename variant_type_>
+    static bool freeze(variant_type_& variant, geometry_t& geometry, usearch_sequence_init_vram_t const&,
+                       usearch_outcome_t* outcome) noexcept {
+        if (!geometry.connectivity) geometry.connectivity = connectivity_32_k;
+        variant.geometry = std::move(geometry);
+        status_t const kept = variant.index.window_widths(to_span(variant.geometry.window_widths));
+        return succeeded(kept) || propagate_error(kept, outcome);
+    }
+
+    /** Calls @p make with the GPU variant of the kind: Levenshtein over bytes or runes, or
+     *  overlap. */
     template <typename make_type_>
     static void with_vram_variant(geometry_t const& geometry, make_type_&& make) noexcept {
-        if (geometry.metric == usearch_sequence_metric_levenshtein_utf8_k)
-            make(std::type_identity<sequence_vram_nvidia_variant<sz_levenshtein_runes_k>> {});
-        else make(std::type_identity<sequence_vram_nvidia_variant<sz_levenshtein_bytes_k>> {});
+        switch (geometry.metric) {
+        case usearch_sequence_metric_levenshtein_utf8_k:
+            return make(
+                std::type_identity<sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k>> {});
+        case usearch_sequence_metric_overlap_k:
+            return make(std::type_identity<sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k>> {});
+        default:
+            return make(
+                std::type_identity<sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_bytes_k>> {});
+        }
     }
 #endif
 

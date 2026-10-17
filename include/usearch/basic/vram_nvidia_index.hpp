@@ -42,6 +42,7 @@ struct vram_ragged_storage {
     node_id_type_* neighbors = nullptr;
     u32_t connectivity = 0;
     nk_kernel_kind_t kernel = nk_kernel_unknown_k;
+    byte_t const* parameters = nullptr;
 };
 
 /** One insertion wave and its back-link passes, mirroring the shared build view. */
@@ -219,8 +220,12 @@ struct vram_index {
 
     /** Device-side storage views, the audit surface for tests. */
     vram_ragged_storage<node_id_t> storage() const noexcept {
-        return {values_tape_.base(), reinterpret_cast<u64_t*>(offsets_column_.base()),
-                reinterpret_cast<node_id_t*>(neighbors_matrix_.base()), static_cast<u32_t>(connectivity()), kernel_};
+        return {values_tape_.base(),
+                reinterpret_cast<u64_t*>(offsets_column_.base()),
+                reinterpret_cast<node_id_t*>(neighbors_matrix_.base()),
+                static_cast<u32_t>(connectivity()),
+                kernel_,
+                parameters_};
     }
 
 #pragma endregion Measures
@@ -537,6 +542,12 @@ struct vram_index {
 
 #pragma endregion Search
 
+  protected:
+
+    /** The kits' runtime parameters in device memory, laid out and owned by the face, which
+     *  sets them before its first launch; null for kits taking none. */
+    byte_t const* parameters_ = nullptr;
+
   private:
 
     derived_& derived() noexcept { return static_cast<derived_&>(*this); }
@@ -643,13 +654,13 @@ struct vram_index {
 
     /** The widest span any row of @p values and @p offsets prepares into, raising @p longest to the
      *  longest row among them. */
-    static std::size_t span_bytes_of_(byte_t const* values, std::span<std::size_t const> offsets,
-                                      std::size_t& longest) noexcept {
+    std::size_t span_bytes_of_(byte_t const* values, std::span<std::size_t const> offsets,
+                               std::size_t& longest) const noexcept {
         std::size_t widest = 0;
         for (std::size_t row = 0; row + 1 < offsets.size(); ++row) {
             std::size_t const bytes = offsets[row + 1] - offsets[row];
             longest = max_of(longest, bytes);
-            widest = max_of(widest, derived_::span_bytes_(values + offsets[row], bytes));
+            widest = max_of(widest, derived().span_bytes_(values + offsets[row], bytes));
         }
         return widest;
     }

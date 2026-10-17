@@ -261,7 +261,8 @@ __device__ __forceinline__ void cuda_walk(vram_search_view<node_id_type_> const&
 template <typename node_id_type_>
 __device__ __forceinline__ vram_ragged_view<node_id_type_> vram_view(
     vram_ragged_storage<node_id_type_> const& storage) noexcept {
-    return {storage.values, storage.offsets, storage.neighbors, storage.connectivity, storage.kernel};
+    return {storage.values,       storage.offsets, storage.neighbors,
+            storage.connectivity, storage.kernel,  storage.parameters};
 }
 template <typename node_id_type_>
 __device__ __forceinline__ vram_build_view<node_id_type_> vram_view(vram_build<node_id_type_> const& build) noexcept {

@@ -2,17 +2,18 @@
  *  @file test/sequence/vram_index.cpp
  *  @author Ash Vardanian
  *  @date October 15, 2026
- *  @brief The sequence VRAM cell: byte and rune Levenshtein on an NVIDIA GPU beside the RAM index
- *      on the same data, judged by recall against exact neighbors, every reported distance against
- *      the serial kit the RAM suite checks against its oracle.
+ *  @brief The sequence VRAM cell: byte and rune Levenshtein and window overlap on an NVIDIA GPU
+ *      beside the RAM index on the same data, judged by recall against exact neighbors, every
+ *      reported distance against the serial kit the RAM suite checks against its oracle.
  *
  *  Strings are planted templates over the nucleotides with an eighth of their symbols edited, so
  *  neighbors cluster by template while the bytes differ. One collection keeps to the two-word kit,
  *  another needs the four-word one, and the last needs a block per walk, its rows past 1 KiB split
  *  over four lanes each, so the walks, the selections and the merges run three kits. A fourth
- *  spells its nucleotides as runes of one to three bytes, for the rune kits. Rows insert in three
- *  batches whose tapes start past their own first byte, as an Arrow slice's do, so the later
- *  batches walk graphs whose reverse links earlier batches merged.
+ *  spells its nucleotides as runes of one to three bytes, for the rune kits, and a fifth scores
+ *  window overlap at two widths, a warp to a row. Rows insert in three batches whose tapes start
+ *  past their own first byte, as an Arrow slice's do, so the later batches walk graphs whose
+ *  reverse links earlier batches merged.
  */
 #include <algorithm> // `std::min`, `std::nth_element`
 #include <array>     // `std::array` - the templates
@@ -85,6 +86,28 @@ static void respell_as_runes(std::vector<std::string>& strings) {
     }
 }
 
+/** The window widths the overlap cell hashes at, in bytes. */
+static constexpr std::size_t vram_overlap_widths_k[] = {4, 8};
+
+/** The metric @p metric_ scores with on the CPU under @p capability_, sized for @p staging
+ *  candidates. */
+template <usearch_sequence_metric_t metric_, sz_capability_t capability_>
+static auto make_sequence_metric(std::size_t staging, std::size_t& failures) {
+    if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
+        overlap_metric<capability_> metric;
+        failures += expect_eq(metric.init(staging, vram_overlap_widths_k), status_t::success_k);
+        return metric;
+    }
+    else {
+        constexpr sz_levenshtein_symbol_t symbol_k = metric_ == usearch_sequence_metric_levenshtein_utf8_k
+                                                         ? sz_levenshtein_runes_k
+                                                         : sz_levenshtein_bytes_k;
+        levenshtein_metric<capability_, symbol_k> metric;
+        failures += expect_eq(metric.init(staging), status_t::success_k);
+        return metric;
+    }
+}
+
 /** Matches, of @p wanted at most, whose distances reach no further than the @p wanted -th exact
  *  one: ties make the IDs ambiguous, the distances never. */
 static std::size_t matched_count(std::span<i64_t const> found, std::vector<i64_t> exact, std::size_t wanted) {
@@ -101,18 +124,16 @@ static std::size_t matched_count(std::span<i64_t const> found, std::vector<i64_t
  *  Every match the GPU reports must carry the pair's exact distance, ascending, and the GPU's
  *  recall at ten must reach the RAM index's at the same breadth, give or take a twentieth.
  */
-template <sz_levenshtein_symbol_t symbol_, typename node_id_type_ = u32_t>
+template <usearch_sequence_metric_t metric_, typename node_id_type_ = u32_t>
 static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& executor, std::size_t count,
                                                   std::size_t length, std::size_t queries_count) {
     using ram_index_t = ram_index<us::utilities::uuid_t, u32_t>;
-    using vram_index_t = vram_nvidia_index<symbol_, node_id_type_, sz_cap_cuda_k, sequence_nvidia_fatbin_t>;
-    using metric_t = levenshtein_metric<sz_cap_any_k, symbol_>;
-    using serial_metric_t = levenshtein_metric<sz_cap_serial_k, symbol_>;
+    using vram_index_t = vram_nvidia_index<metric_, node_id_type_, sz_cap_cuda_k, sequence_nvidia_fatbin_t>;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3, origin_k = 3;
     std::size_t failures = 0;
 
     std::vector<std::string> strings = generate_nucleotides(count + queries_count, length, seed);
-    if constexpr (symbol_ == sz_levenshtein_runes_k) respell_as_runes(strings);
+    if constexpr (metric_ == usearch_sequence_metric_levenshtein_utf8_k) respell_as_runes(strings);
     std::string tape(origin_k, '\0');
     std::vector<std::size_t> offsets {origin_k};
     for (std::string const& symbols : strings) tape += symbols, offsets.push_back(tape.size());
@@ -120,8 +141,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
 
     // The exact distances of every query to every stored string, through the serial kit.
     std::vector<std::vector<i64_t>> exact(queries_count, std::vector<i64_t>(count));
-    serial_metric_t serial_metric;
-    failures += expect_eq(serial_metric.init(count), status_t::success_k);
+    auto serial_metric = make_sequence_metric<metric_, sz_cap_serial_k>(count, failures);
     for (std::size_t query = 0; query != queries_count; ++query) {
         serial_metric.reset(std::string_view {strings[count + query]});
         for (std::size_t row = 0; row != count; ++row) serial_metric.push(std::string_view {strings[row]});
@@ -130,8 +150,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
 
     // The RAM index over the same rows, at the same breadth.
     ram_index_t ram_index;
-    metric_t metric;
-    failures += expect_eq(metric.init(expansion_k * connectivity_32_k), status_t::success_k);
+    auto metric = make_sequence_metric<metric_, sz_cap_any_k>(expansion_k * connectivity_32_k, failures);
     ram_index_t::traversal_context_t ram_context {seed};
     failures += expect(bool(ram_index.reserve(count)));
     for (std::size_t row = 0; row != count; ++row) {
@@ -158,6 +177,8 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     // The GPU index, in three batches, each over a context carved from the executor's run.
     int const device = executor.device(0);
     vram_index_t vram_index {cuda_virtual_memory_allocator<byte_t> {device}};
+    if constexpr (metric_ == usearch_sequence_metric_overlap_k)
+        failures += expect_eq(vram_index.window_widths(vram_overlap_widths_k), status_t::success_k);
     failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                           status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
@@ -197,10 +218,15 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             node_id_type_ const id = ids[query * wanted_k + rank];
             if (id == std::numeric_limits<node_id_type_>::max()) break;
-            i64_t const distance = static_cast<i64_t>(distances[query * wanted_k + rank]);
-            failures += expect(id < count) || expect_eq(distance, exact[query][id]);
-            failures += expect(found.empty() || found.back() <= distance);
-            found.push_back(distance);
+            // A float carries the overlap kind's fixed point rounded, the same way on either side.
+            f32_t const distance = distances[query * wanted_k + rank];
+            if (expect(id < count)) {
+                ++failures;
+                break;
+            }
+            failures += expect_eq(distance, static_cast<f32_t>(exact[query][id]));
+            failures += expect(found.empty() || found.back() <= exact[query][id]);
+            found.push_back(exact[query][id]);
         }
         failures += expect_eq(found.size(), wanted_k);
         vram_matched += matched_count(found, exact[query], wanted_k);
@@ -220,14 +246,20 @@ std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& 
     auto [executor, spawn_status] = cuda_executor_t::spawn(std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println(stderr, "- CUDA: device #{} opens no stream", ordinal), 1;
     std::size_t failures = 0;
-    failures += report("sequence_vram 100 nt", check_sequence_vram_collection<sz_levenshtein_bytes_k>(
+    constexpr usearch_sequence_metric_t bytes_k = usearch_sequence_metric_levenshtein_bytes_k;
+    constexpr usearch_sequence_metric_t runes_k = usearch_sequence_metric_levenshtein_utf8_k;
+    constexpr usearch_sequence_metric_t overlap_k = usearch_sequence_metric_overlap_k;
+    failures += report("sequence_vram 100 nt", check_sequence_vram_collection<bytes_k>(
                                                    stream_key(settings.seed, "short"), executor, 2048, 100, 128));
-    failures += report("sequence_vram 200 nt", check_sequence_vram_collection<sz_levenshtein_bytes_k>(
+    failures += report("sequence_vram 200 nt", check_sequence_vram_collection<bytes_k>(
                                                    stream_key(settings.seed, "long"), executor, 512, 200, 64));
-    failures += report("sequence_vram 1100 nt", check_sequence_vram_collection<sz_levenshtein_bytes_k>(
+    failures += report("sequence_vram 1100 nt", check_sequence_vram_collection<bytes_k>(
                                                     stream_key(settings.seed, "block"), executor, 256, 1100, 32));
-    failures += report("sequence_vram 200 runes", check_sequence_vram_collection<sz_levenshtein_runes_k>(
+    failures += report("sequence_vram 200 runes", check_sequence_vram_collection<runes_k>(
                                                       stream_key(settings.seed, "runes"), executor, 512, 200, 64));
+    failures += report(
+        "sequence_vram 200 nt overlap",
+        check_sequence_vram_collection<overlap_k>(stream_key(settings.seed, "overlap"), executor, 512, 200, 64));
     return failures;
 }
 
