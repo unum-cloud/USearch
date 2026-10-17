@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Neighborhood Map</title>
+    <link rel="icon" href="data:," />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,200;0,400;0,500;1,400&family=Red+Hat+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap"
+    />
+    <style>
+      :root,
+      .dark-surface {
+        --color-white: #ffffff;
+        --color-border: #f0f1f4;
+        --color-darkGrey: #787d8e;
+        --color-pureBlack: #000000;
+        --color-blue: #2962ff;
+      }
+
+      :root {
+        color-scheme: light dark;
+        --ink: var(--color-pureBlack);
+        --ink-muted: var(--color-darkGrey);
+        --paper: var(--color-white);
+        --rule: var(--color-border);
+        --accent: var(--color-blue);
+        --danger: #d93036;
+        --status-partial: light-dark(#735c0f, #d29922);
+
+        --radius-l: 8px;
+        --space-4: 0.25rem;
+        --space-12: 0.75rem;
+        --space-16: 1rem;
+        --space-24: 1.5rem;
+        --space-40: 2.5rem;
+        --space-60: 3.75rem;
+        --width-poster: 82.5rem;
+        --inset-page: var(--space-16);
+
+        --font-sans: 'Poppins', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+        --font-mono: 'Red Hat Mono', ui-monospace, SFMono-Regular, 'Cascadia Mono', Menlo, Consolas, monospace;
+        --type-display: 2.25rem;
+        --type-display-leading: 2.75rem;
+        --type-small: 0.75rem;
+        --type-small-leading: 1.125rem;
+        --type-eyebrow: 0.75rem;
+        --type-axis: 0.6875rem;
+      }
+
+      .dark-surface {
+        color-scheme: dark;
+        --ink: #ffffff;
+        --ink-muted: #8a90a2;
+        --paper: #000000;
+        --rule: #2a2d36;
+        --accent: #6690ff;
+        --danger: #ff6369;
+      }
+
+      .ink-on-paper {
+        --ink: var(--color-pureBlack);
+        --ink-muted: var(--color-darkGrey);
+        --paper: var(--color-white);
+        --rule: var(--color-border);
+        --accent: var(--color-blue);
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --color-white: #111318;
+          --color-border: #363a46;
+          --color-darkGrey: #8a90a2;
+          --color-pureBlack: #eceef2;
+          --color-blue: #6690ff;
+          --danger: #ff6369;
+        }
+      }
+
+      @media screen and (min-width: 768px) {
+        :root {
+          --inset-page: var(--space-24);
+          --type-display: 3.5rem;
+          --type-display-leading: 4.125rem;
+          --type-small: 0.875rem;
+          --type-small-leading: 1.3125rem;
+          --type-eyebrow: 0.875rem;
+        }
+      }
+
+      @media screen and (min-width: 1024px) {
+        :root {
+          --inset-page: var(--space-40);
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .poster-page {
+        max-width: var(--width-poster);
+        margin: 0 auto;
+        padding: var(--space-40) var(--inset-page) var(--space-60);
+      }
+
+      .eyebrow-label {
+        margin: 0 0 var(--space-12);
+        font-size: var(--type-eyebrow);
+        font-weight: 500;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--ink-muted);
+      }
+
+      .display-title {
+        margin: 0 0 var(--space-40);
+        font-size: var(--type-display);
+        line-height: var(--type-display-leading);
+        font-weight: 200;
+        letter-spacing: -0.01em;
+        text-wrap: balance;
+      }
+
+      .poster-figure {
+        margin: 0;
+      }
+
+      .poster-frame {
+        position: relative;
+        aspect-ratio: 16 / 10;
+        overflow: hidden;
+        border: 1px solid var(--rule);
+        border-radius: var(--radius-l);
+        background: var(--paper);
+        cursor: crosshair;
+        touch-action: none;
+        user-select: none;
+      }
+
+      .poster-frame.dragging {
+        cursor: grabbing;
+      }
+
+      .density-canvas,
+      .glyph-overlay {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      .glyph-overlay {
+        pointer-events: none;
+      }
+
+      .status-line {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        margin: 0;
+        padding: var(--space-16);
+        text-align: center;
+        font-family: var(--font-mono);
+        font-size: var(--type-small);
+        color: var(--ink-muted);
+        pointer-events: none;
+      }
+
+      .status-line[hidden] {
+        display: none;
+      }
+
+      .readout-strip {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+        margin: var(--space-24) 0 0;
+        border-top: 1px solid var(--rule);
+        border-bottom: 1px solid var(--rule);
+      }
+
+      .readout-cell {
+        display: flex;
+        flex-direction: column-reverse;
+        gap: var(--space-4);
+        padding: var(--space-16);
+        min-width: 0;
+      }
+
+      .readout-cell + .readout-cell {
+        border-left: 1px solid var(--rule);
+      }
+
+      .readout-value {
+        margin: 0;
+        font-family: var(--font-mono);
+        font-size: 1.125rem;
+        line-height: 1.2;
+        color: var(--ink);
+        overflow-wrap: anywhere;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .readout-value.readout-wide {
+        font-size: var(--type-small);
+        line-height: var(--type-small-leading);
+      }
+
+      .readout-label {
+        font-size: var(--type-small);
+        line-height: var(--type-small-leading);
+        color: var(--ink-muted);
+      }
+
+      .readout-toggle {
+        padding: 0;
+        border: 0;
+        background: none;
+        color: var(--ink);
+        font: inherit;
+        text-decoration: underline;
+        text-decoration-color: var(--rule);
+        text-underline-offset: 0.25em;
+        cursor: pointer;
+      }
+
+      .control-line {
+        margin: var(--space-12) 0 0;
+        font-family: var(--font-mono);
+        font-size: var(--type-small);
+        line-height: var(--type-small-leading);
+        color: var(--ink-muted);
+      }
+
+      .figure-caption {
+        margin: var(--space-12) 0 0;
+        font-size: var(--type-small);
+        line-height: var(--type-small-leading);
+        color: var(--ink-muted);
+      }
+
+      @media screen and (max-width: 640px) {
+        .poster-frame {
+          aspect-ratio: 4 / 5;
+        }
+
+        .readout-cell + .readout-cell {
+          border-left: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="poster-page">
+      <p class="eyebrow-label">USearch · neighborhood map</p>
+      <h1 class="display-title">Every neighborhood, one connected sample at a time</h1>
+      <figure class="poster-figure">
+        <div class="poster-frame dark-surface" id="poster-frame">
+          <canvas class="density-canvas" id="density-canvas"></canvas>
+          <canvas class="glyph-overlay" id="glyph-overlay" aria-hidden="true"></canvas>
+          <p class="status-line" id="status-line">Loading…</p>
+        </div>
+        <dl class="readout-strip">
+          <div class="readout-cell">
+            <dt class="readout-label">nodes</dt>
+            <dd class="readout-value" id="nodes-readout">–</dd>
+          </div>
+          <div class="readout-cell">
+            <dt class="readout-label">edges</dt>
+            <dd class="readout-value" id="edges-readout">–</dd>
+          </div>
+          <div class="readout-cell">
+            <dt class="readout-label">layout</dt>
+            <dd class="readout-value" id="layout-readout">–</dd>
+          </div>
+          <div class="readout-cell">
+            <dt class="readout-label">draw</dt>
+            <dd class="readout-value" id="draw-readout">–</dd>
+          </div>
+          <div class="readout-cell">
+            <dt class="readout-label">last call</dt>
+            <dd class="readout-value readout-wide" id="call-readout">–</dd>
+          </div>
+          <div class="readout-cell">
+            <dt class="readout-label">visited / computed</dt>
+            <dd class="readout-value readout-wide" id="traversal-readout">–</dd>
+          </div>
+          <div class="readout-cell">
+            <dt class="readout-label">outcome</dt>
+            <dd class="readout-value readout-wide" id="outcome-readout">–</dd>
+          </div>
+        </dl>
+        <p class="control-line">
+          edges <button class="readout-toggle" id="edges-toggle" type="button">on</button> · hubs
+          <button class="readout-toggle" id="hubs-toggle" type="button">off</button> · surface
+          <button class="readout-toggle" id="surface-toggle" type="button">poster</button>
+        </p>
+        <figcaption class="figure-caption">
+          Drag to turn the layout, Shift-drag to pan, and scroll to zoom toward the cursor. Hover a node for the entries its
+          graph links reach, dashed where they land outside the drawn sample, and click to bring up every entry under its key
+          with its nearest entries. Option-drag a node to pin it as a landmark, and double-click to reset the view or release a
+          pin.
+        </figcaption>
+      </figure>
+    </main>
+
+    <script type="module">
+      import { explore } from './explorer.js';
+
+      const byId = (id) => document.getElementById(id);
+      const status = byId('status-line');
+      try {
+        window.explorer = await explore(
+          {
+            frame: byId('poster-frame'),
+            canvas: byId('density-canvas'),
+            overlay: byId('glyph-overlay'),
+            status,
+            readouts: {
+              nodes: byId('nodes-readout'),
+              edges: byId('edges-readout'),
+              layout: byId('layout-readout'),
+              draw: byId('draw-readout'),
+              call: byId('call-readout'),
+              traversal: byId('traversal-readout'),
+              outcome: byId('outcome-readout')
+            },
+            toggles: { edges: byId('edges-toggle'), hubs: byId('hubs-toggle'), surface: byId('surface-toggle') }
+          },
+          new URLSearchParams(location.search)
+        );
+      } catch (error) {
+        console.error(error);
+        status.textContent = String(error.message ?? error);
+        status.hidden = false;
+      }
+    </script>
+  </body>
+</html>
