@@ -29,12 +29,12 @@ use numkong::MatrixView;
 use crate::types::{
     arena_slice, check, fail, lower_predicate, lower_progress, nvme_options, path_view, path_views, ram_options,
     read_spelling, spelling, static_string, usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k,
-    usearch_completion_t, usearch_executor_t, usearch_key_t, usearch_keys_view_t, usearch_matches_tape_view_t,
-    usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t, usearch_progress_t,
-    usearch_ram_options_t, usearch_rows_view_t, usearch_scalar_t, usearch_traversal_t, usearch_vram_options_t,
-    values_of, vram_options, Accepts, Arena, Blocking, Callbacks, Calling, Completion, Deferring, Element, Error,
-    Executor, Exported, Handles, Key, Matches, MatchesRow, On, Predicate, ProgressCallback, Residency, Result,
-    RowsView, Scalar, Status, Traversal,
+    usearch_completion_t, usearch_executor_t, usearch_key_t, usearch_keys_tape_view_t, usearch_keys_view_t,
+    usearch_matches_tape_view_t, usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t,
+    usearch_predicate_t, usearch_progress_t, usearch_ram_options_t, usearch_rows_view_t, usearch_scalar_t,
+    usearch_traversal_t, usearch_vram_options_t, values_of, vram_options, Accepts, Arena, Blocking, Callbacks, Calling,
+    Completion, Deferring, Element, Error, Executor, Exported, Handles, Key, Matches, MatchesRow, On, Predicate,
+    ProgressCallback, Residency, Result, RowsView, Scalar, Status, Traversal,
 };
 
 // region: Raw Declarations
@@ -173,6 +173,7 @@ pub struct usearch_dense_refine_t {
     pub outcome: *mut usearch_outcome_t,
     pub completion: usearch_completion_t,
     pub changed: *mut usize,
+    pub reachability: *mut usearch_dense_reachability_t,
     pub expansion_factor: usize,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
@@ -238,7 +239,11 @@ pub struct usearch_dense_absorb_t {
     pub completion: usearch_completion_t,
     pub count: usize,
     pub donors: *mut usearch_dense_index_t,
+    pub changed: *mut usize,
+    pub reachability: *mut usearch_dense_reachability_t,
+    pub expansion_factor: usize,
     pub progress: usearch_progress_t,
+    pub stats: *mut usearch_dense_traversal_stats_t,
 }
 
 #[repr(C)]
@@ -246,7 +251,8 @@ pub struct usearch_dense_cursor_init_t {
     pub cursor: *mut usearch_dense_cursor_t,
     pub index: usearch_dense_index_t,
     pub outcome: *mut usearch_outcome_t,
-    pub start: *const usearch_key_t,
+    pub starts_count: usize,
+    pub starts: *const usearch_key_t,
 }
 
 #[repr(C)]
@@ -257,11 +263,10 @@ pub struct usearch_dense_cursor_next_t {
     pub completion: usearch_completion_t,
     pub cursor: usearch_dense_cursor_t,
     pub keys: *mut usearch_keys_view_t,
-    pub vectors: *mut usearch_rows_view_t,
+    pub links: *mut usearch_keys_tape_view_t,
     pub written: *mut usize,
     pub arena: usearch_arena_t,
     pub wanted: usize,
-    pub outputs_scalar: usearch_scalar_t,
 }
 
 #[repr(C)]
@@ -1190,19 +1195,18 @@ impl<'arena> Monolith<'arena> {
     }
 }
 
-/// One cursor pull exported into the arena it borrows: the keys, and beside them the rows when
-/// `Value` names their scalar type rather than `()`.
+/// One cursor pull exported into the arena it borrows: the keys, and beside them the keys each
+/// entry links to when the pull asked; the rows themselves come from [`DenseVerbs::get`].
 ///
 /// Rust-only.
-pub struct DenseBatch<'arena, Value> {
+pub struct DenseBatch<'arena> {
     arena: &'arena Arena,
     keys: Exported<usearch_keys_view_t>,
-    vectors: Exported<usearch_rows_view_t>,
+    links: Option<Exported<usearch_keys_tape_view_t>>,
     written: usize,
-    value: PhantomData<Value>,
 }
 
-impl<'arena, Value> DenseBatch<'arena, Value> {
+impl<'arena> DenseBatch<'arena> {
     /// Entries the pull wrote; zero means the walk is exhausted.
     pub fn written(&self) -> usize { self.written }
 
@@ -1212,11 +1216,21 @@ impl<'arena, Value> DenseBatch<'arena, Value> {
         // Safety: the arena holds a finished call's packed output in host memory.
         Ok(unsafe { arena_slice(self.keys.0.data, self.written) })
     }
-}
 
-impl<'arena, Value: Element> DenseBatch<'arena, Value> {
-    /// One row per key, refused with [`Status::Device`] over device memory.
-    pub fn view(&self) -> Result<MatrixView<'arena, Value>> { exported_rows(self.arena, &self.vectors.0, self.written) }
+    /// The keys entry `entry` links to, refused with [`Status::InvalidArgument`] when the pull did
+    /// not ask for links or `entry` is not below [`DenseBatch::written`], and with
+    /// [`Status::Device`] over device memory.
+    pub fn links(&self, entry: usize) -> Result<&'arena [Key]> {
+        self.arena.host()?;
+        match (&self.links, entry < self.written) {
+            // Safety: the arena holds a finished call's output in host memory.
+            (Some(links), true) => Ok(unsafe { links.0.row(entry) }),
+            _ => Err(fail(
+                Status::InvalidArgument,
+                "the pull exported no links, or the entry is not below its count",
+            )),
+        }
+    }
 }
 
 // endregion: Results
@@ -1896,12 +1910,15 @@ pub trait DenseVerbs<'index>: Copy {
         })
     }
 
-    /// Opens a row scan over the current contents, pulled blocking on this receiver's executor;
-    /// each shard's publication watermark is read as the walk enters it, so a row once passed is
-    /// never revisited.
+    /// Opens a walk over the current contents, pulled blocking on this receiver's executor; each
+    /// shard's publication watermark is read as the walk enters it, so a row once passed is never
+    /// revisited.
+    ///
+    /// Without `starts` the walk yields every row as stored. With them it yields the start keys'
+    /// own rows first, in order, then the rows those link to breadth-first, each row once.
     ///
     /// Calls `usearch_dense_cursor_init`.
-    fn cursor(self) -> Result<DenseCursor<'index>>
+    fn cursor(self, starts: &[Key]) -> Result<DenseCursor<'index>>
     where
         Self: DenseVerbs<'index, Completion = Blocking>,
     {
@@ -1916,7 +1933,8 @@ pub trait DenseVerbs<'index>: Copy {
                 cursor: &mut cursor.handle,
                 index: cursor.handles.index,
                 outcome: &mut outcome,
-                start: ptr::null(),
+                starts_count: starts.len(),
+                starts: starts.as_ptr(),
             })
         };
         check(outcome).map(|()| cursor)
@@ -2218,6 +2236,7 @@ impl Calling for DenseRefine<'_> {
             outcome,
             completion,
             changed: &mut self.changed,
+            reachability: ptr::null_mut(),
             expansion_factor: self.config.expansion_factor,
             progress,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
@@ -2590,7 +2609,11 @@ impl Calling for DenseAbsorb<'_> {
             completion,
             count: self.donors.0.len(),
             donors: self.donors.0.as_mut_ptr(),
+            changed: ptr::null_mut(),
+            reachability: ptr::null_mut(),
+            expansion_factor: 0,
             progress,
+            stats: ptr::null_mut(),
         })
     }
 
@@ -2679,9 +2702,9 @@ impl<'arena> Calling for DenseSaveBuffer<'_, 'arena> {
 
 // region: Cursors and Streams
 
-/// A row scan over the index contents; see [`DenseVerbs::cursor`].
+/// A walk over the index contents; see [`DenseVerbs::cursor`].
 ///
-/// The walk is a sequential row scan, so it stays a batch operation: export, migration, and
+/// The walk is a sequential scan, so it stays a batch operation: export, migration, and
 /// visualization all move whole slabs.
 ///
 /// Mirrors `usearch_dense_cursor_t`; dropping it calls `usearch_dense_cursor_free`.
@@ -2696,30 +2719,21 @@ impl DenseCursor<'_> {
     /// Copies up to `wanted` next keys into `arena`; an empty batch means the walk is exhausted.
     ///
     /// Calls `usearch_dense_cursor_next`.
-    pub fn next_keys<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena, ()>> {
-        self.next(None, wanted, arena)
+    pub fn next_keys<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
+        self.next(false, wanted, arena)
     }
 
-    /// Copies up to `wanted` next entries into `arena`, keys and rows alike, the rows converted to
-    /// `Value`; an empty batch means the walk is exhausted.
+    /// Copies up to `wanted` next keys into `arena`, each with the keys it links to; an empty
+    /// batch means the walk is exhausted.
     ///
     /// Calls `usearch_dense_cursor_next`.
-    pub fn next_batch<'arena, Value: Element>(
-        &mut self,
-        wanted: usize,
-        arena: &'arena mut Arena,
-    ) -> Result<DenseBatch<'arena, Value>> {
-        self.next(Some(Value::SCALAR), wanted, arena)
+    pub fn next_links<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
+        self.next(true, wanted, arena)
     }
 
-    /// Pulls a batch, exporting rows only when `scalar` names their type.
-    fn next<'arena, Value>(
-        &mut self,
-        scalar: Option<Scalar>,
-        wanted: usize,
-        arena: &'arena mut Arena,
-    ) -> Result<DenseBatch<'arena, Value>> {
-        let (mut keys, mut vectors, mut written) = (Exported::default(), Exported::default(), 0);
+    /// Pulls a batch, exporting each entry's links only when `linked` asks.
+    fn next<'arena>(&mut self, linked: bool, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
+        let (mut keys, mut links, mut written) = (Exported::default(), Exported::default(), 0);
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_dense_cursor_next(&mut usearch_dense_cursor_next_t {
@@ -2729,23 +2743,21 @@ impl DenseCursor<'_> {
                 completion: usearch_completion_blocking_k,
                 cursor: self.handle,
                 keys: &mut keys.0,
-                vectors: match scalar {
-                    Some(_) => ptr::from_mut(&mut vectors.0),
-                    None => ptr::null_mut(),
+                links: match linked {
+                    true => ptr::from_mut(&mut links.0),
+                    false => ptr::null_mut(),
                 },
                 written: &mut written,
                 arena: arena.handle,
                 wanted,
-                outputs_scalar: scalar.map_or(0, |scalar| scalar as usearch_scalar_t),
             })
         };
         check(outcome)?;
         Ok(DenseBatch {
             arena,
             keys,
-            vectors,
+            links: linked.then_some(links),
             written,
-            value: PhantomData,
         })
     }
 }
@@ -3277,18 +3289,11 @@ mod tests {
         index.insert(sequential_keys(2), strided)?;
 
         let mut arena = Arena::new()?;
-        let walked = index.cursor()?.next_batch::<f32>(2, &mut arena)?;
-        assert_eq!(walked.written(), 2);
-        assert_eq!(walked.view()?.shape(), &[2, DIMENSIONS]);
-        for (row, key) in walked.keys()?.iter().enumerate() {
-            let source = u64::try_from(*key).unwrap() as usize;
-            let restored = walked
-                .view()?
-                .slice_leading(row)
-                .unwrap()
-                .as_contiguous_slice()
-                .unwrap()
-                .to_vec();
+        let walked_keys = index.cursor(&[])?.next_keys(2, &mut arena)?.keys()?.to_vec();
+        assert_eq!(walked_keys.len(), 2);
+        for key in walked_keys {
+            let source = u64::try_from(key).unwrap() as usize;
+            let restored = flattened(index.get::<f32>(key, &mut arena)?.view()?);
             assert!(close_rows(&restored, &rows_source[source * DIMENSIONS..][..DIMENSIONS]));
         }
         Ok(())
@@ -3966,16 +3971,15 @@ mod tests {
 
         let executor = executor();
         let receiver = index.on(&executor);
-        let mut cursor = receiver.cursor()?;
+        let mut cursor = receiver.cursor(&[])?;
         let mut arena = Arena::new_in(&executor)?;
         let mut seen = HashSet::new();
         let mut batches = Vec::new();
         loop {
-            let batch = cursor.next_batch::<f32>(BUFFERED, &mut arena)?;
+            let batch = cursor.next_keys(BUFFERED, &mut arena)?;
             if batch.written() == 0 {
                 break;
             }
-            assert_eq!(batch.view()?.shape(), &[batch.written(), DIMENSIONS]);
             batches.push(batch.written());
             seen.extend(batch.keys()?.iter().copied());
         }
@@ -3986,11 +3990,11 @@ mod tests {
     }
 
     #[test]
-    fn walks_entries_without_vectors() -> Result<()> {
+    fn walks_entries_by_keys() -> Result<()> {
         const DIMENSIONS: usize = 8;
         let (index, keys, _) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
 
-        let mut cursor = index.cursor()?;
+        let mut cursor = index.cursor(&[])?;
         let mut arena = Arena::new()?;
         let batch = cursor.next_keys(8, &mut arena)?;
         assert_eq!(batch.written(), 4);

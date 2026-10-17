@@ -814,21 +814,31 @@ def test_iteration_walks_every_key(executor):
     assert sorted(keys_to_integers(np.concatenate(walked)).tolist()) == list(range(300))
 
 
-def test_iteration_carries_typed_vectors(executor):
-    """A pull asked for a scalar type carries that type, one asked for none carries keys alone, and each pull
+def test_iteration_carries_links(executor):
+    """A pull asked for links carries them as offsets and keys, one asked for none carries keys alone, and each pull
     rewinds the batch before it."""
     index, _ = build_index(40, 12, executor)
     cursor, arena = index.cursor(), Arena()
-    batch = cursor.next(16, arena, outputs_dtype=Scalar.F32)
-    view = memoryview(batch.vectors)
-    assert view.format == "f" and view.shape == (16, 12)
+    batch = cursor.next(16, arena, links=True)
+    offsets, linked = batch.links
+    view = memoryview(offsets)
+    assert view.format == "N" and view.shape == (17,)
     assert len(batch) == 16 and np.asarray(batch.keys).shape == (16, 16)
+    assert np.asarray(linked).shape == (view[16], 16)
     with pytest.raises(ContendedError):
         cursor.next(16, arena)
     view.release()
-    assert cursor.next(16, arena).vectors is None
+    assert cursor.next(16, arena).links is None
     with pytest.raises(UninitializedError):
-        memoryview(batch.vectors)
+        memoryview(offsets)
+
+
+def test_iteration_walks_from_start_keys(executor):
+    """A walk from start keys yields their own entries first, in the order given."""
+    index, _ = build_index(40, 12, executor)
+    cursor, arena = index.cursor([7, 3]), Arena()
+    walked = keys_to_integers(np.array(cursor.next(2, arena).keys)).tolist()
+    assert walked == [7, 3]
 
 
 def test_search_stream_yields_nearest_first(executor):

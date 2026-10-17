@@ -371,16 +371,17 @@ println!("{:?}", rows.view()?.shape());
 let rows = index.on(&executor).get::<f32>(key, &mut arena)?;       // rewinds it, so the rows above are gone
 ```
 
-A cursor walks the index contents as a sequential row scan, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
-`next_keys` walks the key column alone, and `next_batch` copies the rows beside the keys, both into an arena.
+A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
+Without start keys it yields every row as stored; with them, the starts' own rows first, then the rows those link to breadth-first, each once.
+`next_keys` walks the key column alone, and `next_links` copies the keys each entry links to beside it, both into an arena; the rows themselves come from `get`.
 
 ```rust
 let mut arena = Arena::new_in(&executor)?;
-let mut cursor = index.on(&executor).cursor()?;
+let mut cursor = index.on(&executor).cursor(&[])?;
 loop {
-    let batch = cursor.next_batch::<f32>(1024, &mut arena)?;
+    let batch = cursor.next_links(1024, &mut arena)?;
     if batch.written() == 0 { break; }
-    println!("{} keys beside {:?} rows", batch.keys()?.len(), batch.view()?.shape());
+    println!("{} keys, the first linking to {:?}", batch.keys()?.len(), batch.links(0)?);
 }
 ```
 

@@ -50,6 +50,7 @@ from usearch.types import (
     Executor,
     Key,
     KeyBytes,
+    KeysTapeViewArguments,
     KeysView,
     Matches,
     MatchesTapeViewArguments,
@@ -146,7 +147,7 @@ device reads. Nothing tells the two kinds apart, so a host function there is und
 
 @fieldwise_init
 struct DenseTraversalStats(ImplicitlyCopyable):
-    """Traversal telemetry - `usearch_dense_traversal_stats_t`, a pure output.
+    """Traversal telemetry - `usearch_traversal_stats_t`, a pure output.
 
     Fully overwritten by the call it is passed to, so a caller reusing one slot across calls reads
     the last call's figures rather than a running total.
@@ -168,7 +169,7 @@ struct DenseTraversalStats(ImplicitlyCopyable):
 
 @fieldwise_init
 struct DenseReachability(Defaultable, ImplicitlyCopyable):
-    """One reachability audit - `usearch_dense_reachability_t`: the population it judged, and how much
+    """One reachability audit - `usearch_reachability_t`: the population it judged, and how much
     of it a search reaches."""
 
     var audited: c_size_t
@@ -356,7 +357,7 @@ struct DenseVectors[dtype: DType, origin: MutOrigin](Movable, Sized):
 
 @fieldwise_init
 struct DenseBatch[origin: MutOrigin](Movable, Sized):
-    """One cursor pull, read in place from its arena: the keys, and the rows beside them when asked for.
+    """One cursor pull, read in place from its arena: the keys, and the keys each links to when asked for.
 
     Parameters:
         origin: The arena the batch lives in, which this result borrows.
@@ -368,8 +369,10 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
     """The arena's call this batch came from, so a read after a later call is refused."""
     var keys_address: Address
     """The first key, inside the arena."""
-    var view: RowsViewArguments
-    """The rows beside the keys, null for a pull of keys alone."""
+    var linked: Bool
+    """Whether the pull exported links."""
+    var links_view: KeysTapeViewArguments
+    """The keys each entry links to and their offsets, null for a pull of keys alone."""
     var written: Int
     """Entries the pull wrote; zero when the walk is exhausted."""
 
@@ -393,28 +396,26 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
         _readable(self.arena, self.generation, "DenseBatch.keys")
         return _in_arena[Key, origin_of(self)](self.keys_address, self.written)
 
-    def row[dtype: DType](ref self, row: Int) raises Error -> Span[Scalar[dtype], origin_of(self)]:
-        """One entry's row, beside its key. Binding-only.
-
-        Parameters:
-            dtype: The element type the row is read as, which the exported kind must store whole.
+    def links(ref self, entry: Int) raises Error -> Span[Key, origin_of(self)]:
+        """The keys one entry links to, as the graph stored them when the pull ran. Binding-only.
 
         Args:
-            row: Which entry, below `len(self)`.
+            entry: Which entry, below `len(self)`.
 
         Returns:
-            The row's elements - `columns` of them, or its packed bytes for a sub-byte kind.
+            The linked keys, borrowed from the arena this result reads.
 
         Raises:
-            `Error` with `SHAPE_MISMATCH` for a pull of keys alone or a kind `dtype` cannot hold, with
+            `Error` with `INVALID_ARGUMENT` for a pull of keys alone or an entry past the batch, with
             `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
         """
-        _readable(self.arena, self.generation, "DenseBatch.row")
-        if not self.view.scalar.stores[dtype]():
-            raise Error(Status.SHAPE_MISMATCH, "DenseBatch.row")
-        return _in_arena[Scalar[dtype], origin_of(self)](
-            self.view.data + row * Int(self.view.stride),
-            self.view.scalar.bytes_for_columns(Int(self.view.columns)) // size_of[Scalar[dtype]](),
+        _readable(self.arena, self.generation, "DenseBatch.links")
+        if not self.linked or entry < 0 or entry >= self.written:
+            raise Error(Status.INVALID_ARGUMENT, "DenseBatch.links")
+        var offsets = _in_arena[c_size_t, origin_of(self)](self.links_view.offsets, self.written + 1)
+        var begin = Int(offsets[entry])
+        return _in_arena[Key, origin_of(self)](
+            self.links_view.keys + begin * size_of[Key](), Int(offsets[entry + 1]) - begin
         )
 
 
@@ -864,6 +865,7 @@ struct DenseRefineArguments(ImplicitlyCopyable):
     var outcome: Address
     var completion: Completion
     var changed: Address
+    var reachability: Address
     var expansion_factor: c_size_t
     var progress: ProgressArguments
     var stats: Address
@@ -890,7 +892,11 @@ struct DenseAbsorbArguments(ImplicitlyCopyable):
     var completion: Completion
     var count: c_size_t
     var donors: Address
+    var changed: Address
+    var reachability: Address
+    var expansion_factor: c_size_t
     var progress: ProgressArguments
+    var stats: Address
 
 
 @fieldwise_init
@@ -947,7 +953,8 @@ struct DenseCursorInitArguments(ImplicitlyCopyable):
     var cursor: Address
     var index: Address
     var outcome: Address
-    var start: Address
+    var starts_count: c_size_t
+    var starts: Address
 
 
 @fieldwise_init
@@ -960,11 +967,10 @@ struct DenseCursorNextArguments(ImplicitlyCopyable):
     var completion: Completion
     var cursor: Address
     var keys: Address
-    var vectors: Address
+    var links: Address
     var written: Address
     var arena: Address
     var wanted: c_size_t
-    var outputs_scalar: ScalarKind
 
 
 @fieldwise_init
@@ -1169,14 +1175,14 @@ struct DenseCursorNextOutputs(Defaultable, ImplicitlyCopyable):
 
     var keys: Address
     var keys_stride: c_size_t
-    var vectors: RowsViewArguments
+    var links: KeysTapeViewArguments
     var written: c_size_t
 
     def __init__(out self):
         """Nothing pulled."""
         self.keys = NULL_ADDRESS
         self.keys_stride = c_size_t(0)
-        self.vectors = _no_rows()
+        self.links = KeysTapeViewArguments()
         self.written = c_size_t(0)
 
 
@@ -1437,6 +1443,7 @@ struct _DenseRefineCall(Call):
                 outcome,
                 completion,
                 outputs,
+                NULL_ADDRESS,
                 c_size_t(self.expansion_factor),
                 ProgressArguments(),
                 self.stats,
@@ -1503,7 +1510,11 @@ struct _DenseAbsorbCall(Call):
                 completion,
                 c_size_t(len(self.addresses)),
                 Int(self.addresses.unsafe_ptr()),
+                NULL_ADDRESS,
+                NULL_ADDRESS,
+                c_size_t(0),
                 ProgressArguments(),
+                NULL_ADDRESS,
             ),
             library.symbols().dense_absorb,
         )
@@ -1806,7 +1817,7 @@ struct _DenseCursorNextCall[origin: MutOrigin](Call):
     comptime Result = DenseBatch[Self.origin]
     comptime symbol: StaticString = "usearch_dense_cursor_next"
     var cursor: Address
-    var scalar: ScalarKind
+    var links: Bool
     var wanted: Int
     var arena: Pointer[Arena, Self.origin]
 
@@ -1820,7 +1831,7 @@ struct _DenseCursorNextCall[origin: MutOrigin](Call):
         outputs: Address,
     ):
         var landing = Pointer[DenseCursorNextOutputs, MutAnyOrigin](unsafe_from_address=outputs)
-        var scalar = self.scalar
+        var links = self.links
         _cross(
             DenseCursorNextArguments(
                 index,
@@ -1829,11 +1840,10 @@ struct _DenseCursorNextCall[origin: MutOrigin](Call):
                 completion,
                 self.cursor,
                 Int(Pointer(to=landing[].keys)),
-                Int(Pointer(to=landing[].vectors)) if scalar != ScalarKind.UNKNOWN else NULL_ADDRESS,
+                Int(Pointer(to=landing[].links)) if links else NULL_ADDRESS,
                 Int(Pointer(to=landing[].written)),
                 self.arena[]._address,
                 c_size_t(self.wanted),
-                scalar,
             ),
             library.symbols().dense_cursor_next,
         )
@@ -1842,7 +1852,9 @@ struct _DenseCursorNextCall[origin: MutOrigin](Call):
         return _served(self.arena, status)
 
     def conclude(deinit self, outputs: DenseCursorNextOutputs, generation: Int) -> Self.Result:
-        return Self.Result(self.arena, generation, outputs.keys, outputs.vectors, Int(outputs.written))
+        return Self.Result(
+            self.arena, generation, outputs.keys, self.links, outputs.links, Int(outputs.written)
+        )
 
 
 @fieldwise_init
@@ -2330,7 +2342,7 @@ struct DenseIndex(DenseVerbs, Movable):
         return _block(self.library, call^, self.address, NULL_ADDRESS)
 
     def cursor(ref self) raises Error -> DenseCursor[ImmOrigin(origin_of(self))]:
-        """Opens a row scan over the current contents, its pulls on the calling thread.
+        """Opens a walk over every row as stored, its pulls on the calling thread.
         Calls `usearch_dense_cursor_init`.
 
         Each shard's publication watermark is read as the walk enters that shard, so a row once
@@ -2342,7 +2354,31 @@ struct DenseIndex(DenseVerbs, Movable):
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
         """
-        return DenseCursor[ImmOrigin(origin_of(self))](self.library, self.address, NULL_ADDRESS)
+        return DenseCursor[ImmOrigin(origin_of(self))](self.library, self.address, NULL_ADDRESS, 0, NULL_ADDRESS)
+
+    def cursor[
+        starts_origin: ImmOrigin, //
+    ](ref self, starts: Span[Key, starts_origin]) raises Error -> DenseCursor[ImmOrigin(origin_of(self))]:
+        """Opens a walk from `starts`, its pulls on the calling thread. Calls `usearch_dense_cursor_init`.
+
+        It yields the start keys' own rows first, in order, then the rows those link to
+        breadth-first, each once.
+
+        Parameters:
+            starts_origin: The start keys' origin, inferred from the argument.
+
+        Args:
+            starts: The keys to walk from.
+
+        Returns:
+            The cursor, which borrows the index and cannot outlive it.
+
+        Raises:
+            `Error` if the residency has no cursor, as VRAM does not.
+        """
+        return DenseCursor[ImmOrigin(origin_of(self))](
+            self.library, self.address, NULL_ADDRESS, len(starts), Int(starts.unsafe_ptr())
+        )
 
     def search_stream[
         query_origin: ImmOrigin, //
@@ -2753,7 +2789,7 @@ struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
         return _block(self.index[].library, call^, self.index[].address, self.executor)
 
     def cursor(self) raises Error -> DenseCursor[Self.origin]:
-        """Opens a row scan over the current contents, its pulls on the bound executor.
+        """Opens a walk over every row as stored, its pulls on the bound executor.
         Calls `usearch_dense_cursor_init`.
 
         Returns:
@@ -2762,7 +2798,28 @@ struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
         """
-        return DenseCursor[Self.origin](self.index[].library, self.index[].address, self.executor)
+        return DenseCursor[Self.origin](self.index[].library, self.index[].address, self.executor, 0, NULL_ADDRESS)
+
+    def cursor[
+        starts_origin: ImmOrigin, //
+    ](self, starts: Span[Key, starts_origin]) raises Error -> DenseCursor[Self.origin]:
+        """Opens a walk from `starts`, its pulls on the bound executor. Calls `usearch_dense_cursor_init`.
+
+        Parameters:
+            starts_origin: The start keys' origin, inferred from the argument.
+
+        Args:
+            starts: The keys to walk from, the walk yielding their rows first.
+
+        Returns:
+            The cursor, which borrows the index and the executor and cannot outlive them.
+
+        Raises:
+            `Error` if the residency has no cursor, as VRAM does not.
+        """
+        return DenseCursor[Self.origin](
+            self.index[].library, self.index[].address, self.executor, len(starts), Int(starts.unsafe_ptr())
+        )
 
     def search_stream[
         query_origin: ImmOrigin, //
@@ -3098,7 +3155,7 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
 
 
 struct DenseCursor[origin: ImmOrigin]:
-    """A sequential row scan over the index contents - `usearch_dense_cursor_t`.
+    """A walk over the index contents - `usearch_dense_cursor_t`.
 
     Export, migration, and visualization feed off it. It borrows the index and the executor its
     pulls run on, so neither can be released while it lives.
@@ -3116,13 +3173,17 @@ struct DenseCursor[origin: ImmOrigin]:
     var address: Address
     """The `usearch_dense_cursor_t` this struct owns."""
 
-    def __init__(out self, library: Library, index: Address, executor: Address) raises Error:
+    def __init__(
+        out self, library: Library, index: Address, executor: Address, starts_count: Int, starts: Address
+    ) raises Error:
         """Opens a cursor over `index`. Calls `usearch_dense_cursor_init`.
 
         Args:
             library: The loaded engine the cursor is opened through.
             index: The handle to scan.
             executor: The executor every pull runs on.
+            starts_count: The start keys at `starts`; zero walks every row as stored.
+            starts: The first start key, or `NULL_ADDRESS` for none.
 
         Raises:
             `Error` if the residency has no cursor, as VRAM does not.
@@ -3132,7 +3193,7 @@ struct DenseCursor[origin: ImmOrigin]:
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
         _cross(
-            DenseCursorInitArguments(Int(created), index, Int(outcome), NULL_ADDRESS),
+            DenseCursorInitArguments(Int(created), index, Int(outcome), c_size_t(starts_count), starts),
             library.symbols().dense_cursor_init,
         )
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_cursor_init")
@@ -3152,7 +3213,7 @@ struct DenseCursor[origin: ImmOrigin]:
         _ = self.library^
 
     def next_keys(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
-        """Copies up to `wanted` next keys into a lent arena, skipping the rows. Calls `usearch_dense_cursor_next`.
+        """Copies up to `wanted` next keys into a lent arena, skipping their links. Calls `usearch_dense_cursor_next`.
 
         Args:
             wanted: The upper bound on keys this pull writes.
@@ -3164,26 +3225,23 @@ struct DenseCursor[origin: ImmOrigin]:
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_DenseCursorNextCall(self.address, ScalarKind.UNKNOWN, wanted, Pointer(to=arena)))
+        return self._next(_DenseCursorNextCall(self.address, False, wanted, Pointer(to=arena)))
 
-    def next_batch(
-        self, wanted: Int, scalar: ScalarKind, mut arena: Arena
-    ) raises Error -> DenseBatch[origin_of(arena)]:
-        """Copies up to `wanted` next entries into a lent arena, keys and rows alike.
+    def next_links(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
+        """Copies up to `wanted` next keys into a lent arena, each with the keys it links to.
         Calls `usearch_dense_cursor_next`.
 
         Args:
             wanted: The upper bound on entries this pull writes.
-            scalar: The scalar type to export the rows as, converted from storage where it differs.
             arena: The arena to rewind and refill, which the batch borrows; a failed call leaves it valid.
 
         Returns:
-            The keys and their rows, read in place from the arena; an empty batch once the walk is exhausted.
+            The keys and their links, read in place from the arena; an empty batch once the walk is exhausted.
 
         Raises:
             `Error` if the engine refuses the copy.
         """
-        return self._next(_DenseCursorNextCall(self.address, scalar, wanted, Pointer(to=arena)))
+        return self._next(_DenseCursorNextCall(self.address, True, wanted, Pointer(to=arena)))
 
     def _next[C: Call](self, var call: C) raises Error -> C.Result:
         """One blocking pull on the cursor's executor."""

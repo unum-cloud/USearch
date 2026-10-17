@@ -267,10 +267,10 @@ A host predicate cannot narrow a device walk, so a VRAM handle refuses one with 
 DenseVectors rows = index.On(pool).Get(key, arena, Scalar.F32);  // Every entry under the key, zero-copy
 ReadOnlySpan<float> first = rows.Row<float>(0);                  // As wide as rows.Columns
 
-using DenseCursor cursor = index.On(pool).Cursor();    // Each row once, in storage order
+using DenseCursor cursor = index.On(pool).Cursor();    // Each row once, in storage order; `Cursor([key])` walks out from a key
 for (DenseBatch batch = cursor.Next(128, arena); batch.Count != 0; batch = cursor.Next(128, arena))
 {
-    ReadOnlySpan<Key> page = batch.Keys;               // Pass `vectors: Scalar.F32` for the rows beside them
+    ReadOnlySpan<Key> page = batch.Keys;               // Pass `links: true` for `batch.Links(entry)`; rows come from `Get`
 }
 
 using DenseSearchStream stream = index.On(pool).SearchStream(RowsView.RowsOf<float>(vector, dimensions: 3));

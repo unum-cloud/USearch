@@ -145,7 +145,7 @@ public struct DenseReachability: Equatable, Sendable {
     /// The levels the sweep took to converge - a diameter proxy.
     public var sweeps: Int
 
-    init(_ raw: usearch_dense_reachability_t) {
+    init(_ raw: usearch_reachability_t) {
         audited = raw.audited
         reachable = raw.reachable
         sweeps = raw.sweeps
@@ -159,11 +159,11 @@ public struct DenseReachability: Equatable, Sendable {
 /// and it belongs to one call until that call is final.
 public final class DenseTraversalStats: @unchecked Sendable {
     /// The C counters the call writes, at an address that holds for a deferred call.
-    let raw: UnsafeMutablePointer<usearch_dense_traversal_stats_t>
+    let raw: UnsafeMutablePointer<usearch_traversal_stats_t>
 
     public init() {
         raw = .allocate(capacity: 1)
-        raw.initialize(to: usearch_dense_traversal_stats_t())
+        raw.initialize(to: usearch_traversal_stats_t())
     }
 
     deinit { raw.deallocate() }
@@ -637,6 +637,27 @@ public struct DenseKeys: RandomAccessCollection {
         return Key(
             raw: UnsafeRawPointer(keys.data!).load(fromByteOffset: position * keys.stride, as: usearch_key_t.self)
         )
+    }
+}
+
+/// The keys each entry of a cursor pull links to, wrote into an arena as a ragged run and read in
+/// place. Mirrors `usearch_keys_tape_view_t`.
+public struct DenseLinks: RandomAccessCollection {
+    /// The arena the keys live in, and which call wrote them.
+    let write: ArenaWrite
+    /// The linked keys and offsets the call wrote.
+    let links: usearch_keys_tape_view_t
+    /// One past the last entry the pull wrote.
+    public let endIndex: Int
+
+    /// The first entry's position, which a collection walk starts from.
+    public var startIndex: Int { 0 }
+
+    /// The keys one entry links to, as the graph stored them when the pull ran.
+    public subscript(entry: Int) -> [Key] {
+        write.check(entry, below: endIndex)
+        guard let offsets = links.offsets, let keys = links.keys else { return [] }
+        return (offsets[entry] ..< offsets[entry + 1]).map { Key(raw: keys[$0]) }
     }
 }
 
@@ -1136,10 +1157,11 @@ public final class DenseIndex: @unchecked Sendable {
         try here.saveBuffer(arena: arena, config: config)
     }
 
-    /// Opens a row scan over the current contents, for export or migration. Each shard's
-    /// publication watermark is read as the walk enters it, so a row once passed is never
-    /// revisited. Calls `usearch_dense_cursor_init`.
-    public func cursor() throws(USearchError) -> DenseCursor { try here.cursor() }
+    /// Opens a walk over the current contents, for export or migration. Each shard's publication
+    /// watermark is read as the walk enters it, so a row once passed is never revisited. Without
+    /// `starts` it yields every row as stored; with them, the start keys' own rows first in order,
+    /// then the rows those link to breadth-first, each once. Calls `usearch_dense_cursor_init`.
+    public func cursor(starts: [Key] = []) throws(USearchError) -> DenseCursor { try here.cursor(starts: starts) }
 
     /// Opens a resumable nearest-neighbor stream over one query row, so a caller that post-filters
     /// aggressively pulls until satisfied rather than guessing a wanted count upfront. Calls
@@ -1287,8 +1309,8 @@ public struct DenseIndexOn: Sendable {
     }
 
     /// Opens a cursor whose every pull blocks on this executor. Calls `usearch_dense_cursor_init`.
-    public func cursor() throws(USearchError) -> DenseCursor {
-        try run { (call) throws(USearchError) in try call.cursor() }
+    public func cursor(starts: [Key] = []) throws(USearchError) -> DenseCursor {
+        try run { (call) throws(USearchError) in try call.cursor(starts: starts) }
     }
 
     /// Opens a stream whose every pull blocks on this executor. Calls
@@ -1602,6 +1624,7 @@ struct DenseCall {
             outcome: landing.outcome,
             completion: completion,
             changed: changed,
+            reachability: nil,
             expansion_factor: config.expansionFactor,
             progress: progress,
             stats: config.stats?.raw
@@ -1613,7 +1636,7 @@ struct DenseCall {
 
     func health() throws(USearchError) -> Submission<DenseReachability> {
         let handle = try open()
-        let reachability = landing.slots(usearch_dense_reachability_t())
+        let reachability = landing.slots(usearch_reachability_t())
         var arguments = usearch_dense_health_t(
             index: handle,
             executor: executor?.raw,
@@ -1806,7 +1829,11 @@ struct DenseCall {
             completion: completion,
             count: donors.count,
             donors: slots,
-            progress: progress
+            changed: nil,
+            reachability: nil,
+            expansion_factor: 0,
+            progress: progress,
+            stats: nil
         )
         usearch_dense_absorb(&arguments)
         // The handles belong to the call until final, then whichever it left go back to their donors.
@@ -1854,11 +1881,19 @@ struct DenseCall {
         return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
     }
 
-    func cursor() throws(USearchError) -> Submission<DenseCursor> {
+    func cursor(starts: [Key]) throws(USearchError) -> Submission<DenseCursor> {
         let handle = try open()
         let cursor = landing.slots(usearch_dense_cursor_t?.none)
-        var arguments = usearch_dense_cursor_init_t(cursor: cursor, index: handle, outcome: landing.outcome, start: nil)
-        usearch_dense_cursor_init(&arguments)
+        try landing.lend(starts) { (run) throws(USearchError) in
+            var arguments = usearch_dense_cursor_init_t(
+                cursor: cursor,
+                index: handle,
+                outcome: landing.outcome,
+                starts_count: starts.count,
+                starts: UnsafeRawPointer(run)?.assumingMemoryBound(to: usearch_key_t.self)
+            )
+            usearch_dense_cursor_init(&arguments)
+        }
         func read() throws(USearchError) -> DenseCursor {
             DenseCursor(raw: try created(cursor), index: index, executor: executor)
         }
@@ -1969,15 +2004,15 @@ private let valueLookupTrampoline: usearch_value_lookup_t = { state, keys, count
 
 // MARK: - Cursors & Streams
 
-/// A row scan over an index's contents; see `DenseIndex.cursor()`.
+/// A walk over an index's contents; see `DenseIndex.cursor()`.
 ///
-/// The walk is a sequential row scan, so it stays a batch operation - export, migration, and
+/// The walk is sequential, so it stays a batch operation - export, migration, and
 /// visualization all move whole batches. Every pull blocks on the executor of the receiver that
 /// opened it, and the cursor keeps its index alive.
 public final class DenseCursor {
     /// The native handle, released by `deinit` and never reassigned.
     private let raw: usearch_dense_cursor_t
-    /// The index the scan walks, held so the cursor cannot outlive it.
+    /// The index the walk covers, held so the cursor cannot outlive it.
     private let index: DenseIndex
     /// The executor every pull runs on, or nil for the calling thread.
     private let executor: Executor?
@@ -1992,35 +2027,31 @@ public final class DenseCursor {
     deinit { usearch_dense_cursor_free(raw) }
 
     /// Copies up to `wanted` next keys into `arena`, walking the key column alone; an empty batch
-    /// means the scan is exhausted. Calls `usearch_dense_cursor_next`.
+    /// means the walk is exhausted. Calls `usearch_dense_cursor_next`.
     public func next(wanted: Int, arena: Arena) throws(USearchError) -> DenseKeys {
-        try pull(wanted, nil, arena).keys
+        try pull(wanted, false, arena).keys
     }
 
-    /// Copies up to `wanted` next keys and the vectors they identify into `arena`, the rows
-    /// converted to `Value`; an empty batch means the scan is exhausted. Calls
+    /// Copies up to `wanted` next keys into `arena`, each with the keys it links to; an empty batch
+    /// means the walk is exhausted. The rows themselves come from `get`. Calls
     /// `usearch_dense_cursor_next`.
-    public func next<Value: ScalarValue>(
-        wanted: Int,
-        as value: Value.Type,
-        arena: Arena
-    ) throws(USearchError) -> (keys: DenseKeys, vectors: DenseVectors<Value>) {
-        let (keys, vectors) = try pull(wanted, Value.scalarKind, arena)
-        return (keys, DenseVectors(write: keys.write, vectors: vectors, endIndex: keys.count))
+    public func nextLinks(wanted: Int, arena: Arena) throws(USearchError) -> (keys: DenseKeys, links: DenseLinks) {
+        let (keys, links) = try pull(wanted, true, arena)
+        return (keys, DenseLinks(write: keys.write, links: links, endIndex: keys.count))
     }
 
-    /// Advances the scan by one batch, exporting rows only when `scalar` names their kind.
+    /// Advances the walk by one batch, exporting each entry's links only when `linked` asks.
     private func pull(
         _ wanted: Int,
-        _ scalar: Scalar?,
+        _ linked: Bool,
         _ arena: Arena
-    ) throws(USearchError) -> (keys: DenseKeys, vectors: usearch_rows_view_t) {
+    ) throws(USearchError) -> (keys: DenseKeys, links: usearch_keys_tape_view_t) {
         guard let handle = index.raw else {
             throw USearchError(status: .uninitialized, message: "an absorb consumed this index")
         }
         let landing = Landing()
         let keys = landing.slots(usearch_keys_view_t())
-        let vectors = landing.slots(usearch_rows_view_t())
+        let links = landing.slots(usearch_keys_tape_view_t())
         let written = landing.slots(0)
         let write = landing.lend(arena)
         var arguments = usearch_dense_cursor_next_t(
@@ -2030,15 +2061,14 @@ public final class DenseCursor {
             completion: landing.completion,
             cursor: raw,
             keys: keys,
-            vectors: scalar == nil ? nil : vectors,
+            links: linked ? links : nil,
             written: written,
             arena: arena.raw,
-            wanted: wanted,
-            outputs_scalar: (scalar ?? .unknown).raw
+            wanted: wanted
         )
         usearch_dense_cursor_next(&arguments)
         return try landing.read {
-            (DenseKeys(write: write, keys: keys.pointee, endIndex: written.pointee), vectors.pointee)
+            (DenseKeys(write: write, keys: keys.pointee, endIndex: written.pointee), links.pointee)
         }
     }
 }

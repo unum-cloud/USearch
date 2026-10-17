@@ -172,7 +172,7 @@ type DenseIndexDescription struct {
 // DenseTraversalStats is the traversal telemetry one call reports. Every call overwrites it
 // rather than accumulating, so a sweep over many batches sums them itself with Accumulate.
 //
-// Mirrors usearch_dense_traversal_stats_t.
+// Mirrors usearch_traversal_stats_t.
 type DenseTraversalStats struct {
 	// VisitedMembers counts the graph members the call visited.
 	VisitedMembers uint
@@ -194,7 +194,7 @@ func (stats *DenseTraversalStats) Accumulate(other DenseTraversalStats) {
 // DenseReachability is one reachability audit: the population it judged, and how much of it a
 // search reaches.
 //
-// Mirrors usearch_dense_reachability_t.
+// Mirrors usearch_reachability_t.
 type DenseReachability struct {
 	// Audited counts the entries published when the audit started; compare Reachable against
 	// this, never a later size.
@@ -218,11 +218,11 @@ type DenseSoftmaxState struct {
 }
 
 // stats lends optional telemetry as the pointer the C interface fills.
-func (call *call) stats(stats *DenseTraversalStats) *C.usearch_dense_traversal_stats_t {
+func (call *call) stats(stats *DenseTraversalStats) *C.usearch_traversal_stats_t {
 	if stats == nil {
 		return nil
 	}
-	return (*C.usearch_dense_traversal_stats_t)(unsafe.Pointer(pin(call, stats)))
+	return (*C.usearch_traversal_stats_t)(unsafe.Pointer(pin(call, stats)))
 }
 
 // ValueLookup resolves the keys an attention walk scores to their value rows, all of them rows
@@ -498,8 +498,8 @@ type DenseSearchStreamInitConfig struct {
 
 // region: Results
 
-// DenseVectors is the rows a call wrote packed into its arena: Get's entries sharing a key, Attend's
-// attended rows, or a cursor batch's rows.
+// DenseVectors is the rows a call wrote packed into its arena: Get's entries sharing a key, or Attend's
+// attended rows.
 //
 // Mirrors usearch_rows_view_t.
 type DenseVectors struct {
@@ -582,12 +582,12 @@ func (monolith Monolith) Bytes() ([]byte, error) {
 	return unsafe.Slice((*byte)(unsafe.Pointer(monolith.raw.data)), monolith.raw.length), nil
 }
 
-// DenseBatch is one cursor pull written into its arena: the keys, and beside them the rows when
-// NextBatch asked for them.
+// DenseBatch is one cursor pull written into its arena: the keys, and beside them the keys each links
+// to when NextLinks asked for them; the rows themselves come from Get.
 type DenseBatch struct {
 	exported
 	keys    C.usearch_keys_view_t
-	vectors DenseVectors
+	links   *C.usearch_keys_tape_view_t
 	written uint
 }
 
@@ -602,8 +602,24 @@ func (batch DenseBatch) Keys() ([]Key, error) {
 	return unsafe.Slice((*Key)(unsafe.Pointer(batch.keys.data)), batch.written), nil
 }
 
-// Vectors reports the entries' rows, one per key; none for NextKeys.
-func (batch DenseBatch) Vectors() DenseVectors { return batch.vectors }
+// Links borrows the keys one entry links to from the arena, refused with StatusInvalidArgument when the
+// pull was NextKeys or entry is not below Written.
+//
+// Mirrors usearch_keys_tape_view_t.
+func (batch DenseBatch) Links(entry uint) ([]Key, error) {
+	if err := batch.host(); err != nil {
+		return nil, err
+	}
+	if batch.links == nil || entry >= batch.written {
+		return nil, fail(StatusInvalidArgument, "the pull exported no links, or the entry is not below its count")
+	}
+	if batch.links.offsets == nil {
+		return nil, nil
+	}
+	offsets := unsafe.Slice((*uint)(unsafe.Pointer(batch.links.offsets)), batch.written+1)
+	linked := unsafe.Slice((*Key)(unsafe.Pointer(batch.links.keys)), offsets[batch.written])
+	return linked[offsets[entry]:offsets[entry+1]], nil
+}
 
 // endregion: Results
 
@@ -1325,7 +1341,7 @@ func (receiver denseReceiver) health(completion C.usearch_completion_t) *lent[De
 		executor:     executor,
 		outcome:      lent.outcome,
 		completion:   completion,
-		reachability: (*C.usearch_dense_reachability_t)(unsafe.Pointer(reachability)),
+		reachability: (*C.usearch_reachability_t)(unsafe.Pointer(reachability)),
 	})
 	lent.result = func() DenseReachability { return *reachability }
 	return lent
@@ -1616,7 +1632,7 @@ func (receiver denseReceiver) saveBuffer(completion C.usearch_completion_t, aren
 
 // region: Cursors & Streams
 
-// DenseCursor is a row scan over the index contents, pulled blocking on the executor of the
+// DenseCursor is a walk over the index contents, pulled blocking on the executor of the
 // receiver that opened it. Each shard's publication watermark is read as the walk enters that
 // shard, so a row once passed is never revisited.
 //
@@ -1626,8 +1642,10 @@ type DenseCursor struct {
 	receiver denseReceiver
 }
 
-// Cursor opens a row scan over the current contents. Calls usearch_dense_cursor_init.
-func (on DenseIndexOn) Cursor() (*DenseCursor, error) {
+// Cursor opens a walk over the current contents. Without starts it yields every row as stored; with them,
+// the start keys' own rows first in order, then the rows those link to breadth-first, each once.
+// Calls usearch_dense_cursor_init.
+func (on DenseIndexOn) Cursor(starts ...Key) (*DenseCursor, error) {
 	index, _, refusal := on.lower()
 	if refusal != nil {
 		return nil, refusal
@@ -1636,9 +1654,11 @@ func (on DenseIndexOn) Cursor() (*DenseCursor, error) {
 	// cgo inspects the whole object behind a lent pointer, so the handle lands apart from the receiver's.
 	handle := pin(&lent.call, new(C.usearch_dense_cursor_t))
 	C.usearch_dense_cursor_init(&C.usearch_dense_cursor_init_t{
-		cursor:  handle,
-		index:   index,
-		outcome: lent.outcome,
+		cursor:       handle,
+		index:        index,
+		outcome:      lent.outcome,
+		starts_count: C.size_t(len(starts)),
+		starts:       (*C.usearch_key_t)(unsafe.Pointer(lend(&lent.call, starts))),
 	})
 	lent.result = func() *DenseCursor { return &DenseCursor{handle: *handle, receiver: on.denseReceiver} }
 	return block(lent)
@@ -1647,18 +1667,17 @@ func (on DenseIndexOn) Cursor() (*DenseCursor, error) {
 // NextKeys copies up to wanted next keys into arena; a batch of none means the walk is exhausted.
 // Calls usearch_dense_cursor_next.
 func (cursor *DenseCursor) NextKeys(wanted uint, arena *Arena) (DenseBatch, error) {
-	return cursor.next(wanted, ScalarUnknown, nil, arena)
+	return cursor.next(wanted, nil, arena)
 }
 
-// NextBatch copies up to wanted next entries into arena, their rows converted to outputsScalar beside their
-// keys; a batch of none means the walk is exhausted. Calls usearch_dense_cursor_next.
-func (cursor *DenseCursor) NextBatch(wanted uint, outputsScalar Scalar, arena *Arena) (DenseBatch, error) {
-	return cursor.next(wanted, outputsScalar, new(C.usearch_rows_view_t), arena)
+// NextLinks copies up to wanted next keys into arena, each with the keys it links to; a batch of none
+// means the walk is exhausted. Calls usearch_dense_cursor_next.
+func (cursor *DenseCursor) NextLinks(wanted uint, arena *Arena) (DenseBatch, error) {
+	return cursor.next(wanted, new(C.usearch_keys_tape_view_t), arena)
 }
 
-// next pulls a batch, exporting rows only when vectors names where their view lands.
-func (cursor *DenseCursor) next(wanted uint, outputsScalar Scalar, vectors *C.usearch_rows_view_t,
-	arena *Arena) (DenseBatch, error) {
+// next pulls a batch, exporting each entry's links only when links names where their view lands.
+func (cursor *DenseCursor) next(wanted uint, links *C.usearch_keys_tape_view_t, arena *Arena) (DenseBatch, error) {
 	index, executor, refusal := cursor.receiver.lower()
 	if refusal == nil && cursor.handle == nil {
 		refusal = fail(StatusInvalidArgument, "the cursor is closed")
@@ -1673,29 +1692,24 @@ func (cursor *DenseCursor) next(wanted uint, outputsScalar Scalar, vectors *C.us
 	lent := open[DenseBatch]()
 	keys := pin(&lent.call, new(C.usearch_keys_view_t))
 	written := pin(&lent.call, new(C.size_t))
-	if vectors != nil {
-		lent.pinner.Pin(vectors)
+	if links != nil {
+		lent.pinner.Pin(links)
 	}
 	C.usearch_dense_cursor_next(&C.usearch_dense_cursor_next_t{
-		index:          index,
-		executor:       executor,
-		outcome:        lent.outcome,
-		completion:     C.usearch_completion_blocking_k,
-		cursor:         cursor.handle,
-		keys:           keys,
-		vectors:        vectors,
-		written:        written,
-		arena:          memory,
-		wanted:         C.size_t(wanted),
-		outputs_scalar: C.usearch_scalar_t(outputsScalar),
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: C.usearch_completion_blocking_k,
+		cursor:     cursor.handle,
+		keys:       keys,
+		links:      links,
+		written:    written,
+		arena:      memory,
+		wanted:     C.size_t(wanted),
 	})
 	view := lent.rewound(arena)
 	lent.result = func() DenseBatch {
-		batch := DenseBatch{exported: view, keys: *keys, written: uint(*written)}
-		if vectors != nil {
-			batch.vectors = DenseVectors{exported: view, raw: *vectors, rows: batch.written}
-		}
-		return batch
+		return DenseBatch{exported: view, keys: *keys, links: links, written: uint(*written)}
 	}
 	return block(lent)
 }

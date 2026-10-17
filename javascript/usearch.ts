@@ -42,6 +42,7 @@ export type {
 export {
   DenseCursor,
   DenseCursorBatch,
+  DenseCursorLinks,
   DenseIndex,
   DenseIndexDeferredOn,
   DenseIndexOn,
@@ -101,6 +102,7 @@ import {
 import {
   DenseCursor,
   DenseCursorBatch,
+  DenseCursorLinks,
   DenseIndex,
   DenseIndexDeferredOn,
   DenseIndexOn,
@@ -133,6 +135,7 @@ const usearch = {
   Deferred,
   DenseCursor,
   DenseCursorBatch,
+  DenseCursorLinks,
   DenseIndex,
   DenseIndexDeferredOn,
   DenseIndexOn,

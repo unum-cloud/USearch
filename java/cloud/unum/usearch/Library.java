@@ -135,10 +135,15 @@ final class Library {
     static final StructLayout PLACEMENT = MemoryLayout.structLayout(POINTER.withName("data"), SIZE.withName("count"))
             .withName("usearch_placement_options_t");
 
-    /** @c usearch_dense_traversal_stats_t - a pure output, fully overwritten by its call. */
+    /** @c usearch_keys_tape_view_t - a ragged run of keys a call wrote into its arena. */
+    static final StructLayout KEYS_TAPE_VIEW = MemoryLayout.structLayout(
+                    POINTER.withName("keys"), POINTER.withName("offsets"))
+            .withName("usearch_keys_tape_view_t");
+
+    /** @c usearch_traversal_stats_t - a pure output, fully overwritten by its call. */
     static final StructLayout TRAVERSAL_STATS = MemoryLayout.structLayout(
                     SIZE.withName("visited_members"), SIZE.withName("computed_distances"), SIZE.withName("restarts"))
-            .withName("usearch_dense_traversal_stats_t");
+            .withName("usearch_traversal_stats_t");
 
     /**
      * The fields that open every verb on a handle - the handle, the executor, the outcome, the

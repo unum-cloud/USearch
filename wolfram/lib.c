@@ -434,7 +434,7 @@ struct call_t {
     usearch_dense_index_description_t description;
 
     /** The audit of @c health. */
-    usearch_dense_reachability_t reachability;
+    usearch_reachability_t reachability;
 };
 
 /** Records a failure the binding caught before the call crossed, as the engine records its own. */

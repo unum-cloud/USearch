@@ -262,15 +262,16 @@ This binding installs no progress handler, so an `insert` batch is all-or-nothin
 var stored = index.get[DType.float32](Key(integer=42), arena)  # empty when the key is absent
 ```
 
-A cursor walks the contents as a sequential row scan, landing each batch in the arena, its rows converted to the kind you name; `next_keys` walks the key column alone.
+A cursor walks the contents, landing each batch in the arena; `next_keys` walks the key column alone, and `next_links` lands the keys each entry links to beside it, while the rows come from `get`.
+Without start keys it yields every row as stored; `cursor(starts)` yields the starts' own rows first, then the rows those link to breadth-first, each once.
 
 ```mojo
 var cursor = index.on(executor).cursor()
 while True:
-    var batch = cursor.next_batch(1024, ScalarKind.F32, arena)  # empty once exhausted
+    var batch = cursor.next_links(1024, arena)  # empty once exhausted
     if len(batch) == 0:
         break
-    print(batch.keys()[0], batch.row[DType.float32](0)[0])
+    print(batch.keys()[0], len(batch.links(0)))
 ```
 
 A search stream is a resumable best-first traversal, so callers that post-filter aggressively pull until satisfied instead of guessing "k" upfront.

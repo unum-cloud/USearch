@@ -140,7 +140,7 @@ calls = [shard.deferred(pool).search(queries, 10, arena) for shard, arena in zip
 results = [call.wait() for call in calls]  # or, in a coroutine: await call
 ```
 
-`search` and `maxsim` answer a `usearch.Matches`, `get`, `attend` and a cursor's batches answer `usearch.DenseVectors`, `multiply` answers `usearch.DenseProducts`, and `save_buffer` answers `usearch.Monolith`.
+`search` and `maxsim` answer a `usearch.Matches`, `get` and `attend` answer `usearch.DenseVectors`, a cursor's batches `usearch.DenseBatch`, `multiply` answers `usearch.DenseProducts`, and `save_buffer` answers `usearch.Monolith`.
 Their `len()` counts rows, or bytes of a monolith.
 
 ## Keys
@@ -247,7 +247,7 @@ Residency is never among those fields, because where the payload lives stays the
 Inputs arrive through PEP 3118 first and `__array_interface__` second, so NumPy is never required and a PyTorch or TensorFlow tensor needs no round-trip through it.
 Only the row stride may vary; a strided column would force a gather the SIMD kernels have no form for.
 A `dtype=` names the scalar type a buffer cannot spell, such as `Scalar.BF16` over raw bytes, and must be as wide as the buffer's items.
-In `get`, a cursor's `next` and `attend`, an `outputs_dtype=` names the scalar type the verb exports as, converted from storage.
+In `get` and `attend`, an `outputs_dtype=` names the scalar type the verb exports as, converted from storage.
 
 ### Search
 
@@ -303,9 +303,9 @@ The first exception any callback raises outranks the outcome it turned into, whe
 
 ```python
 index.get(42, arena)  # a (count, dimensions) `DenseVectors` of what is stored under it
-cursor = index.on(pool).cursor()  # row scan, pulled in batches
-while batch := cursor.next(1024, arena, outputs_dtype=Scalar.F32):
-    ...  # batch.keys, and batch.vectors when a dtype is named
+cursor = index.on(pool).cursor()  # row scan, pulled in batches; `cursor([42])` walks out from key 42
+while batch := cursor.next(1024, arena, links=True):
+    ...  # batch.keys, and batch.links as (offsets, keys) when asked; rows come from `get`
 with index.on(pool).search_stream(query) as stream:  # resumable best-first stream
     while pulled := stream.next(16, arena)[0]:  # one row of `Matches`, empty once drained
         if pulled[-1].distance > 0.3:

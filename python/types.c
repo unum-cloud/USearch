@@ -2343,13 +2343,13 @@ PyTypeObject ArenaBufferType = {
     .tp_getset = ArenaBuffer_getset,
 };
 
-static char const doc_DenseVectors[] =                                                           //
-    "DenseVectors\n"                                                                             //
-    "\n"                                                                                         //
-    "The rows `get`, `attend` or a cursor wrote into an `Arena`, viewing it until it rewinds.\n" //
-    "\n"                                                                                         //
-    "A (count, dimensions) matrix for the kinds a buffer can format, and a (count,\n"            //
-    "row_bytes) run of 'B' for the rest. Host rows export the writable buffer protocol;\n"       //
+static char const doc_DenseVectors[] =                                                     //
+    "DenseVectors\n"                                                                       //
+    "\n"                                                                                   //
+    "The rows `get` or `attend` wrote into an `Arena`, viewing it until it rewinds.\n"     //
+    "\n"                                                                                   //
+    "A (count, dimensions) matrix for the kinds a buffer can format, and a (count,\n"      //
+    "row_bytes) run of 'B' for the rest. Host rows export the writable buffer protocol;\n" //
     "device rows export `__cuda_array_interface__` instead.";
 
 PyTypeObject DenseVectorsType = {

@@ -426,18 +426,15 @@ struct StreamingTests {
 
         let cursor = try index.on(executor).cursor()
         var walked: [Key] = []
-        var vectors: [Float] = []
         while true {
-            let batch = try cursor.next(wanted: 2, as: Float.self, arena: arena)
+            let batch = try cursor.nextLinks(wanted: 2, arena: arena)
             guard !batch.keys.isEmpty else { break }
-            #expect(batch.vectors.count == batch.keys.count)
+            #expect(batch.links.count == batch.keys.count)
             walked.append(contentsOf: batch.keys)
-            vectors.append(contentsOf: batch.vectors.joined())
         }
         #expect(walked == [1, 2, 3])
-        #expect(vectors == [1, 0, 0, 1, 1, 1])
 
-        // A key-only walk needs no rows, and reads the same snapshot from a fresh cursor.
+        // A key-only walk needs no links, and reads the same snapshot from a fresh cursor.
         #expect(Array(try index.cursor().next(wanted: 2, arena: arena)) == [1, 2])
     }
 

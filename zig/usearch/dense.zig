@@ -38,6 +38,7 @@ const refuse = types.refuse;
 const refuseInto = types.refuseInto;
 const usearch_keys_view_t = types.usearch_keys_view_t;
 const usearch_matches_tape_view_t = types.usearch_matches_tape_view_t;
+const usearch_keys_tape_view_t = types.usearch_keys_tape_view_t;
 const usearch_matches_view_t = types.usearch_matches_view_t;
 const usearch_nvme_options_t = types.usearch_nvme_options_t;
 const usearch_progress_t = types.usearch_progress_t;
@@ -175,7 +176,7 @@ pub const DenseIndexDescription = struct {
 };
 
 /// Traversal telemetry, fully overwritten by the call it is passed to.
-/// Mirrors `usearch_dense_traversal_stats_t`.
+/// Mirrors `usearch_traversal_stats_t`.
 pub const DenseTraversalStats = extern struct {
     /// Graph members visited while resolving the batch.
     visited_members: usize = 0,
@@ -186,7 +187,7 @@ pub const DenseTraversalStats = extern struct {
 };
 
 /// One reachability audit: the population it judged, and how much of it a search reaches.
-/// Mirrors `usearch_dense_reachability_t`.
+/// Mirrors `usearch_reachability_t`.
 pub const DenseReachability = extern struct {
     /// Entries published when the audit started; compare `reachable` against this, never a later size.
     audited: usize = 0,
@@ -524,6 +525,7 @@ const usearch_dense_refine_t = extern struct {
     outcome: *Outcome,
     completion: Completion,
     changed: ?*usize,
+    reachability: ?*DenseReachability,
     expansion_factor: usize,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
@@ -582,14 +584,19 @@ const usearch_dense_absorb_t = extern struct {
     completion: Completion,
     count: usize,
     donors: [*]?*anyopaque,
+    changed: ?*usize,
+    reachability: ?*DenseReachability,
+    expansion_factor: usize,
     progress: usearch_progress_t,
+    stats: ?*DenseTraversalStats,
 };
 
 const usearch_dense_cursor_init_t = extern struct {
     cursor: *?*anyopaque,
     index: ?*anyopaque,
     outcome: *Outcome,
-    start: ?*const Key,
+    starts_count: usize,
+    starts: ?[*]const Key,
 };
 
 const usearch_dense_cursor_next_t = extern struct {
@@ -599,11 +606,10 @@ const usearch_dense_cursor_next_t = extern struct {
     completion: Completion,
     cursor: ?*anyopaque,
     keys: *usearch_keys_view_t,
-    vectors: ?*usearch_rows_view_t,
+    links: ?*usearch_keys_tape_view_t,
     written: *usize,
     arena: ?*anyopaque,
     wanted: usize,
-    outputs_scalar: Scalar,
 };
 
 const usearch_dense_search_stream_init_t = extern struct {
@@ -1091,11 +1097,11 @@ pub const DenseIndex = extern struct {
         return self.here().absorb(donors, config);
     }
 
-    /// Copies up to `wanted` more entries out of `cursor` into `arena` - their keys, and their rows
-    /// as `vectors` unless null - answering an empty batch once the walk is exhausted.
-    /// Calls `usearch_dense_cursor_next`.
-    pub fn cursorNext(self: DenseIndex, cursor: DenseCursor, wanted: usize, vectors: ?Scalar, arena: *Arena) Error!DenseCursorBatch {
-        return self.here().cursorNext(cursor, wanted, vectors, arena);
+    /// Copies up to `wanted` more entries out of `cursor` into `arena` - their keys, and the keys
+    /// each links to when `links` asks - answering an empty batch once the walk is exhausted. The
+    /// rows themselves come from `get`. Calls `usearch_dense_cursor_next`.
+    pub fn cursorNext(self: DenseIndex, cursor: DenseCursor, wanted: usize, links: bool, arena: *Arena) Error!DenseCursorBatch {
+        return self.here().cursorNext(cursor, wanted, links, arena);
     }
 
     /// Pulls up to `wanted` more matches out of `stream` into `arena`, as one query's row, answering
@@ -1279,8 +1285,8 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         }
 
         /// See `DenseIndex.cursorNext`. Calls `usearch_dense_cursor_next`.
-        pub fn cursorNext(self: Self, cursor: DenseCursor, wanted: usize, vectors: ?Scalar, arena: *Arena) Answer(DenseCursorNext) {
-            return self.answerIn(DenseCursorNext{ .cursor = cursor, .wanted = wanted, .scalar = vectors }, arena);
+        pub fn cursorNext(self: Self, cursor: DenseCursor, wanted: usize, links: bool, arena: *Arena) Answer(DenseCursorNext) {
+            return self.answerIn(DenseCursorNext{ .cursor = cursor, .wanted = wanted, .links = links }, arena);
         }
 
         /// See `DenseIndex.searchStreamNext`. Calls `usearch_dense_search_stream_next`.
@@ -1469,6 +1475,7 @@ pub const DenseRefine = struct {
             .outcome = &self.outcome,
             .completion = completion,
             .changed = &self.changed,
+            .reachability = null,
             .expansion_factor = self.config.expansion_factor,
             .progress = .of(self.config.progress, self.config.progress_steps),
             .stats = self.config.stats,
@@ -1551,7 +1558,11 @@ pub const DenseAbsorb = struct {
             .completion = completion,
             .count = self.donors.len,
             .donors = @ptrCast(self.donors.ptr),
+            .changed = null,
+            .reachability = null,
+            .expansion_factor = 0,
             .progress = .of(self.config.progress, self.config.progress_steps),
+            .stats = null,
         };
         usearch_dense_absorb(&arguments);
     }
@@ -1566,11 +1577,11 @@ pub const DenseCursorNext = struct {
     pub const Result = DenseCursorBatch;
     cursor: DenseCursor,
     wanted: usize,
-    scalar: ?Scalar,
+    links: bool,
     /// The call the borrowed arena serves, which every view over the outputs carries.
     stamp: Arena.Stamp = undefined,
     keys: usearch_keys_view_t = .{},
-    vectors: usearch_rows_view_t = .{},
+    linked: usearch_keys_tape_view_t = .{},
     written: usize = 0,
     outcome: Outcome = .{},
 
@@ -1582,11 +1593,10 @@ pub const DenseCursorNext = struct {
             .completion = completion,
             .cursor = self.cursor.handle,
             .keys = &self.keys,
-            .vectors = if (self.scalar != null) &self.vectors else null,
+            .links = if (self.links) &self.linked else null,
             .written = &self.written,
             .arena = self.stamp.arena.handle,
             .wanted = self.wanted,
-            .outputs_scalar = self.scalar orelse .unknown,
         };
         usearch_dense_cursor_next(&arguments);
     }
@@ -1597,7 +1607,7 @@ pub const DenseCursorNext = struct {
             .stamp = self.stamp,
             .data = self.keys.data,
             .written = self.written,
-            .vectors = if (self.scalar != null) .of(self.stamp, self.vectors, self.written) else null,
+            .linked = if (self.links) self.linked else null,
         };
     }
 };
@@ -1916,8 +1926,8 @@ pub const DenseProducts = struct {
     }
 };
 
-/// One batch a `DenseCursor` pull wrote into an arena: the keys, and the rows beside them where
-/// asked for.
+/// One batch a `DenseCursor` pull wrote into an arena: the keys, and the keys each links to where
+/// asked for; the rows themselves come from `DenseIndex.get`.
 ///
 /// It reads the arena, so every read is refused once that arena serves another call or is freed.
 pub const DenseCursorBatch = struct {
@@ -1925,29 +1935,47 @@ pub const DenseCursorBatch = struct {
     data: ?[*]const Key,
     /// Entries the pull wrote; zero once the walk is exhausted.
     written: usize,
-    /// The rows, one per key, or null where the pull exported keys alone.
-    vectors: ?DenseVectors,
+    /// The keys each entry links to, or null where the pull exported keys alone.
+    linked: ?usearch_keys_tape_view_t,
 
     /// The keys, refusing a stale view with `Error.Uninitialized` and device memory with `Error.Device`.
     pub fn keys(self: DenseCursorBatch) Error![]const Key {
         try self.stamp.check();
         return landed(Key, self.data, 0, self.written);
     }
+
+    /// The keys one entry links to, refusing a `position` past `written` or a pull that exported
+    /// no links with `Error.InvalidArgument`, and a stale view or device memory as `keys` does.
+    pub fn links(self: DenseCursorBatch, position: usize) Error![]const Key {
+        try self.stamp.check();
+        const tape = self.linked orelse return refuse(.invalid_argument);
+        if (position >= self.written) return refuse(.invalid_argument);
+        const begin = tape.offsets.?[position];
+        return landed(Key, tape.keys, begin, tape.offsets.?[position + 1] - begin);
+    }
 };
 
-/// A sequential row scan over the index contents - export, migration, and visualization feed
+/// A sequential walk over the index contents - export, migration, and visualization feed
 /// off it. Every pull names the index again, through `DenseIndex.cursorNext`, so free the cursor
 /// before the index. Mirrors `usearch_dense_cursor_t`.
 pub const DenseCursor = struct {
     /// The opaque `usearch_dense_cursor_t` the ABI hands back.
     handle: ?*anyopaque,
 
-    /// Opens a row scan over the current contents; each shard's publication watermark is read as
-    /// the walk enters it, so a row once passed is never revisited. Calls `usearch_dense_cursor_init`.
-    pub fn init(index: DenseIndex) Error!DenseCursor {
+    /// Opens a walk over the current contents; each shard's publication watermark is read as the
+    /// walk enters it, so a row once passed is never revisited. Without `starts` it yields every
+    /// row as stored; with them, the start keys' own rows first in order, then the rows those link
+    /// to breadth-first, each once. Calls `usearch_dense_cursor_init`.
+    pub fn init(index: DenseIndex, starts: []const Key) Error!DenseCursor {
         var handle: ?*anyopaque = null;
         var outcome: Outcome = .{};
-        var arguments: usearch_dense_cursor_init_t = .{ .cursor = &handle, .index = index.handle, .outcome = &outcome, .start = null };
+        var arguments: usearch_dense_cursor_init_t = .{
+            .cursor = &handle,
+            .index = index.handle,
+            .outcome = &outcome,
+            .starts_count = starts.len,
+            .starts = starts.ptr,
+        };
         usearch_dense_cursor_init(&arguments);
         errdefer usearch_dense_cursor_free(handle);
         try outcome.check();
@@ -2228,18 +2256,16 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
         try std.testing.expectEqual(@as(usize, 0), (try (try index.searchStreamNext(stream, 2, &arena)).row(0)).keys.len);
     } else |failure| try std.testing.expectEqual(Error.Unsupported, failure);
 
-    // A cursor walks the rows, `wanted` at a time, and exports the rows only when asked.
-    var walk = try DenseCursor.init(index);
+    // A cursor walks the keys, `wanted` at a time, and exports their links only when asked.
+    var walk = try DenseCursor.init(index, &.{});
     defer walk.deinit();
-    const batch = try index.on(executor).cursorNext(walk, 2, .f32, &arena);
+    const batch = try index.on(executor).cursorNext(walk, 2, false, &arena);
     try std.testing.expectEqualSlices(Key, keys[0..2], try batch.keys());
-    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(slab[0..6]), try batch.vectors.?.bytes());
-    const rest = try index.cursorNext(walk, 2, null, &arena);
+    try std.testing.expectError(Error.InvalidArgument, batch.links(0));
+    const rest = try index.cursorNext(walk, 2, false, &arena);
     try std.testing.expectEqualSlices(Key, keys[2..3], try rest.keys());
-    try std.testing.expectEqual(@as(?DenseVectors, null), rest.vectors);
-    const drained = try index.cursorNext(walk, 2, .f32, &arena);
+    const drained = try index.cursorNext(walk, 2, false, &arena);
     try std.testing.expectEqual(@as(usize, 0), (try drained.keys()).len);
-    try std.testing.expectEqual(@as(usize, 0), (try drained.vectors.?.bytes()).len);
 
     // A monolith round-trips through memory, and its metadata reads without loading it.
     const monolith = try (try index.on(executor).saveBuffer(&arena, .{})).bytes();

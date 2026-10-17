@@ -256,7 +256,7 @@ class _ArenaBuffer:
 
 @final
 class DenseVectors(_ArenaBuffer):
-    """The rows `get`, `attend` or a cursor wrote into an `Arena`: (count, dimensions), or (count, row_bytes) of 'B'."""
+    """The rows `get` or `attend` wrote into an `Arena`: (count, dimensions), or (count, row_bytes) of 'B'."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
 
@@ -467,7 +467,7 @@ class On[IndexT]:
     def save_buffer(
         self: On[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
     ) -> Monolith: ...
-    def cursor(self: On[DenseIndex]) -> DenseCursor:
+    def cursor(self: On[DenseIndex], starts: Sequence[_KeyLike] | _Tensor | None = None) -> DenseCursor:
         """Calls `usearch_dense_cursor_init`."""
         ...
 
@@ -657,7 +657,7 @@ class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, 
 
 @final
 class DenseReachability(structseq[Any], tuple[int, int, int]):
-    """One reachability audit, as `usearch_dense_reachability_t` holds it."""
+    """One reachability audit, as `usearch_reachability_t` holds it."""
 
     __match_args__: Final = ("audited", "reachable", "sweeps")
 
@@ -704,8 +704,8 @@ class DenseBatch:
         ...
 
     @property
-    def vectors(self) -> DenseVectors | None:
-        """(count, dimensions) rows, or None when the step named no `outputs_dtype`."""
+    def links(self) -> tuple[_ArenaBuffer, _ArenaBuffer] | None:
+        """(offsets, keys) of each row's linked identities, row `i` spanning `offsets[i]` to `offsets[i + 1]`, or None when the step asked for none."""
         ...
 
     def __len__(self) -> int: ...
@@ -715,7 +715,7 @@ class DenseCursor:
     """A sequential row scan over the entries an index holds, pulled in batches by `next`."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
-    def next(self, wanted: int, arena: Arena, /, *, outputs_dtype: Scalar | None = None) -> DenseBatch:
+    def next(self, wanted: int, arena: Arena, /, *, links: bool = False) -> DenseBatch:
         """The next batch of at most `wanted` rows, in `arena`. Calls `usearch_dense_cursor_next`."""
         ...
 
@@ -1004,8 +1004,8 @@ class DenseIndex:
         """Serializes one monolith into an arena. Calls `usearch_dense_save_buffer`."""
         ...
 
-    def cursor(self) -> DenseCursor:
-        """A scan `DenseCursor.next` pulls in batches. Calls `usearch_dense_cursor_init`."""
+    def cursor(self, starts: Sequence[_KeyLike] | _Tensor | None = None) -> DenseCursor:
+        """A walk `DenseCursor.next` pulls in batches, from `starts` when given. Calls `usearch_dense_cursor_init`."""
         ...
 
     def search_stream(

@@ -664,7 +664,7 @@ func TestCursorsWalkEveryRowOnce(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
 	const count = 5
-	index, keys, slab := populated(t, angularBF16(dimensions), count)
+	index, keys, _ := populated(t, angularBF16(dimensions), count)
 	arena := newArena(t, nil)
 
 	cursor, err := index.On(pool(t)).Cursor()
@@ -673,9 +673,8 @@ func TestCursorsWalkEveryRowOnce(t *testing.T) {
 	}
 	defer cursor.Close()
 	walked := make([]Key, 0, count)
-	rows := make([]float64, 0, count*dimensions)
 	for {
-		batch, err := cursor.NextBatch(2, ScalarF64, arena)
+		batch, err := cursor.NextLinks(2, arena)
 		if err != nil {
 			t.Fatalf("the cursor must pull: %v", err)
 		}
@@ -686,20 +685,15 @@ func TestCursorsWalkEveryRowOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the keys must read: %v", err)
 		}
-		values, err := DenseValues[float64](batch.Vectors())
-		if err != nil {
-			t.Fatalf("the rows must read: %v", err)
+		for entry := range pulled {
+			if _, err := batch.Links(uint(entry)); err != nil {
+				t.Fatalf("the links must read: %v", err)
+			}
 		}
 		walked = append(walked, pulled...)
-		rows = append(rows, values...)
 	}
 	if !slices.Equal(walked, keys) {
 		t.Fatalf("the cursor walked %v", walked)
-	}
-	for position, value := range rows {
-		if !nearly(value, float64(slab[position]), 1e-6) {
-			t.Fatalf("value %d came back as %v, not %v", position, value, slab[position])
-		}
 	}
 
 	keysOnly, err := index.Cursor()
@@ -708,8 +702,11 @@ func TestCursorsWalkEveryRowOnce(t *testing.T) {
 	}
 	defer keysOnly.Close()
 	batch, err := keysOnly.NextKeys(count+1, arena)
-	if err != nil || batch.Written() != count || batch.Vectors().Rows() != 0 {
-		t.Errorf("a keys-only pull wrote %d keys and %d rows: %v", batch.Written(), batch.Vectors().Rows(), err)
+	if err != nil || batch.Written() != count {
+		t.Errorf("a keys-only pull wrote %d keys: %v", batch.Written(), err)
+	}
+	if _, err := batch.Links(0); !errors.Is(err, StatusInvalidArgument) {
+		t.Errorf("a keys-only pull answered links with %v", err)
 	}
 	if err := keysOnly.Close(); err != nil {
 		t.Fatalf("the cursor must close: %v", err)

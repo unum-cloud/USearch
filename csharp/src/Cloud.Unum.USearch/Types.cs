@@ -1600,6 +1600,17 @@ internal unsafe struct NativeMatchesTapeView
     public nuint* Offsets;
 }
 
+/// <summary>A ragged run of keys a call wrote into its arena: every row's keys end to end, and one
+/// more offset than rows.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct NativeKeysTapeView
+{
+    /// <summary>Every row's keys, end to end.</summary>
+    public Key* Keys;
+    /// <summary>The call's written count plus one non-decreasing offsets into the keys.</summary>
+    public nuint* Offsets;
+}
+
 /// <summary>The host memory domains a RAM-resident index places its shards in, one shard apiece.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct NativeRamOptions

@@ -1712,6 +1712,19 @@ public final class Types {
             size(field + ".stride", Key.BYTES);
         }
 
+        /** Fills a count and a pointer, as the {@code starts_count} and {@code starts} of a walk, leaving an empty run null. */
+        void keyRun(String countField, String pointerField, Key[] keys) {
+            if (keys.length == 0) {
+                return;
+            }
+            MemorySegment staged = memory.allocate((long) Key.BYTES * keys.length, 8);
+            for (int row = 0; row != keys.length; ++row) {
+                keys[row].write(staged, (long) row * Key.BYTES);
+            }
+            pointer(pointerField, staged);
+            size(countField, keys.length);
+        }
+
         /** Fills a {@code usearch_rows_view_t} at {@code field} over a matrix the call reads. */
         void rows(String field, RowsView view) {
             pointer(field + ".data", input(view.segment().asSlice(0, view.spanBytes())));

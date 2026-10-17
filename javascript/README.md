@@ -344,13 +344,14 @@ const packed = index.get(42n, bitsArena, { scalar: usearch.Scalar.U1x8 }); // Or
 
 `get` shapes its rows from the width and stride the call reports: `stored.data` holds `stored.rows` rows of `stored.columns` values, `stored.stride` bytes apart, and no rows when the key is absent.
 
-A cursor walks the whole index instead, in storage order; each shard's watermark is read as the walk enters it, so a row once passed is never revisited.
-It lands each batch of up to `wanted` entries in the arena, the keys always and the rows beside them in the kind `vectors` names:
+A cursor walks the index instead; each shard's watermark is read as the walk enters it, so a row once passed is never revisited.
+Without start keys it yields every row in storage order; with them, the starts' own rows first, then the rows those link to breadth-first, each once.
+It lands each batch of up to `wanted` keys in the arena, and beside them the keys each links to when `links` asks; the rows themselves come from `get`:
 
 ```js
 using cursor = index.on(executor).cursor();
-for (let batch = cursor.next(1024, arena, { vectors: usearch.Scalar.F32 }); batch.rows; batch = cursor.next(1024, arena, { vectors: usearch.Scalar.F32 })) {
-  writeOut(batch.keys, batch.vectors.data, batch.rows);
+for (let batch = cursor.next(1024, arena, { links: true }); batch.rows; batch = cursor.next(1024, arena, { links: true })) {
+  writeOut(batch.keys, batch.links.get(0), batch.rows);
 }
 ```
 

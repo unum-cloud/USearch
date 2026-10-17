@@ -718,13 +718,15 @@ public class DenseIndexTest {
         try (DenseIndex index = populated();
                 Arena arena = new Arena(POOL);
                 DenseCursor cursor = index.on(POOL).cursor()) {
-            DenseBatch batch = cursor.next(4, Scalar.F32, arena);
+            DenseBatch batch = cursor.nextLinks(4, arena);
             assertEquals(2, batch.written());
             assertEquals(Key.of(10), batch.key(0));
-            assertArrayEquals(new float[] {0, 1, 1, 0}, floatsOf(batch.vectors()), 0f);
+            batch.linkCount(0);
             DenseBatch drained = cursor.next(4, arena);
             assertEquals(0, drained.written());
-            assertEquals(null, drained.vectors());
+            assertEquals(
+                    Status.INVALID_ARGUMENT,
+                    assertThrows(USearchException.class, () -> drained.linkCount(0)).status());
             assertThrows(IllegalStateException.class, () -> batch.key(0));
         }
     }

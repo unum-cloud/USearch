@@ -799,24 +799,19 @@ test("Cursors walk every entry once, and keep their index alive", () => {
   collect(); // nothing but the cursor refers to the index now
 
   const arena = new Arena();
-  const pull = () => cursor.next(2, arena, { vectors: Scalar.F32 });
+  const pull = () => cursor.next(2, arena);
   const seen = [];
   for (let batch = pull(); batch.rows; batch = pull()) {
-    for (let position = 0; position < batch.rows; position++) {
-      const key = usearch.integerFromKey(usearch.keyAt(batch.keys, position));
-      seen.push(key);
-      assert.deepEqual(
-        batch.vectors.data.subarray(position * 2, position * 2 + 2),
-        new Float32Array([Number(key), Number(key)]),
-      );
-    }
+    assert.equal(batch.links, undefined);
+    for (let position = 0; position < batch.rows; position++)
+      seen.push(usearch.integerFromKey(usearch.keyAt(batch.keys, position)));
   }
   cursor.free();
   cursor.free(); // releasing twice is a no-op
   assert.throws(() => cursor.next(2, arena), { code: Status.Uninitialized, message: "The walk was already released" });
 
   const keysAlone = opened().next(3, arena);
-  assert.deepEqual([keysAlone.rows, keysAlone.keys.length, keysAlone.vectors], [3, 3 * usearch.keyBytes, undefined]);
+  assert.deepEqual([keysAlone.rows, keysAlone.keys.length, keysAlone.links], [3, 3 * usearch.keyBytes, undefined]);
 
   seen.sort((first, second) => Number(first - second));
   assert.deepEqual(seen, [1n, 2n, 3n]);

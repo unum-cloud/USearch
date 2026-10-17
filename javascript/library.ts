@@ -92,16 +92,22 @@ export interface CompiledProducts {
   required: number;
 }
 
-/** One cursor pull viewed inside its arena, the rows present when they were asked for. */
+/** The keys each entry of a cursor pull links to, viewed inside its arena as a ragged run. */
+export interface CompiledLinks {
+  offsets: BigUint64Array | null;
+  keys: Uint8Array | null;
+}
+
+/** One cursor pull viewed inside its arena, the links present when they were asked for. */
 export interface CompiledBatch {
   keys: Uint8Array | null;
   rows: number;
-  vectors?: CompiledVectors;
+  links?: CompiledLinks;
 }
 
-/** A row scan whose every pull lands in the arena it is handed. */
+/** A walk whose every pull lands in the arena it is handed. */
 export interface CompiledCursor {
-  next(wanted: number, arena: CompiledArena, scalar: number | undefined): CompiledBatch;
+  next(wanted: number, arena: CompiledArena, links: boolean | undefined): CompiledBatch;
   free(): void;
 }
 
@@ -186,7 +192,7 @@ export interface CompiledIndex {
       stats: CompiledStats | undefined,
     ]
   ): CompiledVectors;
-  cursor(executor: CompiledExecutor | undefined): CompiledCursor;
+  cursor(executor: CompiledExecutor | undefined, starts: Uint8Array | BigUint64Array | undefined): CompiledCursor;
   searchStream(
     ...arguments_: [executor: CompiledExecutor | undefined, ...query: CompiledRows, expansion: number | undefined]
   ): CompiledSearchStream;

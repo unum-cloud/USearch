@@ -329,17 +329,18 @@ for (0..vectors.rows) |row| consume(try vectors.row(f32, row));
 `DenseVectors.stride` is the byte pitch of each row and `columns` its dimensions, as the call reported them, which is how a sub-byte kind like `.u1x8` is read without arithmetic on its packing.
 `row` refuses an element type other than the kind the rows were written as with `Error.InvalidArgument`, rather than reinterpreting them.
 
-A cursor walks the index contents as a sequential row scan, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
-Each pull lands up to `wanted` keys in the arena, and their rows beside them as the scalar you name, or the keys alone for `null`.
+A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
+Without start keys it yields every row as stored; with them, the starts' own rows first, then the rows those link to breadth-first, each once.
+Each pull lands up to `wanted` keys in the arena, and the keys each links to when `links` is true; the rows themselves come from `get`.
 
 ```zig
-var cursor = try usearch.DenseCursor.init(index);
+var cursor = try usearch.DenseCursor.init(index, &.{});
 defer cursor.deinit();
 
 while (true) {
-    const batch = try index.on(executor).cursorNext(cursor, 1024, .f32, &arena);
+    const batch = try index.on(executor).cursorNext(cursor, 1024, true, &arena);
     if (batch.written == 0) break; // exhausted
-    consume(try batch.keys(), try batch.vectors.?.bytes());
+    consume(try batch.keys(), try batch.links(0));
 }
 ```
 

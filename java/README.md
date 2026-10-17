@@ -327,15 +327,16 @@ DenseVectors every = index.get(Key.of(42), Scalar.F32, arena);
 float[] values = every.segment().toArray(ValueLayout.JAVA_FLOAT);
 ```
 
-A cursor walks the index contents as a sequential row scan, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
-Each pull writes up to a wanted count of keys into the arena, and their rows beside them in the scalar asked for.
+A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
+Without start keys it yields every row as stored, and `cursor(starts...)` yields the starts' own rows first, then the rows those link to breadth-first, each once.
+Each pull writes up to a wanted count of keys into the arena, and `nextLinks` the keys each links to beside them; the rows themselves come from `get`.
 
 ```java
 try (DenseCursor cursor = index.on(pool).cursor()) {
-    for (DenseBatch batch = cursor.next(1024, Scalar.F32, arena); batch.written() != 0;
-            batch = cursor.next(1024, Scalar.F32, arena)) {
+    for (DenseBatch batch = cursor.nextLinks(1024, arena); batch.written() != 0;
+            batch = cursor.nextLinks(1024, arena)) {
         export(batch);
-}
+    }
 }
 ```
 

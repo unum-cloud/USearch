@@ -301,7 +301,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * One reachability audit: the population it judged, and how much of it a search reaches.
      *
      * <p>
-     * Mirrors {@code usearch_dense_reachability_t}.
+     * Mirrors {@code usearch_reachability_t}.
      *
      * @param audited the entries published when the audit started; compare {@code reachable} against
      *     this, never a later size.
@@ -311,7 +311,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      */
     public record DenseReachability(long audited, long reachable, long sweeps) {
 
-        /** Lifts a {@code usearch_dense_reachability_t}. */
+        /** Lifts a {@code usearch_reachability_t}. */
         static DenseReachability lift(MemorySegment reachability) {
             long[] fields = reachability.toArray(ValueLayout.JAVA_LONG);
             return new DenseReachability(fields[0], fields[1], fields[2]);
@@ -342,7 +342,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * one reading always belongs to one call and a sweep over many batches sums them itself.
      *
      * <p>
-     * Mirrors {@code usearch_dense_traversal_stats_t}.
+     * Mirrors {@code usearch_traversal_stats_t}.
      */
     public static final class DenseTraversalStats {
 
@@ -906,7 +906,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * One pull of a {@link DenseCursor}, written into its arena: the keys of the entries passed, and
-     * their rows beside them when asked for. Valid until the arena's next call or its close.
+     * the keys each links to when asked for. Valid until the arena's next call or its close.
      */
     public static final class DenseBatch {
 
@@ -914,15 +914,22 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         private final MemorySegment keys;
         private final long keysStride;
         private final long written;
-        private final @Nullable DenseVectors vectors;
+        private final @Nullable MemorySegment linkOffsets;
+        private final MemorySegment linkKeys;
 
         private DenseBatch(
-                Arena arena, MemorySegment keys, long keysStride, long written, @Nullable DenseVectors vectors) {
+                Arena arena,
+                MemorySegment keys,
+                long keysStride,
+                long written,
+                @Nullable MemorySegment linkOffsets,
+                MemorySegment linkKeys) {
             this.arena = arena;
             this.keys = keys;
             this.keysStride = keysStride;
             this.written = written;
-            this.vectors = vectors;
+            this.linkOffsets = linkOffsets;
+            this.linkKeys = linkKeys;
         }
 
         /** How many entries the pull wrote; zero once the walk is exhausted. */
@@ -944,14 +951,45 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             return Key.read(keys, entry * keysStride);
         }
 
-        /** The rows beside the keys, or {@code null} when the pull exported none. */
-        public @Nullable DenseVectors vectors() {
-            return vectors;
+        /**
+         * How many keys one entry links to.
+         *
+         * @throws USearchException INVALID_ARGUMENT when the pull exported no links, SHAPE_MISMATCH when
+         *     the entry is past the batch, and DEVICE when the arena holds device memory.
+         */
+        public long linkCount(long entry) {
+            MemorySegment offsets = linked(entry);
+            return offsets.getAtIndex(ValueLayout.JAVA_LONG, entry + 1) - offsets.getAtIndex(ValueLayout.JAVA_LONG, entry);
+        }
+
+        /**
+         * One key an entry links to, as the graph stored it when the pull ran.
+         *
+         * @throws USearchException the statuses {@link #linkCount(long)} names, and SHAPE_MISMATCH when
+         *     the rank is past the entry's links.
+         */
+        public Key link(long entry, long rank) {
+            long begin = linked(entry).getAtIndex(ValueLayout.JAVA_LONG, entry);
+            if (rank < 0 || rank >= linkCount(entry)) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "the entry links to " + linkCount(entry) + " keys");
+            }
+            return Key.read(linkKeys, (begin + rank) * Key.BYTES);
+        }
+
+        private MemorySegment linked(long entry) {
+            arena.host();
+            if (linkOffsets == null) {
+                throw new USearchException(Status.INVALID_ARGUMENT, "the pull exported no links");
+            }
+            if (entry < 0 || entry >= written) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "the batch holds " + written + " entries");
+            }
+            return linkOffsets;
         }
     }
 
     /**
-     * A sequential row scan over the index contents, pulled blocking on the executor of the receiver
+     * A sequential walk over the index contents, pulled blocking on the executor of the receiver
      * that opened it - export, migration, and visualization feed off it. It serves one thread at a
      * time, and an overlapping pull reports CONTENDED.
      */
@@ -975,43 +1013,50 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
          *     serves another call.
          */
         public DenseBatch next(long wanted, Arena arena) {
-            return pull(wanted, null, arena);
+            return pull(wanted, false, arena);
         }
 
         /**
-         * Copies up to {@code wanted} next entries into {@code arena}, their rows beside the keys in
-         * {@code outputsScalar}. Calls {@code usearch_dense_cursor_next}.
+         * Copies the keys of up to {@code wanted} next entries into {@code arena}, each with the keys it
+         * links to. Calls {@code usearch_dense_cursor_next}.
          *
-         * @throws USearchException INVALID_ARGUMENT on a negative count, UNKNOWN_KIND on a scalar the
-         *     engine cannot convert into, and CONTENDED when the arena serves another call.
+         * @throws USearchException INVALID_ARGUMENT on a negative count, and CONTENDED when the arena
+         *     serves another call.
          */
-        public DenseBatch next(long wanted, Scalar outputsScalar, Arena arena) {
-            return pull(wanted, outputsScalar, arena);
+        public DenseBatch nextLinks(long wanted, Arena arena) {
+            return pull(wanted, true, arena);
         }
 
-        private DenseBatch pull(long wanted, @Nullable Scalar outputsScalar, Arena arena) {
+        private DenseBatch pull(long wanted, boolean linked, Arena arena) {
             long bound = nonNegative(wanted, "the wanted count is negative");
             return Call.block(CURSOR_NEXT, index.handle, executor, call -> {
                 call.lease("cursor", handle);
                 MemorySegment keys = call.output("keys", Library.KEYS_VIEW);
-                MemorySegment rows = MemorySegment.NULL;
-                if (outputsScalar != null) {
-                    call.enumeration("outputs_scalar", outputsScalar.code());
-                    rows = call.output("vectors", Library.ROWS_VIEW);
-                }
+                MemorySegment tape = linked ? call.output("links", Library.KEYS_TAPE_VIEW) : MemorySegment.NULL;
                 MemorySegment written = call.output("written", Library.SIZE);
                 call.arena("arena", arena);
                 call.size("wanted", bound);
-                MemorySegment exported = rows;
                 return () -> {
                     long count = written.get(Library.SIZE, 0);
                     long stride = keys.get(Library.SIZE, Library.POINTER.byteSize());
+                    MemorySegment offsets = null;
+                    MemorySegment linkKeys = MemorySegment.NULL;
+                    if (linked) {
+                        offsets = call.reach(
+                                tape.get(Library.POINTER, Library.offset(Library.KEYS_TAPE_VIEW, "offsets")),
+                                (count + 1) * Long.BYTES);
+                        long total = count == 0 ? 0 : offsets.getAtIndex(ValueLayout.JAVA_LONG, count);
+                        linkKeys = call.reach(
+                                tape.get(Library.POINTER, Library.offset(Library.KEYS_TAPE_VIEW, "keys")),
+                                Types.Extents.product(total, Key.BYTES, "the links"));
+                    }
                     return new DenseBatch(
                             call.arena(),
                             call.reach(keys.get(Library.POINTER, 0), Types.Extents.product(count, stride, "the keys")),
                             stride,
                             count,
-                            outputsScalar == null ? null : DenseVectors.lift(call, exported, count));
+                            offsets,
+                            linkKeys);
                 };
             });
         }
@@ -1556,7 +1601,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             Library.SIZE.withName("memory_usage"),
             Library.POINTER.withName("capabilities"));
 
-    /** {@code usearch_dense_reachability_t}. */
+    /** {@code usearch_reachability_t}. */
     static final StructLayout REACHABILITY = MemoryLayout.structLayout(
             Library.SIZE.withName("audited"), Library.SIZE.withName("reachable"), Library.SIZE.withName("sweeps"));
 
@@ -1641,6 +1686,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             Library.opening(
                     Library.padding(),
                     Library.POINTER.withName("changed"),
+                    Library.POINTER.withName("reachability"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
                     STATS));
@@ -1683,7 +1729,14 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     static final Verb ABSORB = new Verb(
             "usearch_dense_absorb",
             Library.opening(
-                    Library.padding(), Library.SIZE.withName("count"), Library.POINTER.withName("donors"), PROGRESS));
+                    Library.padding(),
+                    Library.SIZE.withName("count"),
+                    Library.POINTER.withName("donors"),
+                    Library.POINTER.withName("changed"),
+                    Library.POINTER.withName("reachability"),
+                    Library.SIZE.withName("expansion_factor"),
+                    PROGRESS,
+                    STATS));
 
     static final Verb CURSOR_INIT = new Verb(
             "usearch_dense_cursor_init",
@@ -1691,7 +1744,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("cursor"),
                     Library.POINTER.withName("index"),
                     Library.POINTER.withName("outcome"),
-                    Library.POINTER.withName("start")));
+                    Library.SIZE.withName("starts_count"),
+                    Library.POINTER.withName("starts")));
 
     static final Verb CURSOR_NEXT = new Verb(
             "usearch_dense_cursor_next",
@@ -1699,12 +1753,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.padding(),
                     Library.POINTER.withName("cursor"),
                     Library.POINTER.withName("keys"),
-                    Library.POINTER.withName("vectors"),
+                    Library.POINTER.withName("links"),
                     Library.POINTER.withName("written"),
                     Library.POINTER.withName("arena"),
-                    Library.SIZE.withName("wanted"),
-                    Library.ENUM.withName("outputs_scalar"),
-                    Library.padding()));
+                    Library.SIZE.withName("wanted")));
 
     static final Verb SEARCH_STREAM_INIT = new Verb(
             "usearch_dense_search_stream_init",

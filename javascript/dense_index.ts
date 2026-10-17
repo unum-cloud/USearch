@@ -8,6 +8,7 @@ import {
   CompiledCursor,
   CompiledDeferred,
   CompiledIndex,
+  CompiledLinks,
   CompiledMatches,
   CompiledMetadata,
   CompiledProducts,
@@ -56,7 +57,7 @@ export enum DenseMetric {
 
 /**
  * Traversal telemetry from one call, a pure output the call fully overwrites. Mirrors
- * `usearch_dense_traversal_stats_t`.
+ * `usearch_traversal_stats_t`.
  *
  * One reading handed to several calls holds the last of them, so a sweep that wants totals folds
  * them with `accumulate` rather than expecting the calls to sum themselves.
@@ -129,8 +130,8 @@ export interface DenseMultiplyConfig {
 
 /** Optional settings of one cursor pull. Mirrors `usearch_dense_cursor_next_t`. */
 export interface DenseCursorNextConfig {
-  /** The scalar kind to export every row as, converted from storage; absent pulls the keys alone. */
-  vectors?: Scalar;
+  /** Whether to export the keys each entry links to beside it; absent pulls the keys alone. */
+  links?: boolean;
 }
 
 /** Optional per-call settings of attention. Mirrors `usearch_dense_attend_t`. */
@@ -252,7 +253,7 @@ export interface DenseIndexDescription {
   capabilities: string;
 }
 
-/** One reachability audit: the population it judged, and how much of it a search reaches. Mirrors `usearch_dense_reachability_t`. */
+/** One reachability audit: the population it judged, and how much of it a search reaches. Mirrors `usearch_reachability_t`. */
 export interface DenseReachability {
   /** Entries published when the audit started; compare `reachable` against this, never a later size. */
   audited: number;
@@ -295,8 +296,7 @@ function metadataOf(read: CompiledMetadata): DenseMetadata {
 }
 
 /**
- * Rows a call landed in its arena: the entries `get` exported, a cursor pull's rows, or the rows
- * `attend` attended. Mirrors a `usearch_rows_view_t` output.
+ * Rows a call landed in its arena: the entries `get` exported, or the rows `attend` attended. Mirrors a `usearch_rows_view_t` output.
  *
  * `data` is a `Float64Array`, `Float32Array`, `Float16Array` or `Int8Array` for the kinds
  * JavaScript spells, a `Uint16Array` for `bf16` and for `f16` on a runtime without `Float16Array`,
@@ -379,20 +379,61 @@ export class DenseProducts extends ArenaView {
   }
 }
 
-/** One cursor pull, viewed inside its arena: the keys, and the rows beside them when they were asked for. */
-export class DenseCursorBatch extends ArenaView {
-  /** Entries pulled; zero once the scan is exhausted. */
+/**
+ * The keys each entry of a cursor pull links to, as a ragged run with Apache Arrow offsets: entry
+ * `i` links to keys `offsets[i]` up to `offsets[i + 1]`. Mirrors `usearch_keys_tape_view_t`.
+ */
+export class DenseCursorLinks extends ArenaView {
+  /** Entries the pull covers. */
   readonly rows: number;
-  /** The rows beside the keys, in the kind asked for; absent when the pull asked for keys alone. */
-  readonly vectors: DenseVectors | undefined;
+  readonly #landed: CompiledLinks;
+
+  /** Made by `DenseCursor.next`, never directly. */
+  constructor(landed: CompiledLinks, rows: number) {
+    super();
+    this.#landed = landed;
+    this.rows = rows;
+  }
+
+  /** One more entry than there are pulled entries, non-decreasing. */
+  get offsets(): BigUint64Array {
+    return this.live(this.#landed.offsets);
+  }
+
+  /** Sixteen bytes per link, end to end. */
+  get keys(): Uint8Array {
+    return this.live(this.#landed.keys);
+  }
+
+  /**
+   * Borrows the keys one entry links to, without copying. Binding-only.
+   *
+   * @param {number} row - Which pulled entry to read.
+   * @returns {Uint8Array} - Sixteen bytes per key the entry links to.
+   */
+  get(row: number): Uint8Array {
+    if (!Number.isInteger(row) || row < 0 || row >= this.rows)
+      throw fail(Status.InvalidArgument, `No entry ${row} in a pull of ${this.rows}.`);
+    const begin = Number(this.offsets[row]);
+    const end = Number(this.offsets[row + 1]);
+    return this.keys.subarray(begin * keyBytes, end * keyBytes);
+  }
+}
+
+/** One cursor pull, viewed inside its arena: the keys, and the keys they link to when those were asked for. */
+export class DenseCursorBatch extends ArenaView {
+  /** Entries pulled; zero once the walk is exhausted. */
+  readonly rows: number;
+  /** The keys each entry links to; absent when the pull asked for keys alone. */
+  readonly links: DenseCursorLinks | undefined;
   readonly #keys: Uint8Array | null;
 
   /** Made by `DenseCursor.next`, never directly. */
-  constructor(landed: CompiledBatch, scalar: Scalar | undefined) {
+  constructor(landed: CompiledBatch) {
     super();
     this.#keys = landed.keys;
     this.rows = landed.rows;
-    this.vectors = landed.vectors && scalar ? new DenseVectors(landed.vectors, scalar) : undefined;
+    this.links = landed.links ? new DenseCursorLinks(landed.links, landed.rows) : undefined;
   }
 
   /** Sixteen bytes per entry pulled. */
@@ -402,7 +443,7 @@ export class DenseCursorBatch extends ArenaView {
 }
 
 /**
- * A row scan over an index. Each shard's publication watermark is read as the walk enters it, so
+ * A walk over an index. Each shard's publication watermark is read as the walk enters it, so
  * a row once passed is never revisited. Mirrors `usearch_dense_cursor_t`.
  *
  * Holds engine state until `free` is called; a walk left to the garbage collector releases it
@@ -418,19 +459,16 @@ export class DenseCursor implements Disposable {
   }
 
   /**
-   * Pulls the next entries of the scan into `arena`. Calls `usearch_dense_cursor_next`.
+   * Pulls the next entries of the walk into `arena`; the rows themselves come from `get`.
+   * Calls `usearch_dense_cursor_next`.
    *
    * @param {number} wanted - The upper bound on entries this pull lands.
    * @param {Arena} arena - The memory the batch lands in, rewound by the pull.
-   * @param {DenseCursorNextConfig} [config] - The kind to export the rows in; absent pulls keys alone.
-   * @return {DenseCursorBatch} The batch; zero rows once the scan is exhausted.
+   * @param {DenseCursorNextConfig} [config] - Whether to export each entry's links; absent pulls keys alone.
+   * @return {DenseCursorBatch} The batch; zero rows once the walk is exhausted.
    */
   next(wanted: number, arena: Arena, config: DenseCursorNextConfig = {}): DenseCursorBatch {
-    const scalar = config.vectors;
-    return new DenseCursorBatch(
-      this.#compiled.next(wanted, arena, scalar === undefined ? undefined : scalarCodes[scalar]),
-      scalar,
-    );
+    return new DenseCursorBatch(this.#compiled.next(wanted, arena, config.links));
   }
 
   /** Releases the scan; a second call does nothing. Calls `usearch_dense_cursor_free`. */
@@ -812,12 +850,16 @@ export class DenseIndexOn extends DenseVerbs<"blocking"> {
   }
 
   /**
-   * Opens a row scan over the current contents, every pull on this receiver's executor.
-   * Calls `usearch_dense_cursor_init`.
-   * @return {DenseCursor} - The scan, which should be freed once pulling stops.
+   * Opens a walk over the current contents, every pull on this receiver's executor. Without
+   * `starts` it yields every row as stored; with them, the start keys' own rows first in order,
+   * then the rows those link to breadth-first, each once. Calls `usearch_dense_cursor_init`.
+   * @param {KeysLike} [starts] - The keys to walk from; absent walks every row.
+   * @return {DenseCursor} - The walk, which should be freed once pulling stops.
    */
-  cursor(): DenseCursor {
-    return new DenseCursor(this.compiled.cursor(this.executor));
+  cursor(starts?: KeysLike): DenseCursor {
+    return new DenseCursor(
+      this.compiled.cursor(this.executor, starts === undefined ? undefined : normalizeKeys(starts)),
+    );
   }
 
   /**

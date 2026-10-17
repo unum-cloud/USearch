@@ -772,15 +772,14 @@ public sealed class DenseIndexTests : IDisposable
         using DenseCursor cursor = index.On(this._pool).Cursor();
         index.Dispose();
 
-        DenseBatch batch = cursor.Next(2, this._arena, Scalar.F32);
+        DenseBatch batch = cursor.Next(2, this._arena);
         Assert.Equal(2, batch.Count);
         Assert.Equal(Key.FromUInt64(1), batch.Keys[0]);
-        Assert.Equal(RowOf(2f), batch.Vectors.Row<float>(1).ToArray());
 
         batch = cursor.Next(2, this._arena);
         Assert.Equal(1, batch.Count);
         Assert.Equal(Key.FromUInt64(3), batch.Keys[0]);
-        Assert.Equal(0, batch.Vectors.Rows);
+        Assert.Throws<InvalidOperationException>(() => batch.Links(0));
         Assert.Equal(0, cursor.Next(2, this._arena).Count);
     }
 

@@ -213,6 +213,39 @@ impl usearch_matches_tape_view_t {
     }
 }
 
+/// A ragged run of keys a call wrote into its arena - every row's keys end to end, and one more
+/// offset than rows.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct usearch_keys_tape_view_t {
+    pub keys: *const usearch_key_t,
+    pub offsets: *const usize,
+}
+
+impl Default for usearch_keys_tape_view_t {
+    fn default() -> Self {
+        usearch_keys_tape_view_t {
+            keys: ptr::null(),
+            offsets: ptr::null(),
+        }
+    }
+}
+
+impl usearch_keys_tape_view_t {
+    /// Row `row`, spanning its two offsets; a call with nothing to report leaves null offsets,
+    /// which read as empty rows.
+    ///
+    /// # Safety
+    /// The view must be a finished call's output in host memory, and `row` below its count.
+    pub(crate) unsafe fn row<'arena>(&self, row: usize) -> &'arena [Key] {
+        let (start, end) = match self.offsets.is_null() {
+            true => (0, 0),
+            false => (*self.offsets.add(row), *self.offsets.add(row + 1)),
+        };
+        arena_slice(self.keys.wrapping_add(start), end - start)
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct usearch_ram_options_t {

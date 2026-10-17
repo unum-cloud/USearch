@@ -433,21 +433,22 @@ vectors, _ := index.Get(usearch.KeyFromUint64(42), usearch.ScalarF32, arena)
 values, _ := usearch.DenseValues[float32](vectors)
 ```
 
-A cursor walks the contents as a sequential row scan, each pull writing up to `wanted` keys, and their rows in the scalar kind you name, into an arena.
+A cursor walks the contents, each pull writing up to `wanted` keys, and the keys each links to for `NextLinks`, into an arena; the rows themselves come from `Get`.
 `NextKeys` pulls the keys alone, and a batch of none means the walk is exhausted.
+`Cursor()` yields every row as stored, and `Cursor(starts...)` the starts' own rows first, then the rows those link to breadth-first, each once.
 Cursors answer on RAM and NVMe handles, while VRAM rows are read back by key or by search.
 
 ```go
 cursor, _ := index.On(executor).Cursor()
 defer cursor.Close()
 for {
-	batch, err := cursor.NextBatch(1024, usearch.ScalarF32, arena)
+	batch, err := cursor.NextLinks(1024, arena)
 	if err != nil || batch.Written() == 0 {
 		break
-}
+	}
 	keys, _ := batch.Keys()
-	rows, _ := usearch.DenseValues[float32](batch.Vectors())
-	consume(keys, rows)
+	first, _ := batch.Links(0)
+	consume(keys, first)
 }
 ```
 

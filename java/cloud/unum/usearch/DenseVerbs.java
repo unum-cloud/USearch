@@ -327,14 +327,17 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     }
 
     /**
-     * Opens a row scan over the current contents, pulled on this receiver's executor. Each shard's
+     * Opens a walk over the current contents, pulled on this receiver's executor. Each shard's
      * publication watermark is read as the walk enters it, so a row once passed is never revisited.
-     * Calls {@code usearch_dense_cursor_init}.
+     * Without {@code starts} it yields every row as stored; with them, the start keys' own rows first
+     * in order, then the rows those link to breadth-first, each once. Calls
+     * {@code usearch_dense_cursor_init}.
      */
-    public DenseCursor cursor() {
+    public DenseCursor cursor(Key... starts) {
         DenseIndex index = index();
         return Call.block(DenseIndex.CURSOR_INIT, index.handle, null, call -> {
             MemorySegment opened = call.output("cursor", Library.POINTER);
+            call.keyRun("starts_count", "starts", starts);
             return () -> new DenseCursor(opened.get(Library.POINTER, 0), index, executor());
         });
     }

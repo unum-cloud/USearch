@@ -280,16 +280,17 @@ let rows = try index.get(key: 42, as: Float.self, arena: arena)
 print(rows.count, rows.columns, rows.stride, Array(rows[0]))
 ```
 
-`cursor()` opens a row scan over the contents, walking in batches, which is what export and migration want.
+`cursor()` opens a walk over the contents in batches, which is what export and migration want.
 Each shard's publication watermark is read as the walk enters it, so a row once passed is never revisited.
-Every pull lands up to `wanted` keys in its arena, and the rows beside them when `as:` names their scalar kind.
+Without `starts:` it yields every row as stored; with them, the starts' own rows first, then the rows those link to breadth-first, each once.
+Every pull lands up to `wanted` keys in its arena, and `nextLinks` lands the keys each links to beside them; the rows themselves come from `get`.
 
 ```swift
 let cursor = try index.on(executor).cursor()
 while true {
-    let batch = try cursor.next(wanted: 1024, as: Float.self, arena: arena)
+    let batch = try cursor.nextLinks(wanted: 1024, arena: arena)
     guard !batch.keys.isEmpty else { break }
-    print(Array(batch.keys), batch.vectors.count)
+    print(Array(batch.keys), batch.links[0])
 }
 ```
 

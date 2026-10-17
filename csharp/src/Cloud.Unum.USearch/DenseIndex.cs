@@ -156,7 +156,7 @@ public readonly struct DenseIndexDescription
 
 /// <summary>
 /// One reachability audit: the population it judged, and how much of it a search reaches. Mirrors
-/// <c>usearch_dense_reachability_t</c>.
+/// <c>usearch_reachability_t</c>.
 /// </summary>
 public readonly struct DenseReachability
 {
@@ -195,7 +195,7 @@ public struct DenseSoftmaxState
 /// <summary>
 /// The traversal telemetry one call reports. Every call overwrites it rather than accumulating,
 /// so a sweep over many batches sums them itself with <see cref="Accumulate"/>. Mirrors
-/// <c>usearch_dense_traversal_stats_t</c>.
+/// <c>usearch_traversal_stats_t</c>.
 /// </summary>
 public sealed class DenseTraversalStats
 {
@@ -824,11 +824,14 @@ public sealed unsafe class DenseIndex : IDisposable
     public Monolith SaveBuffer(Arena arena) =>
         Calls.Block(new DenseSaveBufferCall(new(this._handle, null), arena)).Result;
 
-    /// <summary>Opens a row scan over the current contents, pulled on the caller's thread; each
+    /// <summary>Opens a walk over the current contents, pulled on the caller's thread; each
     /// shard's publication watermark is read as the walk enters it, so a row once passed is never
-    /// revisited. Calls <c>usearch_dense_cursor_init</c>.</summary>
+    /// revisited. Without starts it yields every row as stored; with them, the start keys' own rows
+    /// first in order, then the rows those link to breadth-first, each once. Calls
+    /// <c>usearch_dense_cursor_init</c>.</summary>
+    /// <param name="starts">The keys to walk from; empty walks every row.</param>
     /// <returns>The cursor, which keeps the index alive until disposed.</returns>
-    public DenseCursor Cursor() => DenseCursor.Open(this, null);
+    public DenseCursor Cursor(ReadOnlySpan<Key> starts = default) => DenseCursor.Open(this, null, starts);
 
     /// <summary>
     /// Opens a resumable nearest-neighbor stream for one query, pulled on the caller's thread. The
@@ -1043,11 +1046,13 @@ public static class DenseVerbs
     public static Deferred<Monolith> SaveBuffer(this DenseIndexDeferredOn on, Arena arena) =>
         Calls.Defer(new DenseSaveBufferCall(Of(on), arena));
 
-    /// <summary>Opens a row scan over the current contents, pulled blocking on the receiver's
+    /// <summary>Opens a walk over the current contents, pulled blocking on the receiver's
     /// executor. Calls <c>usearch_dense_cursor_init</c>.</summary>
     /// <param name="on">The receiver whose executor every pull runs on.</param>
+    /// <param name="starts">The keys to walk from; empty walks every row.</param>
     /// <returns>The cursor, which keeps the index alive until disposed.</returns>
-    public static DenseCursor Cursor(this DenseIndexOn on) => DenseCursor.Open(on.Index, on.Executor);
+    public static DenseCursor Cursor(this DenseIndexOn on, ReadOnlySpan<Key> starts = default) =>
+        DenseCursor.Open(on.Index, on.Executor, starts);
 
     /// <summary>Opens a resumable nearest-neighbor stream for one query, pulled blocking on the
     /// receiver's executor. Calls <c>usearch_dense_search_stream_init</c>.</summary>
@@ -1929,7 +1934,8 @@ public readonly unsafe struct Monolith
 }
 
 /// <summary>One batch a <see cref="DenseCursor"/> pull wrote into its <see cref="Arena"/>: the keys,
-/// and the rows beside them when the pull exported any.</summary>
+/// and the keys each links to when the pull exported them; the rows come from
+/// <see cref="DenseIndex.Get"/>.</summary>
 /// <remarks>A view by value, readable until the arena's next call or disposal, as
 /// <see cref="Matches"/> is.</remarks>
 public readonly unsafe struct DenseBatch
@@ -1937,17 +1943,21 @@ public readonly unsafe struct DenseBatch
     private readonly Arena _arena;
     private readonly int _generation;
     private readonly Key* _keys;
+    private readonly NativeKeysTapeView _links;
+    private readonly bool _linked;
 
-    internal DenseBatch(Arena arena, int generation, NativeKeysView keys, DenseVectors vectors, int count)
+    internal DenseBatch(
+        Arena arena, int generation, NativeKeysView keys, NativeKeysTapeView links, bool linked, int count)
     {
         this._arena = arena;
         this._generation = generation;
         this._keys = (Key*)keys.Data;
-        this.Vectors = vectors;
+        this._links = links;
+        this._linked = linked;
         this.Count = count;
     }
 
-    /// <summary>How many entries the pull wrote; zero once the scan is exhausted.</summary>
+    /// <summary>How many entries the pull wrote; zero once the walk is exhausted.</summary>
     public int Count { get; }
 
     /// <summary>The identities of the entries, in storage order.</summary>
@@ -1960,8 +1970,26 @@ public readonly unsafe struct DenseBatch
         }
     }
 
-    /// <summary>The rows positionally paired with <see cref="Keys"/>, none when the pull exported none.</summary>
-    public DenseVectors Vectors { get; }
+    /// <summary>The keys one entry links to, as the graph stored them when the pull ran.</summary>
+    /// <param name="entry">The entry's position in <see cref="Keys"/>.</param>
+    /// <returns>The keys, valid until the arena's next call or disposal.</returns>
+    /// <exception cref="InvalidOperationException">The pull did not export links.</exception>
+    public ReadOnlySpan<Key> Links(int entry)
+    {
+        if (!this._linked)
+        {
+            throw new InvalidOperationException("the pull exported no links");
+        }
+
+        if ((uint)entry >= (uint)this.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(entry));
+        }
+
+        Arena.Readable(this._arena, this._generation);
+        nuint begin = this._links.Offsets[entry];
+        return new ReadOnlySpan<Key>(this._links.Keys + begin, (int)(this._links.Offsets[entry + 1] - begin));
+    }
 }
 
 #endregion Arena Views
@@ -1969,7 +1997,7 @@ public readonly unsafe struct DenseBatch
 #region Cursors & Streams
 
 /// <summary>
-/// A sequential row scan over the index contents - export, migration, and visualization feed off
+/// A sequential walk over the index contents - export, migration, and visualization feed off
 /// it. Each shard's publication watermark is read as the walk enters that shard, so a row once
 /// passed is never revisited, while a later shard may still carry rows published after the walk
 /// began. It keeps the index and the executor it pulls on alive until disposed.
@@ -1980,7 +2008,7 @@ public sealed unsafe class DenseCursor : IDisposable
 
     private DenseCursor(NativeCursorHandle handle) => this._handle = handle;
 
-    internal static DenseCursor Open(DenseIndex index, Executor? executor)
+    internal static DenseCursor Open(DenseIndex index, Executor? executor, ReadOnlySpan<Key> starts)
     {
         Lease held = Lease.Of(index.Handle, "index");
         Lease pool;
@@ -1996,8 +2024,19 @@ public sealed unsafe class DenseCursor : IDisposable
 
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
-        NativeDenseCursorInit arguments = new() { Cursor = &created, Index = held.Pointer, Outcome = &outcome };
-        usearch_dense_cursor_init(&arguments);
+        fixed (Key* run = starts)
+        {
+            NativeDenseCursorInit arguments = new()
+            {
+                Cursor = &created,
+                Index = held.Pointer,
+                Outcome = &outcome,
+                StartsCount = (nuint)starts.Length,
+                Starts = run,
+            };
+            usearch_dense_cursor_init(&arguments);
+        }
+
         if (outcome.Status != Status.Success)
         {
             held.Dispose();
@@ -2008,13 +2047,13 @@ public sealed unsafe class DenseCursor : IDisposable
         return new DenseCursor(new NativeCursorHandle(created, held, pool));
     }
 
-    /// <summary>Copies the next batch of entries out of the scan into an arena, the keys always and
-    /// the rows beside them when asked for. Calls <c>usearch_dense_cursor_next</c>.</summary>
+    /// <summary>Copies the next batch of entries out of the walk into an arena, the keys always and
+    /// the keys each links to when asked for. Calls <c>usearch_dense_cursor_next</c>.</summary>
     /// <param name="wanted">The upper bound on entries the pull writes.</param>
     /// <param name="arena">Where the batch lands, rewound by the pull.</param>
-    /// <param name="vectors">The scalar type to export the rows as; null exports the keys alone.</param>
-    /// <returns>The batch, empty once the scan is exhausted.</returns>
-    public DenseBatch Next(int wanted, Arena arena, Scalar? vectors = null)
+    /// <param name="links">Whether to export the keys each entry links to; false exports the keys alone.</param>
+    /// <returns>The batch, empty once the walk is exhausted.</returns>
+    public DenseBatch Next(int wanted, Arena arena, bool links = false)
     {
         nuint bound = Calls.Bound(wanted);
         using Lease cursor = Lease.Of(this._handle, "cursor");
@@ -2022,7 +2061,7 @@ public sealed unsafe class DenseCursor : IDisposable
         nuint written = 0;
         NativeOutcome outcome = default;
         NativeKeysView keys = default;
-        NativeRowsView rows = default;
+        NativeKeysTapeView linked = default;
         NativeDenseCursorNext arguments = new()
         {
             Index = this._handle.Index,
@@ -2030,18 +2069,16 @@ public sealed unsafe class DenseCursor : IDisposable
             Outcome = &outcome,
             Cursor = cursor.Pointer,
             Keys = &keys,
-            Vectors = vectors is null ? null : &rows,
+            Links = links ? &linked : null,
             Written = &written,
             Arena = lent.Pointer,
             Wanted = bound,
-            OutputsScalar = vectors ?? Scalar.Unknown,
         };
         usearch_dense_cursor_next(&arguments);
         int generation = Arena.Rewound(arena, &outcome);
         outcome.ThrowIfFailed();
         int count = (int)written;
-        return new DenseBatch(
-            arena, generation, keys, new DenseVectors(arena, generation, rows, vectors is null ? 0 : count), count);
+        return new DenseBatch(arena, generation, keys, linked, links, count);
     }
 
     /// <summary>Releases the cursor, then the index and executor it kept alive. Calls
@@ -2181,7 +2218,7 @@ internal struct NativeDenseTraversalStats
     public nuint Restarts;
 }
 
-/// <summary>One reachability audit, laid out as <c>usearch_dense_reachability_t</c>.</summary>
+/// <summary>One reachability audit, laid out as <c>usearch_reachability_t</c>.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct NativeDenseReachability
 {
@@ -2341,6 +2378,7 @@ internal unsafe struct NativeDenseRefine
     public NativeOutcome* Outcome;
     public Completion Completion;
     public nuint* Changed;
+    public NativeDenseReachability* Reachability;
     public nuint ExpansionFactor;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
@@ -2414,7 +2452,11 @@ internal unsafe struct NativeDenseAbsorb
     public Completion Completion;
     public nuint Count;
     public IntPtr* Donors;
+    public nuint* Changed;
+    public NativeDenseReachability* Reachability;
+    public nuint ExpansionFactor;
     public NativeProgress Progress;
+    public NativeDenseTraversalStats* Stats;
 }
 
 /// <summary>The arguments of <c>usearch_dense_cursor_init</c>.</summary>
@@ -2424,7 +2466,8 @@ internal unsafe struct NativeDenseCursorInit
     public IntPtr* Cursor;
     public IntPtr Index;
     public NativeOutcome* Outcome;
-    public Key* Start;
+    public nuint StartsCount;
+    public Key* Starts;
 }
 
 /// <summary>The arguments of <c>usearch_dense_cursor_next</c>.</summary>
@@ -2437,11 +2480,10 @@ internal unsafe struct NativeDenseCursorNext
     public Completion Completion;
     public IntPtr Cursor;
     public NativeKeysView* Keys;
-    public NativeRowsView* Vectors;
+    public NativeKeysTapeView* Links;
     public nuint* Written;
     public IntPtr Arena;
     public nuint Wanted;
-    public Scalar OutputsScalar;
 }
 
 /// <summary>The arguments of <c>usearch_dense_search_stream_init</c>.</summary>

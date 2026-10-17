@@ -781,6 +781,20 @@ struct MatchesTapeViewArguments(Defaultable, ImplicitlyCopyable):
 
 
 @fieldwise_init
+struct KeysTapeViewArguments(Defaultable, ImplicitlyCopyable):
+    """`usearch_keys_tape_view_t`, laid out as the ABI declares it: every row's keys end to end
+    inside the arena, and one more offset than rows."""
+
+    var keys: Address
+    var offsets: Address
+
+    def __init__(out self):
+        """Nothing written, which is what a failed call leaves."""
+        self.keys = NULL_ADDRESS
+        self.offsets = NULL_ADDRESS
+
+
+@fieldwise_init
 struct Matches[origin: MutOrigin](Movable, Sized):
     """A ranked run a call wrote into its arena - `usearch_matches_view_t`, read in place.
 

@@ -420,7 +420,7 @@ def test_search_stream_pulls_in_distance_order() raises:
 
 
 def test_cursor_walks_every_row_once() raises:
-    """A cursor pulls keys and rows in batches the caller sizes, until the walk is exhausted."""
+    """A cursor pulls keys and their links in batches the caller sizes, until the walk is exhausted."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -429,18 +429,18 @@ def test_cursor_walks_every_row_once() raises:
     var index = _basis(library)
     var cursor = index.on(executor).cursor()
     var arena = Arena(executor)
-    var batch = cursor.next_batch(1, ScalarKind.F32, arena)
-    assert_equal(len(batch), 1, "the first batch holds one row")
+    var batch = cursor.next_links(1, arena)
+    assert_equal(len(batch), 1, "the first batch holds one entry")
     assert_true(batch.keys()[0] == Key(integer=0), "the first key")
-    assert_equal(batch.row[DType.float32](0)[0], Float32(1), "beside its row")
+    _ = batch.links(0)
     var keys = cursor.next_keys(1, arena)
     assert_true(keys.keys()[0] == Key(integer=1), "the key column alone")
     var status = Status.SUCCESS
     try:
-        _ = keys.row[DType.float32](0)
+        _ = keys.links(0)
     except error:
         status = error.status
-    assert_true(status == Status.SHAPE_MISMATCH, "a pull of keys alone has no rows to read")
+    assert_true(status == Status.INVALID_ARGUMENT, "a pull of keys alone has no links to read")
     assert_equal(len(cursor.next_keys(1, arena)), 0, "then the walk is exhausted")
 
 

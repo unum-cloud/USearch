@@ -493,6 +493,13 @@ pub const usearch_matches_tape_view_t = extern struct {
     offsets: ?[*]const usize = null,
 };
 
+/// A ragged run of keys a call wrote into its arena, row `i` spanning `offsets[i]` up to
+/// `offsets[i + 1]`. Mirrors `usearch_keys_tape_view_t`.
+pub const usearch_keys_tape_view_t = extern struct {
+    keys: ?[*]const Key = null,
+    offsets: ?[*]const usize = null,
+};
+
 /// The matches of one row: nearest first for a search, largest first for a `maxsim`, and in
 /// traversal order for a `multiply`. Binding-only.
 pub const MatchesRow = struct {
