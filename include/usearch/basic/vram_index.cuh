@@ -142,6 +142,10 @@ struct vram_build_view {
     /** IDs strictly below this bound may be claimed & inserted by this launch. */
     node_id_type_ end_id;
 
+    /** The rows a re-selection walk samples landmarks below and follows neighbors below: the
+     *  launch's own bound while inserting, every published row while refining. */
+    node_id_type_ sampling_bound;
+
     /** Bytes of the walking warp's dynamic-shared slice: the query span and the pivot span; zero
      *  when the arena shape carries them instead. */
     u32_t scratch_bytes_per_warp;
@@ -561,9 +565,10 @@ __device__ __forceinline__ void vram_insert_one( //
 }
 
 /** Re-selects the published row of @p node_id once its wave's back-links made the wave's rows
- *  reachable from one another: walks from the row's own neighbors over every published row, selects
- *  again, rewrites the row in place, tail slots relaxed and slot 0 last with a release, so walks on
- *  other streams read either row whole at every slot, and threads the new picks. */
+ *  reachable from one another, or once a refine asks: walks from the row's own neighbors over every
+ *  row below the view's sampling bound, selects again, rewrites the row in place, tail slots
+ *  relaxed and slot 0 last with a release, so walks on other streams read either row whole at every
+ *  slot, and threads the new picks. */
 template <vram_basic_kit kit_, typename selector_ = vram_keep_diverse_t, typename schedule_, typename frontier_,
           typename node_id_type_>
 __device__ __forceinline__ void vram_reselect_one( //
@@ -585,7 +590,7 @@ __device__ __forceinline__ void vram_reselect_one( //
     for (u32_t slot_base = 0; slot_base < storage.connectivity; slot_base += warp_t::width_k) {
         u32_t const slot = slot_base + lane;
         node_id_type_ const seed_id = slot < storage.connectivity ? own_neighbors.load_slot(slot) : unknown_k;
-        bool const usable = seed_id < view.end_id && seed_id != node_id;
+        bool const usable = seed_id < view.sampling_bound && seed_id != node_id;
         bool const fresh = visited.test_and_set(usable ? seed_id : unknown_k, lane);
         typename warp_t::mask_t const fresh_mask = warp_t::ballot(fresh);
         u32_t const ordinal = warp_t::count(fresh_mask & warp_t::below(lane));
@@ -596,8 +601,8 @@ __device__ __forceinline__ void vram_reselect_one( //
             vram_score_into_frontier<kit_>(storage, schedule, query, gathered_ids, gathered_count, context, lane);
         warp_t::sync();
     }
-    vram_search_ahead<kit_>(storage, schedule, query, node_id_type_ {0}, view.end_id, view.end_id, visited,
-                            gathered_ids, context, lane);
+    vram_search_ahead<kit_>(storage, schedule, query, node_id_type_ {0}, view.sampling_bound, view.sampling_bound,
+                            visited, gathered_ids, context, lane);
 
     u32_t const selected_count = vram_select_neighbors<kit_, selector_>( //
         storage, schedule, query, pivot_span, gathered_ids, selection, context, lane);

@@ -860,6 +860,25 @@ struct sharded_indexes {
         return derived().absorb(std::span<derived_*>(donors), executor, config);
     }
 
+    /** Splits this index into receivers, the inverse of @ref plan_absorb: a gap on the device
+     *  residencies, which answer @c unsupported_k, while the host residency defines its own. */
+    expected<refine_plan_t> plan_split(std::span<derived_*>, executor_t&, refine_config_t = {}, u64_t = 0) noexcept {
+        return {{}, status_t::unsupported_k};
+    }
+
+    /** Moves every row of this index into one graph-local part per receiver and links each in:
+     *  @c plan_split, then @c run and @c finish. @p on_visited answers as in @ref refine, for the
+     *  re-selection alone; a cancel still heals and reports @c cancelled_k. */
+    template <typename progress_type_ = dummy_progress_t>
+    expected<refine_result_t> split(std::span<derived_*> receivers, executor_t& executor, refine_config_t config = {},
+                                    u64_t seed = 0, progress_type_&& on_visited = {}) noexcept {
+        auto [plan, status] = derived().plan_split(receivers, executor, config, seed);
+        if (failed(status)) return {{}, status};
+        status_t const ran = plan.run(executor, on_visited);
+        auto const [result, finish_status] = plan.finish(executor);
+        return {result, failed(finish_status) ? finish_status : ran};
+    }
+
     /**
      *  @brief Measures how much of every shard a search can reach, shard by shard on its own
      *      device: reachable nodes summed, depth the deepest shard's. Read-only.

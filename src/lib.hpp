@@ -601,13 +601,6 @@ inline constexpr bool is_gpu_executor = requires { executor_type_::vendor_k; };
 template <typename multi_type_>
 inline constexpr bool is_vram_index = is_gpu_executor<typename multi_type_::executor_t>;
 
-/** The vendor a VRAM variant's devices belong to, and @c unknown_k for every other residency. */
-template <typename multi_type_>
-constexpr gpu_vendor_t gpu_vendor_of_index() noexcept {
-    if constexpr (is_vram_index<multi_type_>) return multi_type_::vendor_k;
-    else return gpu_vendor_t::unknown_k;
-}
-
 template <typename multi_type_>
 inline constexpr bool is_nvme_index = std::is_same_v<typename multi_type_::executor_t, nvme_executor_t>;
 
@@ -624,6 +617,23 @@ void visit_writable(handle_type_& index, usearch_outcome_t* outcome, mutate_type
         index.variant);
 }
 
+/** Copies @p source into @p staged when it lives on an NVIDIA or AMD device, whose memory no host
+ *  read reaches, and points @p source at the copy; host pages and Apple's unified memory are read
+ *  in place. */
+inline status_t stage_on_host(bytes_view_t& source, growing_buffer<byte_t>& staged) noexcept {
+    int const nvidia = cuda_device_of(source.data()), amd = nvidia < 0 ? hip_device_of(source.data()) : -1;
+    if (nvidia < 0 && amd < 0) return status_t::success_k;
+    if (failed(staged.resize_uninitialized(source.size()))) return status_t::bad_alloc_k;
+    bool const copied = nvidia >= 0 ? cuda_set_device(nvidia) == cuda_success_k &&
+                                          cuda_copy(staged.data(), source.data(), source.size()) == cuda_success_k
+                                    : hip_set_device(amd) == hip_success_k &&
+                                          hip_api().copy(staged.data(), source.data(), source.size(),
+                                                         hip_copy_device_to_host_k) == hip_success_k;
+    if (!copied) return status_t::device_error_k;
+    source = to_span(staged);
+    return status_t::success_k;
+}
+
 /** Whether @p alternative_type_ is listed in @p variant_type_ - the membership fact the ladder
  *  asserts against the explicit list. */
 template <typename alternative_type_, typename variant_type_>
@@ -631,6 +641,10 @@ inline constexpr bool variant_carries = false;
 template <typename alternative_type_, typename... alternative_types_>
 inline constexpr bool variant_carries<alternative_type_, std::variant<alternative_types_...>> =
     (std::is_same_v<alternative_type_, alternative_types_> || ...);
+
+// The device listing crosses the ABI by casts, so the C vendors and classes mirror the engine's.
+static_assert(static_cast<u32_t>(gpu_vendor_t::apple_k) == usearch_gpu_vendor_apple_k);
+static_assert(static_cast<u32_t>(gpu_class_t::apple_metal10_k) == usearch_gpu_class_apple_metal10_k);
 
 #pragma endregion Residencies
 
@@ -642,16 +656,16 @@ using deferred_arguments_t = std::variant<                                      
     usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
     usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
     usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                              //
-    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t,                              //
+    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t, usearch_dense_split_t,       //
     usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t, //
     usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t,                                  //
     usearch_dense_search_stream_next_t, usearch_dense_cursor_next_t, usearch_dense_sample_t,             //
     usearch_dense_save_t, usearch_dense_save_buffer_t,                                                   //
     usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,       //
     usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t,                            //
-    usearch_sequence_load_ram_t, usearch_sequence_view_nvme_t,                                           //
+    usearch_sequence_load_ram_t, usearch_sequence_load_vram_t, usearch_sequence_view_nvme_t,             //
     usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,                     //
-    usearch_sequence_refine_t, usearch_sequence_absorb_t,                                                //
+    usearch_sequence_refine_t, usearch_sequence_absorb_t, usearch_sequence_split_t,                      //
     usearch_sequence_refinement_init_t, usearch_sequence_refinement_next_t,                              //
     usearch_sequence_refinement_finish_t,                                                                //
     usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,                         //
@@ -659,7 +673,7 @@ using deferred_arguments_t = std::variant<                                      
     usearch_sequence_save_t, usearch_sequence_metadata_read_t, usearch_sequence_describe_t,              //
     usearch_shapes_load_ram_t, usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t,                   //
     usearch_shapes_reserve_t, usearch_shapes_clear_t, usearch_shapes_insert_t,                           //
-    usearch_shapes_refine_t, usearch_shapes_absorb_t,                                                    //
+    usearch_shapes_refine_t, usearch_shapes_absorb_t, usearch_shapes_split_t,                            //
     usearch_shapes_refinement_init_t, usearch_shapes_refinement_next_t,                                  //
     usearch_shapes_refinement_finish_t,                                                                  //
     usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t,                               //
@@ -667,7 +681,7 @@ using deferred_arguments_t = std::variant<                                      
     usearch_shapes_save_t, usearch_shapes_metadata_read_t, usearch_shapes_describe_t,                    //
     usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t, usearch_geospatial_view_nvme_t,       //
     usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t,               //
-    usearch_geospatial_refine_t, usearch_geospatial_absorb_t,                                            //
+    usearch_geospatial_refine_t, usearch_geospatial_absorb_t, usearch_geospatial_split_t,                //
     usearch_geospatial_refinement_init_t, usearch_geospatial_refinement_next_t,                          //
     usearch_geospatial_refinement_finish_t,                                                              //
     usearch_geospatial_search_t, usearch_geospatial_within_t,                                            //

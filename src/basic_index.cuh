@@ -15,7 +15,6 @@
 
 #include <cstdio> // `std::snprintf` - the capability string
 
-#include <array>       // `std::array` - the one key a count scans the key columns for
 #include <atomic>      // `std::atomic_flag` - a cursor's one pull at a time
 #include <memory>      // `std::unique_ptr` - a finished refinement's handle
 #include <new>         // `std::nothrow`
@@ -55,12 +54,6 @@ struct basic_handle {
         : variant(tag, placement) {}
 };
 
-/** The snapshot cursor over the index of the RAM variant @p variant_type_, which no class
- *  changes. */
-template <typename variant_type_>
-using ram_cursor_of =
-    basic::ram_cursor<typename variant_type_::index_t, synchronization_t::concurrent_k, forkunion_allocator_t>;
-
 /** The cursor over a modality's handle: a RAM variant's snapshot, one of @p cursor_types_, or the
  *  next row of an NVMe view, whose rows never change. */
 template <typename handle_type_, typename... cursor_types_>
@@ -77,40 +70,6 @@ struct basic_cursor {
 /** The handle a call's arguments name, as the index they act on or the slot a new one lands in. */
 template <typename arguments_type_>
 using handle_of = std::remove_pointer_t<std::remove_pointer_t<decltype(std::declval<arguments_type_&>().index)>>;
-
-/** Visits the variant of @p index with @p visitor when it lives in RAM; a GPU variant serves the
- *  reservation, insertion, search and description verbs alone, and refuses the rest, and an NVMe
- *  view refuses as read-only whatever its verbs don't serve first. */
-template <typename handle_type_, typename visitor_type_>
-void visit_ram_variant(handle_type_& index, usearch_outcome_t* outcome, visitor_type_&& visitor) noexcept {
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if constexpr (is_ram_index<variant_type_>) visitor(variant);
-            else if constexpr (is_nvme_index<variant_type_>)
-                propagate_error(usearch_status_read_only_k, outcome, "An NVMe view never mutates");
-            else propagate_error(usearch_status_unsupported_k, outcome, "A GPU index serves no such verb yet");
-        },
-        index.variant);
-}
-
-/** Visits the variant of @p index with @p visitor when it is an NVMe view, answering whether it
- *  was. */
-template <typename handle_type_, typename visitor_type_>
-bool visit_nvme_variant(handle_type_& index, visitor_type_&& visitor) noexcept {
-    return std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if constexpr (is_nvme_index<variant_type_>) return visitor(variant), true;
-            else return false;
-        },
-        index.variant);
-}
-
-/** The GPU ordinal @p variant computes on, where a call's arena must live, or the host's. */
-template <typename variant_type_>
-int device_of(variant_type_ const& variant) noexcept {
-    if constexpr (is_vram_index<variant_type_>) return variant.index.device_specs().ordinal;
-    else return host_device_k;
-}
 
 /** Where a call's tape of queries starts, which the arena it rewinds must not hold. */
 inline void const* address_of(usearch_tape_view_t const& tape) noexcept { return tape.data; }
@@ -129,15 +88,17 @@ bool stores_scalar_of(geometry_type_ const& geometry) noexcept {
 
 /**
  *  @brief Lowers @p geometry, frozen with @p arguments, onto the first CPU variant of
- *      @p handle_type_ driven by @p executor_type_; null once @p outcome records why not.
+ *      @p handle_type_ driven by @p executor_type_, then hands it to @p fill, as
+ *      `fill(variant) → bool`; null once @p outcome records why not.
  *
  *  The variant is RAM or NVMe, its class is one the machine admits, and its scalar, if it stores
  *  one, is the one the geometry names. The variant lists each residency's classes newest first
  *  and the serial floor last, and never a class the build left out, so its order is the ladder.
  */
-template <typename handle_type_, typename executor_type_, typename arguments_type_>
+template <typename handle_type_, typename executor_type_, typename arguments_type_, typename fill_type_>
 handle_type_* make_cpu_handle(typename handle_type_::traits_t::geometry_t& geometry, arguments_type_ const& arguments,
-                              usearch_ram_options_t const& ram, usearch_outcome_t* outcome) noexcept {
+                              usearch_ram_options_t const& ram, usearch_outcome_t* outcome,
+                              fill_type_&& fill) noexcept {
     using traits_t = typename handle_type_::traits_t;
     if (!traits_t::admits(geometry, arguments, outcome)) return nullptr;
     // One basic index per handle, so one memory domain at most; values land where first touched.
@@ -159,7 +120,8 @@ handle_type_* make_cpu_handle(typename handle_type_::traits_t::geometry_t& geome
                 handle_type_(std::in_place_type<variant_type_>, forkunion_allocator_t {no_memory_domain_k});
             if (!handle)
                 return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), void();
-            if (!traits_t::freeze(std::get<variant_type_>(handle->variant), geometry, arguments, outcome))
+            variant_type_& variant = std::get<variant_type_>(handle->variant);
+            if (!traits_t::freeze(variant, geometry, arguments, outcome) || !fill(variant))
                 return delete handle, handle = nullptr, void();
             std::snprintf(handle->capabilities_string, sizeof(handle->capabilities_string), "%s",
                           usearch_cpu_class_name(static_cast<usearch_cpu_class_t>(variant_type_::cpu_class_k)));
@@ -182,12 +144,60 @@ void basic_init_ram(arguments_type_* arguments) noexcept {
     *arguments->index = nullptr;
     typename handle_t::traits_t::geometry_t geometry;
     if (!handle_t::traits_t::state(*arguments, geometry, outcome)) return;
-    handle_t* const index = make_cpu_handle<handle_t, forkunion_executor_t>(geometry, *arguments, arguments->ram,
-                                                                            outcome);
+    handle_t* const index = make_cpu_handle<handle_t, forkunion_executor_t>(
+        geometry, *arguments, arguments->ram, outcome, [](auto&) noexcept { return true; });
     if (!index) return;
     *arguments->index = index;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
+
+/** Loads the checkpoint at @p path into the freshly placed @p variant on the executor
+ *  @p arguments name; false once @p outcome records why not. */
+template <typename variant_type_, typename arguments_type_>
+bool basic_load_variant(variant_type_& variant, std::string_view path, arguments_type_ const& arguments,
+                        usearch_outcome_t* outcome) noexcept {
+    usearch_executor_handle_t call_executor;
+    typename variant_type_::executor_t* const executor = executor_of(variant, arguments.executor, call_executor,
+                                                                     outcome);
+    if (!executor) return false;
+    progress_ticks_t ticks {arguments.progress, executor->size()};
+    return propagate_error(variant.load(path, *executor, ticks), outcome);
+}
+
+#if USEARCH_ARCH_CUDA_
+
+/** Places the GPU variant of @p handle_type_ for @p geometry, frozen with @p arguments, on the one
+ *  device they name, then hands it to @p fill, as `fill(variant) → bool`; null once @p outcome
+ *  records why not, as for a geometry no device kit serves. */
+template <typename handle_type_, typename arguments_type_, typename fill_type_>
+handle_type_* make_vram_handle(typename handle_type_::traits_t::geometry_t& geometry, arguments_type_ const& arguments,
+                               usearch_outcome_t* outcome, fill_type_&& fill) noexcept {
+    using traits_t = typename handle_type_::traits_t;
+    if (!traits_t::admits(geometry, arguments, outcome)) return nullptr;
+    if (arguments.values_per_key)
+        return propagate_error(usearch_status_unsupported_k, outcome, "A GPU index bounds no key's entries"), nullptr;
+    usearch_vram_options_t const& vram = arguments.vram;
+    if (vram.devices_count > 1)
+        return propagate_error(usearch_status_unsupported_k, outcome, "A basic index places one shard"), nullptr;
+    std::size_t const ordinal = vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[0]) : 0;
+    gpu_device_t const* const device = basic_device_at(ordinal, outcome);
+    if (!device) return nullptr;
+    handle_type_* index = nullptr;
+    traits_t::with_vram_variant(geometry, [&]<typename variant_type_>(std::type_identity<variant_type_>) noexcept {
+        index = new (std::nothrow)
+            handle_type_(std::in_place_type<variant_type_>, static_cast<int>(device->vendor_ordinal));
+        if (!index)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), void();
+        variant_type_& variant = std::get<variant_type_>(index->variant);
+        if (!traits_t::freeze(variant, geometry, arguments, outcome) || !fill(variant))
+            return delete index, index = nullptr, void();
+        std::snprintf(index->capabilities_string, sizeof(index->capabilities_string), "%s",
+                      usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device->gpu_class)));
+    });
+    return index;
+}
+
+#endif
 
 /** Places a GPU index on the one device the arguments name, refusing what no device kit serves. */
 template <typename arguments_type_>
@@ -196,31 +206,10 @@ void basic_init_vram(arguments_type_* arguments) noexcept {
     *arguments->index = nullptr;
 #if USEARCH_ARCH_CUDA_
     using handle_t = handle_of<arguments_type_>;
-    using traits_t = typename handle_t::traits_t;
-    typename traits_t::geometry_t geometry;
-    if (!traits_t::state(*arguments, geometry, outcome) || !traits_t::admits(geometry, *arguments, outcome)) return;
-    if (arguments->values_per_key)
-        return propagate_error(usearch_status_unsupported_k, outcome, "A GPU index bounds no key's entries"), void();
-    usearch_vram_options_t const& vram = arguments->vram;
-    if (vram.devices_count > 1)
-        return propagate_error(usearch_status_unsupported_k, outcome, "A basic index places one shard"), void();
-    std::size_t const ordinal = vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[0]) : 0;
-    std::span<gpu_device_t const> const listed = gpu_devices();
-    if (ordinal >= listed.size())
-        return propagate_error(usearch_status_device_k, outcome, "A device ordinal is past the listing"), void();
-    gpu_device_t const& device = listed[ordinal];
-    if (device.vendor != gpu_vendor_t::nvidia_k)
-        return propagate_error(usearch_status_device_k, outcome, "No basic GPU kernels serve this vendor yet"), void();
-    handle_t* index = nullptr;
-    traits_t::with_vram_variant(geometry, [&]<typename variant_type_>(std::type_identity<variant_type_>) noexcept {
-        index = new (std::nothrow) handle_t(std::in_place_type<variant_type_>, static_cast<int>(device.vendor_ordinal));
-        if (!index)
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), void();
-        if (!traits_t::freeze(std::get<variant_type_>(index->variant), geometry, *arguments, outcome))
-            return delete index, index = nullptr, void();
-        std::snprintf(index->capabilities_string, sizeof(index->capabilities_string), "%s",
-                      usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)));
-    });
+    typename handle_t::traits_t::geometry_t geometry;
+    if (!handle_t::traits_t::state(*arguments, geometry, outcome)) return;
+    handle_t* const index = make_vram_handle<handle_t>(geometry, *arguments, outcome,
+                                                       [](auto&) noexcept { return true; });
     if (!index) return;
     *arguments->index = index;
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -239,20 +228,46 @@ void basic_load_ram(arguments_type_* arguments) noexcept {
     typename handle_t::traits_t::geometry_t geometry;
     if (status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
+    auto load = [&](auto& variant) noexcept { return basic_load_variant(variant, path, *arguments, outcome); };
     handle_t* const index = make_cpu_handle<handle_t, forkunion_executor_t>(geometry, *arguments, arguments->ram,
-                                                                            outcome);
-    if (!index) return;
-    bool loaded = false;
-    visit_ram_variant(*index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
-                                                                         outcome);
-        if (!executor) return;
-        progress_ticks_t ticks {arguments->progress, executor->size()};
-        loaded = propagate_error(variant.load(path, *executor, ticks), outcome);
-    });
-    if (!loaded) return delete index, void();
-    *arguments->index = index;
+                                                                            outcome, load);
+    if (index) *arguments->index = index;
+}
+
+/** Loads a checkpoint onto the one device the arguments name, as the GPU variant's face answers. */
+template <auto verb_, typename arguments_type_>
+void basic_load_vram(arguments_type_* arguments) noexcept {
+    if (submitted<verb_>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+#if USEARCH_ARCH_CUDA_
+    using handle_t = handle_of<arguments_type_>;
+    std::string_view const path = as_text(arguments->path);
+    typename handle_t::traits_t::geometry_t geometry;
+    if (status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
+        return propagate_error(recalled, outcome), void();
+    auto load = [&](auto& variant) noexcept { return basic_load_variant(variant, path, *arguments, outcome); };
+    handle_t* const index = make_vram_handle<handle_t>(geometry, *arguments, outcome, load);
+    if (index) *arguments->index = index;
+#else
+    propagate_error(usearch_status_device_k, outcome, "This build compiled no GPU kernels for basic indexes");
+#endif
+}
+
+/** Serves a checkpoint in place on the host, as each RAM variant's face answers. */
+template <typename arguments_type_>
+void basic_view_ram(arguments_type_* arguments) noexcept {
+    using handle_t = handle_of<arguments_type_>;
+    call_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    std::string_view const path = as_text(arguments->path);
+    typename handle_t::traits_t::geometry_t geometry;
+    if (status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
+        return propagate_error(recalled, outcome), void();
+    auto view = [&](auto& variant) noexcept { return propagate_error(variant.view(path), outcome); };
+    handle_t* const index = make_cpu_handle<handle_t, forkunion_executor_t>(geometry, *arguments,
+                                                                            usearch_ram_options_t {}, outcome, view);
+    if (index) *arguments->index = index;
 }
 
 template <auto verb_, typename arguments_type_>
@@ -278,17 +293,14 @@ void basic_view_nvme(arguments_type_* arguments) noexcept {
     typename handle_t::traits_t::geometry_t geometry;
     if (status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
-    handle_t* const index = make_cpu_handle<handle_t, nvme_executor_t>(geometry, *arguments, usearch_ram_options_t {},
-                                                                       outcome);
-    if (!index) return;
-    bool viewed = false;
-    visit_nvme_variant(*index, [&](auto& variant) noexcept {
+    auto view = [&](auto& variant) noexcept {
         usearch_executor_handle_t call_executor;
         nvme_executor_t* const executor = executor_of(variant, arguments->executor, call_executor, outcome);
-        viewed = executor && propagate_error(variant.view(path, to_span(paths), *executor), outcome);
-    });
-    if (!viewed) return delete index, void();
-    *arguments->index = index;
+        return executor && propagate_error(variant.view(path, to_span(paths), *executor), outcome);
+    };
+    handle_t* const index = make_cpu_handle<handle_t, nvme_executor_t>(geometry, *arguments, usearch_ram_options_t {},
+                                                                       outcome, view);
+    if (index) *arguments->index = index;
 }
 
 /** Frees an index or a cursor once no deferred call names it. */
@@ -302,48 +314,31 @@ template <auto verb_, typename arguments_type_>
 void basic_reserve(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
-        if constexpr (is_vram_index<variant_type_>) propagate_error(variant.reserve(*arguments), outcome);
-        else propagate_error(variant.index.reserve(arguments->entries).status, outcome);
-    });
+    visit_writable(*arguments->index, outcome,
+                   [&](auto& variant) noexcept { propagate_error(variant.reserve(*arguments), outcome); });
 }
 
 template <auto verb_, typename arguments_type_>
 void basic_clear(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    visit_ram_variant(*arguments->index, outcome,
-                      [&](auto& variant) noexcept { propagate_error(variant.clear(), outcome); });
-}
-
-/** Refuses a verb the interface declares and no basic residency serves yet, zeroing what it
- *  reports; each is intended work, which replaces this refusal where it lands. */
-template <auto verb_, typename arguments_type_>
-void basic_unserved(arguments_type_* arguments) noexcept {
-    if constexpr (requires { arguments->executor; })
-        if (submitted<verb_>(arguments)) return;
-    usearch_arena_t arena = nullptr;
-    if constexpr (requires { arguments->arena; }) arena = arguments->arena;
-    call_outcome_t outcome(arguments->outcome, arena);
-    if constexpr (requires { *arguments->index = nullptr; }) *arguments->index = nullptr;
-    if constexpr (requires { arguments->stats; })
-        if (arguments->stats) *arguments->stats = {};
-    propagate_error(usearch_status_unsupported_k, outcome, "No basic residency serves this verb yet");
+    visit_writable(*arguments->index, outcome,
+                   [&](auto& variant) noexcept { propagate_error(variant.clear(), outcome); });
 }
 
 #pragma endregion Lifetime
 
 #pragma region Refinement
 
-/** The plan of a RAM variant with the donors it lands: their variants, whose handles a call frees
- *  once landed, their indexes, which the plan nulls as it lands them, and where the calls stand.
- *  Every other variant refines nothing. */
+/** The plan of a variant with the donors it lands: their variants, whose handles a call frees once
+ *  landed, their indexes, which the plan nulls as it lands them, and where the calls stand. A
+ *  variant declaring no plan, as an NVMe view, never mutates and refines nothing. */
 template <typename variant_type_>
 struct basic_refinement_of {
     using type = std::monostate;
 };
 template <typename variant_type_>
-    requires is_ram_index<variant_type_>
+    requires requires { typename variant_type_::refine_plan_t; }
 struct basic_refinement_of<variant_type_> {
     struct type {
         growing_buffer<variant_type_*, forkunion_allocator_t> donors;
@@ -361,7 +356,7 @@ struct basic_refinements_of<std::variant<variant_types_...>> {
     using type = std::variant<std::monostate, typename basic_refinement_of<variant_types_>::type...>;
 };
 
-/** What a modality's refinement handle owns: one RAM variant's plan, which keeps its index closed
+/** What a modality's refinement handle owns: one variant's plan, which keeps its index closed
  *  until it dies, and the caller's donor slots it nulls. */
 template <typename handle_type_>
 struct basic_refinement {
@@ -443,7 +438,7 @@ void basic_report_refined(basic::refine_result_t const& refined, arguments_type_
  *  donors have not all landed heals nothing and reports zeros. */
 template <typename variant_type_, typename refining_type_, typename arguments_type_>
 status_t basic_finish_refinement(variant_type_& variant, refining_type_& refining, arguments_type_ const& arguments,
-                                 forkunion_executor_t& executor) noexcept {
+                                 typename variant_type_::executor_t& executor) noexcept {
     auto& plan = refining.plan;
     if (plan.landing()) return status_t::success_k;
     // The re-selection a cancel left is skipped rather than finished.
@@ -467,7 +462,7 @@ void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** 
     if (arguments->stats) *arguments->stats = {};
     if (count && !donors)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
-    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         usearch_executor_handle_t call_executor;
         typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
                                                                          outcome);
@@ -509,7 +504,16 @@ void basic_refinement_init(arguments_type_* arguments) noexcept {
                void();
     if (arguments->count && !arguments->donors)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
-    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+    if (arguments->count && arguments->receivers_count)
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "A refinement absorbs donors or splits into receivers, never both"),
+               void();
+    if (arguments->receivers_count && (arguments->receivers_count < 2 || !arguments->receivers))
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more"),
+               void();
+    if (arguments->receivers_count)
+        return propagate_error(usearch_status_unsupported_k, outcome, "No residency splits an index yet"), void();
+    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         using refining_t = typename basic_refinement_of<variant_type_>::type;
         usearch_executor_handle_t call_executor;
         if (!executor_of(variant, arguments->executor, call_executor, outcome)) return;
@@ -542,7 +546,7 @@ void visit_refinement(arguments_type_ const& arguments, usearch_outcome_t* outco
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The refinement was opened on another index or executor"),
                void();
-    visit_ram_variant(*arguments.index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+    visit_writable(*arguments.index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         auto* const refining = std::get_if<typename basic_refinement_of<variant_type_>::type>(&refinement->refining);
         if (!refining)
             return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another variant"),
@@ -610,57 +614,18 @@ void basic_describe(arguments_type_* arguments) noexcept {
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
-/** Whether @p traits_type_ measures a key's entries from their values of @p value_type_, which a
- *  count then reads. */
-template <typename traits_type_, typename stats_type_, typename value_type_>
-concept tallies = requires(stats_type_& stats, value_type_ const& value) { traits_type_::tally(stats, value); };
-
-/** Adds @p value to @p stats, from any thread, where @p traits_type_ measures such values. */
-template <typename traits_type_, typename stats_type_, typename value_type_>
-void tally_entry(stats_type_& stats, value_type_ const& value) noexcept {
-    if constexpr (tallies<traits_type_, stats_type_, value_type_>) traits_type_::tally(stats, value);
-}
-
-/** Counts a key's entries, and tallies their sizes where the traits measure any: an NVMe view reads
- *  them only then. */
+/** Counts a key's entries, and tallies their sizes where the traits measure any. */
 template <auto verb_, typename arguments_type_>
 void basic_count(arguments_type_* arguments) noexcept {
     using traits_t = typename handle_of<arguments_type_>::traits_t;
-    using stats_t = std::remove_pointer_t<decltype(arguments->key_stats)>;
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     *arguments->key_stats = {};
-    stats_t& stats = *arguments->key_stats;
-    std::array<us::utilities::uuid_t, 1> const identities {uuid_of(arguments->key)};
-    auto count_nvme = [&]<typename variant_type_>(variant_type_& variant) noexcept {
-        usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(variant, arguments->executor, call_executor, outcome);
-        if (!executor) return;
-        using view_t = decltype(typename variant_type_::index_t::codec_t {}.view(bytes_view_t {}));
-        if constexpr (tallies<traits_t, stats_t, view_t>) {
-            auto take_count = [&](std::size_t entries) noexcept {
-                return stats.entries = entries, status_t::success_k;
-            };
-            auto measure = [&](std::size_t, std::size_t, std::size_t, view_t const& value) noexcept {
-                tally_entry<traits_t>(stats, value);
-            };
-            propagate_error(values_under(variant.index, arguments->key, *executor, take_count, measure), outcome);
-        }
-        else {
-            std::array<std::size_t, 1> entries {};
-            status_t const counted = variant.index.count(identities, entries, *executor);
-            stats.entries = entries[0];
-            propagate_error(counted, outcome);
-        }
-    };
-    if (visit_nvme_variant(*arguments->index, count_nvme)) return;
-    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
-        variant.index.find_each(identities[0], [&](typename variant_type_::index_t::node_id_t node) noexcept {
-            ++stats.entries;
-            tally_entry<traits_t>(stats, variant.index.published_value_of(node));
-        });
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    std::visit(
+        [&](auto& variant) noexcept {
+            count_entries<traits_t>(variant, arguments->key, *arguments->key_stats, arguments->executor, outcome);
+        },
+        arguments->index->variant);
 }
 
 #pragma endregion Introspection
@@ -702,7 +667,7 @@ void basic_search(arguments_type_* arguments) noexcept {
     *arguments->matches = {};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if (is_vram_index<variant_type_> && arguments->predicate.callback)
+            if (device_of(variant) != host_device_k && arguments->predicate.callback)
                 return propagate_error(usearch_status_device_k, outcome,
                                        "A host predicate cannot narrow a device walk"),
                        void();
@@ -735,12 +700,10 @@ void basic_search(arguments_type_* arguments) noexcept {
         arguments->index->variant);
 }
 
-/** Exports a key's entries into the arena, in insertion order; a view's values land in its threads'
- *  arenas first, as their sizes are unknown until read. */
+/** Exports a key's entries into the arena, in insertion order. */
 template <auto verb_, typename arguments_type_>
 void basic_get(arguments_type_* arguments) noexcept {
     using traits_t = typename handle_of<arguments_type_>::traits_t;
-    using kept_t = typename traits_t::kept_t;
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
     *traits_t::output_of(*arguments) = {};
@@ -750,49 +713,8 @@ void basic_get(arguments_type_* arguments) noexcept {
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                       host_device_k, {}, outcome);
     if (!arena) return;
-    auto get_nvme = [&](auto& variant) noexcept {
-        usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(variant, arguments->executor, call_executor, outcome);
-        if (!executor) return;
-        std::size_t held = 0;
-        kept_t* kept = nullptr;
-        auto carve_entries = [&](std::size_t entries) noexcept {
-            held = entries;
-            if (!held) return status_t::success_k;
-            kept = carve<kept_t>(arena->memory, held);
-            return kept ? status_t::success_k : status_t::bad_alloc_k;
-        };
-        status_t keeping = status_t::success_k;
-        auto keep = [&](std::size_t, std::size_t rank, std::size_t thread, auto const& value) noexcept {
-            keep_first_failure(keeping, traits_t::keep(*executor, thread, value, kept[rank]));
-        };
-        if (status_t const read = values_under(variant.index, arguments->key, *executor, carve_entries, keep);
-            failed(read))
-            return propagate_error(read, outcome), void();
-        if (failed(keeping)) return propagate_error(keeping, outcome), void();
-        if (!held) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        auto kept_at = [&](std::size_t entry) noexcept -> decltype(auto) { return kept[entry]; };
-        if (!traits_t::land(variant, held, kept_at, arena->memory, *arguments, outcome)) return;
-        if (arguments->written) *arguments->written = held;
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    };
-    if (visit_nvme_variant(*arguments->index, get_nvme)) return;
-    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
-                                                                         outcome);
-        if (!executor) return;
-        if (status_t const rewound = executor->reserve(0); failed(rewound))
-            return propagate_error(rewound, outcome), void();
-        auto const ids = ids_under(variant.index, arguments->key, thread_allocator_t {executor->arena(0)});
-        if (ids.empty()) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        auto value_at = [&](std::size_t entry) noexcept -> decltype(auto) {
-            return variant.index.published_value_of(ids[entry]);
-        };
-        if (!traits_t::land(variant, ids.size(), value_at, arena->memory, *arguments, outcome)) return;
-        if (arguments->written) *arguments->written = ids.size();
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    std::visit([&](auto& variant) noexcept { get_entries<traits_t>(variant, *arguments, arena->memory, outcome); },
+               arguments->index->variant);
 }
 
 #pragma endregion Insertion and Search
@@ -804,103 +726,48 @@ void basic_cursor_init(arguments_type_* arguments) noexcept {
     using cursor_handle_t = std::remove_pointer_t<std::remove_pointer_t<decltype(arguments->cursor)>>;
     call_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
-    if (arguments->start)
+    if (arguments->starts_count && !arguments->starts)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The starts must name keys"), void();
+    if (arguments->starts_count)
         return propagate_error(usearch_status_unsupported_k, outcome, "No residency steps through graph links yet"),
                void();
     cursor_handle_t* const cursor = new (std::nothrow) cursor_handle_t {};
     if (!cursor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor"), void();
     cursor->index = arguments->index;
-    auto open_nvme = [&](auto&) noexcept { cursor->cursor.template emplace<std::size_t>(0); };
-    if (!visit_nvme_variant(*arguments->index, open_nvme))
-        visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            auto& opened = cursor->cursor.template emplace<ram_cursor_of<variant_type_>>(
-                variant.index, forkunion_allocator_t {no_memory_domain_k});
-            // Stands on the first entry, so every pull copies from where it stands; an empty
-            // snapshot stays past the end.
-            if (opened.visible_count()) [[maybe_unused]]
-                status_t const entered = opened.seek(0);
-        });
-    // A GPU variant opened nothing, and the outcome says why.
+    std::visit([&](auto& variant) noexcept { open_cursor(variant, cursor->cursor, outcome); },
+               arguments->index->variant);
+    // A variant that opened nothing said why in the outcome.
     if (std::holds_alternative<std::monostate>(cursor->cursor)) return delete cursor, void();
     *arguments->cursor = cursor;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
-/** Pulls the next keys and, when asked, their values into the arena; a view reads its rows through
- *  the executor, landing values in its threads' arenas first. */
+/** Pulls the next keys into the arena. */
 template <auto verb_, typename arguments_type_>
 void basic_cursor_next(arguments_type_* arguments) noexcept {
     using traits_t = typename handle_of<arguments_type_>::traits_t;
-    using kept_t = typename traits_t::kept_t;
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->keys = {};
-    auto* const output = traits_t::output_of(*arguments);
-    if (output) *output = {};
+    if (arguments->links) *arguments->links = {};
     *arguments->written = 0;
     auto* const cursor = arguments->cursor;
     if (cursor->index != arguments->index)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
                void();
+    if (arguments->links)
+        return propagate_error(usearch_status_unsupported_k, outcome, "No residency pulls graph links yet"), void();
     if (cursor->busy.test_and_set(std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull holds the cursor"), void();
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                       host_device_k, {}, outcome);
-    auto next_nvme = [&](auto& variant) noexcept {
-        std::size_t* const row = std::get_if<std::size_t>(&cursor->cursor);
-        if (!row) return propagate_error(usearch_status_internal_k, outcome, "The cursor lost its variant"), void();
-        usearch_executor_handle_t call_executor;
-        nvme_executor_t* const executor = executor_of(variant, arguments->executor, call_executor, outcome);
-        if (!executor) return;
-        std::size_t const taking = min_of(variant.index.size() - *row, arguments->wanted);
-        if (!taking) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, taking);
-        kept_t* const kept = output ? carve<kept_t>(arena->memory, taking) : nullptr;
-        if (!keys || (output && !kept))
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-        status_t keeping = status_t::success_k;
-        auto keep = [&](std::size_t entry, std::size_t thread, auto const& value) noexcept {
-            if (kept) keep_first_failure(keeping, traits_t::keep(*executor, thread, value, kept[entry]));
-        };
-        std::span<us::utilities::uuid_t> const identities {reinterpret_cast<us::utilities::uuid_t*>(keys), taking};
-        if (status_t const read = variant.index.read_rows(*row, identities, *executor, keep); failed(read))
-            return propagate_error(read, outcome), void();
-        if (failed(keeping)) return propagate_error(keeping, outcome), void();
-        auto kept_at = [&](std::size_t entry) noexcept -> decltype(auto) { return kept[entry]; };
-        if (output && !traits_t::land(variant, taking, kept_at, arena->memory, *arguments, outcome)) return;
-        *row += taking;
-        *arguments->keys = {keys, sizeof(usearch_key_t)};
-        *arguments->written = taking;
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    };
-    auto next_ram = [&]<typename variant_type_>(variant_type_& variant) noexcept {
-        using node_id_t = typename variant_type_::index_t::node_id_t;
-        auto* const typed = std::get_if<ram_cursor_of<variant_type_>>(&cursor->cursor);
-        if (!typed) return propagate_error(usearch_status_internal_k, outcome, "The cursor lost its variant"), void();
-        std::size_t const remaining = *typed ? typed->visible_count() - typed->id() : 0;
-        std::size_t const taking = min_of(remaining, arguments->wanted);
-        usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, taking);
-        if (taking && !keys)
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-        node_id_t const first = typed->id();
-        for (std::size_t entry = 0; entry != taking; ++entry)
-            keys[entry] = std::bit_cast<usearch_key_t>(
-                variant.index.key_of(static_cast<node_id_t>(first + entry)).value);
-        auto value_at = [&](std::size_t entry) noexcept -> decltype(auto) {
-            return variant.index.published_value_of(static_cast<node_id_t>(first + entry));
-        };
-        if (output && !traits_t::land(variant, taking, value_at, arena->memory, *arguments, outcome)) return;
-        for (std::size_t step = 0; step != taking; ++step) ++*typed;
-        *arguments->keys = {keys, sizeof(usearch_key_t)};
-        *arguments->written = taking;
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    };
-    bool exported = true;
-    if constexpr (requires { traits_t::exports(*arguments, outcome); })
-        exported = !arena || traits_t::exports(*arguments, outcome);
-    if (arena && exported && !visit_nvme_variant(*arguments->index, next_nvme))
-        visit_ram_variant(*arguments->index, outcome, next_ram);
+    if (arena)
+        std::visit(
+            [&](auto& variant) noexcept {
+                pull_entries<traits_t>(variant, cursor->cursor, *arguments, arena->memory, outcome);
+            },
+            arguments->index->variant);
     cursor->busy.clear(std::memory_order_release);
 }
 
@@ -912,18 +779,43 @@ void basic_save(arguments_type_* arguments) noexcept {
     if (path.empty()) return propagate_error(usearch_status_invalid_argument_k, outcome, "The path is empty"), void();
     if (path.ends_with(".json"))
         return propagate_error(usearch_status_unsupported_k, outcome, "A basic index saves one monolith"), void();
-    auto refuse_nvme = [&](auto&) noexcept {
-        propagate_error(usearch_status_unsupported_k, outcome, "An NVMe view already is its checkpoint");
-    };
-    if (visit_nvme_variant(*arguments->index, refuse_nvme)) return;
-    visit_ram_variant(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
-                                                                         outcome);
-        if (!executor) return;
-        progress_ticks_t ticks {arguments->progress, executor->size()};
-        propagate_error(variant.save(path, *executor, ticks), outcome);
-    });
+    std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            usearch_executor_handle_t call_executor;
+            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
+                                                                             call_executor, outcome);
+            if (!executor) return;
+            progress_ticks_t ticks {arguments->progress, executor->size()};
+            propagate_error(variant.save(path, *executor, ticks), outcome);
+        },
+        arguments->index->variant);
+}
+
+/** Samples the index as each variant's face answers. */
+template <auto verb_, typename arguments_type_>
+void basic_sample(arguments_type_* arguments) noexcept {
+    if (submitted<verb_>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->keys = {};
+    *arguments->links = {};
+    *arguments->written = 0;
+    if (arguments->stats) *arguments->stats = {};
+    std::visit([&](auto& variant) noexcept { propagate_error(variant.sample(*arguments), outcome); },
+               arguments->index->variant);
+}
+
+/** Splits the index into its receivers, which no residency serves yet. */
+template <auto verb_, typename arguments_type_>
+void basic_split(arguments_type_* arguments) noexcept {
+    if (submitted<verb_>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->reachability) *arguments->reachability = {};
+    if (arguments->stats) *arguments->stats = {};
+    if (arguments->count < 2 || !arguments->receivers)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more"),
+               void();
+    propagate_error(usearch_status_unsupported_k, outcome, "No residency splits an index yet");
 }
 
 /** Reads the geometry a checkpoint recorded without loading it; @p traits_type_ names the modality,

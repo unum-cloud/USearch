@@ -1279,6 +1279,11 @@ struct ram_index {
      *  the islands are re-selected and reconnected round by round while their count shrinks. An
      *  empty range heals.
      *
+     *  A split runs it in reverse: the source's rows partition into one graph-local part per
+     *  receiver, scatter into the receivers with the links inside each part rebased and the links
+     *  across dropped, and publish; then every receiver is refined in turn over its seams, the
+     *  prefix of rows that lost a link, and heals, the tallies summing over the receivers.
+     *
      *  The plan holds the shared side and the claims closed from planning to its death, so batches
      *  answer @c contended_k and stop-the-world verbs refuse meanwhile, while searches run
      *  throughout. Round @c r walks every node across the neighboring group of `2^r` parts, which
@@ -1301,27 +1306,38 @@ struct ram_index {
 
         /** An unbound pass placed by @p allocator - what a refused plan answers with. */
         explicit refine_plan_t(allocator_t const& allocator) noexcept
-            : audit(allocator), part_bases_(allocator), donor_holds_(allocator) {}
+            : audit(allocator), part_bases_(allocator), donor_holds_(allocator), receiver_holds_(allocator),
+              receiver_seats_(allocator), receiver_audits_(allocator), part_slots_(allocator), part_members_(allocator),
+              part_sizes_(allocator), part_seams_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : audit(std::move(other.audit)), index_(std::exchange(other.index_, nullptr)),
               hold_(std::move(other.hold_)), nodes_(other.nodes_), part_bases_(std::move(other.part_bases_)),
               donors_(other.donors_), donor_holds_(std::move(other.donor_holds_)), landed_donors_(other.landed_donors_),
-              seats_(other.seats_), rounds_(other.rounds_), round_(other.round_), stopped_(other.stopped_),
-              walk_(other.walk_), connectivity_(other.connectivity_), phase_(other.phase_),
-              swept_after_(other.swept_after_), islands_before_(other.islands_before_), tally_(other.tally_) {}
+              seats_(other.seats_), source_(std::exchange(other.source_, nullptr)),
+              source_hold_(std::move(other.source_hold_)), receivers_(other.receivers_),
+              receiver_holds_(std::move(other.receiver_holds_)), receiver_seats_(std::move(other.receiver_seats_)),
+              receiver_audits_(std::move(other.receiver_audits_)), part_slots_(std::move(other.part_slots_)),
+              part_members_(std::move(other.part_members_)), part_sizes_(std::move(other.part_sizes_)),
+              part_seams_(std::move(other.part_seams_)), source_rows_(other.source_rows_),
+              part_capacity_(other.part_capacity_), seed_(other.seed_), refined_receivers_(other.refined_receivers_),
+              receivers_health_(other.receivers_health_), receivers_islands_(other.receivers_islands_),
+              rounds_(other.rounds_), round_(other.round_), stopped_(other.stopped_), walk_(other.walk_),
+              connectivity_(other.connectivity_), phase_(other.phase_), swept_after_(other.swept_after_),
+              islands_before_(other.islands_before_), tally_(other.tally_) {}
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
         ~refine_plan_t() noexcept { release_(); }
 
         /** Step @p position of the current phase; an empty step past the end. */
         step_t operator[](std::size_t position) const noexcept {
-            if (phase_ != phase_t::land_k && phase_ != phase_t::reselect_k) return audit[position];
+            if (audited_()) return audit[position];
             step_t step;
             if (position >= steps().size()) return step;
-            iota_view<node_id_t> const range = phase_ == phase_t::land_k ? landing_rows_() : round_nodes_();
-            std::size_t const first = range.first + position * nodes_schedule_t::rows_in(0);
-            std::size_t const bound = min_of(first + nodes_schedule_t::rows_in(0),
-                                             static_cast<std::size_t>(range.bound));
+            iota_view<node_id_t> const range = phase_rows_();
+            std::size_t const width = phase_ == phase_t::partition_k ? max_of<std::size_t>(range.size(), 1)
+                                                                     : nodes_schedule_t::rows_in(0);
+            std::size_t const first = range.first + position * width;
+            std::size_t const bound = min_of(first + width, static_cast<std::size_t>(range.bound));
             step.position = position;
             step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             return step;
@@ -1330,10 +1346,9 @@ struct ram_index {
         /** The current phase's steps, positionally; none once the pass is over. */
         indexed_range<refine_plan_t> steps() const noexcept {
             if (!index_ || phase_ == phase_t::done_k) return {this, 0u};
-            if (phase_ == phase_t::land_k)
-                return {this, divide_round_up<std::size_t>(landing_rows_().size(), nodes_schedule_t::rows_in(0))};
-            if (phase_ != phase_t::reselect_k) return {this, audit.steps().size()};
-            return {this, divide_round_up<std::size_t>(round_nodes_().size(), nodes_schedule_t::rows_in(0))};
+            if (phase_ == phase_t::partition_k) return {this, 1u};
+            if (audited_()) return {this, audit.steps().size()};
+            return {this, divide_round_up<std::size_t>(phase_rows_().size(), nodes_schedule_t::rows_in(0))};
         }
 
         /**
@@ -1341,9 +1356,11 @@ struct ram_index {
          *      of one phase, and never failing on a bound plan, since planning claimed, covered and
          *      reserved everything a step writes.
          *
-         *  A landing step moves a donor's rows in, a re-selection step walks from each node and
-         *  wires what @p selector picks, a sweep step expands the audit, and a reconnection step
-         *  links islands from reached rows; @p metric and @p context serve the walks alone.
+         *  A landing step moves a donor's rows in, the one partition step grows a split's parts, a
+         *  scatter step moves source rows into their receivers, a re-selection step walks from each
+         *  node and wires what @p selector picks, a sweep step expands the audit, and a
+         *  reconnection step links islands from reached rows; @p metric and @p context serve the
+         *  walks alone.
          */
         template <typename metric_type_, typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
             requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
@@ -1352,6 +1369,8 @@ struct ram_index {
             if (!index_) return status_t::uninitialized_k;
             switch (phase_) {
             case phase_t::land_k: land_(step); break;
+            case phase_t::partition_k: partition_(); break;
+            case phase_t::scatter_k: scatter_(step); break;
             case phase_t::reselect_k:
             case phase_t::reselect_islands_k: reselect_(step, metric, context, selector); break;
             case phase_t::sweep_k: audit.sweep(step); break;
@@ -1362,12 +1381,22 @@ struct ram_index {
         }
 
         /** The barrier between phases, one caller after every step of the current one ran:
-         *  publishes a landed donor, or picks the next phase, and answers whether one follows. */
+         *  publishes a landed donor or a split's parts, or picks the next phase, and answers
+         *  whether one follows. */
         bool advance() noexcept {
             if (!index_) return false;
             if (phase_ == phase_t::land_k) {
                 publish_landed_();
                 if (landed_donors_ == donors_.size()) phase_ = first_pass_phase_();
+                return true;
+            }
+            if (phase_ == phase_t::partition_k) {
+                phase_ = phase_t::scatter_k;
+                return true;
+            }
+            if (phase_ == phase_t::scatter_k) {
+                publish_parts_();
+                bind_receiver_();
                 return true;
             }
             if (phase_ == phase_t::sweep_k) {
@@ -1379,6 +1408,7 @@ struct ram_index {
                 swept_after_ = phase_;
                 phase_ = phase_t::sweep_k;
             }
+            if (phase_ == phase_t::done_k && refined_receivers_ != receivers_.size()) settle_receiver_();
             return phase_ != phase_t::done_k;
         }
 
@@ -1395,8 +1425,11 @@ struct ram_index {
         /** The budget planning reserved every row for. */
         std::size_t connectivity() const noexcept { return connectivity_; }
 
-        /** Whether the current phase lands a donor - the phases no stop skips. */
-        bool landing() const noexcept { return phase_ == phase_t::land_k; }
+        /** Whether the current phase lands a donor or moves a split's rows - the phases no stop
+         *  skips. */
+        bool landing() const noexcept {
+            return phase_ == phase_t::land_k || phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k;
+        }
 
         /** Whether the current phase re-selects the planned range, which a caller's progress
          *  counts. */
@@ -1411,17 +1444,44 @@ struct ram_index {
       private:
         friend ram_index;
 
-        enum class phase_t : u8_t { land_k, reselect_k, sweep_k, reselect_islands_k, reconnect_k, done_k };
+        enum class phase_t : u8_t {
+            land_k,
+            partition_k,
+            scatter_k,
+            reselect_k,
+            sweep_k,
+            reselect_islands_k,
+            reconnect_k,
+            done_k,
+        };
 
         static void add_(std::size_t& into, std::size_t value) noexcept {
             atomic_add(atomic_ref<std::size_t>(into), value, std::memory_order_relaxed);
         }
 
-        /** Reopens the claims and drops every hold; the plan is unbound after. */
+        /** Reopens the claims of the refined index and of every receiver closed, and drops every
+         *  hold; the plan is unbound after. */
         void release_() noexcept {
             if (index_) std::exchange(index_, nullptr)->reopen_();
+            for (std::size_t receiver = 0; receiver != receiver_holds_.size(); ++receiver)
+                receivers_[receiver]->reopen_();
             hold_ = {};
             donor_holds_.clear();
+            receiver_holds_.clear();
+            source_hold_ = {};
+        }
+
+        /** Whether the current phase steps over the audit's ranges rather than rows of its own. */
+        bool audited_() const noexcept {
+            return phase_ == phase_t::sweep_k || phase_ == phase_t::reselect_islands_k ||
+                   phase_ == phase_t::reconnect_k;
+        }
+
+        /** The rows the current phase steps over: a donor's, a split source's, or the round's. */
+        iota_view<node_id_t> phase_rows_() const noexcept {
+            if (phase_ == phase_t::land_k) return landing_rows_();
+            if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) return {0, source_rows_};
+            return round_nodes_();
         }
 
         /** The phase the pass starts with once no donor is pending. */
@@ -1471,6 +1531,134 @@ struct ram_index {
             donor_holds_[landed_donors_].unlock();
             donors_[landed_donors_] = nullptr;
             ++landed_donors_;
+        }
+
+        /** Places source row @p row last in @p part, its slot naming the part and the position. */
+        void enlist_(node_id_t row, std::size_t part) noexcept {
+            std::size_t const position = part_sizes_[part]++;
+            part_members_[part * part_capacity_ + position] = row;
+            part_slots_[row] = static_cast<node_id_t>(part * part_capacity_ + position);
+        }
+
+        /** Expands the oldest unexpanded member of @p part, enlisting its unplaced neighbors while
+         *  the part has room; answers whether the part could expand at all. */
+        bool expand_(std::size_t part) noexcept {
+            // Until the seams replace them, these count each part's expanded members.
+            std::size_t& expanded = part_seams_[part];
+            if (expanded == part_sizes_[part] || part_sizes_[part] == part_capacity_) return false;
+            node_id_t const node_id = part_members_[part * part_capacity_ + expanded++];
+            for (node_id_t const target : source_->nodes_[node_id].neighbors)
+                if (target < source_rows_ && part_slots_[target] == missing_k && part_sizes_[part] != part_capacity_)
+                    enlist_(target, part);
+            return true;
+        }
+
+        /** Whether source row @p row links into a part other than its @p part. */
+        bool links_across_(node_id_t row, std::size_t part) const noexcept {
+            for (node_id_t const target : source_->nodes_[row].neighbors)
+                if (target < source_rows_ && part_slots_[target] / part_capacity_ != part) return true;
+            return false;
+        }
+
+        /**
+         *  @brief Grows one part per receiver from a root the seed picks, breadth first over the
+         *      source's links and one expansion per part in turn, each capped at the part capacity;
+         *      every row left unplaced then seeds a growth of the smallest part.
+         *
+         *  Each part's seams, the rows linking into another part, then move ahead of the rest, and
+         *  every row's slot names its part and its row in the receiver. Reads the source without
+         *  locks, since its unique side is held.
+         */
+        void partition_() noexcept {
+            std::size_t const parts = receivers_.size();
+            for (node_id_t& slot : part_slots_) slot = missing_k;
+            for (std::size_t part = 0; part != parts; ++part) part_sizes_[part] = part_seams_[part] = 0;
+            for (std::size_t part = 0; part != parts && part != source_rows_; ++part)
+                enlist_(static_cast<node_id_t>(seeded_bijection(part, source_rows_, seed_)), part);
+            for (std::size_t expanded = parts; expanded;) {
+                expanded = 0;
+                for (std::size_t part = 0; part != parts; ++part) expanded += expand_(part);
+            }
+            for (node_id_t row = 0; row != source_rows_; ++row) {
+                if (part_slots_[row] != missing_k) continue;
+                std::size_t smallest = 0;
+                for (std::size_t part = 1; part != parts; ++part)
+                    if (part_sizes_[part] < part_sizes_[smallest]) smallest = part;
+                enlist_(row, smallest);
+                while (expand_(smallest)) {}
+            }
+            for (std::size_t part = 0; part != parts; ++part) {
+                node_id_t* const members = part_members_.data() + part * part_capacity_;
+                std::size_t seams = 0, interior = part_sizes_[part];
+                while (seams != interior)
+                    if (links_across_(members[seams], part)) ++seams;
+                    else std::swap(members[seams], members[--interior]);
+                part_seams_[part] = seams;
+                for (std::size_t position = 0; position != part_sizes_[part]; ++position)
+                    part_slots_[members[position]] = static_cast<node_id_t>(part * part_capacity_ + position);
+            }
+        }
+
+        /** Moves the source rows of @p step into their receivers' records, the links inside each
+         *  part rebased through its slots and the links across dropped; the rows swap buffers, so
+         *  nothing allocates. */
+        void scatter_(step_t const& step) noexcept {
+            for (node_id_t source = step.nodes.first; source < step.nodes.bound; ++source) {
+                std::size_t const slot = part_slots_[source], part = slot / part_capacity_;
+                node_t& from = source_->nodes_[source];
+                node_t& into = receivers_[part]->nodes_[slot % part_capacity_];
+                into.value = std::move(from.value);
+                into.key = from.key;
+                into.neighbors = std::move(from.neighbors);
+                std::size_t kept = 0;
+                for (node_id_t const target : into.neighbors)
+                    if (target < source_rows_ && part_slots_[target] / part_capacity_ == part)
+                        into.neighbors[kept++] = static_cast<node_id_t>(part_slots_[target] % part_capacity_);
+                into.neighbors.resize_reserved(kept);
+            }
+        }
+
+        /** Publishes every receiver's rows at once, then their keys in the seats claimed for them,
+         *  and empties the source and releases it. */
+        void publish_parts_() noexcept {
+            for (std::size_t part = 0; part != receivers_.size(); ++part) {
+                ram_index& into = *receivers_[part];
+                node_id_t const rows = static_cast<node_id_t>(part_sizes_[part]);
+                if (!rows) continue;
+                atomic_ref<node_id_t>(into.next_dispensed_id_).store(rows, std::memory_order_relaxed);
+                atomic_ref<node_id_t>(into.last_visible_id_).store(rows, std::memory_order_release);
+                for (node_id_t node_id = 0; node_id != rows; ++node_id)
+                    into.key_map_.insert(receiver_seats_[part], into.nodes_[node_id].key, node_id);
+            }
+            source_->forget_(source_rows_);
+            source_hold_.unlock();
+            source_ = nullptr;
+        }
+
+        /** Turns the pass to the next receiver: its audit, its seams as the range, and the
+         *  re-selection, or straight the sweep when it has no seams or a stop cut the pass. */
+        void bind_receiver_() noexcept {
+            std::size_t const receiver = refined_receivers_;
+            index_ = receivers_[receiver];
+            audit = std::move(receiver_audits_[receiver]);
+            audit.visible = static_cast<node_id_t>(part_sizes_[receiver]);
+            audit.seed_count = min_of<std::size_t>(connectivity_32_k, part_sizes_[receiver]);
+            audit.restart_sweep();
+            nodes_ = {0, static_cast<node_id_t>(part_seams_[receiver])};
+            round_ = 0;
+            swept_after_ = phase_t::reselect_k;
+            islands_before_ = 0;
+            phase_ = stopped_ || nodes_.empty() ? phase_t::sweep_k : phase_t::reselect_k;
+        }
+
+        /** Folds a healed receiver's audit and islands into the split's, then binds the next one,
+         *  or reports the sums once the last healed. */
+        void settle_receiver_() noexcept {
+            receivers_health_ += tally_.health;
+            receivers_islands_ += tally_.islands_found;
+            if (++refined_receivers_ != receivers_.size()) return bind_receiver_();
+            tally_.health = receivers_health_;
+            tally_.islands_found = receivers_islands_;
         }
 
         /** Picks what follows a converged audit, from the phase the audit followed. */
@@ -1592,6 +1780,55 @@ struct ram_index {
         /** One key seat per donor row, claimed at planning. */
         typename key_map_t::seats_t seats_ {};
 
+        /** The index a split empties, whose unique side @c source_hold_ occupies until its rows
+         *  publish in the receivers; null otherwise. */
+        ram_index* source_ = nullptr;
+
+        /** The unique hold on a split's source. */
+        unique_lock_t source_hold_;
+
+        /** The caller's receiver slots of a split, one part each; empty otherwise. */
+        std::span<ram_index*> receivers_;
+
+        /** One shared hold per receiver whose claims the split closed, in receiver order. */
+        growing_buffer<shared_lock_t, allocator_t> receiver_holds_;
+
+        /** One run of key seats per receiver, as many as the part capacity. */
+        growing_buffer<typename key_map_t::seats_t, allocator_t> receiver_seats_;
+
+        /** One audit per receiver, sized for a full part, each moved in once its turn comes. */
+        growing_buffer<health_plan_t, allocator_t> receiver_audits_;
+
+        /** Per source row: its part times the part capacity, plus its row in that receiver. */
+        growing_buffer<node_id_t, allocator_t> part_slots_;
+
+        /** Per part, a run of the part capacity: its source rows in receiver order. */
+        growing_buffer<node_id_t, allocator_t> part_members_;
+
+        /** Rows per part. */
+        growing_buffer<std::size_t, allocator_t> part_sizes_;
+
+        /** Per part, the seams leading its rows: the ones that lost a link across. */
+        growing_buffer<std::size_t, allocator_t> part_seams_;
+
+        /** Rows the split's source published at planning. */
+        node_id_t source_rows_ = 0;
+
+        /** The most rows one part takes: the source's rows over the receivers, rounded up. */
+        std::size_t part_capacity_ = 0;
+
+        /** What picks the parts' roots. */
+        u64_t seed_ = 0;
+
+        /** Receivers whose passes healed so far; the bound one is the next. */
+        std::size_t refined_receivers_ = 0;
+
+        /** The audits of the receivers healed so far, summed. */
+        health_result_t receivers_health_ {};
+
+        /** The islands the receivers healed so far found, summed. */
+        std::size_t receivers_islands_ = 0;
+
         /** Rounds of re-selection, one with fewer than three parts. */
         std::size_t rounds_ = 1;
 
@@ -1666,6 +1903,39 @@ struct ram_index {
                                         selector_type_ const& selector = {}, refine_config_t config = {}) noexcept {
         return plan_pass_({0, static_cast<node_id_t>(max_node_count_k)}, donors, context, selector.connectivity,
                           config);
+    }
+
+    /**
+     *  @brief Opens a split of this index into @p receivers - the inverse of @ref plan_absorb:
+     *      its plan's first phases move every row into one graph-local part per receiver, then
+     *      refine every receiver in turn over the rows that lost a link, and heal.
+     *
+     *  The one partition step grows the parts breadth first over the links, one root per part
+     *  through @ref seeded_bijection under @p seed, each part capped at the rows over the receivers
+     *  rounded up; rows no growth reached seed the smallest part. Scatter steps move each row's
+     *  value, key and neighbors into its receiver, the links inside its part rebased and the links
+     *  across dropped, and the phase boundary publishes every receiver's rows at once, their keys
+     *  right after, then empties this index and releases it, so its claims reopen at zero. Every
+     *  receiver then re-selects its seams, the prefix of rows that lost a link, sweeps and heals as
+     *  @ref plan_refine does, and the result sums over the receivers.
+     *
+     *  Every fallible step happens here: this index's unique side taken, each receiver's shared
+     *  side joined and its claims closed, the records, key seats and audit of a full part covered
+     *  in every receiver, and every row reserved to the budget. Receivers must share this index's
+     *  allocator, the slots must outlive the plan, and nothing may search this index meanwhile.
+     *
+     *  @param[in] receivers The empty indexes taking the parts, at least two, all distinct.
+     *  @param[in] seed Picks the parts' roots, so equal seeds over equal graphs split alike.
+     *  @retval config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
+     *      index itself, or a zero budget.
+     *  @retval contended_k A batch in flight on this index or on a receiver, or another refine.
+     *  @retval overflow_k Part slots past the node ID type.
+     */
+    template <typename selector_type_ = keep_diverse_t>
+    expected<refine_plan_t> plan_split(std::span<ram_index*> receivers, traversal_context_t& context,
+                                       selector_type_ const& selector = {}, refine_config_t config = {},
+                                       u64_t seed = 0) noexcept {
+        return plan_split_(receivers, context, selector.connectivity, config, seed);
     }
 
     /**
@@ -2455,6 +2725,75 @@ struct ram_index {
         plan.walk_ = resolved_config_(config, connectivity);
         plan.connectivity_ = connectivity;
         plan.phase_ = donors.empty() ? plan.first_pass_phase_() : phase_t::land_k;
+        return {std::move(plan), status_t::success_k};
+    }
+
+    /** What @ref plan_split does: every check, hold, claim, cover and reservation of a split of
+     *  this index into @p receivers, every row reserved to @p connectivity. */
+    expected<refine_plan_t> plan_split_(std::span<ram_index*> receivers, traversal_context_t& context,
+                                        std::size_t connectivity, refine_config_t config, u64_t seed) noexcept {
+        using phase_t = typename refine_plan_t::phase_t;
+        refine_plan_t plan {context.allocator};
+        auto refuse = [&](status_t status) noexcept {
+            plan.release_();
+            return expected<refine_plan_t> {std::move(plan), status};
+        };
+        std::size_t const parts = receivers.size();
+        if (!connectivity || parts < 2) return refuse(status_t::config_mismatch_k);
+        for (std::size_t receiver = 0; receiver != parts; ++receiver) {
+            if (!receivers[receiver] || receivers[receiver] == this) return refuse(status_t::config_mismatch_k);
+            for (std::size_t earlier = 0; earlier != receiver; ++earlier)
+                if (receivers[earlier] == receivers[receiver]) return refuse(status_t::config_mismatch_k);
+        }
+        if (status_t const sized = reserve_traversal(context, connectivity, config); failed(sized))
+            return refuse(sized);
+
+        // The source is held as a donor is, so no batch lands in it while its rows move out.
+        unique_lock_t source_hold {shared_mutex_, std::try_to_lock};
+        if (!source_hold) return refuse(status_t::contended_k);
+        auto const [rows, watermark_status] = watermark_();
+        if (failed(watermark_status)) return refuse(watermark_status);
+        plan.source_ = this;
+        plan.source_hold_ = std::move(source_hold);
+        plan.receivers_ = receivers;
+        std::size_t const capacity = divide_round_up<std::size_t>(rows, parts);
+        if (parts * capacity > static_cast<std::size_t>(missing_k)) return refuse(status_t::overflow_k);
+        if (failed(plan.receiver_holds_.reserve_exactly(parts)) ||
+            failed(plan.receiver_seats_.reserve_exactly(parts)) ||
+            failed(plan.receiver_audits_.reserve_exactly(parts)) || failed(plan.part_sizes_.resize(parts)) ||
+            failed(plan.part_seams_.resize(parts)) || failed(plan.part_slots_.resize(rows)) ||
+            failed(plan.part_members_.resize(parts * capacity)))
+            return refuse(status_t::bad_alloc_k);
+
+        // From here the plan reopens the claims of every receiver it closed on any refusal, and at
+        // its death; the claims closed at an empty watermark prove no batch is in flight.
+        for (ram_index* receiver : receivers) {
+            shared_lock_t receiver_hold {receiver->shared_mutex_};
+            if (status_t const closed = receiver->close_(); failed(closed)) return refuse(closed);
+            plan.receiver_holds_.push_back_reserved(std::move(receiver_hold));
+            if (receiver->size()) return refuse(status_t::config_mismatch_k);
+        }
+        for (ram_index* receiver : receivers) {
+            if (status_t const covered = receiver->nodes_.cover(capacity); failed(covered)) return refuse(covered);
+            auto [seats, seat_status] = receiver->key_map_.claim(capacity);
+            if (failed(seat_status)) return refuse(seat_status);
+            plan.receiver_seats_.push_back_reserved(seats);
+            auto [audit, audit_status] = receiver->plan_audit_(static_cast<node_id_t>(capacity), context.allocator);
+            if (failed(audit_status)) return refuse(audit_status);
+            plan.receiver_audits_.push_back_reserved(std::move(audit));
+        }
+        // Rows last; each moves its buffer into a receiver, where re-selecting allocates nothing.
+        for (node_id_t node_id = 0; node_id != rows; ++node_id)
+            if (status_t const grown = nodes_[node_id].neighbors.reserve_exactly(connectivity); failed(grown))
+                return refuse(grown);
+
+        plan.index_ = receivers[0];
+        plan.source_rows_ = rows;
+        plan.part_capacity_ = capacity;
+        plan.seed_ = seed;
+        plan.walk_ = resolved_config_(config, connectivity);
+        plan.connectivity_ = connectivity;
+        plan.phase_ = phase_t::partition_k;
         return {std::move(plan), status_t::success_k};
     }
 

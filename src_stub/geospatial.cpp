@@ -19,9 +19,13 @@
  *  not read it as one. A view copies its checkpoint rather than mapping it, and every VRAM
  *  lifecycle verb refuses. Traversal statistics are plausible fiction: shaped correctly, invented
  *  numerically. A checkpoint is a binary blob of this file's own memory image, readable by nothing
- *  else. Keeping no edges, a cursor opened at a key steps to its entries' exact nearest by chord at
- *  the frozen connectivity, and a sample links each draw to its exact nearest earlier draws - the
- *  lists a perfect graph would hold, where the engine's are the ones it stored.
+ *  else.
+ *
+ *  Keeping no edges, the stand-in links every one of its entries to its exact nearest at the frozen
+ *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
+ *  cursor walks those lists breadth-first from its start keys, a split grows its parts over them,
+ *  each receiver keeping the source's storage order, and a sample links each draw to its exact
+ *  nearest earlier draws.
  */
 #include <cmath> // `std::sqrt`, `std::sin`, `std::cos`, `std::isnan`
 
@@ -66,24 +70,13 @@ struct geospatial_index_options_t {
 
 using geospatial_index_t = handle<geospatial_payload_t, geospatial_index_options_t>;
 
-struct geospatial_cursor_t {
+using geospatial_cursor_t = graph_cursor<geospatial_index_t>;
 
-    /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
-    geospatial_index_t const* opened_on;
-
-    /** The next entry to hand out. */
-    std::size_t position;
-
-    /** The creation watermark, which later insertions cannot raise, or the @c linked count. */
-    std::size_t limit;
-
-    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    std::atomic_flag pulling;
-
-    /** The entries a step from a key yields, in link order; empty for a scan, which yields them as
-     *  stored. */
-    std::vector<std::size_t> linked;
-};
+/** Whether a receiver frozen at @p receiver takes a part of an index frozen at @p index: the same
+ *  connectivity, since every observation is scored alike. */
+static bool same_kind(geospatial_index_options_t const& index, geospatial_index_options_t const& receiver) {
+    return index.connectivity == receiver.connectivity;
+}
 
 /** Refuses any terrain, which this stand-in cannot test lines of sight over. */
 static bool reject_terrain(usearch_geospatial_terrain_t const& terrain, usearch_outcome_t* outcome) {
@@ -656,6 +649,12 @@ struct usearch_geospatial_refinement_handle_t {
     /** Donors landed so far, and entries the sweep visited so far. */
     std::size_t landed;
     std::size_t swept;
+
+    /** The receivers a split lands in, the seed picking its roots, and the parts landed so far. */
+    usearch_geospatial_index_t const* receivers;
+    std::size_t receivers_count;
+    us::utilities::u64_t seed;
+    std::size_t parted;
 };
 
 void usearch_geospatial_refinement_init(usearch_geospatial_refinement_init_t* arguments) {
@@ -674,8 +673,11 @@ void usearch_geospatial_refinement_init(usearch_geospatial_refinement_init_t* ar
                       "An index cannot absorb itself", outcome))
             return;
     }
-    usearch_geospatial_refinement_t const refinement = new (std::nothrow)
-        usearch_geospatial_refinement_handle_t {&index, arguments->donors, arguments->count, 0, 0};
+    if (reject_receivers(*arguments, outcome)) return;
+    usearch_geospatial_refinement_t const refinement = new (std::nothrow) usearch_geospatial_refinement_handle_t {
+        &index, arguments->donors,    arguments->count,           0,
+        0,      arguments->receivers, arguments->receivers_count, arguments->seed,
+        0};
     if (reject_if(!refinement, usearch_status_out_of_memory_k, "The refinement could not be allocated", outcome))
         return;
     *arguments->refinement = refinement;
@@ -700,6 +702,14 @@ void usearch_geospatial_refinement_next(usearch_geospatial_refinement_next_t* ar
             return;
         for (geospatial_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
         delete std::exchange(refinement.donors[refinement.landed], nullptr);
+    }
+    if (refinement.parted != refinement.receivers_count) {
+        writers.unlock();
+        std::span<usearch_geospatial_index_handle_t* const> const receivers {refinement.receivers,
+                                                                             refinement.receivers_count};
+        if (!split_into(index, receivers, refinement.seed, chord_between, same_kind, outcome)) return;
+        refinement.parted = refinement.receivers_count;
+        writers.lock();
     }
     // Each call continues the sweep where the last one stopped.
     std::size_t const rows = index.entries.size();
@@ -732,14 +742,14 @@ void usearch_geospatial_refinement_finish(usearch_geospatial_refinement_finish_t
 void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
+    if (reject_if(arguments->starts_count && !arguments->starts, usearch_status_invalid_argument_k,
+                  "The starts must name keys", outcome))
+        return;
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> linked;
-    if (arguments->start) linked = linked_rows(index, *arguments->start, chord_between);
-    std::size_t const limit = arguments->start ? linked.size() : index.entries.size();
-    usearch_geospatial_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_geospatial_cursor_handle_t {&index, 0, limit, {}, std::move(linked)};
+    usearch_geospatial_cursor_handle_t* const cursor = new (std::nothrow) usearch_geospatial_cursor_handle_t {};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
+    open_walk(*cursor, index, arguments->starts, arguments->starts_count);
     *arguments->cursor = cursor;
 }
 
@@ -748,8 +758,7 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->written = 0;
     *arguments->keys = {};
-    usearch_geospatial_observation_t const** const observations_output = arguments->observations;
-    if (observations_output) *observations_output = nullptr;
+    if (arguments->links) *arguments->links = {};
     usearch_geospatial_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
@@ -761,24 +770,7 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
                   "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
-    std::size_t const written = std::min(arguments->wanted, cursor.limit - cursor.position);
-    usearch_key_t* const keys = carve<usearch_key_t>(*arena, written, outcome);
-    usearch_geospatial_observation_t* const observations =
-        keys && observations_output ? carve<usearch_geospatial_observation_t>(*arena, written, outcome) : nullptr;
-
-    // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
-    if (keys && (observations || !observations_output)) {
-        for (std::size_t row = 0; row != written; ++row) {
-            std::size_t const position = cursor.position + row;
-            geospatial_entry_t const& entry = index.entries[cursor.linked.empty() ? position : cursor.linked[position]];
-            keys[row] = entry.key;
-            if (observations) observations[row] = entry.payload;
-        }
-        cursor.position += written;
-        *arguments->keys = {keys, sizeof(usearch_key_t)};
-        if (observations_output) *observations_output = observations;
-        *arguments->written = written;
-    }
+    pull_walk(*arguments, cursor, chord_between, *arena, outcome);
     cursor.pulling.clear(std::memory_order_release);
 }
 
@@ -805,6 +797,16 @@ void usearch_geospatial_sample(usearch_geospatial_sample_t* arguments) {
     land_sample(*arguments, std::span<geospatial_entry_t const>(index.entries),
                 std::span<usearch_geospatial_observation_t const>(arguments->anchors, anchors_count), chord_between,
                 *arena, outcome);
+}
+
+void usearch_geospatial_split(usearch_geospatial_split_t* arguments) {
+    if (through_executor<usearch_geospatial_split>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->reachability) *arguments->reachability = {};
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    land_split(*arguments, index, chord_between, same_kind, outcome);
 }
 
 void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {

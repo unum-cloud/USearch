@@ -77,6 +77,22 @@ struct vram_nvidia_index
     /** Bytes the @p bytes long row at @p data takes once prepared, a multiple of 16. */
     std::size_t span_bytes_(byte_t const* data, std::size_t bytes) const noexcept;
 
+    /** Bytes the @p stored row saves into: its own, since a row is its bytes, as a RAM string. */
+    static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept {
+        return {stored.size(), status_t::success_k};
+    }
+
+    /** Saves the @p stored row into @p saved as it is. */
+    static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept { return copy_bytes(saved, stored); }
+
+    /** Bytes the @p saved row stores into: its own. */
+    static expected<std::size_t> stored_bytes_(bytes_view_t saved) noexcept {
+        return {saved.size(), status_t::success_k};
+    }
+
+    /** Stores the @p saved row into @p stored as it is. */
+    static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept { return copy_bytes(stored, saved); }
+
     /** Loads the fatbin onto @p device, finds every kernel of every rung by its symbol, and uploads
      *  the window widths the kits read beside the rows. */
     status_t load_kernels_(int device) noexcept;

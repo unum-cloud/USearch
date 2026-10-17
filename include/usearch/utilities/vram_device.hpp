@@ -248,6 +248,36 @@ enum class vram_kernel_t : u32_t {
     /** Links each unreached island back into the reached graph. */
     reconnect_island_k,
 
+    /** Places a split's part roots, one row per part, in the first frontier. */
+    partition_seeds_k,
+
+    /** Proposes every frontier row to the unplaced rows it links to, a growth round's first. */
+    partition_propose_k,
+
+    /** Counts the rows a growth round proposed to each part. */
+    partition_tally_k,
+
+    /** Places the proposed rows of every part with room for the whole round. */
+    partition_accept_k,
+
+    /** Places the lowest-ID proposed rows of every part a round overflows, up to its room. */
+    partition_fill_k,
+
+    /** Places every row no growth round reached in the smallest parts. */
+    partition_islands_k,
+
+    /** Marks the rows linking into another part. */
+    partition_seams_k,
+
+    /** Moves every row's neighbors into its part's receiver, rebased through the slots. */
+    split_links_k,
+
+    /** Moves every row's ragged value into its part's receiver. */
+    split_tape_k,
+
+    /** Moves every fixed-width row into its part's receiver. */
+    split_rows_k,
+
     /** Merges the attended rows of several shards' walks by the flash rule. */
     merge_attention_k,
 

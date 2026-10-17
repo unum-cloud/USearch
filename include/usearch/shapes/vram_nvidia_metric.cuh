@@ -169,6 +169,51 @@ std::size_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
+expected<std::size_t> vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::saved_bytes_(
+    bytes_view_t stored) noexcept {
+    using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
+    nk_size_t points = 0;
+    if (status_t const read = status_of(
+            pack_kit_t::packed_shape(stored.data(), &points, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+        failed(read))
+        return {0, read};
+    return {points * 3 * sizeof(typename scalar_::raw_t), status_t::success_k};
+}
+
+template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
+status_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::save_value_(
+    bytes_view_t stored, bytes_span_t saved) noexcept {
+    using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
+    auto const [saved_bytes, saved_status] = saved_bytes_(stored);
+    if (failed(saved_status)) return saved_status;
+    if (saved.size() != saved_bytes) return status_t::config_mismatch_k;
+    if (saved.empty()) return status_t::success_k;
+    return status_of(
+        pack_kit_t::unpack(stored.data(), reinterpret_cast<typename scalar_::raw_t*>(saved.data()), nullptr));
+}
+
+template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
+expected<std::size_t> vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::stored_bytes_(
+    bytes_view_t saved) noexcept {
+    using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
+    constexpr std::size_t point_bytes_k = 3 * sizeof(typename scalar_::raw_t);
+    if (saved.size() % point_bytes_k) return {0, status_t::malformed_k};
+    nk_size_t bytes = 0;
+    if (status_t const sized = status_of(pack_kit_t::pack_size(saved.size() / point_bytes_k, &bytes)); failed(sized))
+        return {0, sized};
+    return {bytes, status_t::success_k};
+}
+
+template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
+status_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::load_value_(
+    bytes_view_t saved, bytes_span_t stored) noexcept {
+    using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
+    constexpr std::size_t point_bytes_k = 3 * sizeof(typename scalar_::raw_t);
+    return status_of(pack_kit_t::pack(reinterpret_cast<typename scalar_::raw_t const*>(saved.data()),
+                                      saved.size() / point_bytes_k, stored.data(), nullptr));
+}
+
+template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
 status_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::load_kernels_(int device) noexcept {
     auto [module, status] = cuda_module_t::load(device, kernels_type_::bytes());
     if (failed(status)) return status;

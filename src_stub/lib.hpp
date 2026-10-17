@@ -209,16 +209,16 @@ using call_arguments_t = std::variant<                                          
     usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
     usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
     usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                              //
-    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t,                              //
+    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t, usearch_dense_split_t,       //
     usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t, //
     usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t,                                  //
     usearch_dense_search_stream_next_t, usearch_dense_cursor_next_t, usearch_dense_sample_t,             //
     usearch_dense_save_t, usearch_dense_save_buffer_t,                                                   //
     usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,       //
     usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t,                            //
-    usearch_sequence_load_ram_t, usearch_sequence_view_nvme_t,                                           //
+    usearch_sequence_load_ram_t, usearch_sequence_load_vram_t, usearch_sequence_view_nvme_t,             //
     usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,                     //
-    usearch_sequence_refine_t, usearch_sequence_absorb_t,                                                //
+    usearch_sequence_refine_t, usearch_sequence_absorb_t, usearch_sequence_split_t,                      //
     usearch_sequence_refinement_init_t, usearch_sequence_refinement_next_t,                              //
     usearch_sequence_refinement_finish_t,                                                                //
     usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,                         //
@@ -226,7 +226,7 @@ using call_arguments_t = std::variant<                                          
     usearch_sequence_save_t, usearch_sequence_metadata_read_t, usearch_sequence_describe_t,              //
     usearch_shapes_load_ram_t, usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t,                   //
     usearch_shapes_reserve_t, usearch_shapes_clear_t, usearch_shapes_insert_t,                           //
-    usearch_shapes_refine_t, usearch_shapes_absorb_t,                                                    //
+    usearch_shapes_refine_t, usearch_shapes_absorb_t, usearch_shapes_split_t,                            //
     usearch_shapes_refinement_init_t, usearch_shapes_refinement_next_t,                                  //
     usearch_shapes_refinement_finish_t,                                                                  //
     usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t,                               //
@@ -234,7 +234,7 @@ using call_arguments_t = std::variant<                                          
     usearch_shapes_save_t, usearch_shapes_metadata_read_t, usearch_shapes_describe_t,                    //
     usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t, usearch_geospatial_view_nvme_t,       //
     usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t,               //
-    usearch_geospatial_refine_t, usearch_geospatial_absorb_t,                                            //
+    usearch_geospatial_refine_t, usearch_geospatial_absorb_t, usearch_geospatial_split_t,                //
     usearch_geospatial_refinement_init_t, usearch_geospatial_refinement_next_t,                          //
     usearch_geospatial_refinement_finish_t,                                                              //
     usearch_geospatial_search_t, usearch_geospatial_within_t,                                            //
@@ -961,37 +961,260 @@ void land_sample(arguments_ const& arguments, std::span<entry<payload_> const> e
     *arguments.written = drawn;
 }
 
+#pragma endregion Sampling
+
+#pragma region Graph Walks
+
 /**
- *  @brief The rows a cursor opened at @p key yields: those the key's entries link to, once each
- *      and in link order, never an entry under @p key itself. An absent key links to none.
+ *  @brief The rows entry @p from links to: its @c connectivity nearest other rows below @p limit by
+ *      @p score, nearest first, ties in storage order.
  *
- *  A stand-in keeps no graph, so an entry's links are its @c connectivity nearest other entries by
- *  @p score, nearest first - the lists a perfectly refined graph would hold.
+ *  A stand-in keeps no graph, so these are the lists a perfectly refined graph would hold, where
+ *  the engine's are the ones it stored.
  */
 template <typename handle_, typename score_>
-std::vector<std::size_t> linked_rows(handle_ const& index, usearch_key_t key, score_ const& score) {
-    std::size_t const rows = index.entries.size();
-    std::vector<double> distances(rows);
-    std::vector<std::size_t> nearest, linked;
-    for (std::size_t from : rows_under(index, key)) {
-        nearest.clear();
-        for (std::size_t row = 0; row != rows; ++row) {
-            if (row == from) continue;
-            distances[row] = score(index.entries[from].payload, index.entries[row].payload);
-            nearest.push_back(row);
-        }
-        std::stable_sort(nearest.begin(), nearest.end(),
-                         [&](std::size_t first, std::size_t second) { return distances[first] < distances[second]; });
-        nearest.resize(std::min(nearest.size(), index.options.connectivity));
-        for (std::size_t row : nearest)
-            if (keyed(index.entries[row].key) != keyed(key) &&
-                std::find(linked.begin(), linked.end(), row) == linked.end())
-                linked.push_back(row);
-    }
+std::vector<std::size_t> links_of(handle_ const& index, std::size_t from, std::size_t limit, score_ const& score) {
+    std::vector<std::pair<double, std::size_t>> nearest;
+    nearest.reserve(limit);
+    for (std::size_t row = 0; row != limit; ++row)
+        if (row != from) nearest.push_back({score(index.entries[from].payload, index.entries[row].payload), row});
+    std::size_t const kept = std::min(nearest.size(), index.options.connectivity);
+    std::partial_sort(nearest.begin(), nearest.begin() + static_cast<std::ptrdiff_t>(kept), nearest.end());
+    std::vector<std::size_t> linked(kept);
+    for (std::size_t link = 0; link != kept; ++link) linked[link] = nearest[link].second;
     return linked;
 }
 
-#pragma endregion Sampling
+/** A stand-in's cursor: every row below the creation watermark as stored, or the start keys' rows
+ *  and then, breadth-first, the rows they link to, each once. */
+template <typename handle_>
+struct graph_cursor {
+
+    /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
+    handle_ const* opened_on = nullptr;
+
+    /** The creation watermark, which later insertions cannot raise. */
+    std::size_t limit = 0;
+
+    /** Rows already handed out. */
+    std::size_t position = 0;
+
+    /** The breadth-first order discovered so far; empty for a scan, which yields rows as stored. */
+    std::vector<std::size_t> order;
+
+    /** Per row below @c limit, whether @c order holds it; empty for a scan. */
+    std::vector<std::uint8_t> seen;
+
+    /** Rows of @c order whose links are already queued behind them. */
+    std::size_t expanded = 0;
+
+    /** Each row's links, kept once a pull or an expansion computed them. */
+    std::unordered_map<std::size_t, std::vector<std::size_t>> links;
+
+    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
+    std::atomic_flag pulling;
+};
+
+/** Opens @p cursor on @p index: a scan without @p starts, else a walk beginning with the start
+ *  keys' own rows, in the order given, each once. */
+template <typename handle_>
+void open_walk(graph_cursor<handle_>& cursor, std::type_identity_t<handle_> const& index, usearch_key_t const* starts,
+               std::size_t starts_count) {
+    cursor.opened_on = &index;
+    cursor.limit = index.entries.size();
+    if (!starts_count) return;
+    cursor.seen.assign(cursor.limit, 0);
+    for (std::size_t start = 0; start != starts_count; ++start)
+        for (std::size_t row : rows_under(index, starts[start]))
+            if (row < cursor.limit && !cursor.seen[row]) cursor.seen[row] = 1, cursor.order.push_back(row);
+}
+
+/** The links of @p row, computed on first use and kept. */
+template <typename handle_, typename score_>
+std::vector<std::size_t> const& walk_links(graph_cursor<handle_>& cursor, std::size_t row, score_ const& score) {
+    auto found = cursor.links.find(row);
+    if (found == cursor.links.end())
+        found = cursor.links.emplace(row, links_of(*cursor.opened_on, row, cursor.limit, score)).first;
+    return found->second;
+}
+
+/**
+ *  @brief The body of every modality's @c cursor_next: lands the next @c wanted rows' keys and,
+ *      when asked, their links as a keys tape. A walk expands only as far as the pull needs.
+ *
+ *  A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
+ */
+template <typename arguments_, typename handle_, typename score_>
+void pull_walk(arguments_ const& arguments, graph_cursor<handle_>& cursor, score_ const& score,
+               usearch_arena_handle_t& arena, usearch_outcome_t* outcome) {
+    handle_ const& index = *cursor.opened_on;
+    std::size_t const wanted = arguments.wanted;
+    std::vector<std::size_t> rows;
+    if (cursor.seen.empty()) {
+        std::size_t const taking = std::min(wanted, cursor.limit - std::min(cursor.position, cursor.limit));
+        for (std::size_t row = 0; row != taking; ++row) rows.push_back(cursor.position + row);
+    }
+    else {
+        while (cursor.order.size() < cursor.position + wanted && cursor.expanded < cursor.order.size()) {
+            for (std::size_t linked : walk_links(cursor, cursor.order[cursor.expanded], score))
+                if (!cursor.seen[linked]) cursor.seen[linked] = 1, cursor.order.push_back(linked);
+            ++cursor.expanded;
+        }
+        std::size_t const end = std::min(cursor.order.size(), cursor.position + wanted);
+        rows.assign(cursor.order.begin() + static_cast<std::ptrdiff_t>(cursor.position),
+                    cursor.order.begin() + static_cast<std::ptrdiff_t>(end));
+    }
+    std::size_t total_links = 0;
+    if (arguments.links)
+        for (std::size_t row : rows) total_links += walk_links(cursor, row, score).size();
+    usearch_key_t* const keys = carve<usearch_key_t>(arena, rows.size(), outcome);
+    std::size_t* const offsets = keys && arguments.links ? carve<std::size_t>(arena, rows.size() + 1, outcome)
+                                                         : nullptr;
+    usearch_key_t* const linked_keys = offsets ? carve<usearch_key_t>(arena, total_links, outcome) : nullptr;
+    if (!keys || (arguments.links && !linked_keys)) return;
+    for (std::size_t row = 0; row != rows.size(); ++row) keys[row] = index.entries[rows[row]].key;
+    if (arguments.links) {
+        offsets[0] = 0;
+        for (std::size_t row = 0; row != rows.size(); ++row) {
+            std::vector<std::size_t> const& linked = walk_links(cursor, rows[row], score);
+            for (std::size_t link = 0; link != linked.size(); ++link)
+                linked_keys[offsets[row] + link] = index.entries[linked[link]].key;
+            offsets[row + 1] = offsets[row] + linked.size();
+        }
+        *arguments.links = {linked_keys, offsets};
+    }
+    cursor.position += rows.size();
+    *arguments.keys = {keys, sizeof(usearch_key_t)};
+    *arguments.written = rows.size();
+}
+
+#pragma endregion Graph Walks
+
+#pragma region Splitting
+
+/** The part each row of @p index lands in, of @p parts: roots drawn from @p seed, each part grown
+ *  breadth-first over the links from its root, one row per part per round and capped at an equal
+ *  share, and every row no root reached joining the smallest part. */
+template <typename handle_, typename score_>
+std::vector<std::size_t> partition_rows(handle_ const& index, std::size_t parts, u64_t seed, score_ const& score) {
+    std::size_t const rows = index.entries.size();
+    std::size_t const unassigned = std::numeric_limits<std::size_t>::max();
+    std::size_t const cap = divide_round_up(rows, parts);
+    std::vector<std::size_t> part_of(rows, unassigned), sizes(parts, 0), heads(parts, 0);
+    std::vector<std::vector<std::size_t>> frontiers(parts);
+    std::vector<std::size_t> const order = drawing_order(rows, seed, [](std::size_t) { return true; });
+    for (std::size_t part = 0; part != std::min(parts, rows); ++part)
+        part_of[order[part]] = part, sizes[part] = 1, frontiers[part].push_back(order[part]);
+    for (bool grew = true; grew;) {
+        grew = false;
+        for (std::size_t part = 0; part != parts; ++part) {
+            if (heads[part] == frontiers[part].size() || sizes[part] >= cap) continue;
+            std::size_t const from = frontiers[part][heads[part]++];
+            for (std::size_t linked : links_of(index, from, rows, score))
+                if (part_of[linked] == unassigned && sizes[part] < cap)
+                    part_of[linked] = part, ++sizes[part], frontiers[part].push_back(linked);
+            grew = true;
+        }
+    }
+    for (std::size_t row = 0; row != rows; ++row) {
+        if (part_of[row] != unassigned) continue;
+        std::size_t const smallest = static_cast<std::size_t>(std::min_element(sizes.begin(), sizes.end()) -
+                                                              sizes.begin());
+        part_of[row] = smallest, ++sizes[smallest];
+    }
+    return part_of;
+}
+
+/**
+ *  @brief Moves every row of @p index into @p receivers, part @c p of @ref partition_rows landing
+ *      in receiver @c p in storage order, and empties @p index; false once @p outcome records why
+ *      not, having moved nothing.
+ *
+ *  Every receiver must be a distinct, empty handle other than @p index whose options
+ *  @p same_kind accepts beside the source's. Keeping no edges, a part loses none to rebase.
+ */
+template <typename handle_, typename receiver_, typename score_, typename same_kind_>
+bool split_into(handle_& index, std::span<receiver_* const> receivers, u64_t seed, score_ const& score,
+                same_kind_ const& same_kind, usearch_outcome_t* outcome) {
+    if (reject_read_only(index, outcome)) return false;
+    if (reject_if(receivers.size() < 2, usearch_status_invalid_argument_k, "A split needs two receivers or more",
+                  outcome))
+        return false;
+    for (std::size_t position = 0; position != receivers.size(); ++position) {
+        receiver_* const receiver = receivers[position];
+        if (reject_if(!receiver, usearch_status_invalid_argument_k, "A receiver must not be null", outcome) ||
+            reject_if(static_cast<handle_ const*>(receiver) == &index, usearch_status_config_mismatch_k,
+                      "An index cannot split into itself", outcome) ||
+            reject_if(std::find(receivers.begin(), receivers.begin() + static_cast<std::ptrdiff_t>(position),
+                                receiver) != receivers.begin() + static_cast<std::ptrdiff_t>(position),
+                      usearch_status_config_mismatch_k, "A receiver is named twice", outcome))
+            return false;
+    }
+    std::unique_lock source(index.mutex);
+    std::vector<std::unique_lock<std::shared_mutex>> held;
+    for (receiver_* receiver : receivers) {
+        held.emplace_back(receiver->mutex);
+        if (reject_if(!receiver->entries.empty() || static_cast<bool>(receiver->served),
+                      usearch_status_config_mismatch_k, "A receiver must be an empty, mutable handle", outcome) ||
+            reject_if(!same_kind(index.options, receiver->options), usearch_status_config_mismatch_k,
+                      "A receiver must share the index's kind and geometry", outcome))
+            return false;
+    }
+    std::vector<std::size_t> const part_of = partition_rows(index, receivers.size(), seed, score);
+    std::vector<std::size_t> sizes(receivers.size(), 0);
+    for (std::size_t part : part_of) ++sizes[part];
+    for (std::size_t part = 0; part != receivers.size(); ++part)
+        if (reject_if(!receivers[part]->accommodate(sizes[part]), usearch_status_out_of_memory_k,
+                      "A receiver could not accommodate its part", outcome))
+            return false;
+    for (std::size_t row = 0; row != part_of.size(); ++row)
+        receivers[part_of[row]]->append(index.entries[row].key, std::move(index.entries[row].payload));
+    index.reset();
+    return true;
+}
+
+/** Refuses a refinement naming donors and receivers both, or receivers no split can land in: fewer
+ *  than two, a null slot, or the index itself. */
+template <typename arguments_>
+bool reject_receivers(arguments_ const& arguments, usearch_outcome_t* outcome) {
+    if (reject_if(arguments.count && arguments.receivers_count, usearch_status_invalid_argument_k,
+                  "A refinement absorbs donors or splits into receivers, never both", outcome))
+        return true;
+    if (!arguments.receivers_count) return false;
+    if (reject_if(arguments.receivers_count < 2 || !arguments.receivers, usearch_status_invalid_argument_k,
+                  "A split needs two receivers or more", outcome))
+        return true;
+    for (std::size_t position = 0; position != arguments.receivers_count; ++position)
+        if (reject_if(!arguments.receivers[position], usearch_status_invalid_argument_k, "A receiver must not be null",
+                      outcome) ||
+            reject_if(arguments.receivers[position] == arguments.index, usearch_status_config_mismatch_k,
+                      "An index cannot split into itself", outcome))
+            return true;
+    return false;
+}
+
+/** The body of every modality's @c split: moves the rows as @ref split_into does, then reports a
+ *  closing sweep over every receiver, which re-selects nothing in a stand-in keeping no edges. */
+template <typename arguments_, typename handle_, typename score_, typename same_kind_>
+void land_split(arguments_ const& arguments, handle_& index, score_ const& score, same_kind_ const& same_kind,
+                usearch_outcome_t* outcome) {
+    using receiver_t = std::remove_pointer_t<std::remove_cvref_t<decltype(*arguments.receivers)>>;
+    if (reject_if(arguments.count && !arguments.receivers, usearch_status_invalid_argument_k,
+                  "The receivers must name handles", outcome))
+        return;
+    std::span<receiver_t* const> const receivers {arguments.receivers, arguments.receivers ? arguments.count : 0};
+    if (!split_into(index, receivers, arguments.seed, score, same_kind, outcome)) return;
+    std::size_t rows = 0, reached = 0;
+    for (receiver_t* receiver : receivers) rows += receiver->entries.size(), reached += !receiver->entries.empty();
+    bool cancelled = false;
+    for (std::size_t row = 0; row != rows && !cancelled; ++row)
+        cancelled = !keep_going(arguments.progress, row + 1, rows);
+    if (arguments.stats) arguments.stats->visited_members = rows;
+    if (arguments.reachability) *arguments.reachability = {rows, rows, reached ? 1u : 0u};
+    reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
+}
+
+#pragma endregion Splitting
 
 #pragma region Files
 

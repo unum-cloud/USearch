@@ -118,6 +118,9 @@ struct sequence_ram_variant {
 
     explicit sequence_ram_variant(forkunion_allocator_t const& allocator) noexcept : index(allocator) {}
 
+    status_t reserve(usearch_sequence_reserve_t const& arguments) noexcept {
+        return index.reserve(arguments.entries).status;
+    }
     status_t clear() noexcept { return index.clear(); }
     expected<traversal_telemetry_t> insert(usearch_sequence_insert_t const& arguments, progress_ticks_t& ticks,
                                            executor_t& executor) noexcept;
@@ -134,6 +137,11 @@ struct sequence_ram_variant {
                     executor_t& executor) noexcept;
     status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Serving a checkpoint in place and sampling answer @c unsupported_k until the index serves
+     *  them. */
+    status_t view(std::string_view) noexcept { return status_t::unsupported_k; }
+    status_t sample(usearch_sequence_sample_t const&) noexcept { return status_t::unsupported_k; }
 };
 
 template <cpu_class_t cpu_class_>
@@ -228,6 +236,11 @@ struct sequence_nvme_variant {
 
     expected<traversal_telemetry_t> search(usearch_sequence_search_t const& arguments, matches_landing_t& landing,
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
+
+    /** A view already is its checkpoint, so saving answers @c unsupported_k, as does sampling until
+     *  the view serves it. */
+    status_t save(std::string_view, executor_t&, progress_ticks_t&) noexcept { return status_t::unsupported_k; }
+    status_t sample(usearch_sequence_sample_t const&) noexcept { return status_t::unsupported_k; }
 };
 
 template <cpu_class_t cpu_class_>
@@ -277,7 +290,7 @@ struct sequence_vram_nvidia_variant
 
     /** Claimed by the one batch landing its keys and rows, which another answers with
      *  @c contended_k meanwhile. */
-    vram_claim_word_t claims;
+    claim_word_t claims;
 
     status_t reserve(usearch_sequence_reserve_t const& arguments) noexcept {
         return this->reserve_(arguments.entries, geometry.connectivity, arguments.payload_bytes);

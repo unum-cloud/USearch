@@ -1218,7 +1218,34 @@ check_vendor_neutral() {
     local named
     named=$(printf '%s\n' "$added" | grep -E '(^|[^A-Za-z0-9_])(cuda|hip|metal)_[A-Za-z0-9_]' || true)
     [ -z "$named" ] || fail "$named" \
-        "$file is shared by every GPU vendor - name its symbols dense::vram_* and its warp the kit's policy:"
+        "$file is shared by every GPU vendor - its symbols say vram_*, and a vendor's calls stay in its own tower:"
+}
+
+check_residency_branches() {
+    local branching
+    branching=$(printf '%s\n' "$added" |
+        grep -E 'is_(ram|vram|nvme)_index|gpu_vendor_of_index|gpu_vendor_t::|vendor_k' || true)
+    [ -z "$branching" ] || fail "$branching" \
+        "$file branches a C verb on residency or vendor - the face serves the verb or answers unsupported_k:"
+}
+
+check_deleted_verbs() {
+    local deleted
+    deleted=$(printf '%s\n' "$added" | grep -E '= delete;' | grep -vE 'operator[[:space:]]*=' |
+        grep -vE '^[+]?[[:space:]]*(explicit[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(' || true)
+    [ -z "$deleted" ] || fail "$deleted" \
+        "$file deletes a verb - a face keeps every verb, answering unsupported_k or device_k where it serves none:"
+}
+
+check_tower_isolation() {
+    local vendor crossing
+    # The device listing alone gathers every vendor's devices, so it alone includes every tower.
+    [ "$file" != include/usearch/utilities/vram_device.hpp ] || return 0
+    vendor=$(basename "$file" | sed -nE 's/^vram_(nvidia|amd|apple)_.*/\1/p')
+    crossing=$(grep -nE '^[[:space:]]*#[[:space:]]*(include|embed)[[:space:]]*"usearch/[a-z_]+/vram_(nvidia|amd|apple)_' \
+        "$staged_blob" | grep -vE "vram_${vendor:-none}_" || true)
+    [ -z "$crossing" ] || fail "$crossing" \
+        "$file reaches into a vendor's tower - towers include only their own vendor, and shared headers none:"
 }
 
 # Calling a call's result the same way: `vectors.view()(range, slice)` reads as a typo and hides which object
@@ -1787,9 +1814,19 @@ judge_path() {
         check_host_threads
         check_cuda_raw_atomics
         ;;&
-    # The device code NVCC and HIP-Clang share.
-    include/usearch/dense/vram_index.cuh | include/usearch/dense/vram_queue.cuh)
+    # The code every GPU vendor shares, and the C verbs above every residency.
+    include/usearch/*/vram_index.cuh | include/usearch/*/vram_index.hpp | include/usearch/utilities/vram_queue.cuh | \
+        include/usearch/dense/sharded_indexes.hpp | src/*_index.cpp | src/*_index.cuh)
         check_vendor_neutral
+        ;;&
+    src/*_index.cpp | src/*_index.cuh)
+        check_residency_branches
+        ;;&
+    include/usearch/*/*_index.hpp | include/usearch/*/*_indexes.hpp)
+        check_deleted_verbs
+        ;;&
+    include/usearch/*/vram_* | include/usearch/*/ram_* | include/usearch/*/nvme_* | include/usearch/*/sharded_*)
+        check_tower_isolation
         ;;&
     # The test and benchmark harness headers, whose directories name their namespaces.
     test/*.hpp | test/*.cuh | test/*.h | bench/*.hpp | bench/*.cuh | bench/*.h)

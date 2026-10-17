@@ -268,10 +268,12 @@ struct specialized_index {
     expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
                                      keys_span_t keys, scores_span_t distances, counts_span_t counts,
                                      dummy_predicate_t) noexcept;
+
+    /** Narrows a walk by a host predicate, which a device walk cannot take, so a GPU index answers
+     *  @c device_error_k. */
     expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
                                      keys_span_t keys, scores_span_t distances, counts_span_t counts,
-                                     key_predicate_t& predicate) noexcept
-        requires is_ram_index<index_type_>;
+                                     key_predicate_t& predicate) noexcept;
     expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys,
                                        scores_span_t products, counts_span_t counts) noexcept;
     expected<search_result_t> maxsim(rows_view_t queries, std::size_t rows_per_query, executor_t& executor,
@@ -284,6 +286,21 @@ struct specialized_index {
     status_t save(bytes_span_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t load(bytes_view_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Opens a cursor over every row into @p walk, which holds any variant's cursor; a GPU index
+     *  reads its rows back by key or search and answers @c unsupported_k. */
+    template <typename walk_type_>
+    status_t open(walk_type_& walk) noexcept
+        requires is_ram_index<index_type_>;
+    template <typename walk_type_>
+    status_t open(walk_type_& walk) noexcept
+        requires is_vram_index<index_type_>;
+
+    /** Reads the next rows of @p walk, a cursor @ref open placed, into @p keys and @p rows,
+     *  answering how many landed. */
+    template <typename cursor_type_>
+    expected<std::size_t> read(cursor_type_& walk, std::span<key_t> keys, rows_span_t rows,
+                               executor_t& executor) noexcept;
 
     /** The C layer's save config: the path's suffix picks the layout, the residency the contract -
      *  device storage cannot be settlement-probed, so a GPU handle certifies. */
@@ -425,10 +442,9 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
     rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
-    counts_span_t counts, key_predicate_t& predicate) noexcept
-    requires is_ram_index<index_type_>
-{
-    return index.search_if(queries, executor, config, keys, distances, counts, predicate);
+    counts_span_t counts, key_predicate_t& predicate) noexcept {
+    if constexpr (is_vram_index<index_type_>) return {{}, status_t::device_error_k};
+    else return index.search_if(queries, executor, config, keys, distances, counts, predicate);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply(
@@ -467,6 +483,27 @@ template <typename index_type_>
 status_t specialized_index<index_type_>::load(bytes_view_t buffer, executor_t& executor,
                                               progress_ticks_t& ticks) noexcept {
     return index.load(buffer, load_config_t {}, executor, ticks);
+}
+template <typename index_type_>
+template <typename walk_type_>
+status_t specialized_index<index_type_>::open(walk_type_& walk) noexcept
+    requires is_ram_index<index_type_>
+{
+    walk.template emplace<typename index_type_::cursor_t>(index);
+    return status_t::success_k;
+}
+template <typename index_type_>
+template <typename walk_type_>
+status_t specialized_index<index_type_>::open(walk_type_&) noexcept
+    requires is_vram_index<index_type_>
+{
+    return status_t::unsupported_k;
+}
+template <typename index_type_>
+template <typename cursor_type_>
+expected<std::size_t> specialized_index<index_type_>::read(cursor_type_& walk, std::span<key_t> keys, rows_span_t rows,
+                                                           executor_t&) noexcept {
+    return {walk.read(index, keys, rows), status_t::success_k};
 }
 template <typename index_type_>
 save_config_t specialized_index<index_type_>::save_config_of(std::string_view path) noexcept {
@@ -520,8 +557,38 @@ struct specialized_index<index_type_> {
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
                                      f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
                                      executor_t& executor, search_config_t config) noexcept;
+
+    /** Opens a cursor over every row into @p walk, which holds any variant's cursor. */
+    template <typename walk_type_>
+    status_t open(walk_type_& walk) noexcept;
+
+    /** Reads the next rows of @p walk through the executor into @p keys and @p rows, answering how
+     *  many landed. */
+    template <typename cursor_type_>
+    expected<std::size_t> read(cursor_type_& walk, std::span<key_t> keys, rows_span_t rows,
+                               executor_t& executor) noexcept;
+
+    /** A view already is its checkpoint, so saving it answers @c unsupported_k. */
+    expected<std::size_t> storage_requirements() const noexcept { return {0, status_t::unsupported_k}; }
+    status_t save(std::string_view, executor_t&, progress_ticks_t&) noexcept { return status_t::unsupported_k; }
+    status_t save(bytes_span_t, executor_t&, progress_ticks_t&) noexcept { return status_t::unsupported_k; }
 };
 
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+template <typename walk_type_>
+status_t specialized_index<index_type_>::open(walk_type_& walk) noexcept {
+    walk.template emplace<typename index_type_::cursor_t>(index);
+    return status_t::success_k;
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+template <typename cursor_type_>
+expected<std::size_t> specialized_index<index_type_>::read(cursor_type_& walk, std::span<key_t> keys, rows_span_t rows,
+                                                           executor_t& executor) noexcept {
+    auto const [scanned, status] = walk.read(index, keys, rows, executor);
+    return {scanned.count, status};
+}
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 status_t specialized_index<index_type_>::view(std::string_view path, std::span<std::string_view const> paths) noexcept {
@@ -613,5 +680,34 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 
 template <typename index_type_>
 specialized_index(index_type_&) -> specialized_index<index_type_>;
+
+/** The executor a null handle runs VRAM work on: streams or queues of its own on its devices, never
+ *  a legacy default stream, which would wait on every blocking stream of the process. */
+template <typename multi_type_>
+    requires is_vram_index<multi_type_>
+usearch_executor_t call_executor_for(multi_type_& variant, usearch_executor_handle_t& call_executor,
+                                     usearch_outcome_t* outcome) noexcept {
+    // One stream or queue per distinct device, which every shard there shares.
+    specialized_index const shards {variant};
+    growing_buffer<int> devices {global_allocator};
+    if (failed(devices.reserve_exactly(shards.shards_count())))
+        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), nullptr;
+    for (std::size_t shard = 0; shard != shards.shards_count(); ++shard) {
+        bool opened = false;
+        for (int const earlier : devices) opened |= earlier == shards.device(shard);
+        if (!opened) devices.push_back_reserved(shards.device(shard));
+    }
+    auto [built, status] = multi_type_::executor_t::spawn(devices);
+    if (failed(status)) return propagate_error(status, outcome), nullptr;
+    call_executor.executor = gpu_executor_t {std::move(built)};
+    return &call_executor;
+}
+
+/** The GPU ordinal @p variant computes on, or @c host_device_k. */
+template <typename variant_type_>
+int device_of(variant_type_& variant) noexcept {
+    if constexpr (is_vram_index<variant_type_>) return specialized_index {variant}.device(0);
+    else return host_device_k;
+}
 
 #pragma endregion Specialized Index

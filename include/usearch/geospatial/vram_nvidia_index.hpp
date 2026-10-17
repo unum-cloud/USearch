@@ -54,6 +54,23 @@ struct vram_nvidia_index
     /** Bytes the row at @p data takes once prepared. */
     static std::size_t span_bytes_(byte_t const* data, std::size_t bytes) noexcept;
 
+    /** Bytes the @p stored observation saves into: its own 32, as the RAM codec saves it. */
+    static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept {
+        return {stored.size(), status_t::success_k};
+    }
+
+    /** Saves the @p stored observation into @p saved as it is. */
+    static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept { return copy_bytes(saved, stored); }
+
+    /** Bytes the @p saved observation stores into: its own, @c malformed_k unless one whole. */
+    static expected<std::size_t> stored_bytes_(bytes_view_t saved) noexcept {
+        if (saved.size() != sizeof(earth_observation_t)) return {0, status_t::malformed_k};
+        return {saved.size(), status_t::success_k};
+    }
+
+    /** Stores the @p saved observation into @p stored as it is. */
+    static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept { return copy_bytes(stored, saved); }
+
     /** Loads the fatbin onto @p device and finds every kernel by its symbol. */
     status_t load_kernels_(int device) noexcept;
 

@@ -2268,7 +2268,6 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::ser
 /** Appends one RAM shard per named memory domain - or one per allocatable domain of a transient
  *  topology when the list is empty, so a bare init still spans the machine. */
 template <typename multi_type_>
-    requires is_ram_index<multi_type_>
 static status_t place_shards(multi_type_& variant, usearch_ram_options_t const& ram) noexcept {
     if (ram.memory_domains && ram.memory_domains_count) {
         for (std::size_t position = 0; position != ram.memory_domains_count; ++position)
@@ -2303,7 +2302,6 @@ struct nvme_placement_t {
 
 /** Opens every part of the checkpoint @p nvme names, served in place. */
 template <typename multi_type_>
-    requires is_nvme_index<multi_type_>
 static status_t place_shards(multi_type_& variant, nvme_placement_t const& nvme) noexcept {
     return specialized_index {variant}.view(nvme.path, nvme.paths);
 }
@@ -2315,10 +2313,11 @@ static void append_capability(usearch_dense_index_handle_t& handle, char const* 
                   name);
 }
 
-/** Fills the handle's capability string once, from the picked NumKong kit. */
-template <typename multi_type_>
-    requires is_ram_index<multi_type_> || is_nvme_index<multi_type_>
-static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_ const&) noexcept {
+/** Fills the handle's capability string once, from the picked NumKong kit of a variant placed on
+ *  the host or its storage. */
+template <typename multi_type_, typename placement_type_>
+static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_ const&,
+                                 placement_type_ const&) noexcept {
     constexpr nk_capability_t picked =
         us::dense::quads_ladder<typename multi_type_::scalar_t, multi_type_::capability_k>::picked_k;
     for (numkong_capability_name_t const& named : numkong_capability_names_k)
@@ -2338,7 +2337,6 @@ static std::size_t named_ordinal(usearch_vram_options_t const& vram, std::size_t
 
 /** Appends one VRAM shard per named USearch device ordinal, on that device's vendor ordinal. */
 template <typename multi_type_>
-    requires is_vram_index<multi_type_>
 static status_t place_shards(multi_type_& variant, usearch_vram_options_t const& vram) noexcept {
     std::span<gpu_device_t const> const devices = gpu_devices();
     for (std::size_t shard = 0; shard != named_count(vram); ++shard) {
@@ -2352,17 +2350,16 @@ static status_t place_shards(multi_type_& variant, usearch_vram_options_t const&
     return status_t::success_k;
 }
 
-/** Fills the handle's capability string once, from the listed class of the first shard's device. */
+/** Fills the handle's capability string once, from the listed class of the device the first shard
+ *  was placed on. */
 template <typename multi_type_>
-    requires is_vram_index<multi_type_>
-static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_& variant) noexcept {
-    if (!specialized_index {variant}.shards_count()) return;
-    u32_t const resident = static_cast<u32_t>(specialized_index {variant}.device(0));
-    for (gpu_device_t const& device : gpu_devices()) {
-        if (device.vendor != multi_type_::vendor_k || device.vendor_ordinal != resident) continue;
-        for (gpu_class_name_t const& named : gpu_class_names_k)
-            if (named.gpu_class == device.gpu_class) return append_capability(handle, named.name);
-    }
+static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_ const&,
+                                 usearch_vram_options_t const& vram) noexcept {
+    std::span<gpu_device_t const> const devices = gpu_devices();
+    std::size_t const ordinal = named_ordinal(vram, 0);
+    if (ordinal >= devices.size()) return;
+    for (gpu_class_name_t const& named : gpu_class_names_k)
+        if (named.gpu_class == devices[ordinal].gpu_class) return append_capability(handle, named.name);
 }
 
 /** The host allocator a multi-index keeps its tables on: the first named memory domain on RAM,
@@ -2375,18 +2372,29 @@ static forkunion_allocator_t host_allocator_of(placement_type_ const& placement)
     return forkunion_allocator_t {no_memory_domain_k};
 }
 
+/** Allocates the handle holding @p variant_type_, scoring under @p kernel, with its tables where
+ *  @p placement names. */
+template <typename variant_type_, typename placement_type_>
+static usearch_dense_index_t new_dense_handle(placement_type_ const& placement, nk_kernel_kind_t kernel) noexcept {
+    return new (std::nothrow)
+        usearch_dense_index_handle_t(std::in_place_type<variant_type_>, kernel, host_allocator_of(placement));
+}
+
+/** Allocates the handle holding the NVMe view @p variant_type_, which takes its metric from the
+ *  parts' headers. */
+template <typename variant_type_>
+static usearch_dense_index_t new_dense_handle(nvme_placement_t const& placement, nk_kernel_kind_t) noexcept {
+    return new (std::nothrow)
+        usearch_dense_index_handle_t(std::in_place_type<variant_type_>, host_allocator_of(placement));
+}
+
 /** Allocates the handle holding @p variant_type_ and places its shards. The constructors below
  *  finish @p outcome only on failure, since a load still has work to do on success. */
 template <typename variant_type_, typename placement_type_>
 static usearch_dense_index_t make_punned_dense_index(usearch_dense_metadata_t const& geometry,
                                                      placement_type_ const& placement, nk_kernel_kind_t kernel,
                                                      usearch_outcome_t* outcome) noexcept {
-    std::in_place_type_t<variant_type_> const tag;
-    usearch_dense_index_t handle = nullptr;
-    // An NVMe view takes its metric from the parts' headers.
-    if constexpr (is_nvme_index<variant_type_>)
-        handle = new (std::nothrow) usearch_dense_index_handle_t(tag, host_allocator_of(placement));
-    else handle = new (std::nothrow) usearch_dense_index_handle_t(tag, kernel, host_allocator_of(placement));
+    usearch_dense_index_t const handle = new_dense_handle<variant_type_>(placement, kernel);
     if (!handle)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
     handle->requested_dimensions = geometry.dimensions;
@@ -2396,7 +2404,7 @@ static usearch_dense_index_t make_punned_dense_index(usearch_dense_metadata_t co
     variant_type_& variant = std::get<variant_type_>(handle->variant);
     if (status_t const placed = place_shards(variant, placement); failed(placed))
         return delete handle, propagate_error(placed, outcome), nullptr;
-    compose_capabilities(*handle, variant);
+    compose_capabilities(*handle, variant, placement);
     return handle;
 }
 
@@ -2716,35 +2724,6 @@ static usearch_dense_index_t with_cell(usearch_dense_metadata_t const& geometry,
 
 #pragma region Multi Verbs
 
-/** The executor a null handle runs VRAM work on: streams or queues of its own on its devices, never
- *  a legacy default stream, which would wait on every blocking stream of the process. */
-template <typename multi_type_>
-    requires is_vram_index<multi_type_>
-static usearch_executor_t call_executor_for(multi_type_& variant, usearch_executor_handle_t& call_executor,
-                                            usearch_outcome_t* outcome) noexcept {
-    // One stream or queue per distinct device, which every shard there shares.
-    specialized_index const shards {variant};
-    growing_buffer<int> devices {global_allocator};
-    if (failed(devices.reserve_exactly(shards.shards_count())))
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), nullptr;
-    for (std::size_t shard = 0; shard != shards.shards_count(); ++shard) {
-        bool opened = false;
-        for (int const earlier : devices) opened |= earlier == shards.device(shard);
-        if (!opened) devices.push_back_reserved(shards.device(shard));
-    }
-    auto [built, status] = multi_type_::executor_t::spawn(devices);
-    if (failed(status)) return propagate_error(status, outcome), nullptr;
-    call_executor.executor = gpu_executor_t {std::move(built)};
-    return &call_executor;
-}
-
-/** The GPU ordinal @p variant computes on, or @c host_device_k. */
-template <typename variant_type_>
-static int device_of(variant_type_& variant) noexcept {
-    if constexpr (is_vram_index<variant_type_>) return specialized_index {variant}.device(0);
-    else return host_device_k;
-}
-
 /** @p count rows of the C view @p rows as the engines take them, their scalar riding along. */
 static us::dense::rows_view_t rows_of(usearch_rows_view_t const& rows, std::size_t count) noexcept {
     return {static_cast<byte_t const*>(rows.data), count, rows.columns, rows.stride, nk_dtype_of(rows.scalar)};
@@ -2835,14 +2814,14 @@ static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor
 
 #pragma endregion Multi Verbs
 
-/** The cursor of a RAM or NVMe variant; a VRAM variant reads its rows through a search and has
- *  none. */
+/** The cursor of a variant declaring one; a variant reading its rows back by key or search alone
+ *  has none. */
 template <typename variant_type_>
 struct cursor_of {
     using type = std::monostate;
 };
 template <typename variant_type_>
-    requires is_ram_index<variant_type_> || is_nvme_index<variant_type_>
+    requires requires { typename variant_type_::cursor_t; }
 struct cursor_of<variant_type_> {
     using type = typename variant_type_::cursor_t;
 };
@@ -2867,13 +2846,14 @@ struct usearch_dense_cursor_handle_t {
     std::atomic_flag busy;
 };
 
-/** The plan of a writable variant with the donors it lands; an NVMe view refines nothing. */
+/** The plan of a variant declaring one, with the donors it lands; an NVMe view declares none, as it
+ *  never mutates. */
 template <typename variant_type_>
 struct refinement_of {
     using type = std::monostate;
 };
 template <typename variant_type_>
-    requires is_ram_index<variant_type_> || is_vram_index<variant_type_>
+    requires requires { typename variant_type_::refine_plan_t; }
 struct refinement_of<variant_type_> {
     struct type {
 
@@ -2943,22 +2923,16 @@ static void load_dense_index(source_type_ source, placement_type_ const& placeme
         }
     usearch_dense_index_t const loaded = with_cell(geometry, placed, outcome);
     if (!loaded) return;
-    bool const filled = std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            // A load places RAM or VRAM variants alone, so a view's variant never reaches here.
-            if constexpr (is_nvme_index<variant_type_>)
-                return propagate_error(usearch_status_internal_k, outcome, "A load never builds a view");
-            else {
-                usearch_executor_handle_t call_executor;
-                typename variant_type_::executor_t* const typed = executor_of(variant, executor, call_executor,
-                                                                              outcome);
-                if (!typed) return false;
-                progress_ticks_t ticks {progress, specialized_index {variant}.shards_count()};
-                status_t const status = specialized_index {variant}.load(source, *typed, ticks);
-                return succeeded(status) || propagate_error(status, outcome);
-            }
-        },
-        loaded->variant);
+    // A load places RAM or VRAM variants alone, and fills the fresh handle as a mutation.
+    bool filled = false;
+    visit_writable(*loaded, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename variant_type_::executor_t* const typed = executor_of(variant, executor, call_executor, outcome);
+        if (!typed) return;
+        progress_ticks_t ticks {progress, specialized_index {variant}.shards_count()};
+        status_t const status = specialized_index {variant}.load(source, *typed, ticks);
+        filled = succeeded(status) || propagate_error(status, outcome);
+    });
     if (!filled) return delete loaded, void();
     *index = loaded;
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -3230,7 +3204,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     key_predicate_t keyed {arguments->predicate};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if (is_vram_index<variant_type_> && keyed.predicate.callback)
+            if (device_of(variant) != host_device_k && keyed.predicate.callback)
                 propagate_error(usearch_status_device_k, outcome, "A host predicate cannot narrow a device walk");
             else {
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
@@ -3265,10 +3239,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                             return view.search(rows, executor, config, keys, distances, counts, predicate);
                         });
                 };
-                if constexpr (is_vram_index<variant_type_>) {
-                    if (!search_with(dummy_predicate_t {})) return;
-                }
-                else if (!(keyed.predicate.callback ? search_with(keyed) : search_with(dummy_predicate_t {}))) return;
+                if (!(keyed.predicate.callback ? search_with(keyed) : search_with(dummy_predicate_t {}))) return;
                 *arguments->matches = landing.view();
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3308,25 +3279,24 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
                 return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
             std::size_t total = 0;
             us::dense::rows_span_t const target {rows, entries, dimensions, row_bytes, target_dtype};
-            if constexpr (is_vram_index<variant_type_>) {
-                // A device exports its stored scalar alone, so rows cast on the host before they
-                // land.
-                nk_dtype_t const stored_dtype = variant_type_::vector_dtype_k;
-                std::size_t const stored_bytes = us::dense::packed_bytes(stored_dtype, dimensions);
-                std::byte* const stored = carve<std::byte>(arena->memory, entries * stored_bytes);
-                if (!stored)
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                if (status_t const got = view.get({&key, 1}, {stored, entries, dimensions, stored_bytes, stored_dtype},
-                                                  entries, {&total, 1}, *executor);
-                    failed(got))
-                    return propagate_error(got, outcome, "Failed to export the rows"), void();
+            // Rows in another scalar than the stored one are read in the stored one, which every
+            // face exports, and cast on the host before they land.
+            nk_dtype_t const stored_dtype = variant_type_::vector_dtype_k;
+            std::size_t const stored_bytes = us::dense::packed_bytes(stored_dtype, dimensions);
+            std::byte* const stored = stored_dtype == target_dtype
+                                          ? rows
+                                          : carve<std::byte>(arena->memory, entries * stored_bytes);
+            if (!stored)
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+            if (status_t const got = view.get({&key, 1}, {stored, entries, dimensions, stored_bytes, stored_dtype},
+                                              entries, {&total, 1}, *executor);
+                failed(got))
+                return propagate_error(got, outcome, "Failed to export the rows"), void();
+            if (stored != rows)
                 for (std::size_t row = 0; row != min_of(total, entries); ++row)
                     us::dense::export_row<nk_cap_any_k>(stored + row * stored_bytes, stored_dtype, target, row);
-                if (status_t const landed = drained(*arena, publish(*arena, rows, entries * row_bytes)); failed(landed))
-                    return propagate_error(landed, outcome, "Failed to land the rows on the device"), void();
-            }
-            else if (status_t const got = view.get({&key, 1}, target, entries, {&total, 1}, *executor); failed(got))
-                return propagate_error(got, outcome, "Failed to export the rows"), void();
+            if (status_t const landed = drained(*arena, publish(*arena, rows, entries * row_bytes)); failed(landed))
+                return propagate_error(landed, outcome, "Failed to land the rows on the device"), void();
             *arguments->vectors = {rows, row_bytes, dimensions, scalar};
             if (arguments->written) *arguments->written = min_of(total, entries);
             propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -3358,43 +3328,36 @@ USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream
 USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
-    if (arguments->start)
+    if (arguments->starts_count && !arguments->starts)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The starts must name keys"), void();
+    if (arguments->starts_count)
         return propagate_error(usearch_status_unsupported_k, outcome, "No residency steps through graph links yet"),
                void();
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if constexpr (is_vram_index<variant_type_>)
-                propagate_error(usearch_status_unsupported_k, outcome,
-                                "A cursor walks host rows; VRAM rows are read back by key or search");
-            else {
-                usearch_dense_cursor_t const opened = new (std::nothrow)
-                    usearch_dense_cursor_handle_t {decltype(usearch_dense_cursor_handle_t::walk) {
-                                                       std::in_place_type<typename variant_type_::cursor_t>, variant},
-                                                   arguments->index,
-                                                   {}};
-                if (!opened)
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor"),
-                           void();
-                *arguments->cursor = opened;
-                propagate_error(usearch_status_success_k, outcome, nullptr);
-            }
-        },
+    usearch_dense_cursor_t const opened = new (std::nothrow) usearch_dense_cursor_handle_t {{}, arguments->index, {}};
+    if (!opened)
+        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor"), void();
+    status_t const placed = std::visit(
+        [&](auto& variant) noexcept { return specialized_index {variant}.open(opened->walk); },
         arguments->index->variant);
+    if (failed(placed)) return delete opened, propagate_error(placed, outcome), void();
+    *arguments->cursor = opened;
+    propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
 USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     if (submitted<usearch_dense_cursor_next>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
-    usearch_rows_view_t* const vectors = arguments->vectors;
     std::size_t const wanted = arguments->wanted;
     *arguments->written = 0;
     *arguments->keys = {};
-    if (vectors) *vectors = {};
+    if (arguments->links) *arguments->links = {};
     if (!arguments->cursor)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor must not be null"), void();
     if (arguments->index != arguments->cursor->opened_on)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
                void();
+    if (arguments->links)
+        return propagate_error(usearch_status_unsupported_k, outcome, "No residency pulls graph links yet"), void();
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                       host_device_k, {}, outcome);
     if (!arena) return;
@@ -3405,45 +3368,27 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
     std::visit(
         [&]<typename cursor_type_>(cursor_type_& walk) noexcept {
             if constexpr (std::is_same_v<cursor_type_, std::monostate>)
-                propagate_error(usearch_status_unsupported_k, outcome,
-                                "A cursor walks host rows; VRAM rows are read back by key or search");
+                propagate_error(usearch_status_internal_k, outcome, "The cursor lost its variant");
             else {
                 using key_t = typename cursor_type_::key_t;
                 using indexes_t = typename cursor_type_::indexes_t;
                 static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
                 // A handle never changes its variant, so it is still the one the cursor opened on.
                 auto& indexes = std::get<indexes_t>(arguments->index->variant);
-                std::size_t const dimensions = indexes.dimensions();
-                nk_dtype_t const target_dtype = vectors ? rows_dtype_of(arguments->outputs_scalar, dimensions, outcome)
-                                                        : nk_dtype_unknown_k;
-                if (vectors && target_dtype == nk_dtype_unknown_k) return;
                 if (!wanted) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                // An NVMe cursor reads its rows through an executor, a RAM one copies them.
                 usearch_executor_handle_t call_executor;
-                [[maybe_unused]] typename indexes_t::executor_t* executor = nullptr;
-                if constexpr (is_nvme_index<indexes_t>) {
-                    executor = executor_of(indexes, arguments->executor, call_executor, outcome);
-                    if (!executor) return;
-                }
-                std::size_t const row_bytes = vectors ? us::dense::packed_bytes(target_dtype, dimensions) : 0;
+                typename indexes_t::executor_t* const executor = executor_of(indexes, arguments->executor,
+                                                                             call_executor, outcome);
+                if (!executor) return;
                 usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, wanted);
-                std::byte* const rows = vectors && keys ? carve<std::byte>(arena->memory, wanted * row_bytes) : nullptr;
-                if (!keys || (vectors && !rows))
+                if (!keys)
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
                 std::span<key_t> const identities {reinterpret_cast<key_t*>(keys), wanted};
-                us::dense::rows_span_t const landing = vectors ? us::dense::rows_span_t {rows, wanted, dimensions,
-                                                                                         row_bytes, target_dtype}
-                                                               : us::dense::rows_span_t {};
-                expected<std::size_t> read {0, status_t::success_k};
-                if constexpr (is_nvme_index<indexes_t>) {
-                    auto const [scanned, status] = walk.read(indexes, identities, landing, *executor);
-                    read = {scanned.count, status};
-                }
-                else read = {walk.read(indexes, identities, landing), status_t::success_k};
-                if (!read) return propagate_error(read.status, outcome, "Failed to export the rows"), void();
+                expected<std::size_t> const read = specialized_index {indexes}.read(
+                    walk, identities, us::dense::rows_span_t {}, *executor);
+                if (!read) return propagate_error(read.status, outcome, "Failed to export the keys"), void();
                 if (read.value) {
                     *arguments->keys = {keys, sizeof(usearch_key_t)};
-                    if (vectors) *vectors = {rows, row_bytes, dimensions, arguments->outputs_scalar};
                     *arguments->written = read.value;
                 }
                 propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -3522,6 +3467,15 @@ USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_
                void();
     if (arguments->count && !arguments->donors)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
+    if (arguments->count && arguments->receivers_count)
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "A refinement absorbs donors or splits into receivers, never both"),
+               void();
+    if (arguments->receivers_count && (arguments->receivers_count < 2 || !arguments->receivers))
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more"),
+               void();
+    if (arguments->receivers_count)
+        return propagate_error(usearch_status_unsupported_k, outcome, "No residency splits an index yet"), void();
     visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
         usearch_executor_handle_t call_executor;
         typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
@@ -3643,6 +3597,18 @@ USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments) {
     propagate_error(usearch_status_unsupported_k, outcome, "No residency samples yet");
 }
 
+USEARCH_EXPORT void usearch_dense_split(usearch_dense_split_t* arguments) {
+    if (submitted<usearch_dense_split>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->reachability) *arguments->reachability = {};
+    if (arguments->stats) *arguments->stats = {};
+    if (arguments->count < 2 || !arguments->receivers)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more"),
+               void();
+    propagate_error(usearch_status_unsupported_k, outcome, "No residency splits an index yet");
+}
+
 #pragma endregion Cursors and Absorbing
 
 #pragma region Linear Algebra
@@ -3762,8 +3728,6 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                 "A softmax weighs logits, so the kind must be inner product");
             else if (!arguments->value_lookup)
                 propagate_error(usearch_status_invalid_argument_k, outcome, "The value lookup must be set");
-            else if constexpr (gpu_vendor_of_index<variant_type_>() == gpu_vendor_t::apple_k)
-                propagate_error(usearch_status_unsupported_k, outcome, "A Metal kernel cannot call the value lookup");
             else {
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
                                                                   arguments->executor, device_of(variant),
@@ -3876,20 +3840,8 @@ USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffe
     // place.
     bytes_view_t source = as_bytes(arguments->buffer);
     growing_buffer<byte_t> staged {global_allocator};
-    int const nvidia = cuda_device_of(source.data()), amd = nvidia < 0 ? hip_device_of(source.data()) : -1;
-    if (nvidia >= 0 || amd >= 0) {
-        if (failed(staged.resize_uninitialized(source.size())))
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to stage the buffer"), void();
-        bool const copied = nvidia >= 0 ? cuda_set_device(nvidia) == cuda_success_k &&
-                                              cuda_copy(staged.data(), source.data(), source.size()) == cuda_success_k
-                                        : hip_set_device(amd) == hip_success_k &&
-                                              hip_api().copy(staged.data(), source.data(), source.size(),
-                                                             hip_copy_device_to_host_k) == hip_success_k;
-        if (!copied)
-            return propagate_error(status_t::device_error_k, outcome, "Failed to read the buffer off its device"),
-                   void();
-        source = to_span(staged);
-    }
+    if (status_t const read = stage_on_host(source, staged); failed(read))
+        return propagate_error(read, outcome, "Failed to read the buffer off its device"), void();
     load_dense_index(source, arguments->vram, arguments->executor, arguments->progress, arguments->index, outcome);
 }
 
@@ -3900,16 +3852,12 @@ USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if constexpr (is_nvme_index<variant_type_>)
-                propagate_error(usearch_status_unsupported_k, outcome, "An NVMe view already is its checkpoint");
-            else {
-                usearch_executor_handle_t call_executor;
-                typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                                 call_executor, outcome);
-                if (!executor) return;
-                progress_ticks_t ticks {arguments->progress, specialized_index {variant}.shards_count()};
-                propagate_error(specialized_index {variant}.save(as_text(arguments->path), *executor, ticks), outcome);
-            }
+            usearch_executor_handle_t call_executor;
+            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
+                                                                             call_executor, outcome);
+            if (!executor) return;
+            progress_ticks_t ticks {arguments->progress, specialized_index {variant}.shards_count()};
+            propagate_error(specialized_index {variant}.save(as_text(arguments->path), *executor, ticks), outcome);
         },
         arguments->index->variant);
 }
@@ -3920,32 +3868,28 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
     *arguments->monolith = {};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if constexpr (is_nvme_index<variant_type_>)
-                propagate_error(usearch_status_unsupported_k, outcome, "An NVMe view already is its checkpoint");
-            else {
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
-                                                                  arguments->executor, device_of(variant), {}, outcome);
-                if (!arena) return;
-                usearch_executor_handle_t call_executor;
-                typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                                 call_executor, outcome);
-                if (!executor) return;
-                auto const [length, status] = specialized_index {variant}.storage_requirements();
-                if (failed(status)) return propagate_error(status, outcome), void();
-                std::byte* monolith = carve<std::byte>(arena->memory, length);
-                if (!monolith)
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                progress_ticks_t ticks {arguments->progress, specialized_index {variant}.shards_count()};
-                status_t const saved = specialized_index {variant}.save(
-                    bytes_span_t {reinterpret_cast<byte_t*>(monolith), length}, *executor, ticks);
-                if (failed(saved)) return propagate_error(saved, outcome), void();
-                // A VRAM monolith is written on the host, then lands on the arena's device
-                // in one upload.
-                if (status_t const landed = drained(*arena, publish(*arena, monolith, length)); failed(landed))
-                    return propagate_error(landed, outcome, "Failed to land the monolith on the device"), void();
-                *arguments->monolith = {reinterpret_cast<uint8_t const*>(monolith), length};
-                propagate_error(usearch_status_success_k, outcome, nullptr);
-            }
+            usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                              device_of(variant), {}, outcome);
+            if (!arena) return;
+            usearch_executor_handle_t call_executor;
+            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
+                                                                             call_executor, outcome);
+            if (!executor) return;
+            auto const [length, status] = specialized_index {variant}.storage_requirements();
+            if (failed(status)) return propagate_error(status, outcome), void();
+            std::byte* monolith = carve<std::byte>(arena->memory, length);
+            if (!monolith)
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+            progress_ticks_t ticks {arguments->progress, specialized_index {variant}.shards_count()};
+            status_t const saved = specialized_index {variant}.save(
+                bytes_span_t {reinterpret_cast<byte_t*>(monolith), length}, *executor, ticks);
+            if (failed(saved)) return propagate_error(saved, outcome), void();
+            // A VRAM monolith is written on the host, then lands on the arena's device in one
+            // upload.
+            if (status_t const landed = drained(*arena, publish(*arena, monolith, length)); failed(landed))
+                return propagate_error(landed, outcome, "Failed to land the monolith on the device"), void();
+            *arguments->monolith = {reinterpret_cast<uint8_t const*>(monolith), length};
+            propagate_error(usearch_status_success_k, outcome, nullptr);
         },
         arguments->index->variant);
 }
@@ -4051,9 +3995,6 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
     executor->executor = std::move(spawned);
     hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
 }
-
-static_assert(static_cast<u32_t>(gpu_vendor_t::apple_k) == usearch_gpu_vendor_apple_k);
-static_assert(static_cast<u32_t>(gpu_class_t::apple_metal10_k) == usearch_gpu_class_apple_metal10_k);
 
 USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {
     call_outcome_t outcome(arguments->outcome);

@@ -22,10 +22,13 @@
  *  so a load or view checks only that weights are named where the kind needs them, and a view
  *  copies its checkpoint rather than mapping it. Traversal statistics are plausible fiction:
  *  shaped correctly, invented numerically. A checkpoint is a binary blob of this file's own memory
- *  image, readable by nothing else. Keeping no edges, a cursor opened at a key steps to its
- *  entries' exact nearest at the frozen connectivity, and a sample links each draw to its exact
- *  nearest earlier draws - the lists a perfect graph would hold, where the engine's are the ones it
- *  stored.
+ *  image, readable by nothing else.
+ *
+ *  Keeping no edges, the stand-in links every one of its entries to its exact nearest at the frozen
+ *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
+ *  cursor walks those lists breadth-first from its start keys, a split grows its parts over them,
+ *  each receiver keeping the source's storage order, and a sample links each draw to its exact
+ *  nearest earlier draws.
  */
 
 #include <algorithm> // `std::stable_sort`, `std::min`, `std::max`
@@ -86,24 +89,15 @@ static_assert(std::is_nothrow_move_constructible_v<sequence_entry_t>, "reallocat
 
 using sequence_index_t = handle<sequence_payload_t, sequence_index_options_t>;
 
-struct sequence_cursor_t {
+using sequence_cursor_t = graph_cursor<sequence_index_t>;
 
-    /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
-    sequence_index_t const* opened_on;
-
-    /** The next entry to hand out. */
-    std::size_t position;
-
-    /** The creation watermark, which later insertions cannot raise, or the @c linked count. */
-    std::size_t limit;
-
-    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    std::atomic_flag pulling;
-
-    /** The entries a step from a key yields, in link order; empty for a scan, which yields them as
-     *  stored. */
-    std::vector<std::size_t> linked;
-};
+/** Whether a receiver frozen at @p receiver takes a part of an index frozen at @p index: the same
+ *  kind, weights, window widths and connectivity. */
+static bool same_kind(sequence_index_options_t const& index, sequence_index_options_t const& receiver) {
+    return index.metric == receiver.metric && index.connectivity == receiver.connectivity &&
+           index.substitution == receiver.substitution && index.gap_open == receiver.gap_open &&
+           index.gap_extend == receiver.gap_extend && index.window_widths == receiver.window_widths;
+}
 
 /** Whether the kind scores without scoring parameters, and so refuses any weights. */
 static bool levenshtein_metric(usearch_sequence_metric_t metric) {
@@ -595,6 +589,13 @@ void usearch_sequence_init_vram(usearch_sequence_init_vram_t* arguments) {
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
+void usearch_sequence_load_vram(usearch_sequence_load_vram_t* arguments) {
+    if (through_executor<usearch_sequence_load_vram>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+}
+
 void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
     if (through_executor<usearch_sequence_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
@@ -842,6 +843,12 @@ struct usearch_sequence_refinement_handle_t {
     /** Donors landed so far, and entries the sweep visited so far. */
     std::size_t landed;
     std::size_t swept;
+
+    /** The receivers a split lands in, the seed picking its roots, and the parts landed so far. */
+    usearch_sequence_index_t const* receivers;
+    std::size_t receivers_count;
+    us::utilities::u64_t seed;
+    std::size_t parted;
 };
 
 void usearch_sequence_refinement_init(usearch_sequence_refinement_init_t* arguments) {
@@ -860,8 +867,11 @@ void usearch_sequence_refinement_init(usearch_sequence_refinement_init_t* argume
                       "An index cannot absorb itself", outcome))
             return;
     }
+    if (reject_receivers(*arguments, outcome)) return;
     usearch_sequence_refinement_t const refinement = new (std::nothrow)
-        usearch_sequence_refinement_handle_t {&index, arguments->donors, arguments->count, 0, 0};
+        usearch_sequence_refinement_handle_t {&index, arguments->donors,    arguments->count,           0,
+                                              0,      arguments->receivers, arguments->receivers_count, arguments->seed,
+                                              0};
     if (reject_if(!refinement, usearch_status_out_of_memory_k, "The refinement could not be allocated", outcome))
         return;
     *arguments->refinement = refinement;
@@ -886,6 +896,18 @@ void usearch_sequence_refinement_next(usearch_sequence_refinement_next_t* argume
             return;
         for (sequence_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
         delete std::exchange(refinement.donors[refinement.landed], nullptr);
+    }
+    if (refinement.parted != refinement.receivers_count) {
+        sequence_search_scratch_t scratch;
+        auto const score = [&](bytes_view_t first, bytes_view_t second) {
+            return distance(index, first, second, scratch);
+        };
+        writers.unlock();
+        std::span<usearch_sequence_index_handle_t* const> const receivers {refinement.receivers,
+                                                                           refinement.receivers_count};
+        if (!split_into(index, receivers, refinement.seed, score, same_kind, outcome)) return;
+        refinement.parted = refinement.receivers_count;
+        writers.lock();
     }
     // Each call continues the sweep where the last one stopped.
     std::size_t const rows = index.entries.size();
@@ -918,16 +940,14 @@ void usearch_sequence_refinement_finish(usearch_sequence_refinement_finish_t* ar
 void usearch_sequence_cursor_init(usearch_sequence_cursor_init_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
+    if (reject_if(arguments->starts_count && !arguments->starts, usearch_status_invalid_argument_k,
+                  "The starts must name keys", outcome))
+        return;
     usearch_sequence_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    sequence_search_scratch_t scratch;
-    auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
-    std::vector<std::size_t> linked;
-    if (arguments->start) linked = linked_rows(index, *arguments->start, score);
-    std::size_t const limit = arguments->start ? linked.size() : index.entries.size();
-    usearch_sequence_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_sequence_cursor_handle_t {&index, 0, limit, {}, std::move(linked)};
+    usearch_sequence_cursor_handle_t* const cursor = new (std::nothrow) usearch_sequence_cursor_handle_t {};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
+    open_walk(*cursor, index, arguments->starts, arguments->starts_count);
     *arguments->cursor = cursor;
 }
 
@@ -936,7 +956,7 @@ void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->written = 0;
     *arguments->keys = {};
-    if (arguments->sequences) *arguments->sequences = {};
+    if (arguments->links) *arguments->links = {};
     usearch_sequence_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
@@ -948,18 +968,9 @@ void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
                   "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
-    std::size_t const written = std::min(arguments->wanted, cursor.limit - cursor.position);
-    std::vector<std::size_t> rows(written);
-    for (std::size_t row = 0; row != written; ++row)
-        rows[row] = cursor.linked.empty() ? cursor.position + row : cursor.linked[cursor.position + row];
-    usearch_key_t* const keys = carve<usearch_key_t>(*arena, written, outcome);
-    // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
-    if (keys && (!arguments->sequences || land_entries(index, rows, *arena, *arguments->sequences, outcome))) {
-        for (std::size_t row = 0; row != written; ++row) keys[row] = index.entries[rows[row]].key;
-        cursor.position += written;
-        *arguments->keys = {keys, sizeof(usearch_key_t)};
-        *arguments->written = written;
-    }
+    sequence_search_scratch_t scratch;
+    auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
+    pull_walk(*arguments, cursor, score, *arena, outcome);
     cursor.pulling.clear(std::memory_order_release);
 }
 
@@ -990,6 +1001,18 @@ void usearch_sequence_sample(usearch_sequence_sample_t* arguments) {
     std::shared_lock readers(index.mutex);
     land_sample(*arguments, std::span<sequence_entry_t const>(index.entries),
                 std::span<bytes_view_t const>(anchor_views), score, *arena, outcome);
+}
+
+void usearch_sequence_split(usearch_sequence_split_t* arguments) {
+    if (through_executor<usearch_sequence_split>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->reachability) *arguments->reachability = {};
+    usearch_sequence_index_handle_t& index = *arguments->index;
+    sequence_search_scratch_t scratch;
+    auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
+    land_split(*arguments, index, score, same_kind, outcome);
 }
 
 void usearch_sequence_save(usearch_sequence_save_t* arguments) {

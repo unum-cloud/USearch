@@ -305,8 +305,7 @@ typedef enum usearch_scalar_t {
      *  nibble and odd ones in the high. */
     usearch_scalar_i4x2_k = 11,
 
-    /** 32-bit signed integer spanning ±2.15e9, every code a number - the Earth-fixed centimetres a
-     *  geospatial cursor exports. */
+    /** 32-bit signed integer spanning ±2.15e9, every code a number. */
     usearch_scalar_i32_k = 12,
 
     /** 8-bit unsigned integer spanning 0 to 255, every code a number. */
@@ -389,9 +388,9 @@ typedef struct usearch_tape_view_t {
      *  @c written + 1 for an output. */
     size_t const* offsets;
 
-    /** The scalar type the elements hold: @c u8 for sequences, @c f64 degrees for geospatial inputs
-     *  and @c i32 Earth-fixed centimetres for their cursor, and any kind for shape points,
-     *  converted on the way in where it differs from storage. */
+    /** The scalar type the elements hold: @c u8 for sequences, @c f64 degrees for geospatial
+     *  inputs, and any kind for shape points, converted on the way in where it differs from
+     *  storage. */
     usearch_scalar_t scalar;
 } usearch_tape_view_t;
 
@@ -440,6 +439,21 @@ typedef struct usearch_matches_tape_view_t {
     /** The call's @c count + 1 non-decreasing offsets into @c keys and @c scores. */
     size_t const* offsets;
 } usearch_matches_tape_view_t;
+
+/**
+ *  @brief A ragged run of keys a call wrote into its arena, for verbs whose rows name as many keys
+ *      as each entry links to: keys end to end, and one more offset than rows.
+ *
+ *  Row @c i spans @c offsets[i] up to @c offsets[i+1], so the last offset is the total.
+ */
+typedef struct usearch_keys_tape_view_t {
+
+    /** Every row's keys, end to end. */
+    usearch_key_t const* keys;
+
+    /** The call's @c written + 1 non-decreasing offsets into @c keys. */
+    size_t const* offsets;
+} usearch_keys_tape_view_t;
 
 /** The CPU families USearch ships tuned variants for - dispatch reports its pick in
  *  this vocabulary, and callers may pin one. Each class bundles the compute features,

@@ -4,7 +4,8 @@
  *  @date July 22, 2026
  *  @brief The device bodies every dense VRAM index compiled by NVCC or HIP-Clang shares: the views,
  *      the greedy walk, the diversity selection, the back-linker, insertion, refinement, the
- *      attention fold, the reachability audits, and the sharded search's rankings.
+ *      attention fold, the reachability audits, the sharded search's rankings, and a split's
+ *      partition and scatter.
  *
  *  Every body here is templated on a quads kit and its vendor's warp policy, or on that warp policy
  *  alone; see @c vram_queue.cuh for what a warp policy provides. Walks and builders also take a
@@ -2312,5 +2313,240 @@ __device__ __forceinline__ void vram_reconnect_island(u32_t* neighbors, u32_t co
 }
 
 #pragma endregion Audits
+
+#pragma region Splits
+
+/** Places the first @p roots_count parts of a split: part @c p takes row @p roots[p], alone in
+ *  @p frontier. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_partition_seeds(u32_t const* roots, u32_t roots_count, u32_t* labels,
+                                                     vram_bitset_t frontier, u32_t* part_sizes) noexcept {
+    u32_t const part = blockIdx.x * blockDim.x + threadIdx.x;
+    if (part >= roots_count) return;
+    labels[roots[part]] = part;
+    vram_bitset_insert<warp_type_>(frontier, roots[part]);
+    part_sizes[part] = 1;
+}
+
+/** A growth round's first pass, one warp per frontier row: a row of a part with room proposes
+ *  itself to every unplaced row it links to, and each keeps its lowest-ID proposer, so no warp
+ *  order sways the round. A round whose @p placed_before reads zero follows one that placed nothing
+ *  and leaves at entry, as every later pass of it does. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_partition_propose(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
+                                                       u32_t const* labels, u32_t* proposals, vram_bitset_t frontier,
+                                                       u32_t const* part_sizes, u32_t part_capacity,
+                                                       u32_t const* placed_before) noexcept {
+    if (placed_before && !*placed_before) return;
+    vram_grid_warp_t const warp = vram_grid_warp<warp_type_>();
+    for (u32_t row = warp.index; row < rows_count; row += warp.count) {
+        if (!vram_bitset_contains<warp_type_>(frontier, row) || part_sizes[labels[row]] >= part_capacity) continue;
+        vram_for_each_link<warp_type_>(neighbors, connectivity, rows_count, row, warp.lane, [&](u32_t target) noexcept {
+            if (labels[target] != node_id_unknown_k) return;
+            for (u32_t held = warp_type_::load_relaxed(proposals[target]); row < held;
+                 held = warp_type_::load_relaxed(proposals[target]))
+                if (warp_type_::compare_exchange_relaxed(proposals[target], held, row)) return;
+        });
+    }
+}
+
+/** A growth round's second pass, one lane per row: counts the rows proposed to each part in
+ *  @p proposed, the lanes of a warp proposed to one part adding at once. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_partition_tally(u32_t const* labels, u32_t const* proposals, u32_t rows_count,
+                                                     u32_t* proposed, u32_t const* placed_before) noexcept {
+    if (placed_before && !*placed_before) return;
+    u32_t const lane = threadIdx.x % warp_type_::width_k, threads = gridDim.x * blockDim.x;
+    // The trip count is warp-uniform, so every lane joins each vote.
+    for (u32_t first = blockIdx.x * blockDim.x + threadIdx.x - lane; first < rows_count; first += threads) {
+        u32_t const row = first + lane;
+        u32_t const proposal = row < rows_count ? proposals[row] : node_id_unknown_k;
+        u32_t const part = proposal != node_id_unknown_k ? labels[proposal] : node_id_unknown_k;
+        typename warp_type_::mask_t const peers = warp_type_::match_any(part);
+        if (part != node_id_unknown_k && warp_type_::first(peers) == lane)
+            warp_type_::fetch_add_relaxed(proposed[part], warp_type_::count(peers));
+    }
+}
+
+/** A growth round's third pass, one lane per row: places every row proposed to a part with room for
+ *  the round's whole tally, in @p next_frontier, counting them in @p placed. The rows a tally would
+ *  overflow stay proposed for @ref vram_partition_fill. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_partition_accept(u32_t* labels, u32_t* proposals, u32_t rows_count,
+                                                      vram_bitset_t next_frontier, u32_t const* part_sizes,
+                                                      u32_t const* proposed, u32_t part_capacity, u32_t* placed,
+                                                      u32_t const* placed_before) noexcept {
+    if (placed_before && !*placed_before) return;
+    u32_t const lane = threadIdx.x % warp_type_::width_k, threads = gridDim.x * blockDim.x;
+    for (u32_t first = blockIdx.x * blockDim.x + threadIdx.x - lane; first < rows_count; first += threads) {
+        u32_t const row = first + lane;
+        u32_t const proposal = row < rows_count ? proposals[row] : node_id_unknown_k;
+        // Proposers were placed in earlier rounds, so no lane rewrites a label another one reads.
+        u32_t const part = proposal != node_id_unknown_k ? labels[proposal] : node_id_unknown_k;
+        bool const placing = part != node_id_unknown_k && proposed[part] <= part_capacity - part_sizes[part];
+        if (placing) {
+            labels[row] = part;
+            proposals[row] = node_id_unknown_k;
+            vram_bitset_insert<warp_type_>(next_frontier, row);
+        }
+        typename warp_type_::mask_t const placed_lanes = warp_type_::ballot(placing);
+        if (lane == 0 && placed_lanes) warp_type_::fetch_add_relaxed(*placed, warp_type_::count(placed_lanes));
+    }
+}
+
+/** A growth round's last pass, one block per part: a part whose tally fit takes it into its size,
+ *  and one the tally overflows places its lowest-ID proposed rows up to its room, in
+ *  @p next_frontier, and fills up. Either way the part's proposals and tally clear for the next
+ *  round. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_partition_fill(u32_t* labels, u32_t* proposals, u32_t rows_count,
+                                                    vram_bitset_t next_frontier, u32_t* part_sizes, u32_t* proposed,
+                                                    u32_t part_capacity, u32_t* placed,
+                                                    u32_t const* placed_before) noexcept {
+    if (placed_before && !*placed_before) return;
+    __shared__ u32_t warp_counts[vram_warps_per_block_k];
+    u32_t const part = blockIdx.x, lane = threadIdx.x % warp_type_::width_k, warp = threadIdx.x / warp_type_::width_k;
+    u32_t const warps = blockDim.x / warp_type_::width_k;
+    u32_t const wanted = proposed[part], room = part_capacity - part_sizes[part];
+    __syncthreads();
+    if (wanted > room)
+        for (u32_t first = 0, taken = 0; first < rows_count; first += blockDim.x) {
+            u32_t const row = first + threadIdx.x;
+            u32_t const proposal = row < rows_count ? proposals[row] : node_id_unknown_k;
+            bool const proposed_here = proposal != node_id_unknown_k && labels[proposal] == part;
+            typename warp_type_::mask_t const voted = warp_type_::ballot(proposed_here);
+            if (lane == 0) warp_counts[warp] = warp_type_::count(voted);
+            __syncthreads();
+            u32_t rank = taken + warp_type_::count(voted & warp_type_::below(lane)), total = 0;
+            for (u32_t other = 0; other != warps; ++other) {
+                if (other < warp) rank += warp_counts[other];
+                total += warp_counts[other];
+            }
+            if (proposed_here) {
+                if (rank < room) {
+                    labels[row] = part;
+                    vram_bitset_insert<warp_type_>(next_frontier, row);
+                }
+                proposals[row] = node_id_unknown_k;
+            }
+            taken += total;
+            __syncthreads();
+        }
+    if (threadIdx.x != 0) return;
+    part_sizes[part] += wanted > room ? room : wanted;
+    proposed[part] = 0;
+    if (wanted > room) warp_type_::fetch_add_relaxed(*placed, room);
+}
+
+/** Places every row no growth round reached, one block walking them in ID order: each joins the
+ *  part smallest at its turn, the lowest-indexed among equals. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_partition_islands(u32_t* labels, u32_t rows_count, u32_t* part_sizes,
+                                                       u32_t parts_count) noexcept {
+    __shared__ u32_t warp_counts[vram_warps_per_block_k];
+    __shared__ u32_t picks[vram_warps_per_block_k * warp_type_::width_k];
+    u32_t const lane = threadIdx.x % warp_type_::width_k, warp = threadIdx.x / warp_type_::width_k;
+    u32_t const warps = blockDim.x / warp_type_::width_k;
+    for (u32_t first = 0; first < rows_count; first += blockDim.x) {
+        u32_t const row = first + threadIdx.x;
+        bool const unplaced = row < rows_count && labels[row] == node_id_unknown_k;
+        typename warp_type_::mask_t const voted = warp_type_::ballot(unplaced);
+        if (lane == 0) warp_counts[warp] = warp_type_::count(voted);
+        __syncthreads();
+        u32_t rank = warp_type_::count(voted & warp_type_::below(lane)), total = 0;
+        for (u32_t other = 0; other != warps; ++other) {
+            if (other < warp) rank += warp_counts[other];
+            total += warp_counts[other];
+        }
+        if (threadIdx.x == 0)
+            for (u32_t pick = 0; pick != total; ++pick) {
+                u32_t smallest = 0;
+                for (u32_t part = 1; part != parts_count; ++part)
+                    if (part_sizes[part] < part_sizes[smallest]) smallest = part;
+                ++part_sizes[smallest];
+                picks[pick] = smallest;
+            }
+        __syncthreads();
+        if (unplaced) labels[row] = picks[rank];
+        __syncthreads();
+    }
+}
+
+/** Marks in @p seams every row linking into another part, one warp per row. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_partition_seams(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
+                                                     u32_t const* labels, vram_bitset_t seams) noexcept {
+    vram_grid_warp_t const warp = vram_grid_warp<warp_type_>();
+    for (u32_t row = warp.index; row < rows_count; row += warp.count) {
+        u32_t const part = labels[row];
+        bool across = false;
+        vram_for_each_link<warp_type_>(neighbors, connectivity, rows_count, row, warp.lane,
+                                       [&](u32_t target) noexcept { across = across || labels[target] != part; });
+        if (warp_type_::any(across) && warp.lane == 0) vram_bitset_insert<warp_type_>(seams, row);
+    }
+}
+
+/** Moves every row's neighbors into its part's receiver, one warp per row, at the row its slot
+ *  names past the part's first slot, each part @p part_capacity slots wide: the links inside the
+ *  part rebased through their own slots and packed to the front, the links across dropped, and a
+ *  row nothing survived in pointing at itself. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_split_links(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
+                                                 u32_t const* slots, u32_t part_capacity,
+                                                 u32_t* const* part_neighbors) noexcept {
+    vram_grid_warp_t const warp = vram_grid_warp<warp_type_>();
+    for (u32_t row = warp.index; row < rows_count; row += warp.count) {
+        u32_t const part = slots[row] / part_capacity, position = slots[row] % part_capacity;
+        u32_t const* const from = vram_row(neighbors, row, connectivity);
+        u32_t* const into = vram_row(part_neighbors[part], position, connectivity);
+        u32_t kept = 0;
+        for (u32_t base = 0; base < connectivity; base += warp_type_::width_k) { // Warp-uniform trip count.
+            u32_t const slot = base + warp.lane;
+            u32_t const id = slot < connectivity ? from[slot] : node_id_unknown_k;
+            u32_t const target = id < rows_count && id != row ? slots[id] : node_id_unknown_k;
+            bool const inside = target != node_id_unknown_k && target / part_capacity == part;
+            typename warp_type_::mask_t const survivors = warp_type_::ballot(inside);
+            if (inside)
+                into[kept + warp_type_::count(survivors & warp_type_::below(warp.lane))] = target % part_capacity;
+            kept += warp_type_::count(survivors);
+        }
+        for (u32_t slot = kept + warp.lane; slot < connectivity; slot += warp_type_::width_k)
+            into[slot] = node_id_unknown_k;
+        if (!kept && warp.lane == 0) into[0] = position;
+    }
+}
+
+/** Moves every row's ragged value into its part's receiver, one warp per row, from the bytes
+ *  @p offsets bound into the receiver's tape at its own @p part_offsets, laid out in slot order. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_split_tape(byte_t const* values, u64_t const* offsets, u32_t rows_count,
+                                                u32_t const* slots, u32_t part_capacity, byte_t* const* part_values,
+                                                u64_t const* const* part_offsets) noexcept {
+    vram_grid_warp_t const warp = vram_grid_warp<warp_type_>();
+    for (u32_t row = warp.index; row < rows_count; row += warp.count) {
+        u32_t const part = slots[row] / part_capacity, position = slots[row] % part_capacity;
+        byte_t const* const from = values + offsets[row];
+        byte_t* const into = part_values[part] + part_offsets[part][position];
+        u64_t const bytes = offsets[row + 1] - offsets[row];
+        for (u64_t byte = warp.lane; byte < bytes; byte += warp_type_::width_k) into[byte] = from[byte];
+    }
+}
+
+/** Moves every fixed-width row of @p row_words words into its part's receiver, one warp per row, at
+ *  the row its slot names. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_split_rows(u32_t const* rows, u32_t row_words, u32_t rows_count,
+                                                u32_t const* slots, u32_t part_capacity,
+                                                u32_t* const* part_rows) noexcept {
+    vram_grid_warp_t const warp = vram_grid_warp<warp_type_>();
+    for (u32_t row = warp.index; row < rows_count; row += warp.count) {
+        u32_t const part = slots[row] / part_capacity, position = slots[row] % part_capacity;
+        u32_t const* const from = vram_row(rows, row, row_words);
+        u32_t* const into = vram_row(part_rows[part], position, row_words);
+        for (u32_t word = warp.lane; word < row_words; word += warp_type_::width_k) into[word] = from[word];
+    }
+}
+
+#pragma endregion Splits
 
 } // namespace unum::usearch::dense

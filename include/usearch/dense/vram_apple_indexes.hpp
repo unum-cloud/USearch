@@ -23,7 +23,7 @@
 
 #include <memory>  // `std::unique_ptr` - an index holds atomics and never moves
 #include <span>    // `std::span` - the caller's keys & the merged ranking
-#include <utility> // `std::move`
+#include <utility> // `std::move`, `std::forward`
 
 #include "usearch/dense/sharded_indexes.hpp"
 #include "usearch/dense/vram_apple_index.hpp"
@@ -93,12 +93,12 @@ struct vram_apple_indexes
     }
 
     /** Grouped-query attention of every token over every shard, vetted as on NVIDIA and AMD, then
-     *  refused with @c unsupported_k, since a Metal kernel cannot call the caller's value lookup;
-     *  @c config_mismatch_k unless the shards score by dot. */
+     *  answered by the first shard's face on its own stream; @c config_mismatch_k unless the shards
+     *  score by dot. */
     template <typename value_lookup_type_>
-    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&&, f32_t,
-                                     rows_span_t outputs, std::span<softmax_state_t> carry, executor_t& executor,
-                                     search_config_t = {}) noexcept {
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
+                                     f32_t score_scale, rows_span_t outputs, std::span<softmax_state_t> carry,
+                                     executor_t& executor, search_config_t config = {}) noexcept {
         std::size_t const rows_count = queries.rows;
         if (this->kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = this->pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
@@ -108,7 +108,9 @@ struct vram_apple_indexes
             return {{}, status_t::config_mismatch_k};
         if (!rows_count) return {{}, status_t::success_k};
         if (queries.columns != this->dimensions()) return {{}, status_t::config_mismatch_k};
-        return {{}, status_t::unsupported_k};
+        traversal_context_t traversal {executor.stream(this->stream_of_(executor, 0)).handle.share()};
+        return shards_[0].index->attend(queries, head_count, std::forward<value_lookup_type_>(value_lookup),
+                                        score_scale, outputs, carry, traversal, config);
     }
 
     /**

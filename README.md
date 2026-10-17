@@ -229,8 +229,8 @@ The C++ core also exposes lower-level kits & custom folds.
 | Sequence, Shapes & Geospatial ²   |   ✓   |   -    |   -   |   -   |   -   |   -   |   -   |   -   |   -   |   -   |    -    |
 
 ✓ indicates a binding surface; engine availability still depends on residency, as detailed in the [C guide](c/README.md).
-¹ Merge & Streams expose the declared API, but their C engine verbs currently report unsupported.
-² The experimental sequence & shape C calls run the RAM engines, & the geospatial ones the stand-in.
+¹ Absorption runs in the C engine; streams expose the declared API, but their C engine verbs currently report unsupported.
+² The experimental sequence, shape & geospatial C calls run the engines, on RAM & NVIDIA GPUs.
 Kotlin & Scala consume the Java surface directly & match its column.
 
 Most calls name an Index, an Executor for scheduling, & an Arena for outputs whose size grows with the input.

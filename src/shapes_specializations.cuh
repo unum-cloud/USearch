@@ -107,6 +107,11 @@ struct shapes_ram_variant {
 
     explicit shapes_ram_variant(forkunion_allocator_t const& allocator) noexcept : index(allocator) {}
 
+    /** Reserves the entries @p arguments name. */
+    status_t reserve(usearch_shapes_reserve_t const& arguments) noexcept {
+        return index.reserve(arguments.entries).status;
+    }
+
     /** Empties the index and its point count. */
     status_t clear() noexcept {
         status_t const cleared = index.clear();
@@ -133,12 +138,20 @@ struct shapes_ram_variant {
         standard_atomic_ref<std::size_t>(total_points).fetch_add(donor.total_points, std::memory_order_relaxed);
     }
 
+    /** The points of one stored value. */
+    static std::size_t points_of(value_t const& value) noexcept { return value.max_points(); }
+
     /** Writes the @p entries points of one stored value into @p output in @p dtype, through
      *  @p scratch when the dtype is not the stored one. */
     status_t export_points(value_t const& value, nk_dtype_t dtype, void* output,
                            thread_allocator_t const& scratch) const noexcept;
     status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Serving a checkpoint in place and sampling answer @c unsupported_k until the index serves
+     *  them. */
+    status_t view(std::string_view) noexcept { return status_t::unsupported_k; }
+    status_t sample(usearch_shapes_sample_t const&) noexcept { return status_t::unsupported_k; }
 };
 
 /** Packs entry @p row of @p tape into @p packed under @p allocator, casting the caller's scalar
@@ -295,14 +308,26 @@ struct shapes_nvme_variant {
     expected<traversal_telemetry_t> search(usearch_shapes_search_t const& arguments, matches_landing_t& landing,
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
 
-    /** Writes the points of one stored @p cloud, its bytes as saved, into @p output in @p dtype. */
-    status_t export_points(bytes_view_t cloud, nk_dtype_t dtype, void* output) const noexcept {
+    /** The points of one stored @p cloud, its bytes as saved, three coordinates apiece. */
+    static std::size_t points_of(bytes_view_t cloud) noexcept {
+        return cloud.size() / (3 * sizeof(typename scalar_type_::raw_t));
+    }
+
+    /** Writes the points of one stored @p cloud, its bytes as saved, into @p output in @p dtype; a
+     *  cast reads them in place, so it needs no scratch. */
+    status_t export_points(bytes_view_t cloud, nk_dtype_t dtype, void* output,
+                           thread_allocator_t const&) const noexcept {
         if (dtype != dtype_k)
             return us::shapes::status_of(
                 kit_t::cast(cloud.data(), dtype_k, output, dtype, cloud.size() / sizeof(scalar_type_), nullptr));
         if (!cloud.empty()) std::memcpy(output, cloud.data(), cloud.size());
         return status_t::success_k;
     }
+
+    /** A view already is its checkpoint, so saving answers @c unsupported_k, as does sampling until
+     *  the view serves it. */
+    status_t save(std::string_view, executor_t&, progress_ticks_t&) noexcept { return status_t::unsupported_k; }
+    status_t sample(usearch_shapes_sample_t const&) noexcept { return status_t::unsupported_k; }
 };
 
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
@@ -362,7 +387,7 @@ struct shapes_vram_nvidia_variant
 
     /** Claimed by the one batch packing its clouds, landing its keys and inserting its rows,
      *  which another answers with @c contended_k meanwhile. */
-    vram_claim_word_t claims;
+    claim_word_t claims;
 
     /** The host pages a batch packs its clouds into, rewound per batch. */
     growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};

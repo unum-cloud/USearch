@@ -590,6 +590,7 @@ usearch_variants(shapes ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzi
 usearch_variants(shapes vram nvidia nvidia)
 usearch_variants(geospatial ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
 usearch_variants(geospatial vram nvidia nvidia)
+usearch_variants(basic vram nvidia nvidia)
 
 # The type-erased implementations behind the C interface: the dispatch units visit the variants through their explicitly
 # instantiated views and compile at the baseline, since they inline no kernel, gated per CPU class and told which GPU

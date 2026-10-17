@@ -55,6 +55,20 @@ struct vram_nvidia_index
     /** Bytes the @p bytes long pack at @p data takes once prepared, a multiple of 16. */
     static std::size_t span_bytes_(byte_t const* data, std::size_t bytes) noexcept;
 
+    /** Bytes the @p stored pack saves into: its cloud unpacked, @b [points,3] scalars, as the RAM
+     *  codec saves a cloud. */
+    static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept;
+
+    /** Unpacks the @p stored pack into @p saved. */
+    static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept;
+
+    /** Bytes the @p saved cloud stores into once packed; @c malformed_k unless it holds whole
+     *  points. */
+    static expected<std::size_t> stored_bytes_(bytes_view_t saved) noexcept;
+
+    /** Packs the @p saved cloud into @p stored, as an insertion packs one on the host. */
+    static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept;
+
     /** Loads the fatbin onto @p device and finds every kernel by its symbol. */
     status_t load_kernels_(int device) noexcept;
 

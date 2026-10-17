@@ -40,10 +40,13 @@
  *  and NVMe lifecycle verb refuses. Traversal statistics are plausible fiction: shaped
  *  correctly, invented numerically, so assert that they move, never what they equal. A checkpoint
  *  is a binary blob of this file's own memory image - not SafeGraphs, not portable across builds,
- *  and readable by nothing but the stand-in that wrote it. Keeping no edges, a cursor opened at a
- *  key steps to its entries' exact nearest at the frozen connectivity, and a sample links each draw
- *  to its exact nearest earlier draws - the lists a perfect graph would hold, where the engine's
- *  are the ones it stored.
+ *  and readable by nothing but the stand-in that wrote it.
+ *
+ *  Keeping no edges, the stand-in links every one of its rows to its exact nearest at the frozen
+ *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
+ *  cursor walks those lists breadth-first from its start keys, a split grows its parts over them,
+ *  each receiver keeping the source's storage order, and a sample links each draw to its exact
+ *  nearest earlier draws.
  */
 #include <cmath> // `std::sqrt`, `std::exp`
 
@@ -101,24 +104,7 @@ struct dense_index_options_t {
 
 using dense_index_t = handle<dense_payload_t, dense_index_options_t>;
 
-struct dense_cursor_t {
-
-    /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
-    dense_index_t const* opened_on;
-
-    /** The next row to hand out. */
-    std::size_t position;
-
-    /** The creation watermark, which later insertions cannot raise, or the @c linked count. */
-    std::size_t limit;
-
-    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    std::atomic_flag pulling;
-
-    /** The rows a step from a key yields, in link order; empty for a scan, which yields rows as
-     *  stored. */
-    std::vector<std::size_t> linked;
-};
+using dense_cursor_t = graph_cursor<dense_index_t>;
 
 struct dense_search_stream_t {
 
@@ -178,6 +164,13 @@ static bool reject_unstored(usearch_scalar_t quantization, usearch_outcome_t* ou
 static bool reject_unfrozen(dense_index_t const& index, usearch_outcome_t* outcome) {
     return reject_if(!index.options.dimensions, usearch_status_uninitialized_k, "The geometry was never frozen",
                      outcome);
+}
+
+/** Whether a receiver frozen at @p receiver takes a part of an index frozen at @p index: the same
+ *  metric, quantization, width and connectivity. */
+static bool same_kind(dense_index_options_t const& index, dense_index_options_t const& receiver) {
+    return index.metric == receiver.metric && index.quantization == receiver.quantization &&
+           index.dimensions == receiver.dimensions && index.connectivity == receiver.connectivity;
 }
 
 #pragma endregion Storage
@@ -718,6 +711,12 @@ struct usearch_dense_refinement_handle_t {
     /** Donors landed so far, and rows the sweep visited so far. */
     std::size_t landed;
     std::size_t swept;
+
+    /** The receivers a split lands in, the seed picking its roots, and the parts landed so far. */
+    usearch_dense_index_t const* receivers;
+    std::size_t receivers_count;
+    us::utilities::u64_t seed;
+    std::size_t parted;
 };
 
 void usearch_dense_refinement_init(usearch_dense_refinement_init_t* arguments) {
@@ -736,8 +735,11 @@ void usearch_dense_refinement_init(usearch_dense_refinement_init_t* arguments) {
                       "An index cannot absorb itself", outcome))
             return;
     }
+    if (reject_receivers(*arguments, outcome)) return;
     usearch_dense_refinement_t const refinement = new (std::nothrow)
-        usearch_dense_refinement_handle_t {&index, arguments->donors, arguments->count, 0, 0};
+        usearch_dense_refinement_handle_t {&index, arguments->donors,    arguments->count,           0,
+                                           0,      arguments->receivers, arguments->receivers_count, arguments->seed,
+                                           0};
     if (reject_if(!refinement, usearch_status_out_of_memory_k, "The refinement could not be allocated", outcome))
         return;
     *arguments->refinement = refinement;
@@ -762,6 +764,17 @@ void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments) {
             return;
         for (dense_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
         delete std::exchange(refinement.donors[refinement.landed], nullptr);
+    }
+    if (refinement.parted != refinement.receivers_count) {
+        auto const score = [&](dense_payload_t const& first, dense_payload_t const& second) {
+            return distance(index.options.metric, first, second);
+        };
+        writers.unlock();
+        std::span<usearch_dense_index_handle_t* const> const receivers {refinement.receivers,
+                                                                        refinement.receivers_count};
+        if (!split_into(index, receivers, refinement.seed, score, same_kind, outcome)) return;
+        refinement.parted = refinement.receivers_count;
+        writers.lock();
     }
     // Each call continues the sweep where the last one stopped.
     std::size_t const rows = index.entries.size();
@@ -794,17 +807,14 @@ void usearch_dense_refinement_finish(usearch_dense_refinement_finish_t* argument
 void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
+    if (reject_if(arguments->starts_count && !arguments->starts, usearch_status_invalid_argument_k,
+                  "The starts must name keys", outcome))
+        return;
     usearch_dense_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    auto const score = [&](dense_payload_t const& first, dense_payload_t const& second) {
-        return distance(index.options.metric, first, second);
-    };
-    std::vector<std::size_t> linked;
-    if (arguments->start) linked = linked_rows(index, *arguments->start, score);
-    std::size_t const limit = arguments->start ? linked.size() : index.entries.size();
-    usearch_dense_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_dense_cursor_handle_t {&index, 0, limit, {}, std::move(linked)};
+    usearch_dense_cursor_handle_t* const cursor = new (std::nothrow) usearch_dense_cursor_handle_t {};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
+    open_walk(*cursor, index, arguments->starts, arguments->starts_count);
     *arguments->cursor = cursor;
 }
 
@@ -813,39 +823,22 @@ void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->written = 0;
     *arguments->keys = {};
-    usearch_rows_view_t* const vectors = arguments->vectors;
-    if (vectors) *vectors = {};
+    if (arguments->links) *arguments->links = {};
     usearch_dense_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
         return;
     usearch_dense_index_handle_t& index = *arguments->index;
-    usearch_scalar_t const scalar = arguments->outputs_scalar;
-    if (vectors && reject_vector_scalar(scalar, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
     if (reject_if(cursor.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
                   "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
-    std::size_t const written = std::min(arguments->wanted, cursor.limit - cursor.position);
-    std::size_t const dimensions = index.options.dimensions;
-    std::size_t const row_bytes = vectors ? row_extent(scalar, dimensions) : 0;
-    usearch_key_t* const keys = carve<usearch_key_t>(*arena, written, outcome);
-    std::byte* const rows = keys && vectors ? carve<std::byte>(*arena, written * row_bytes, outcome) : nullptr;
-    // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
-    if (keys && (rows || !vectors)) {
-        for (std::size_t row = 0; row != written; ++row) {
-            std::size_t const position = cursor.position + row;
-            dense_entry_t const& entry = index.entries[cursor.linked.empty() ? position : cursor.linked[position]];
-            keys[row] = entry.key;
-            if (vectors) write_row(row_at<std::byte>(rows, row, row_bytes, row_bytes), scalar, entry.payload);
-        }
-        cursor.position += written;
-        *arguments->keys = {keys, sizeof(usearch_key_t)};
-        if (vectors) *vectors = {rows, row_bytes, dimensions, scalar};
-        *arguments->written = written;
-    }
+    auto const score = [&](dense_payload_t const& first, dense_payload_t const& second) {
+        return distance(index.options.metric, first, second);
+    };
+    pull_walk(*arguments, cursor, score, *arena, outcome);
     cursor.pulling.clear(std::memory_order_release);
 }
 
@@ -881,6 +874,19 @@ void usearch_dense_sample(usearch_dense_sample_t* arguments) {
     std::shared_lock readers(index.mutex);
     land_sample(*arguments, std::span<dense_entry_t const>(index.entries),
                 std::span<dense_payload_t const>(anchor_rows), score, *arena, outcome);
+}
+
+void usearch_dense_split(usearch_dense_split_t* arguments) {
+    if (through_executor<usearch_dense_split>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->reachability) *arguments->reachability = {};
+    usearch_dense_index_handle_t& index = *arguments->index;
+    auto const score = [&](dense_payload_t const& first, dense_payload_t const& second) {
+        return distance(index.options.metric, first, second);
+    };
+    land_split(*arguments, index, score, same_kind, outcome);
 }
 
 void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {

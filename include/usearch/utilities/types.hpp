@@ -11,9 +11,10 @@
 #include <cstring> // `std::memmove`, `std::memcmp`, `std::memcpy`
 
 #include <atomic>      // `std::atomic`
-#include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words
+#include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words, `std::bit_width` - the bijection's span
 #include <concepts>    // `std::convertible_to` - the string-view conversion's constraint
 #include <functional>  // `std::hash` - specialized for `uuid_t` below, `std::less`
+#include <limits>      // `std::numeric_limits` - the claim word's closed sentinel
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::type_identity_t`, `std::conditional_t` - the kit cascades
@@ -1308,6 +1309,25 @@ constexpr u64_t mix_bits(u64_t word) noexcept {
     return word ^ (word >> 31);
 }
 
+/** The image of @p position under a bijection over `[0, count)` keyed by @p seed: two odd
+ *  multiplies around an xor-shift over the next power of two, its cycle walked until the image
+ *  lands below @p count, so the first few positions name distinct rows in constant expected time,
+ *  never a scan. Positions at or past @p count have no image. */
+constexpr u64_t seeded_bijection(u64_t position, u64_t count, u64_t seed) noexcept {
+    if (count < 2) return 0;
+    std::size_t const bits = static_cast<std::size_t>(std::bit_width(count - 1));
+    u64_t const mask = bits == 64 ? ~u64_t {0} : (u64_t {1} << bits) - 1;
+    u64_t const first_multiplier = mix_bits(seed) | 1u, second_multiplier = mix_bits(seed + 1) | 1u;
+    u64_t const offset = mix_bits(seed + 2);
+    u64_t image = position;
+    do {
+        image = (image * first_multiplier + offset) & mask;
+        image ^= image >> (bits / 2 + 1);
+        image = (image * second_multiplier) & mask;
+    } while (image >= count);
+    return image;
+}
+
 /**
  *  @brief Minimal 8-byte SplitMix64 engine for stochastic NSW start-point selection - the
  *      cheap-to-construct sibling of the standard engines, paired with @ref uniform_below
@@ -1427,19 +1447,22 @@ struct vram_telemetry_block_t {
 };
 
 /**
- *  @brief A VRAM index's claim word: past the watermark by the rows of the one batch or load in
+ *  @brief An index's claim word: past the watermark by the rows of the one batch or load in
  *      flight, claimed from the watermark by one compare-exchange, or the sentinel while a caller
  *      holds it closed, so a second claimant refuses rather than waits.
  *
  *  The watermark, the rows visible, is the index's own, and every call takes it as @p visible.
  */
-struct vram_claim_word_t {
+struct claim_word_t {
+
+    /** The word's value while a caller holds it closed, past any row count. */
+    static constexpr std::size_t closed_k = std::numeric_limits<std::size_t>::max();
+
     std::size_t claimed_rows = 0;
 
     /** Whether a caller holds the word closed. */
     bool closed() const noexcept {
-        return standard_atomic_ref<std::size_t const>(claimed_rows).load(std::memory_order_acquire) ==
-               node_id_unknown_k;
+        return standard_atomic_ref<std::size_t const>(claimed_rows).load(std::memory_order_acquire) == closed_k;
     }
 
     /** Rows claimed by batches and loads, visible or not; a closed word holds none past
@@ -1447,12 +1470,12 @@ struct vram_claim_word_t {
     std::size_t claimed(std::size_t visible) const noexcept {
         std::size_t const claimed =
             standard_atomic_ref<std::size_t const>(claimed_rows).load(std::memory_order_acquire);
-        return claimed == node_id_unknown_k ? visible : claimed;
+        return claimed == closed_k ? visible : claimed;
     }
 
     /** Claims @p rows from @p visible: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone grows, launches and publishes them. */
-    expected<node_id_t> claim(std::size_t visible, std::size_t rows, std::size_t max_rows) noexcept {
+    expected<std::size_t> claim(std::size_t visible, std::size_t rows, std::size_t max_rows) noexcept {
         std::size_t first = visible;
         if (rows > max_rows - first) return {{}, status_t::overflow_k};
         if (!standard_atomic_ref<std::size_t>(claimed_rows)
@@ -1473,8 +1496,7 @@ struct vram_claim_word_t {
      *  batch or load is in flight. */
     status_t close(std::size_t visible) noexcept {
         return standard_atomic_ref<std::size_t>(claimed_rows)
-                       .compare_exchange_strong(visible, node_id_unknown_k, std::memory_order_acq_rel,
-                                                std::memory_order_relaxed)
+                       .compare_exchange_strong(visible, closed_k, std::memory_order_acq_rel, std::memory_order_relaxed)
                    ? status_t::success_k
                    : status_t::contended_k;
     }
@@ -1482,7 +1504,7 @@ struct vram_claim_word_t {
     /** Reopens a closed word at @p visible, past every row a load published meanwhile; an open
      *  one stays as it is. */
     void reopen(std::size_t visible) noexcept {
-        std::size_t closed = node_id_unknown_k;
+        std::size_t closed = closed_k;
         standard_atomic_ref<std::size_t>(claimed_rows)
             .compare_exchange_strong(closed, visible, std::memory_order_acq_rel, std::memory_order_relaxed);
     }

@@ -1744,6 +1744,237 @@ std::size_t test_basic_absorb(u64_t seed) {
     return failures;
 }
 
+/** Of the ten nearest rows under the exact oracle, how many the walks over @p index return, summed
+ *  over @p queries; a match within the tenth's distance counts, so ties never punish a walk. */
+template <typename fixture_type_, typename index_type_, typename metric_type_>
+std::size_t basic_recall_at_ten(index_type_& index, metric_type_& metric,
+                                std::vector<typename index_type_::value_t> const& queries, u64_t stream,
+                                allocation_ledger_t& ledger, std::size_t& failures) {
+    using distance_t = typename index_type_::distance_t;
+    using node_id_t = typename index_type_::node_id_t;
+    constexpr std::size_t wanted_k = 10;
+    typename index_type_::traversal_context_t probe {stream, counting_allocator_t {ledger}};
+    std::vector<distance_t> exact(index.size());
+    std::size_t found = 0;
+    for (auto const& query : queries) {
+        failures += expect_eq(index.search(query, metric, probe, {basic_connectivity_k * 4, 0}).status,
+                              status_t::success_k);
+        for (std::size_t node = 0; node != exact.size(); ++node)
+            exact[node] = fixture_type_::oracle(query, index.published_value_of(static_cast<node_id_t>(node)));
+        std::sort(exact.begin(), exact.end());
+        std::size_t const ranked = min_of(wanted_k, exact.size());
+        if (!ranked) continue;
+        f64_t const tenth = static_cast<f64_t>(exact[ranked - 1]);
+        for (std::size_t rank = 0; rank != min_of(ranked, probe.results.size()); ++rank)
+            found += static_cast<f64_t>(probe.results[rank].distance) <= tenth + 1e-3 * max_of(tenth, 1.0);
+    }
+    return found;
+}
+
+/** Drives one split of a freshly built index into @p receivers under @p seed, asserting what it
+ *  leaves: every row in exactly one receiver under its key with its value, the source empty, and
+ *  every receiver reaching all its rows. The walks draw from a context keyed by @p seed alone, so
+ *  equal graphs split alike. Answers the plan's result. */
+template <typename fixture_type_, typename index_type_, typename metric_type_>
+refine_result_t basic_split(index_type_& source, std::vector<index_type_*>& receivers, metric_type_& metric,
+                            std::vector<typename index_type_::value_t> const& originals, u64_t seed,
+                            allocation_ledger_t& ledger, std::size_t& failures) {
+    keep_diverse_t const selector {basic_connectivity_k};
+    std::size_t const rows = source.size();
+    typename index_type_::traversal_context_t context {seed, counting_allocator_t {ledger}};
+    refine_result_t result;
+    {
+        auto [plan, plan_status] = source.plan_split(receivers, context, selector, {}, seed);
+        failures += expect_eq(plan_status, status_t::success_k);
+        failures += expect(plan.landing() && source.size() == rows && receivers[0]->size() == 0);
+        // The receivers' claims stay closed while the plan lives.
+        auto extra = fixture_type_::make_values(1, stream_key(seed, "split_extra"), counting_allocator_t {ledger});
+        auto const extra_key = fixture_type_::make_key(rows);
+        failures += expect_eq(
+            receivers[0]->insert({extra.data(), 1}, {&extra_key, 1}, metric, {}, context, selector).status,
+            status_t::contended_k);
+        failures += basic_drive(plan, metric, context, selector);
+        auto const [split, finish_status] = plan.finish();
+        failures += expect_eq(finish_status, status_t::success_k);
+        result = split;
+    }
+    failures += expect_eq(source.size(), 0u);
+    std::size_t landed = 0;
+    for (index_type_* receiver : receivers) {
+        landed += receiver->size();
+        auto [audit, audit_status] = receiver->plan_health(context);
+        failures += expect_eq(audit_status, status_t::success_k);
+        do
+            for (auto const step : audit.steps()) [[maybe_unused]]
+                std::size_t const expanded = audit.sweep(step);
+        while (audit.advance_level());
+        auto const [health, health_status] = audit.finish();
+        failures += expect_eq(health_status, status_t::success_k);
+        failures += expect_eq(health.reachable_nodes, receiver->size());
+    }
+    failures += expect_eq(landed, rows);
+    failures += expect_eq(result.health.audited_nodes, rows);
+    failures += expect_eq(result.health.reachable_nodes, rows);
+    for (std::size_t row = 0; row != rows; ++row) {
+        std::size_t holders = 0;
+        for (index_type_* receiver : receivers) {
+            auto const key = fixture_type_::make_key(row);
+            holders += receiver->count(key);
+            auto const [node_id, find_status] = receiver->find(key);
+            if (succeeded(find_status))
+                failures += expect(fixture_type_::value_equals(receiver->published_value_of(node_id), originals[row]));
+        }
+        failures += expect_eq(holders, 1u);
+    }
+    return result;
+}
+
+/**
+ *  @brief A source splits into two and into three graph-local parts, and absorbing the parts back
+ *      restores it: every key lands once with its value, every receiver reaches all its rows, and
+ *      recall at ten against the exact oracle stays within noise of the source's throughout.
+ *
+ *  Two splits of equal graphs under one seed save byte-identical receivers. Refusals leave the
+ *  source whole and every receiver open: fewer than two receivers, a repeated or non-empty one, or
+ *  the source among them; the source then takes batches again once its split published.
+ */
+template <typename fixture_type_>
+std::size_t test_basic_split(u64_t seed) {
+    using index_t = typename fixture_type_::index_t;
+    using context_t = typename index_t::traversal_context_t;
+    using node_id_t = typename index_t::node_id_t;
+    constexpr std::size_t rows_k = basic_growth_nodes_k, noise_percent_k = 10;
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    {
+        auto metric = fixture_type_::make_metric();
+        auto const codec = fixture_type_::make_codec();
+        context_t context {stream_key(seed, "split"), counting_allocator_t {ledger}};
+        keep_diverse_t const selector {basic_connectivity_k};
+        auto const originals = fixture_type_::make_values(rows_k, stream_key(seed, "split"),
+                                                          counting_allocator_t {ledger});
+        auto const queries = fixture_type_::make_values(basic_recall_samples_k, stream_key(seed, "split", 1),
+                                                        counting_allocator_t {ledger});
+        u64_t const probes = stream_key(seed, "split", 2);
+        std::size_t const recall_total = basic_recall_samples_k * 10;
+        // Equal streams under fresh contexts build equal graphs, one batch at a time.
+        auto build = [&](index_t& index) {
+            context_t building {stream_key(seed, "split", 3), counting_allocator_t {ledger}};
+            auto values = fixture_type_::make_values(rows_k, stream_key(seed, "split"), counting_allocator_t {ledger});
+            std::vector<node_id_t> assigned_ids;
+            failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, building, selector);
+        };
+        auto make_receivers = [&](std::vector<std::unique_ptr<index_t>>& owned, std::size_t count) {
+            std::vector<index_t*> receivers;
+            for (std::size_t receiver = 0; receiver != count; ++receiver) {
+                owned.push_back(fixture_type_::make_index(ledger));
+                receivers.push_back(owned.back().get());
+            }
+            return receivers;
+        };
+        auto report_recall = [&](char const* stage, std::size_t found, std::size_t baseline) {
+            if (found * 100 + noise_percent_k * recall_total < baseline * 100)
+                fmt::print(stderr, "  split diagnostics: {} found {} of {} at ten, the source {}\n", stage, found,
+                           recall_total, baseline);
+            return expect(found * 100 + noise_percent_k * recall_total >= baseline * 100);
+        };
+
+        std::unique_ptr<index_t> const source = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const twin = fixture_type_::make_index(ledger);
+        build(*source);
+        build(*twin);
+        std::size_t const source_recall = basic_recall_at_ten<fixture_type_>(*source, metric, queries, probes, ledger,
+                                                                             failures);
+
+        // Refusals precede every hold, or release what they took: the source stays whole.
+        {
+            std::vector<std::unique_ptr<index_t>> owned;
+            std::vector<index_t*> receivers = make_receivers(owned, 2);
+            std::vector<index_t*> single {receivers[0]};
+            std::vector<index_t*> repeated {receivers[0], receivers[0]};
+            std::vector<index_t*> including {receivers[0], source.get()};
+            failures += expect_eq(source->plan_split(single, context, selector).status, status_t::config_mismatch_k);
+            failures += expect_eq(source->plan_split(repeated, context, selector).status, status_t::config_mismatch_k);
+            failures += expect_eq(source->plan_split(including, context, selector).status, status_t::config_mismatch_k);
+            auto filled = fixture_type_::make_values(1, stream_key(seed, "split", 4), counting_allocator_t {ledger});
+            auto const filled_key = fixture_type_::make_key(rows_k);
+            failures += expect_eq(
+                receivers[1]->insert({filled.data(), 1}, {&filled_key, 1}, metric, {}, context, selector).status,
+                status_t::success_k);
+            failures += expect_eq(source->plan_split(receivers, context, selector).status, status_t::config_mismatch_k);
+            failures += expect_eq(source->size(), rows_k);
+            failures += expect_eq(receivers[1]->size(), 1u);
+            failures += expect_eq(basic_saved_columns(*receivers[0], codec).status, status_t::success_k);
+            failures += expect_eq(basic_saved_columns(*source, codec).status, status_t::success_k);
+        }
+
+        // Two parts, twice over equal graphs: the receivers save alike, byte for byte.
+        std::vector<std::unique_ptr<index_t>> halves_owned, twin_halves_owned;
+        std::vector<index_t*> halves = make_receivers(halves_owned, 2);
+        std::vector<index_t*> twin_halves = make_receivers(twin_halves_owned, 2);
+        u64_t const split_seed = stream_key(seed, "split", 5);
+        refine_result_t const halved = basic_split<fixture_type_>(*source, halves, metric, originals, split_seed,
+                                                                  ledger, failures);
+        failures += expect(halved.visited_nodes > 0);
+        [[maybe_unused]] refine_result_t const twin_halved = basic_split<fixture_type_>(
+            *twin, twin_halves, metric, originals, split_seed, ledger, failures);
+        for (std::size_t half = 0; half != halves.size(); ++half) {
+            auto const saved = basic_saved_columns(*halves[half], codec);
+            auto const twin_saved = basic_saved_columns(*twin_halves[half], codec);
+            failures += expect(succeeded(saved.status) && succeeded(twin_saved.status));
+            failures += expect(saved.value == twin_saved.value);
+            failures += expect(halves[half]->size() * halves.size() <= rows_k + halves.size());
+            failures += report_recall(
+                "a half", basic_recall_at_ten<fixture_type_>(*halves[half], metric, queries, probes, ledger, failures),
+                source_recall);
+        }
+
+        // The halves absorbed back split again into thirds, which absorb back once more.
+        {
+            auto [regrown, regrown_status] = halves[0]->plan_absorb({halves.data() + 1, 1}, context, selector);
+            failures += expect_eq(regrown_status, status_t::success_k);
+            failures += basic_drive(regrown, metric, context, selector);
+            failures += expect_eq(regrown.finish().status, status_t::success_k);
+        }
+        failures += expect_eq(halves[0]->size(), rows_k);
+        std::vector<std::unique_ptr<index_t>> thirds_owned;
+        std::vector<index_t*> thirds = make_receivers(thirds_owned, 3);
+        [[maybe_unused]] refine_result_t const thirded = basic_split<fixture_type_>(
+            *halves[0], thirds, metric, originals, stream_key(seed, "split", 6), ledger, failures);
+        for (index_t* third : thirds)
+            failures += expect(third->size() * thirds.size() <= rows_k + thirds.size() && third->size());
+
+        {
+            std::vector<index_t*> donors {thirds[1], thirds[2]};
+            auto [absorbed, absorbed_status] = thirds[0]->plan_absorb(donors, context, selector);
+            failures += expect_eq(absorbed_status, status_t::success_k);
+            failures += basic_drive(absorbed, metric, context, selector);
+            auto const [merged, merged_status] = absorbed.finish();
+            failures += expect_eq(merged_status, status_t::success_k);
+            failures += expect_eq(merged.health.reachable_nodes, rows_k);
+        }
+        failures += expect_eq(thirds[0]->size(), rows_k);
+        for (std::size_t row = 0; row != rows_k; ++row) {
+            auto const [node_id, find_status] = thirds[0]->find(fixture_type_::make_key(row));
+            failures += expect_eq(find_status, status_t::success_k);
+            if (succeeded(find_status))
+                failures += expect(fixture_type_::value_equals(thirds[0]->published_value_of(node_id), originals[row]));
+        }
+        failures += report_recall(
+            "the reunion", basic_recall_at_ten<fixture_type_>(*thirds[0], metric, queries, probes, ledger, failures),
+            source_recall);
+
+        // The emptied source takes batches from zero again.
+        auto again = fixture_type_::make_values(1, stream_key(seed, "split", 7), counting_allocator_t {ledger});
+        auto const again_key = fixture_type_::make_key(0);
+        failures += expect_eq(source->insert({again.data(), 1}, {&again_key, 1}, metric, {}, context, selector).status,
+                              status_t::success_k);
+        failures += expect_eq(source->size(), 1u);
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
 /** Allocation refusals at planning leave both sides byte-identical: a budget swept up from the live
  *  bytes refuses an absorb at its allocations in turn, each refusal leaving the receiver's and the
  *  donor's saved columns as they were, which saving proves free of holds, until a budget wide
@@ -3468,6 +3699,7 @@ std::size_t test_basic_scenarios(u64_t seed) {
     failures += test_basic_plan_contention<fixture_type_>(seed);
     failures += test_basic_refine<fixture_type_>(seed);
     failures += test_basic_absorb<fixture_type_>(seed);
+    failures += test_basic_split<fixture_type_>(seed);
     failures += test_basic_refine_starved<fixture_type_>(seed);
     failures += test_basic_health<fixture_type_>(seed);
     failures += test_basic_certified<fixture_type_>(seed);

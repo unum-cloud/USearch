@@ -237,7 +237,7 @@ Callers lend memory, never a way to allocate it: no allocator callback crosses t
 
 Every dense verb is exported for every residency, and the engine answers what a residency lacks with `usearch_status_unsupported_k`:
 
-- RAM answers every verb but `usearch_dense_view_ram`, `usearch_dense_search_stream_init` and `usearch_dense_sample`.
+- RAM answers every verb but `usearch_dense_view_ram`, `usearch_dense_search_stream_init`, `usearch_dense_sample` and `usearch_dense_split`, and a cursor answers neither `starts` nor `links` yet.
 - VRAM answers insertion, refinement, absorbing, counting, `get`, search, `multiply`, `maxsim`, attention and the serialization family, `save_buffer` included, while cursors answer `usearch_status_unsupported_k`, as [GPUs](#gpus) explains.
   NVIDIA devices answer exact scans, while AMD and Apple ones refuse them with `usearch_status_unsupported_k`.
   Apple's Metal answers attention `usearch_status_unsupported_k` too, since its kernels cannot call the caller's value lookup.
@@ -453,7 +453,7 @@ An insertion claims every row before its first report, so its handler only repor
 ### Retrieval: Get, Cursors & Streams
 
 `usearch_dense_get` writes every vector stored under one key into an arena, shard by shard and in insertion order within each, as the [Arenas](#arenas) example shows; an absent key leaves `vectors->data` `NULL`.
-A cursor walks the whole index in storage order, its keys and, when asked, its rows landing in an arena batch by batch:
+A cursor walks the graph, every row in storage order or breadth-first from `starts`, its keys and, when asked, each row's `links` landing in an arena batch by batch:
 
 ```c
 usearch_dense_cursor_t cursor = NULL;
@@ -472,6 +472,8 @@ usearch_dense_cursor_free(cursor);
 ```
 
 Each shard's publication watermark is read as the walk enters it, so a row once passed is never revisited, while a later shard may carry rows published after the walk began.
+Opened at `starts`, a cursor yields their own rows first, in the order given, then breadth-first the rows they link to, each row once, so the first rows pulled carry the starts' immediate links.
+`links` is a `usearch_keys_tape_view_t`, row `i` spanning `offsets[i]` up to `offsets[i+1]`, and the vectors themselves come from `usearch_dense_get`.
 
 When a filter is selective enough that no `wanted` can be guessed upfront, a search stream keeps pulling matches in distance order:
 
@@ -531,7 +533,12 @@ Donors are consumed and nulled as they go, so the array itself says which handle
 Each donor's shards append to the index's as appended parts with their edges rebased, then a refinement of every shard that took one walks each of its rows across into the other part from landmarks drawn there and re-selects it, so a group costs one such refinement per donor, and its heal re-selects from the landmarks every row no earlier one links to.
 A donor must share the index's residency, scalar, class, metric and geometry, else the call answers `usearch_status_config_mismatch_k`, and an NVMe view answers `usearch_status_read_only_k`.
 An insertion in flight on the index or on the next donor refuses the call with `usearch_status_contended_k`, leaving that donor and the rest live, and an insertion into the index arriving meanwhile is refused the same way, while nothing may search a donor or start an insertion into it.
-A VRAM-built donor joins a RAM index through a save and a load, and splitting is not in the C library yet.
+A VRAM-built donor joins a RAM index through a save and a load.
+
+`usearch_dense_split` is the inverse, emptying one index into `count` receivers, empty handles of its residency, scalar, class, metric, geometry and shard count.
+It grows one graph-local part per receiver from roots drawn from `seed`, breadth-first over the links and capped at an equal share, lands part `p` of shard `s` in shard `s` of receiver `p` with edges rebased and edges across parts dropped, and refines the rows that lost an edge.
+`usearch_dense_refinement_init` takes `receivers` in place of `donors` for the resumable form, never both, refusing the pair with `usearch_status_invalid_argument_k`.
+The engine answers splitting with `usearch_status_unsupported_k` for now, while the stand-in partitions by brute force.
 
 ### Sparse Multiplication
 
@@ -671,9 +678,9 @@ usearch_sequence_search(&(usearch_sequence_search_t) {.index = sequences,
 The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch and Smith-Waterman with linear gaps, their Gotoh forms with affine gaps, and overlap, the share of fixed-width windows one side misses of the other.
 The alignment kinds take `usearch_sequence_weights_t`, a 256×256 substitution matrix with gap costs, and the overlap kind takes `window_widths` in bytes, each refused by every other kind with `usearch_status_config_mismatch_k`.
 The local Smith-Waterman kinds only rank: each is served from an index built under its global counterpart, which the library picks.
-The verbs mirror the dense ones: `init_ram`, `load_ram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` and `cursor_next` writing tapes into an arena, `absorb`, `save`, `metadata_read` and `describe`, while `count` also reports a key's total and largest byte lengths.
+The verbs mirror the dense ones: `init_ram`, `init_vram`, `load_ram`, `load_vram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` writing tapes into an arena, `cursor_next` writing keys and their links, `absorb`, `split`, `save`, `metadata_read` and `describe`, while `count` also reports a key's total and largest byte lengths.
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.
-The engine serves the Levenshtein and overlap kinds, and answers the alignment kinds, `view_ram`, `refine`, `absorb`, `sample` and a cursor opened at a key with `usearch_status_unsupported_k`.
+The engine serves the Levenshtein and overlap kinds, and answers the alignment kinds, `view_ram`, `sample`, `split`, a cursor opened at `starts` and a pull asking for `links` with `usearch_status_unsupported_k`; `refine` and `absorb` serve RAM indexes.
 The stand-in serves every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
 
 ## Shape Indexes
@@ -703,7 +710,7 @@ Wasserstein-Procrustes pairs points by an exact transport plan, alternated with 
 Gromov-Wasserstein compares each side's internal distances.
 All four are invariant to rotation, reflection, translation and point order.
 A non-zero `points` freezes the count, rejecting insertions of any other with `usearch_status_shape_mismatch_k`.
-The verbs are the sequence ones plus `init_vram` and `load_vram`, where `get` and `cursor_next` convert to an `outputs_scalar` and return each shape in its inserted pose, and `count` reports a key's total and largest point counts.
+The verbs are the sequence ones, where `get` converts to an `outputs_scalar` and returns each shape in its inserted pose, and `count` reports a key's total and largest point counts.
 The engine serves all four kinds in RAM over `f16` or `f32` points, refusing other quantizations, `view_ram`, `refine` and `absorb` with `usearch_status_unsupported_k`, and both VRAM verbs with `usearch_status_device_k`.
 The stand-in scores Chamfer and Hausdorff in the frame the points arrive in, refuses the two transport kinds with `usearch_status_unknown_kind_k`, refuses quantizations other than `f16` and `f32` with `usearch_status_unsupported_k`, and refuses every VRAM verb with `usearch_status_device_k`.
 
@@ -761,7 +768,7 @@ An emplaced query is not internally synchronized, so build one per thread, and t
 `usearch_geospatial_search` ranks the `wanted` best entries per query instead, under one `mode`: nearest `approach_k`, shared-ground `overlap_k`, whole-shape `shape_k`, one-way `coverage_k`, or order-respecting `route_k`, which needs paths.
 `axes` narrows the comparison to the ground track, three dimensions, or every axis with time, and `tolerance` carries the radius in metres and the time window in seconds.
 Scores are metres, except overlap, which counts query points and ranks largest first.
-`insert` takes optional per-point `deviations` in metres, `get` returns the degrees, metres and seconds inserted, and `cursor_next` exports the internal Earth-fixed integer centimetres, three per point, as `usearch_scalar_i32_k`.
+`insert` takes optional per-point `deviations` in metres, `get` returns the degrees, metres and seconds inserted, and `cursor_next` lands keys and their links, as every modality's does.
 The remaining verbs are the shapes ones, with `count` reporting a key's total and longest point counts.
 The engine does not export these verbs yet, so a program calling them links against the stand-in, which converts onto a sphere rather than the ellipsoid, refuses `overlap_k` with `usearch_status_unknown_kind_k`, ignores deviations, and refuses every VRAM verb with `usearch_status_device_k`.
 

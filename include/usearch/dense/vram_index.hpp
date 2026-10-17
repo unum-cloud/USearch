@@ -197,21 +197,6 @@ struct vram_ranking_t {
     u32_t score_bytes = 0;
 };
 
-/** A sharded search's rankings: a shard's @c walked IDs and distances per query resolve through
- *  its device @c keys into @c ranking, and the first shard merges @c shards rankings, gathered
- *  @c block_bytes apart from @c gathered, into it. */
-struct vram_matches_t {
-    node_id_t const* ids = nullptr;
-    distance_t const* distances = nullptr;
-    byte_t const* keys = nullptr;
-    vram_ranking_t gathered;
-    vram_ranking_t ranking;
-    std::size_t block_bytes = 0;
-    u32_t walked = 0;
-    u32_t queries_count = 0;
-    u32_t shards = 0;
-};
-
 /** Sets the keyed twin of a value lookup apart from the bare one in an attend kernel's name. */
 inline constexpr u32_t vram_keyed_lookup_k = 1u << 16;
 
@@ -231,7 +216,10 @@ struct vram_keyed_lookup {
 };
 
 /** The one argument every dense kernel takes, each reading the records its kernel names: the casts
- *  read NumKong's own plans. */
+ *  read NumKong's own plans, and @c matches holds a sharded search's rankings - a shard's
+ *  @c walked IDs and distances per query resolve through its device @c keys into @c ranking, and
+ *  the first shard merges @c shards rankings, gathered @c block_bytes apart from @c gathered, into
+ *  it. */
 struct vram_arguments_t {
     vram_build_t build;
     vram_search_t search;
@@ -241,7 +229,17 @@ struct vram_arguments_t {
     vram_rescoring_t rescoring;
     vram_graph_t graph;
     vram_attend_t attend;
-    vram_matches_t matches;
+    struct {
+        node_id_t const* ids = nullptr;
+        distance_t const* distances = nullptr;
+        byte_t const* keys = nullptr;
+        vram_ranking_t gathered;
+        vram_ranking_t ranking;
+        std::size_t block_bytes = 0;
+        u32_t walked = 0;
+        u32_t queries_count = 0;
+        u32_t shards = 0;
+    } matches;
     nk_cast_arguments_t cast;
     nk_each_rmsnorm_arguments_t rmscast;
 };
@@ -803,11 +801,13 @@ struct vram_index {
         return search_(query_vector, context, config, size());
     }
 
-    /** Filtered search is banned on the device index: a host predicate cannot run inside the walk,
-     *  and a device-resident admission bitmap is a design of its own. */
+    /** Filtered search answers @c device_error_k: a host predicate cannot run inside the walk, and
+     *  a device-resident admission bitmap is a design of its own. */
     template <typename predicate_type_>
     expected<search_result_t> search_if(vector_view_t, predicate_type_&&, traversal_context_t&,
-                                        search_config_t = {}) noexcept = delete;
+                                        search_config_t = {}) noexcept {
+        return {{}, status_t::device_error_k};
+    }
 
     /**
      *  @brief Graph products of every left-hand row: each row keeps the pairs its walk scored, node
@@ -1201,6 +1201,16 @@ struct vram_index {
             if (status_t const landed = plan.queue(); failed(landed) || failed(plan.wait())) break;
         while (plan.advance());
         return plan.finish();
+    }
+
+    /** A split of this index into @p receivers, the inverse of an absorb, which no dense GPU face
+     *  serves yet: it answers @c unsupported_k with an unbound plan. */
+    expected<refine_plan_t> plan_split(std::span<derived_*>, traversal_context_t& context, refine_config_t = {},
+                                       u64_t = 0) noexcept {
+        using bytes_ptr_t = typename traversal_context_t::bytes_ptr_t;
+        return {refine_plan_t {refine_scratch_t {
+                    bytes_ptr_t {nullptr, typename bytes_ptr_t::deleter_type {context.allocator_, 0}}}},
+                status_t::unsupported_k};
     }
 
     /** Measures forward reachability from as many stride-spread landmarks as one search draws -
@@ -2294,7 +2304,10 @@ struct vram_index {
 
     /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone grows, launches and publishes them. */
-    expected<node_id_t> claim_(std::size_t rows) noexcept { return claims_.claim(size(), rows, max_node_count_k); }
+    expected<node_id_t> claim_(std::size_t rows) noexcept {
+        auto const [first_id, claim_status] = claims_.claim(size(), rows, max_node_count_k);
+        return {static_cast<node_id_t>(first_id), claim_status};
+    }
 
     /** Gives back the claim over @p rows from @p first, which launched nothing; a word that moved
      *  on, closed by a caller around a load, stays as it is. */
@@ -2413,7 +2426,7 @@ struct vram_index {
 
     /** The claim word, closed while a refine, an absorb, a load or a save of the sharded index
      *  holds it. */
-    vram_claim_word_t claims_;
+    claim_word_t claims_;
 
     /** Mapped rows whose neighbors a grow sentinel-filled, read and advanced by the claim's holder
      *  alone; a reservation maps past it and the next claim fills the rest. */

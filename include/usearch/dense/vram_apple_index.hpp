@@ -516,11 +516,13 @@ struct vram_apple_index {
         return search_one_(query_vector, context, config, size());
     }
 
-    /** Filtered search is banned on the device index: a host predicate cannot run inside the walk,
-     *  and a device-resident admission bitmap is a design of its own. */
+    /** Filtered search answers @c device_error_k: a host predicate cannot run inside the walk, and
+     *  a device-resident admission bitmap is a design of its own. */
     template <typename predicate_type_>
     expected<search_result_t> search_if(vector_view_t, predicate_type_&&, traversal_context_t&,
-                                        search_config_t = {}) noexcept = delete;
+                                        search_config_t = {}) noexcept {
+        return {{}, status_t::device_error_k};
+    }
 
     /** Graph products of every left-hand row: each keeps the pairs its walk scored, until its
      *  output row fills. */
@@ -1859,7 +1861,10 @@ struct vram_apple_index {
 
     /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone runs and publishes them. */
-    expected<node_id_t> claim_(std::size_t rows) noexcept { return claims_.claim(size(), rows, max_node_count_k); }
+    expected<node_id_t> claim_(std::size_t rows) noexcept {
+        auto const [first_id, claim_status] = claims_.claim(size(), rows, max_node_count_k);
+        return {static_cast<node_id_t>(first_id), claim_status};
+    }
 
     /** Gives back the claim over @p rows from @p first, which launched nothing; a word that moved
      *  on, closed by a caller around a load, stays as it is. */
@@ -1951,7 +1956,7 @@ struct vram_apple_index {
 
     /** The claim word, closed while a refine, an absorb, a load or a save of the sharded index
      *  holds it. */
-    vram_claim_word_t claims_;
+    claim_word_t claims_;
     std::size_t last_visible_id_ = 0;
     status_t status_ = status_t::success_k;
 

@@ -508,21 +508,26 @@ struct ram_indexes
      *  pulling steps from its home shard first and stealing from the rest in the tail, so a pass
      *  costs one sweep of the graph however the shards are filled. An absorb's plan first lands its
      *  donors, one after another, and only then opens the shards' passes over the parts they
-     *  appended.
+     *  appended. A split's plan opens every shard's split at planning, and the phase boundary that
+     *  publishes the parts moves the keys' locators into the receivers and empties this index.
      */
     struct [[nodiscard]] refine_plan_t {
         refine_plan_t() noexcept : refine_plan_t(forkunion_allocator_t {}) {}
 
-        /** An empty plan over @p allocator; only @ref plan_absorb ever fills it. */
+        /** An empty plan over @p allocator; only @ref plan_absorb and @ref plan_split fill it. */
         explicit refine_plan_t(forkunion_allocator_t allocator) noexcept
             : arenas_(allocator), traversals_(allocator), homes_(allocator), shard_plans_(allocator),
-              cursors_(allocator), part_bases_(allocator), part_offsets_(allocator) {}
+              cursors_(allocator), part_bases_(allocator), part_offsets_(allocator), receiver_shards_(allocator),
+              receiver_seats_(allocator), emptied_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : arenas_(std::move(other.arenas_)), traversals_(std::move(other.traversals_)),
               homes_(std::move(other.homes_)), shard_plans_(std::move(other.shard_plans_)),
               cursors_(std::move(other.cursors_)), part_bases_(std::move(other.part_bases_)),
               part_offsets_(std::move(other.part_offsets_)), donors_(other.donors_),
-              landed_donors_(other.landed_donors_), config_(other.config_), visited_(other.visited_),
+              landed_donors_(other.landed_donors_), receivers_(other.receivers_),
+              closed_receivers_(std::exchange(other.closed_receivers_, 0)),
+              receiver_shards_(std::move(other.receiver_shards_)), receiver_seats_(std::move(other.receiver_seats_)),
+              emptied_(std::move(other.emptied_)), config_(other.config_), visited_(other.visited_),
               population_(other.population_), owner_(std::exchange(other.owner_, nullptr)) {}
         refine_plan_t& operator=(refine_plan_t&&) = delete;
         refine_plan_t(refine_plan_t const&) = delete;
@@ -530,9 +535,7 @@ struct ram_indexes
 
         /** An unfinished plan heals nothing: it reopens, and the graph is as the last step left
          *  it. */
-        ~refine_plan_t() noexcept {
-            if (owner_) owner_->reopen_shards_();
-        }
+        ~refine_plan_t() noexcept { release_(); }
 
         /**
          *  @brief Runs the pending phases on @p executor until the pass ends or @p on_visited
@@ -586,7 +589,7 @@ struct ram_indexes
                 healed = drain_(executor, heal_alone);
             }
             refine_result_t const result = running();
-            std::exchange(owner_, nullptr)->reopen_shards_();
+            release_();
             return {result, healed};
         }
 
@@ -601,6 +604,19 @@ struct ram_indexes
       private:
         friend ram_indexes;
 
+        /** Reopens this index and every receiver it closed; the plan is unbound after. */
+        void release_() noexcept {
+            if (owner_) std::exchange(owner_, nullptr)->reopen_shards_();
+            for (; closed_receivers_; --closed_receivers_) receivers_[closed_receivers_ - 1]->reopen_shards_();
+        }
+
+        /** The thread whose arena holds @p shard 's audit: the first homed on it. */
+        std::size_t home_of_(std::size_t shard) const noexcept {
+            std::size_t thread = 0;
+            while (thread != homes_.size() && homes_[thread] != shard) ++thread;
+            return thread != homes_.size() ? thread : 0;
+        }
+
         /** Opens every shard's pass over its parts, its audit on the arena of its home thread, once
          *  no donor is pending. */
         status_t open_shards_() noexcept {
@@ -610,10 +626,8 @@ struct ram_indexes
                     parts = {part_bases_.data() + part_offsets_[shard],
                              part_offsets_[shard + 1] - part_offsets_[shard]};
                 // The first thread homed on the shard holds its audit, on the shard's own domain.
-                std::size_t thread = 0;
-                while (thread != homes_.size() && homes_[thread] != shard) ++thread;
                 auto [plan, status] = owner_->shards_[shard].index->plan_refine(
-                    {0, node_id_unknown_k}, traversals_[thread != homes_.size() ? thread : 0], config_, parts);
+                    {0, node_id_unknown_k}, traversals_[home_of_(shard)], config_, parts);
                 if (failed(status)) return shard_plans_.clear(), status;
                 shard_plans_.push_back_reserved(std::move(plan));
             }
@@ -631,7 +645,11 @@ struct ram_indexes
                                 std::size_t thread, nk::matrix_span<node_id_t>) noexcept -> status_t {
                 typename index_t::refine_plan_t& plan = shard_plans_[shard];
                 bool const reselecting = plan.reselecting();
-                if (status_t const ran = plan.run(step, traversals_[thread]); failed(ran)) return ran;
+                // A split's scatter lands each key beside its row, in the receiver's same shard.
+                auto land_key = [&](node_id_t row, std::size_t receiver, node_id_t landed) noexcept {
+                    receivers_[receiver]->shards_[shard].keys[landed] = owner_->shards_[shard].keys[row];
+                };
+                if (status_t const ran = plan.run(step, traversals_[thread], land_key); failed(ran)) return ran;
                 if (!reselecting) return status_t::success_k;
                 std::size_t const done = atomic_ref<std::size_t>(visited).fetch_add(step.nodes.size(),
                                                                                     std::memory_order_relaxed) +
@@ -646,8 +664,20 @@ struct ram_indexes
                 // Every claimed step ran, so a stopped drain's cursors say where the next starts.
                 drained = owner_->drain_steps_(shard_plans_, cursors, to_span(homes_), executor, 0, run_step);
                 if (failed(drained)) break;
+                // The boundary publishing a split's parts shows a search every receiver shard's
+                // rows or none, and only then do their keys resolve.
+                bool const landing = !receivers_.empty() && shard_plans_[0].landing();
+                if (landing)
+                    for (ram_indexes* receiver : receivers_)
+                        atomic_ref<u64_t>(receiver->commit_sequence_).add(1, std::memory_order_release);
                 advancing = 0;
                 for (typename index_t::refine_plan_t& plan : shard_plans_) advancing += plan.advance();
+                if (landing) {
+                    for (ram_indexes* receiver : receivers_)
+                        atomic_ref<u64_t>(receiver->commit_sequence_)
+                            .add((u64_t {1} << 32) - 1, std::memory_order_release);
+                    if (!shard_plans_[0].landing()) owner_->publish_split_(*this);
+                }
                 std::memset(cursors.data(), 0, cursors.size_bytes());
             } while (advancing);
             visited_ = visited;
@@ -684,6 +714,22 @@ struct ram_indexes
 
         /** Donors landed so far. */
         std::size_t landed_donors_ = 0;
+
+        /** The caller's receiver slots of a split, one part each; empty otherwise. */
+        std::span<ram_indexes*> receivers_;
+
+        /** Receivers whose dispensers the split closed, in receiver order. */
+        std::size_t closed_receivers_ = 0;
+
+        /** Per shard, the receivers' same shards in receiver order - what each shard's split
+         *  scatters into. */
+        growing_buffer<index_t*, forkunion_allocator_t> receiver_shards_;
+
+        /** One run of locator seats per receiver, as many as its shards' part capacities sum to. */
+        growing_buffer<typename locators_map_t::seats_t, forkunion_allocator_t> receiver_seats_;
+
+        /** One fresh shard per shard of this index, built at planning, which it empties into. */
+        growing_buffer<std::unique_ptr<index_t>, forkunion_allocator_t> emptied_;
 
         /** The passes' knobs. */
         refine_config_t config_ {};
@@ -776,24 +822,103 @@ struct ram_indexes
             for (node_id_t& base : plan.part_bases_) base = node_id_unknown_k;
         }
 
-        // A re-selection walks like any other query, so it sizes like one; contexts seeded apart,
-        // and apart across calls, so concurrent walks start from different entry points.
-        insert_config_t const walk_config {config.expansion_factor};
-        index_t& shape = *(shaped ? shaped : this)->shards_[0].index;
-        std::size_t const walk_bytes = shape.traversal_memory_usage(walk_config);
-        std::size_t const seed = atomic_ref<std::size_t>(routed_rows_).load(std::memory_order_relaxed);
-        for (std::size_t thread = 0; thread != threads; ++thread) {
-            plan.arenas_.push_back_reserved(
-                typename executor_t::arena_t {forkunion_allocator_t {executor.memory_domain(thread)}});
-            if (failed(plan.arenas_[thread].reserve_exactly(walk_bytes))) return {{}, status_t::bad_alloc_k};
-            traversal_context_t traversal {arena_allocator<byte_t, forkunion_allocator_t>(plan.arenas_[thread])};
-            traversal.random_generator.state = seed + thread;
-            plan.traversals_.push_back_reserved(std::move(traversal));
-            if (status_t const sized = shape.reserve_traversal(plan.traversals_[thread], walk_config); failed(sized))
-                return {{}, sized};
-        }
+        if (status_t const opened = open_traversals_(plan, executor, *(shaped ? shaped : this)->shards_[0].index);
+            failed(opened))
+            return {{}, opened};
         if (donors.empty())
             if (status_t const opened = plan.open_shards_(); failed(opened)) return {{}, opened};
+        return {std::move(plan), status_t::success_k};
+    }
+
+    /**
+     *  @brief Opens a split of this index into @p receivers - the inverse of @ref plan_absorb:
+     *      shard @c s of this index splits into shard @c s of every receiver, one graph-local part
+     *      per receiver, with its keys beside its rows, and this index empties.
+     *
+     *  Every shard's split opens here, as @c index_t::plan_split describes, and so does every other
+     *  fallible thing: every dispenser of this index and of the receivers closed, the receivers'
+     *  key slots covered and locator seats claimed for full parts, and this index's fresh empty
+     *  shards. The plan's first phases then partition and scatter every shard over the threads,
+     *  each key landing beside its row, and the boundary publishing the parts shows a search every
+     *  receiver shard's rows or none; their keys resolve after, and this index empties into its
+     *  fresh shards, which keep their placement but no capacity. Every receiver shard then
+     *  re-selects the rows that lost a link and heals; a cancel pauses only that walk.
+     *
+     *  Searches of the receivers run throughout, while nothing may search this index or start an
+     *  insertion into it; an insertion into a receiver arriving meanwhile is refused.
+     *
+     *  @param[in] receivers The empty indexes taking the parts, at least two, all distinct, each
+     *      with as many shards as this index; the slots must outlive the plan.
+     *  @param[in] executor The executor every @c run and @c finish names; its threads size the
+     *      plan.
+     *  @param[in] config The refine's knobs; zeros mean "derive from connectivity".
+     *  @param[in] seed Picks every shard's part roots: equal seeds over equal graphs split alike.
+     *  @retval config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
+     *      index itself, another metric, geometry or shard count.
+     *  @retval contended_k A batch in flight on this index or a receiver, or another refine,
+     *      absorb, split or load.
+     */
+    expected<refine_plan_t> plan_split(std::span<ram_indexes*> receivers, executor_t const& executor,
+                                       refine_config_t config = {}, u64_t seed = 0) noexcept {
+        std::size_t const shards = shards_.size(), threads = executor.size(), parts = receivers.size();
+        if (!shards || !threads) return {{}, status_t::uninitialized_k};
+        if (parts < 2) return {{}, status_t::config_mismatch_k};
+        for (std::size_t receiver = 0; receiver != parts; ++receiver) {
+            ram_indexes const* into = receivers[receiver];
+            if (!into || into == this || into->kernel_ != kernel_ || into->shards_.size() != shards || into->size())
+                return {{}, status_t::config_mismatch_k};
+            if (into->capacity() && capacity() &&
+                (into->dimensions() != dimensions() || into->connectivity() != connectivity()))
+                return {{}, status_t::config_mismatch_k};
+            for (std::size_t earlier = 0; earlier != receiver; ++earlier)
+                if (receivers[earlier] == into) return {{}, status_t::config_mismatch_k};
+        }
+        if (status_t const closed = close_shards_(); failed(closed)) return {{}, closed};
+        refine_plan_t plan {allocator_};
+        plan.owner_ = this;
+        plan.receivers_ = receivers;
+        plan.config_ = config;
+        for (ram_indexes* into : receivers) {
+            if (status_t const closed = into->close_shards_(); failed(closed)) return {{}, closed};
+            ++plan.closed_receivers_;
+        }
+        if (failed(plan.arenas_.reserve_exactly(threads)) || failed(plan.traversals_.reserve_exactly(threads)) ||
+            failed(plan.shard_plans_.reserve_exactly(shards)) || failed(plan.cursors_.resize(shards)) ||
+            failed(pick_home_shards_(plan.homes_, executor)) ||
+            failed(plan.receiver_shards_.reserve_exactly(shards * parts)) ||
+            failed(plan.receiver_seats_.reserve_exactly(parts)) || failed(plan.emptied_.reserve_exactly(shards)))
+            return {{}, status_t::bad_alloc_k};
+        if (status_t const opened = open_traversals_(plan, executor, *shards_[0].index); failed(opened))
+            return {{}, opened};
+
+        // A full part of every shard in every receiver: its key slots, and the locator seats.
+        for (ram_indexes* into : receivers) {
+            std::size_t seats = 0;
+            for (std::size_t shard = 0; shard != shards; ++shard) {
+                std::size_t const capacity = divide_round_up<std::size_t>(shards_[shard].index->size(), parts);
+                if (status_t const covered = into->shards_[shard].keys.cover(capacity); failed(covered))
+                    return {{}, covered};
+                seats += capacity;
+            }
+            auto [claimed, seat_status] = into->locators_of_key_.claim(seats);
+            if (failed(seat_status)) return {{}, seat_status};
+            plan.receiver_seats_.push_back_reserved(claimed);
+        }
+        for (shard_t const& part : shards_) {
+            plan.emptied_.push_back_reserved(rebuild_(*part.index));
+            if (!plan.emptied_.back()) return {{}, status_t::bad_alloc_k};
+        }
+        for (std::size_t shard = 0; shard != shards; ++shard)
+            for (ram_indexes* into : receivers)
+                plan.receiver_shards_.push_back_reserved(into->shards_[shard].index.get());
+        for (std::size_t shard = 0; shard != shards; ++shard) {
+            std::span<index_t*> const into {plan.receiver_shards_.data() + shard * parts, parts};
+            auto [split, status] = shards_[shard].index->plan_split(into, plan.traversals_[plan.home_of_(shard)],
+                                                                    config, seed + shard);
+            if (failed(status)) return {{}, status};
+            plan.shard_plans_.push_back_reserved(std::move(split));
+        }
+        plan.population_ = size();
         return {std::move(plan), status_t::success_k};
     }
 
@@ -1329,6 +1454,27 @@ struct ram_indexes
         return status_t::success_k;
     }
 
+    /** Builds one arena and one walk context per executor thread for @p plan, sized by @p shape 's
+     *  geometry: a re-selection walks like any other query, so it sizes like one, and the contexts
+     *  are seeded apart, and apart across calls, so concurrent walks start from different entry
+     *  points. */
+    status_t open_traversals_(refine_plan_t& plan, executor_t const& executor, index_t& shape) noexcept {
+        insert_config_t const walk_config {plan.config_.expansion_factor};
+        std::size_t const walk_bytes = shape.traversal_memory_usage(walk_config);
+        std::size_t const seed = atomic_ref<std::size_t>(routed_rows_).load(std::memory_order_relaxed);
+        for (std::size_t thread = 0; thread != executor.size(); ++thread) {
+            plan.arenas_.push_back_reserved(
+                typename executor_t::arena_t {forkunion_allocator_t {executor.memory_domain(thread)}});
+            if (failed(plan.arenas_[thread].reserve_exactly(walk_bytes))) return status_t::bad_alloc_k;
+            traversal_context_t traversal {arena_allocator<byte_t, forkunion_allocator_t>(plan.arenas_[thread])};
+            traversal.random_generator.state = seed + thread;
+            plan.traversals_.push_back_reserved(std::move(traversal));
+            if (status_t const sized = shape.reserve_traversal(plan.traversals_[thread], walk_config); failed(sized))
+                return sized;
+        }
+        return status_t::success_k;
+    }
+
 #pragma region Health
 
     /** Lands every row of @p donor and consumes it, under the closed dispensers of both indexes
@@ -1421,6 +1567,28 @@ struct ram_indexes
         donor.locators_of_key_.clear();
         atomic_ref<std::size_t>(donor.routed_rows_).store(0, std::memory_order_relaxed);
         return status_t::success_k;
+    }
+
+    /** Once every shard's split published its parts: every receiver's keys resolve in the seats
+     *  @p splitting claimed, and this index empties into the fresh shards built at planning. */
+    void publish_split_(refine_plan_t& splitting) noexcept {
+        for (std::size_t receiver = 0; receiver != splitting.receivers_.size(); ++receiver) {
+            ram_indexes& into = *splitting.receivers_[receiver];
+            for (std::size_t shard = 0; shard != into.shards_.size(); ++shard) {
+                shard_t const& part = into.shards_[shard];
+                for (node_id_t row = 0; row != static_cast<node_id_t>(part.index->size()); ++row)
+                    into.locators_of_key_.insert(splitting.receiver_seats_[receiver], part.keys[row],
+                                                 key_locator_t {shard, row});
+            }
+        }
+        for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
+            shard_t& part = shards_[shard];
+            forkunion_allocator_t const placed {part.index->vectors_allocator_.memory_domain};
+            part.index = std::move(splitting.emptied_[shard]);
+            part.keys = keys_column_t {placed};
+        }
+        locators_of_key_.clear();
+        atomic_ref<std::size_t>(routed_rows_).store(0, std::memory_order_relaxed);
     }
 
     /** Sizes what an audit runs on: one context per thread, one cursor per shard. The reservation

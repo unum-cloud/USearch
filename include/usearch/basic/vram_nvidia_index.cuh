@@ -266,10 +266,23 @@ __device__ __forceinline__ vram_ragged_view<node_id_type_> vram_view(
 }
 template <typename node_id_type_>
 __device__ __forceinline__ vram_build_view<node_id_type_> vram_view(vram_build<node_id_type_> const& build) noexcept {
-    return {vram_view(build.storage),     build.staged_offsets, build.tape_first, build.end_id,
-            build.scratch_bytes_per_warp, build.span_bytes,     build.first_id,   build.arena,
-            vram_view(build.arena_shape), build.expansion,      build.epoch_base, build.telemetry,
-            build.assigned_rows,          build.link_heads,     build.link_next,  build.touched_ids,
+    return {vram_view(build.storage),
+            build.staged_offsets,
+            build.tape_first,
+            build.end_id,
+            build.sampling_bound,
+            build.scratch_bytes_per_warp,
+            build.span_bytes,
+            build.first_id,
+            build.arena,
+            vram_view(build.arena_shape),
+            build.expansion,
+            build.epoch_base,
+            build.telemetry,
+            build.assigned_rows,
+            build.link_heads,
+            build.link_next,
+            build.touched_ids,
             build.touched_count};
 }
 template <typename node_id_type_>

@@ -187,8 +187,9 @@ struct sequence_traits_t {
 
     /** Moves @p geometry into the GPU @p variant and hands its index the window widths, which its
      *  first reservation uploads. */
-    template <typename variant_type_>
-    static bool freeze(variant_type_& variant, geometry_t& geometry, usearch_sequence_init_vram_t const&,
+    template <typename variant_type_, typename arguments_type_>
+        requires requires(arguments_type_ const& arguments) { arguments.vram; }
+    static bool freeze(variant_type_& variant, geometry_t& geometry, arguments_type_ const&,
                        usearch_outcome_t* outcome) noexcept {
         if (!geometry.connectivity) geometry.connectivity = connectivity_32_k;
         variant.geometry = std::move(geometry);
@@ -232,7 +233,7 @@ struct sequence_traits_t {
         return accepts_sequences(arguments.queries, arguments.count, outcome);
     }
 
-    /** Where a get or a pull hands its strings out, null when a pull wants none. */
+    /** Where a get hands its strings out. */
     template <typename arguments_type_>
     static usearch_tape_view_t* output_of(arguments_type_ const& arguments) noexcept {
         return arguments.sequences;
@@ -288,9 +289,10 @@ USEARCH_EXPORT void usearch_sequence_init_vram(usearch_sequence_init_vram_t* arg
 USEARCH_EXPORT void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
     basic_load_ram<usearch_sequence_load_ram>(arguments);
 }
-USEARCH_EXPORT void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {
-    basic_unserved<usearch_sequence_view_ram>(arguments);
+USEARCH_EXPORT void usearch_sequence_load_vram(usearch_sequence_load_vram_t* arguments) {
+    basic_load_vram<usearch_sequence_load_vram>(arguments);
 }
+USEARCH_EXPORT void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) { basic_view_ram(arguments); }
 USEARCH_EXPORT void usearch_sequence_view_nvme(usearch_sequence_view_nvme_t* arguments) {
     basic_view_nvme<usearch_sequence_view_nvme>(arguments);
 }
@@ -327,10 +329,13 @@ USEARCH_EXPORT void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t*
 }
 USEARCH_EXPORT void usearch_sequence_cursor_free(usearch_sequence_cursor_t cursor) { basic_free(cursor); }
 USEARCH_EXPORT void usearch_sequence_sample(usearch_sequence_sample_t* arguments) {
-    basic_unserved<usearch_sequence_sample>(arguments);
+    basic_sample<usearch_sequence_sample>(arguments);
 }
 USEARCH_EXPORT void usearch_sequence_absorb(usearch_sequence_absorb_t* arguments) {
     basic_absorb<usearch_sequence_absorb>(arguments);
+}
+USEARCH_EXPORT void usearch_sequence_split(usearch_sequence_split_t* arguments) {
+    basic_split<usearch_sequence_split>(arguments);
 }
 USEARCH_EXPORT void usearch_sequence_refinement_init(usearch_sequence_refinement_init_t* arguments) {
     basic_refinement_init<usearch_sequence_refinement_init>(arguments);

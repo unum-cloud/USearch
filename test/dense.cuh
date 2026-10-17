@@ -1819,6 +1819,163 @@ std::size_t test_dense_heal_islands(make_index_type_ const& make_index, u64_t se
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
+/** Of the ten nearest rows by @p index 's own exact scan, how many its walks return, summed over
+ *  the rows of @p queries; a match within the tenth's distance counts, so ties never punish one. */
+template <typename index_type_, typename make_index_type_, typename vectors_view_type_>
+std::size_t dense_recall_at_ten(index_type_& index, make_index_type_ const& make_index, vectors_view_type_ queries) {
+    using search_config_t = typename index_type_::search_config_t;
+    using small_size_t = typename index_type_::small_size_t;
+    constexpr std::size_t wanted_k = 10;
+    typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
+    search_config_t const scan {.expansion_factor = static_cast<small_size_t>(wanted_k),
+                                .traversal = traversal_t::scan_k};
+    std::size_t found = 0;
+    for (std::size_t query = 0; query != queries.extent(0); ++query) {
+        auto const query_vector = queries.row(query).as_vector();
+        if (failed(index.search(query_vector, context, scan).status) || context.results.empty()) continue;
+        f64_t const tenth = context.results[context.results.size() - 1].distance;
+        auto const [walked, status] = index.search(query_vector, context);
+        if (failed(status)) continue;
+        for (std::size_t rank = 0; rank != min_of(wanted_k, walked.count); ++rank)
+            found += context.results[rank].distance <= tenth + 1e-3 * max_of(std::fabs(tenth), 1.0);
+    }
+    return found;
+}
+
+/**
+ *  @brief A built index splits into two and, refilled, into three graph-local parts: every row
+ *      lands in exactly one receiver, the source empties and takes rows from zero again, and every
+ *      receiver reaches all its rows and walks within noise of the source's recall at ten.
+ *
+ *  Equal graphs split under one seed place every row alike. Refusals leave every index whole:
+ *  fewer than two receivers, a repeated or non-empty one, the source among them, another metric
+ *  or another geometry.
+ */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+std::size_t dense_expect_split(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    using node_id_t = typename index_type_::node_id_t;
+    constexpr std::size_t rows_k = dense_growth_nodes_k, samples_k = 32, noise_percent_k = 10;
+    constexpr nk_kernel_kind_t other_kernel_k = kernel_ == nk_kernel_euclidean_k ? nk_kernel_angular_k
+                                                                                 : nk_kernel_euclidean_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+    typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
+    auto const vectors = make_vectors<scalar_t>(rows_k, dimensions, stream_key(seed, "split"));
+    auto const queries = make_vectors<scalar_t>(samples_k, dimensions, stream_key(seed, "split", 1));
+    std::size_t const row_bytes = dense_rows_bytes(vectors.view(), 1);
+    // Equal rows under fresh contexts build equal graphs.
+    auto build = [&](index_type_& index) {
+        typename index_type_::traversal_context_t building = dense_make_context<index_type_>(make_index);
+        failures += expect(succeeded(index.reserve({rows_k, connectivity_16_k, dimensions}).status));
+        failures += expect(succeeded(index.insert(vectors.view(), {}, building).status));
+    };
+    auto make_receivers = [&](std::vector<std::unique_ptr<index_type_>>& owned, std::size_t count) {
+        std::vector<index_type_*> receivers;
+        for (std::size_t receiver = 0; receiver != count; ++receiver) {
+            owned.push_back(make_index(ledger));
+            receivers.push_back(owned.back().get());
+        }
+        return receivers;
+    };
+    auto recall_close = [&](std::size_t found, std::size_t baseline) {
+        return expect(found * 100 + noise_percent_k * samples_k * 10 >= baseline * 100);
+    };
+    // Drives one split, then checks that every source row lands in exactly one receiver, byte for
+    // byte, and that every receiver reaches its rows.
+    auto split = [&](index_type_& source, std::vector<index_type_*>& receivers, u64_t split_seed) {
+        {
+            auto [plan, plan_status] = source.plan_split(receivers, context, {}, split_seed);
+            failures += expect_eq(plan_status, status_t::success_k);
+            failures += expect(plan.landing() && source.size() == rows_k && receivers[0]->size() == 0);
+            do
+                for (auto const step : plan.steps())
+                    failures += expect_eq(plan.run(step, context), status_t::success_k);
+            while (plan.advance());
+            auto const [split_result, finish_status] = plan.finish();
+            failures += expect_eq(finish_status, status_t::success_k);
+            failures += expect_eq(split_result.health.audited_nodes, rows_k);
+        }
+        failures += expect_eq(source.size(), 0u);
+        std::vector<std::size_t> holders(rows_k);
+        for (index_type_* receiver : receivers) {
+            failures += expect(receiver->size() * receivers.size() <= rows_k + receivers.size() && receiver->size());
+            for (node_id_t node = 0; node != receiver->size(); ++node)
+                for (std::size_t row = 0; row != rows_k; ++row)
+                    holders[row] += std::memcmp(receiver->vector(node).byte_data(),
+                                                vectors.view().row(row).as_vector().byte_data(), row_bytes) == 0;
+            auto const [health, health_status] = dense_audit_health(*receiver, context);
+            failures += expect(succeeded(health_status));
+            if constexpr (kernel_ != nk_kernel_dot_k) failures += expect_eq(health.reachable_nodes, receiver->size());
+            else failures += expect(health.reachable_nodes * 100 >= receiver->size() * dense_minimal_recall_percent_k);
+        }
+        std::size_t misplaced = 0;
+        for (std::size_t const held : holders) misplaced += held != 1;
+        failures += expect_eq(misplaced, 0u);
+    };
+
+    std::unique_ptr<index_type_> const source = make_index(ledger);
+    std::unique_ptr<index_type_> const twin = make_index(ledger);
+    build(*source);
+    build(*twin);
+    std::size_t const source_recall = dense_recall_at_ten(*source, make_index, queries.view());
+
+    // Refusals precede every claim: the source and every receiver stay as they were.
+    {
+        std::vector<std::unique_ptr<index_type_>> owned;
+        std::vector<index_type_*> receivers = make_receivers(owned, 2);
+        std::unique_ptr<index_type_> const foreign {
+            new (std::nothrow) index_type_(other_kernel_k, counting_allocator_t(ledger), counting_allocator_t(ledger))};
+        std::unique_ptr<index_type_> const narrower = make_index(ledger);
+        failures += expect(succeeded(narrower->reserve({16, connectivity_16_k, dimensions * 2}).status));
+        for (std::vector<index_type_*> refused :
+             {std::vector<index_type_*> {receivers[0]}, std::vector<index_type_*> {receivers[0], receivers[0]},
+              std::vector<index_type_*> {receivers[0], source.get()},
+              std::vector<index_type_*> {receivers[0], foreign.get()},
+              std::vector<index_type_*> {receivers[0], narrower.get()}})
+            failures += expect_eq(source->plan_split(refused, context).status, status_t::config_mismatch_k);
+        failures += expect(succeeded(receivers[1]->reserve({16, connectivity_16_k, dimensions}).status));
+        failures += expect(succeeded(receivers[1]->insert(vectors(nk::range(0, 1), nk::slice), {}, context).status));
+        failures += expect_eq(source->plan_split(receivers, context).status, status_t::config_mismatch_k);
+        failures += expect(source->size() == rows_k && receivers[0]->size() == 0 && receivers[1]->size() == 1);
+    }
+
+    // Two parts, twice over equal graphs: every row lands at the same node of the same receiver.
+    std::vector<std::unique_ptr<index_type_>> halves_owned, twin_halves_owned;
+    std::vector<index_type_*> halves = make_receivers(halves_owned, 2);
+    std::vector<index_type_*> twin_halves = make_receivers(twin_halves_owned, 2);
+    u64_t const split_seed = stream_key(seed, "split", 2);
+    split(*source, halves, split_seed);
+    split(*twin, twin_halves, split_seed);
+    for (std::size_t half = 0; half != halves.size(); ++half) {
+        failures += expect_eq(halves[half]->size(), twin_halves[half]->size());
+        std::size_t moved = 0;
+        for (node_id_t node = 0; node != min_of(halves[half]->size(), twin_halves[half]->size()); ++node)
+            moved += std::memcmp(halves[half]->vector(node).byte_data(), twin_halves[half]->vector(node).byte_data(),
+                                 row_bytes) != 0;
+        failures += expect_eq(moved, 0u);
+        failures += recall_close(dense_recall_at_ten(*halves[half], make_index, queries.view()), source_recall);
+    }
+
+    // The emptied source takes rows from zero again, so it refills and splits into three.
+    std::vector<std::unique_ptr<index_type_>> thirds_owned;
+    std::vector<index_type_*> thirds = make_receivers(thirds_owned, 3);
+    failures += expect(succeeded(source->insert(vectors.view(), {}, context).status));
+    failures += expect_eq(source->size(), rows_k);
+    split(*source, thirds, stream_key(seed, "split", 3));
+    for (index_type_* third : thirds)
+        failures += recall_close(dense_recall_at_ten(*third, make_index, queries.view()), source_recall);
+    return failures;
+}
+
+/** @ref dense_expect_split, then the ledger it left must balance. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+std::size_t test_dense_split(make_index_type_ const& make_index, u64_t seed) {
+    allocation_ledger_t ledger;
+    std::size_t const failures = dense_expect_split<index_type_, kernel_>(make_index, ledger, seed);
+    return failures + expect_eq(ledger.live_bytes.load(), 0);
+}
+
 #pragma endregion Refinement
 
 #pragma region Algebra
@@ -2444,21 +2601,20 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
         auto odd_only = [](node_id_t node_id) noexcept {
             return node_id % 2 == 1 ? admission_t::admit_k : admission_t::reject_k;
         };
-        // The predicated sibling runs only where the backend exposes the verb - the GPU joins
-        // this branch the moment a device-side search_if lands.
-        constexpr bool predicable_k = requires(typename index_type_::vector_view_t query) {
-            index.search_if(query, odd_only, threads.contexts[0]);
-        };
+        // A device index answers the predicated sibling with `device_error_k`, its walk running no
+        // host predicate, and takes the unfiltered steps alone.
+        bool const predicable =
+            index.search_if(query_vectors.view().row(0).as_vector(), odd_only, threads.contexts[0]).status !=
+            status_t::device_error_k;
         auto search_step = [&](typename index_type_::vector_view_t query, bool predicated) {
-            if constexpr (predicable_k)
-                if (predicated) return index.search_if(query, odd_only, threads.contexts[0]);
+            if (predicated) return index.search_if(query, odd_only, threads.contexts[0]);
             return index.search(query, threads.contexts[0]);
         };
         for (std::size_t step = 0; step < dense_reader_minimal_searches_k || //
                                    writer_lanes_remaining.load(std::memory_order_acquire) != 0;
              ++step) {
             auto query = query_vectors.view().row(step % queries_count).as_vector();
-            bool const predicated = predicable_k && step % 2 == 1;
+            bool const predicated = predicable && step % 2 == 1;
             auto const [result, status] = search_step(query, predicated);
             if (status != status_t::success_k) thread_failures.fetch_add(1);
             thread_failures.fetch_add(
@@ -3047,6 +3203,185 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
     auto const [health, health_status] = recipient.health(executor);
     failures += expect(succeeded(health_status));
     failures += expect(health.reachable_nodes * 100 >= rows * dense_minimal_recall_percent_k);
+    return failures;
+}
+
+/**
+ *  @brief A sharded index splits into two and into three graph-local parts, each absorbed back,
+ *      and recall at ten against the exact oracle stays within noise of the source's throughout.
+ *
+ *  Shard @c s lands in every receiver's shard @c s, every key resolves in exactly one receiver with
+ *  its vector intact, the source empties and takes rows again, and every receiver reaches its rows.
+ *  While a split's plan lives, an insertion into a receiver refuses. Refusals leave every index
+ *  whole: fewer than two receivers, a repeated or non-empty one, the source among them, another
+ *  metric or another shard count.
+ */
+template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
+std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement) {
+    using scalar_t = typename indexes_type_::index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using distance_t = typename indexes_type_::distance_t;
+    constexpr bool device_k = !ram_collection<indexes_type_>;
+    constexpr nk_capability_t caps_k = device_k ? nk_cap_serial_k : indexes_type_::index_t::picked_quads_capability_k;
+    constexpr std::size_t samples_k = 32, wanted_k = 10, noise_percent_k = 10;
+    constexpr nk_kernel_kind_t other_kernel_k = kernel_ == nk_kernel_euclidean_k ? nk_kernel_angular_k
+                                                                                 : nk_kernel_euclidean_k;
+    std::size_t failures = 0;
+    std::size_t const rows = dense_growth_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+
+    dense_indexes_executor<indexes_type_> driver {placement...};
+    if (failed(driver.status)) return failures + expect(false);
+    auto& executor = driver.executor;
+    auto const vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_split"));
+    auto const queries = make_vectors<scalar_t>(samples_k, dimensions, stream_key(seed, "indexes_split", 1));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    auto oracle = nk::matrix<distance_t>::zeros({samples_k, rows}).value;
+    for (std::size_t query = 0; query != samples_k; ++query) {
+        auto const query_vector = queries.view().row(query).as_vector();
+        auto const query_norms = norms<caps_k, scalar_t>(query_vector);
+        for (std::size_t row = 0; row != rows; ++row) {
+            auto const row_vector = vectors.view().row(row).as_vector();
+            oracle(query, row) = distance<caps_k, scalar_t>(kernel_, query_vector, query_norms, row_vector,
+                                                            norms<caps_k, scalar_t>(row_vector));
+        }
+    }
+    // Of the ten nearest rows `indexes` holds by the oracle, how many its walks return; a match
+    // within the tenth's distance counts, so ties never punish a walk.
+    auto recall_at_ten = [&](indexes_type_& indexes) {
+        dense_indexes_row_driver<indexes_type_> walker {indexes, driver};
+        failures += expect(succeeded(walker.status));
+        std::vector<std::size_t> held;
+        for (std::size_t row = 0; row != rows; ++row)
+            if (indexes.count(keys[row])) held.push_back(row);
+        std::array<key_t, wanted_k> found_keys {};
+        std::array<distance_t, wanted_k> found_distances {};
+        std::vector<distance_t> exact;
+        std::size_t found = 0;
+        for (std::size_t query = 0; query != samples_k && held.size() >= wanted_k; ++query) {
+            exact.clear();
+            for (std::size_t const row : held) exact.push_back(oracle(query, row));
+            std::sort(exact.begin(), exact.end());
+            f64_t const tenth = exact[wanted_k - 1];
+            auto const [result, status] = indexes.search(queries.view().row(query).as_vector(), walker.handle(), {},
+                                                         std::span<key_t> {found_keys}, std::span {found_distances});
+            failures += expect(succeeded(status));
+            for (std::size_t rank = 0; rank != result.count; ++rank)
+                found += found_distances[rank] <= tenth + 1e-3 * max_of(std::fabs(tenth), 1.0);
+        }
+        return found;
+    };
+    auto recall_close = [&](std::size_t found, std::size_t baseline) {
+        return expect(found * 100 + noise_percent_k * samples_k * wanted_k >= baseline * 100);
+    };
+    auto make_receivers = [&](std::vector<std::unique_ptr<indexes_type_>>& owned, std::size_t count) {
+        std::vector<indexes_type_*> receivers;
+        for (std::size_t receiver = 0; receiver != count; ++receiver) {
+            owned.push_back(std::make_unique<indexes_type_>(kernel_, forkunion_allocator_t {no_memory_domain_k}));
+            failures += expect(succeeded(place_shards(*owned.back(), placement...)));
+            receivers.push_back(owned.back().get());
+        }
+        return receivers;
+    };
+    // Every key in exactly one receiver, sampled vectors intact, and every receiver reaching its
+    // rows and walking within noise of the source.
+    auto fetched = make_vectors<scalar_t>(1, dimensions, stream_key(seed, "indexes_split", 2));
+    std::size_t const row_bytes = dense_rows_bytes(vectors.view(), 1);
+    auto expect_parts = [&](std::vector<indexes_type_*> const& receivers, std::size_t baseline) {
+        std::size_t landed = 0, misplaced = 0, mismatched = 0;
+        for (indexes_type_* receiver : receivers) landed += receiver->size();
+        failures += expect_eq(landed, rows);
+        for (std::size_t row = 0; row != rows; ++row) {
+            std::size_t holders = 0;
+            for (indexes_type_* receiver : receivers) {
+                std::size_t const held = receiver->count(keys[row]);
+                holders += held;
+                if (held && row % 16 == 0)
+                    mismatched += receiver->get(keys[row], fetched.span(), 1, executor) != 1 ||
+                                  std::memcmp(fetched.data(), vectors.view().row(row).as_vector().byte_data(),
+                                              row_bytes) != 0;
+            }
+            misplaced += holders != 1;
+        }
+        failures += expect_eq(misplaced, 0u);
+        failures += expect_eq(mismatched, 0u);
+        for (indexes_type_* receiver : receivers) {
+            auto const [health, health_status] = receiver->health(executor);
+            failures += expect(succeeded(health_status));
+            if constexpr (kernel_ != nk_kernel_dot_k) failures += expect_eq(health.reachable_nodes, receiver->size());
+            else failures += expect(health.reachable_nodes * 100 >= receiver->size() * dense_minimal_recall_percent_k);
+            failures += recall_close(recall_at_ten(*receiver), baseline);
+        }
+    };
+
+    indexes_type_ source {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(source, placement...)));
+    failures += expect(succeeded(source.reserve({rows, connectivity_16_k, dimensions}).status));
+    failures += expect(succeeded(source.insert(std::span<key_t const> {keys}, vectors.view(), executor).status));
+    std::size_t const source_recall = recall_at_ten(source);
+
+    // Refusals precede every hold: the source and every receiver stay as they were, and open.
+    {
+        std::vector<std::unique_ptr<indexes_type_>> owned;
+        std::vector<indexes_type_*> receivers = make_receivers(owned, 2);
+        indexes_type_ foreign {other_kernel_k, forkunion_allocator_t {no_memory_domain_k}};
+        indexes_type_ wider {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+        failures += expect(succeeded(place_shards(foreign, placement...)));
+        failures += expect(succeeded(place_shards(wider, placement...)) &&
+                           succeeded(place_shards(wider, placement...)));
+        for (std::vector<indexes_type_*> refused :
+             {std::vector<indexes_type_*> {receivers[0]}, std::vector<indexes_type_*> {receivers[0], receivers[0]},
+              std::vector<indexes_type_*> {receivers[0], &source}, std::vector<indexes_type_*> {receivers[0], &foreign},
+              std::vector<indexes_type_*> {receivers[0], &wider}})
+            failures += expect_eq(source.plan_split(refused, executor).status, status_t::config_mismatch_k);
+        failures += expect(succeeded(receivers[1]->reserve({16, connectivity_16_k, dimensions}).status));
+        failures += expect(succeeded(
+            receivers[1]
+                ->insert(std::span<key_t const> {keys.data(), 1}, vectors(nk::range(0, 1), nk::slice), executor)
+                .status));
+        failures += expect_eq(source.plan_split(receivers, executor).status, status_t::config_mismatch_k);
+        failures += expect(source.size() == rows && receivers[0]->size() == 0 && receivers[1]->size() == 1);
+    }
+
+    // Two parts, the receivers closed while the plan lives, then absorbed back.
+    std::vector<std::unique_ptr<indexes_type_>> halves_owned;
+    std::vector<indexes_type_*> halves = make_receivers(halves_owned, 2);
+    {
+        auto [plan, plan_status] = source.plan_split(halves, executor, {}, stream_key(seed, "indexes_split", 3));
+        failures += expect_eq(plan_status, status_t::success_k);
+        failures += expect_eq(
+            halves[0]
+                ->insert(std::span<key_t const> {keys.data(), 1}, vectors(nk::range(0, 1), nk::slice), executor)
+                .status,
+            status_t::contended_k);
+        failures += expect_eq(plan.run(executor), status_t::success_k);
+        auto const [split, finish_status] = plan.finish(executor);
+        failures += expect_eq(finish_status, status_t::success_k);
+        failures += expect_eq(split.health.audited_nodes, rows);
+    }
+    failures += expect_eq(source.size(), 0u);
+    expect_parts(halves, source_recall);
+    failures += expect(succeeded(halves[0]->absorb(*halves[1], executor).status));
+    failures += expect_eq(halves[1]->size(), 0u);
+    failures += dense_indexes_expect_restored(*halves[0], vectors, keys, dimensions, executor, seed);
+    failures += recall_close(recall_at_ten(*halves[0]), source_recall);
+
+    // The reunion splits into three through the one-shot, and absorbs back once more.
+    std::vector<std::unique_ptr<indexes_type_>> thirds_owned;
+    std::vector<indexes_type_*> thirds = make_receivers(thirds_owned, 3);
+    failures += expect(succeeded(halves[0]->split(thirds, executor, {}, stream_key(seed, "indexes_split", 4)).status));
+    failures += expect_eq(halves[0]->size(), 0u);
+    expect_parts(thirds, source_recall);
+    std::vector<indexes_type_*> donors {thirds[1], thirds[2]};
+    failures += expect(succeeded(thirds[0]->absorb(donors, executor).status));
+    failures += dense_indexes_expect_restored(*thirds[0], vectors, keys, dimensions, executor, seed);
+    failures += recall_close(recall_at_ten(*thirds[0]), source_recall);
+
+    // The emptied source takes rows again.
+    failures += expect(succeeded(source.reserve({rows, connectivity_16_k, dimensions}).status));
+    failures += expect(succeeded(source.insert(std::span<key_t const> {keys}, vectors.view(), executor).status));
+    failures += expect_eq(source.size(), rows);
     return failures;
 }
 

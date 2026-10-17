@@ -15,9 +15,9 @@
  *
  *      Action                           RAM          VRAM         NVMe
  *      init: start empty, mutable       init_ram     init_vram    none
- *      load: copy a checkpoint in       load_ram     none         none
+ *      load: copy a checkpoint in       load_ram     load_vram    none
  *      view: serve one in place         view_ram     none         view_nvme
- *      save: write a checkpoint         save         none         none
+ *      save: write a checkpoint         save         save         none
  *
  *  Each is spelled @c usearch_sequence_ and the suffix above. A VRAM handle serves byte and UTF-8
  *  Levenshtein, on one GPU, through the insertion, search and description verbs, refusing the rest
@@ -67,19 +67,21 @@ extern "C" {
  */
 typedef struct usearch_sequence_index_handle_t* usearch_sequence_index_t;
 
-/** A consistent snapshot cursor over the index contents. Captures the publication
- *  watermark at creation, so concurrent inserts never appear mid-iteration, and the
- *  walk is a sequential entry scan - export, migration, and visualization feed off it.
- *  Each pull names the index again; an overlapping pull reports @c usearch_status_contended_k. */
+/** A consistent snapshot cursor over the graph. Captures the publication watermark at creation,
+ *  so concurrent inserts never appear mid-iteration, and yields each entry's key with the keys it
+ *  links to - every entry as stored, or breadth-first from start keys - which export, migration,
+ *  and visualization feed off. Each pull names the index again; an overlapping pull reports
+ *  @c usearch_status_contended_k. */
 typedef struct usearch_sequence_cursor_handle_t* usearch_sequence_cursor_t;
 
 /**
- *  @brief One refinement in flight, optionally absorbing donors first: it holds everything the pass
- *      needs between calls, so a cancelled @c usearch_sequence_refinement_next continues where it
- *      stopped, and nothing about it stays in the index once it finishes.
+ *  @brief One refinement in flight, optionally absorbing donors or splitting into receivers first.
  *
- *  The index admits no insertion and no save while the handle lives; searches proceed as during
- *  @c usearch_sequence_refine. Each call names the index and the executor it was opened with.
+ *  It holds everything the pass needs between calls, so a cancelled
+ *  @c usearch_sequence_refinement_next continues where it stopped, and nothing about it stays in
+ *  the index once it finishes. The index admits no insertion and no save while the handle lives;
+ *  searches proceed as during @c usearch_sequence_refine. Each call names the index and the
+ *  executor it was opened with.
  */
 typedef struct usearch_sequence_refinement_handle_t* usearch_sequence_refinement_t;
 
@@ -371,6 +373,42 @@ typedef struct usearch_sequence_load_ram_t {
  *  whole and cancelling costs the part being read rather than everything behind it.
  */
 USEARCH_EXPORT void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments);
+
+/** The arguments of @c usearch_sequence_load_vram. */
+typedef struct usearch_sequence_load_vram_t {
+
+    /** Output for the new index, written by the time the call is final. */
+    usearch_sequence_index_t* index;
+
+    /** The executor the upload runs on, one stream per device. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Checkpoint path - a monolith, or a manifest naming many. */
+    usearch_bytes_view_t path;
+
+    /** The devices to place the parts on. */
+    usearch_vram_options_t vram;
+
+    /** Zero alone: a GPU index keeps no key lookup, so it bounds no key's entries and refuses any
+     *  bound it is given. */
+    size_t values_per_key;
+
+    /** The weights an alignment checkpoint was built with; @c NULL for the Levenshtein kinds. */
+    usearch_sequence_weights_t const* weights;
+
+    /** The @b optional handler, called with parts placed and their count. */
+    usearch_progress_t progress;
+} usearch_sequence_load_vram_t;
+
+/** Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
+ *  @c usearch_sequence_load_ram. */
+USEARCH_EXPORT void usearch_sequence_load_vram(usearch_sequence_load_vram_t* arguments);
 
 /** The arguments of @c usearch_sequence_view_ram. */
 typedef struct usearch_sequence_view_ram_t {
@@ -791,6 +829,77 @@ typedef struct usearch_sequence_absorb_t {
  */
 USEARCH_EXPORT void usearch_sequence_absorb(usearch_sequence_absorb_t* arguments);
 
+/** The arguments of @c usearch_sequence_split. */
+typedef struct usearch_sequence_split_t {
+
+    /** The handle split into the receivers, left empty and live. */
+    usearch_sequence_index_t index;
+
+    /** The executor the partition, each part's landing and the closing refinements fan out over. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Receiver handles to split into, at least two. */
+    size_t count;
+
+    /** Array of @c count empty handles of the source's residency, class, kind and geometry, each
+     *  receiving one part. */
+    usearch_sequence_index_t const* receivers;
+
+    /** The @b optional output for the entries the closing refines changed, across the receivers. */
+    size_t* changed;
+
+    /** The @b optional output for the audits closing the heals, across the receivers. */
+    usearch_reachability_t* reachability;
+
+    /** The @b optional candidate-pool breadth of the closing refines' walks; zero derives. */
+    size_t expansion_factor;
+
+    /** Picks the part roots: equal seeds over an unchanged index split equally. */
+    uint64_t seed;
+
+    /** The @b optional handler, called with entries the closing refines re-selected; a cancel stops
+     *  them as it stops @c usearch_sequence_refine, never a landing. */
+    usearch_progress_t progress;
+
+    /** The @b optional traversal telemetry; @c NULL skips reporting. */
+    usearch_traversal_stats_t* stats;
+} usearch_sequence_split_t;
+
+/**
+ *  @brief Splits @c index into the handles in @c receivers, the inverse of
+ *      @c usearch_sequence_absorb: graph-local parts keeping their edges rather than re-inserting
+ *      their sequences, one part per receiver, and @c index left empty but live.
+ *  @retval usearch_status_read_only_k @c index is a view.
+ *  @retval usearch_status_invalid_argument_k Fewer than two receivers, @c NULL @c receivers, or a
+ *      @c NULL slot in them.
+ *  @retval usearch_status_config_mismatch_k A receiver of another residency, class, kind or
+ *      geometry, one holding entries, one named twice, or @c index itself.
+ *  @retval usearch_status_contended_k An insertion or refinement in flight on @c index or on a
+ *      receiver; nothing moves.
+ *
+ *  Every receiver is checked and held before the first part lands, so a refusal moves nothing. The
+ *  part roots are drawn from @c seed without a scan, and each part grows breadth-first over the
+ *  links from its root, capped at an equal share of the entries, while entries no root reaches join
+ *  the smallest part. Each part then lands in its receiver all-or-nothing, its edges rebased, its
+ *  edges into other parts dropped, and the entries that lost one placed first; @c index clears once
+ *  every part landed. Each receiver closes by refining the entries that lost an edge and re-linking
+ *  what that strands, as @c usearch_sequence_refine does. Insertions into @c index or a receiver
+ *  arriving meanwhile are refused with @c usearch_status_contended_k, and nothing may search either
+ *  until the call is final.
+ *
+ *  The handler reports and cancels the closing refinements alone, exactly as in
+ *  @c usearch_sequence_refine: a cancel skips the rest of the re-selection, still re-links, and
+ *  answers @c usearch_status_cancelled_k with every part landed. A caller wanting to continue that
+ *  re-selection later holds a @c usearch_sequence_refinement_t opened with @c receivers instead.
+ */
+USEARCH_EXPORT void usearch_sequence_split(usearch_sequence_split_t* arguments);
+
 /** The arguments of @c usearch_sequence_refinement_init. */
 typedef struct usearch_sequence_refinement_init_t {
 
@@ -817,22 +926,34 @@ typedef struct usearch_sequence_refinement_init_t {
     /** Donor handles in @c donors. */
     size_t count;
 
+    /** The @b optional receivers to split @c index into first, as @c usearch_sequence_split lands
+     *  them, each refined in turn; the array must outlive the refinement. */
+    usearch_sequence_index_t const* receivers;
+
+    /** Receiver handles in @c receivers, zero or at least two. */
+    size_t receivers_count;
+
     /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
     size_t expansion_factor;
+
+    /** Picks the part roots when @c receivers are named, as in @c usearch_sequence_split. */
+    uint64_t seed;
 } usearch_sequence_refinement_init_t;
 
 /**
  *  @brief Opens a refinement of @c index, absorbing @c donors first when any are named, as
- *      @c usearch_sequence_absorb lands them. Every allocation the refinement needs in the index
+ *      @c usearch_sequence_absorb lands them, or splitting it into @c receivers, as
+ *      @c usearch_sequence_split lands them. Every allocation the refinement needs in the index
  *      happens here, never in a step.
  *  @retval usearch_status_read_only_k @c index is an NVMe view.
  *  @retval usearch_status_unsupported_k @c index lives on a GPU, whose index refines nothing yet.
- *  @retval usearch_status_invalid_argument_k No executor, a @c NULL slot in @c donors, or @c NULL
- *      @c donors for a nonzero @c count.
- *  @retval usearch_status_config_mismatch_k A donor of another residency, class, kind or geometry,
- *      or @c index itself.
- *  @retval usearch_status_contended_k An insertion or another refinement in flight on @c index or
- *      on a donor.
+ *  @retval usearch_status_invalid_argument_k No executor, a @c NULL slot in @c donors or
+ *      @c receivers, @c NULL @c donors for a nonzero @c count, one receiver alone, or donors and
+ *      receivers both named.
+ *  @retval usearch_status_config_mismatch_k A donor or receiver of another residency, class, kind
+ *      or geometry, a receiver holding entries, or @c index itself.
+ *  @retval usearch_status_contended_k An insertion or another refinement in flight on @c index, on
+ *      a donor or on a receiver.
  */
 USEARCH_EXPORT void usearch_sequence_refinement_init(usearch_sequence_refinement_init_t* arguments);
 
@@ -930,12 +1051,22 @@ typedef struct usearch_sequence_cursor_init_t {
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** The @b optional key to step from: the cursor then yields the entries that the key's entries
-     *  link to in the graph, once each and in link order; @c NULL scans every entry as stored. */
-    usearch_key_t const* start;
+    /** The @b optional count of @c starts; zero walks every entry as stored. */
+    size_t starts_count;
+
+    /** The keys to walk from, in the order the walk begins with them. */
+    usearch_key_t const* starts;
 } usearch_sequence_cursor_init_t;
 
-/** Opens a snapshot cursor over the current contents; see @c usearch_sequence_cursor_t. */
+/**
+ *  @brief Opens a snapshot cursor over the current contents; see @c usearch_sequence_cursor_t.
+ *  @retval usearch_status_invalid_argument_k @c NULL @c starts for a nonzero @c starts_count.
+ *
+ *  Without @c starts the cursor yields every entry as stored. With them it yields the start keys'
+ *  own entries first, in the order given, then the entries those link to, breadth-first, each
+ *  entry once, so a caller wanting only the starts' immediate links reads the rows of the first
+ *  pulled entries. A key the index lacks starts nothing.
+ */
 USEARCH_EXPORT void usearch_sequence_cursor_init(usearch_sequence_cursor_init_t* arguments);
 
 /** The arguments of @c usearch_sequence_cursor_next. */
@@ -959,14 +1090,15 @@ typedef struct usearch_sequence_cursor_next_t {
     /** Output for the identities, inside @c arena. */
     usearch_keys_view_t* keys;
 
-    /** The @b optional output for the entries as a tape inside @c arena, @c written + 1 offsets
-     *  around their bytes; @c NULL skips them. */
-    usearch_tape_view_t* sequences;
+    /** The @b optional output for each entry's links, the keys of the entries it links to in the
+     *  graph, row @c i spanning @c offsets[i] up to @c offsets[i+1], inside @c arena; @c NULL skips
+     *  them. */
+    usearch_keys_tape_view_t* links;
 
     /** Output for the entries written; zero when the snapshot is exhausted. */
     size_t* written;
 
-    /** Memory for @c keys and @c sequences, rewound by the call. */
+    /** Memory for @c keys and @c links, rewound by the call. */
     usearch_arena_t arena;
 
     /** The upper bound on entries this pull writes. */
@@ -974,11 +1106,14 @@ typedef struct usearch_sequence_cursor_next_t {
 } usearch_sequence_cursor_next_t;
 
 /**
- *  @brief Copies the next batch of entries out of the cursor into @c arena.
+ *  @brief Copies the next batch of entries out of the cursor into @c arena, each with the keys it
+ *      links to, in the order @c usearch_sequence_cursor_init describes; the sequences themselves
+ *      come from @c usearch_sequence_get.
  *  @retval usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  *
- *  The bytes are copied rather than borrowed from the index, so the batch stays valid until the
- *  next call given the same arena, however the cursor moves meanwhile.
+ *  Links name only entries the snapshot holds, as the graph stored them when the pull ran. The
+ *  keys are copied rather than borrowed from the index, so the batch stays valid until the next
+ *  call given the same arena, however the cursor moves meanwhile.
  */
 USEARCH_EXPORT void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments);
 

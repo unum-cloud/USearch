@@ -108,6 +108,12 @@ struct geospatial_terrain {
      *  steps. */
     status_t adopt_terrain(us::geospatial::terrain_t const& grid) noexcept;
 
+    /** Whether a terrain was adopted, which lines of sight need. */
+    bool has_terrain() const noexcept { return !terrain.empty(); }
+
+    /** The bytes the packed terrain holds. */
+    std::size_t terrain_memory_usage() const noexcept { return terrain_pack.memory_usage(); }
+
   protected:
 
     /** A factory of the variant's metric over a thread's arena, sized for a round of candidates. */
@@ -160,6 +166,11 @@ struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
 
     explicit geospatial_ram_variant(forkunion_allocator_t const& allocator) noexcept : index(allocator) {}
 
+    /** Reserves the entries @p arguments name. */
+    status_t reserve(usearch_geospatial_reserve_t const& arguments) noexcept {
+        return index.reserve(arguments.entries).status;
+    }
+
     /** Empties the index and forgets its largest deviation. */
     status_t clear() noexcept {
         status_t const cleared = index.clear();
@@ -207,6 +218,11 @@ struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
     status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Serving a checkpoint in place and sampling answer @c unsupported_k until the index serves
+     *  them. */
+    status_t view(std::string_view) noexcept { return status_t::unsupported_k; }
+    status_t sample(usearch_geospatial_sample_t const&) noexcept { return status_t::unsupported_k; }
 
   private:
 
@@ -641,6 +657,19 @@ struct geospatial_nvme_variant : geospatial_terrain<cpu_class_> {
 
     expected<traversal_telemetry_t> search(usearch_geospatial_search_t const& arguments, matches_landing_t& landing,
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
+
+    /** A radius walk answers @c unsupported_k until the view serves it. */
+    expected<traversal_telemetry_t> within(usearch_geospatial_observation_t const*, std::size_t, relation_t,
+                                           usearch_geospatial_tolerance_t, usearch_predicate_t,
+                                           growing_arena<forkunion_allocator_t>&, usearch_matches_tape_view_t&,
+                                           std::size_t&, progress_ticks_t&, executor_t&) noexcept {
+        return {{}, status_t::unsupported_k};
+    }
+
+    /** A view already is its checkpoint, so saving answers @c unsupported_k, as does sampling until
+     *  the view serves it. */
+    status_t save(std::string_view, executor_t&, progress_ticks_t&) noexcept { return status_t::unsupported_k; }
+    status_t sample(usearch_geospatial_sample_t const&) noexcept { return status_t::unsupported_k; }
 };
 
 template <cpu_class_t cpu_class_>
@@ -742,6 +771,12 @@ struct geospatial_vram_nvidia_variant
         return reserve_(arguments.entries, geometry.connectivity, arguments.entries * sizeof(value_t));
     }
 
+    /** Holds no terrain, as lines of sight stay the RAM variants'. */
+    static constexpr bool has_terrain() noexcept { return false; }
+
+    /** Packs no terrain, so it holds no terrain bytes. */
+    static constexpr std::size_t terrain_memory_usage() noexcept { return 0; }
+
     expected<traversal_telemetry_t> insert(usearch_geospatial_insert_t const& arguments, progress_ticks_t& ticks,
                                            executor_t& executor) noexcept;
 
@@ -752,6 +787,15 @@ struct geospatial_vram_nvidia_variant
     expected<traversal_telemetry_t> search(usearch_geospatial_search_t const& arguments,
                                            growing_arena<forkunion_allocator_t>& pages, matches_landing_t& landing,
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
+
+    /** A radius walk answers @c unsupported_k until the device serves it. */
+    expected<traversal_telemetry_t> within(usearch_geospatial_observation_t const*, std::size_t,
+                                           us::geospatial::relation_t, usearch_geospatial_tolerance_t,
+                                           usearch_predicate_t, growing_arena<forkunion_allocator_t>&,
+                                           usearch_matches_tape_view_t&, std::size_t&, progress_ticks_t&,
+                                           executor_t&) noexcept {
+        return {{}, status_t::unsupported_k};
+    }
 
   private:
 

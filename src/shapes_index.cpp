@@ -158,9 +158,10 @@ struct shapes_traits_t {
         return true;
     }
 
-    /** Refuses the kinds and scalars no device kit serves. */
-    static bool admits(geometry_t const& geometry, usearch_shapes_init_vram_t const&,
-                       usearch_outcome_t* outcome) noexcept {
+    /** Refuses the kinds and scalars no device kit serves, for a call placing on a device. */
+    template <typename arguments_type_>
+        requires requires(arguments_type_ const& arguments) { arguments.vram; }
+    static bool admits(geometry_t const& geometry, arguments_type_ const&, usearch_outcome_t* outcome) noexcept {
         switch (geometry.metric) {
         case usearch_shapes_metric_chamfer_k:
         case usearch_shapes_metric_hausdorff_k: break;
@@ -228,7 +229,7 @@ struct shapes_traits_t {
         return accepts_shapes(arguments.queries, arguments.count, outcome);
     }
 
-    /** Whether the points a get or a pull asks for export to a whole-byte scalar; false once
+    /** Whether the points a get asks for export to a whole-byte scalar; false once
      *  @p outcome records why not. */
     template <typename arguments_type_>
     static bool exports(arguments_type_ const& arguments, usearch_outcome_t* outcome) noexcept {
@@ -237,7 +238,7 @@ struct shapes_traits_t {
         return propagate_error(usearch_status_unsupported_k, outcome, "Points export to a whole-byte scalar");
     }
 
-    /** Where a get or a pull hands its clouds out, null when a pull wants none. */
+    /** Where a get hands its clouds out. */
     template <typename arguments_type_>
     static usearch_tape_view_t* output_of(arguments_type_ const& arguments) noexcept {
         return arguments.shapes;
@@ -256,27 +257,22 @@ struct shapes_traits_t {
     static bool land(variant_type_ const& variant, std::size_t count, value_at_type_&& value_at,
                      growing_arena<forkunion_allocator_t>& memory, arguments_type_ const& arguments,
                      usearch_outcome_t* outcome) noexcept {
-        using raw_t = typename variant_type_::scalar_t::raw_t;
         nk_dtype_t const exported = nk_dtype_of(arguments.outputs_scalar);
         std::size_t const element_bytes = nk_dtype_bits(exported) / 8;
         std::size_t* const offsets = carve<std::size_t>(memory, count + 1);
         if (!offsets) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
         offsets[0] = 0;
         for (std::size_t entry = 0; entry != count; ++entry)
-            if constexpr (is_nvme_index<variant_type_>)
-                offsets[entry + 1] = offsets[entry] + value_at(entry).size() / (3 * sizeof(raw_t));
-            else offsets[entry + 1] = offsets[entry] + value_at(entry).max_points();
+            offsets[entry + 1] = offsets[entry] + variant.points_of(value_at(entry));
         byte_t* const points = carve<byte_t>(memory, offsets[count] * 3 * element_bytes);
         if (offsets[count] && !points)
             return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
         thread_allocator_t const scratch {memory};
         for (std::size_t entry = 0; entry != count; ++entry) {
             byte_t* const output = points + offsets[entry] * 3 * element_bytes;
-            status_t exported_status;
-            if constexpr (is_nvme_index<variant_type_>)
-                exported_status = variant.export_points(value_at(entry), exported, output);
-            else exported_status = variant.export_points(value_at(entry), exported, output, scratch);
-            if (failed(exported_status)) return propagate_error(exported_status, outcome);
+            if (status_t const exported_status = variant.export_points(value_at(entry), exported, output, scratch);
+                failed(exported_status))
+                return propagate_error(exported_status, outcome);
         }
         *arguments.shapes = {points, offsets, arguments.outputs_scalar};
         return true;
@@ -314,11 +310,9 @@ USEARCH_EXPORT void usearch_shapes_load_ram(usearch_shapes_load_ram_t* arguments
     basic_load_ram<usearch_shapes_load_ram>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_load_vram(usearch_shapes_load_vram_t* arguments) {
-    basic_unserved<usearch_shapes_load_vram>(arguments);
+    basic_load_vram<usearch_shapes_load_vram>(arguments);
 }
-USEARCH_EXPORT void usearch_shapes_view_ram(usearch_shapes_view_ram_t* arguments) {
-    basic_unserved<usearch_shapes_view_ram>(arguments);
-}
+USEARCH_EXPORT void usearch_shapes_view_ram(usearch_shapes_view_ram_t* arguments) { basic_view_ram(arguments); }
 USEARCH_EXPORT void usearch_shapes_view_nvme(usearch_shapes_view_nvme_t* arguments) {
     basic_view_nvme<usearch_shapes_view_nvme>(arguments);
 }
@@ -353,10 +347,13 @@ USEARCH_EXPORT void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arg
 }
 USEARCH_EXPORT void usearch_shapes_cursor_free(usearch_shapes_cursor_t cursor) { basic_free(cursor); }
 USEARCH_EXPORT void usearch_shapes_sample(usearch_shapes_sample_t* arguments) {
-    basic_unserved<usearch_shapes_sample>(arguments);
+    basic_sample<usearch_shapes_sample>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_absorb(usearch_shapes_absorb_t* arguments) {
     basic_absorb<usearch_shapes_absorb>(arguments);
+}
+USEARCH_EXPORT void usearch_shapes_split(usearch_shapes_split_t* arguments) {
+    basic_split<usearch_shapes_split>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_refinement_init(usearch_shapes_refinement_init_t* arguments) {
     basic_refinement_init<usearch_shapes_refinement_init>(arguments);

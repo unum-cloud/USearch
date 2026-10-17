@@ -35,12 +35,6 @@
 
 namespace unum::usearch::dense {
 
-/** Sixteen bytes every NVIDIA kit loads at once - the host's spelling of the kernels' @c uint4,
- *  which only the CUDA SDK declares. */
-struct alignas(16) cuda_fragment_t {
-    u32_t x, y, z, w;
-};
-
 /** The device value lookup an attend kernel resolves rows through, by the @c device_lookup_k a
  *  lookup type names itself with: whichever unit compiles a fatbin specializes it with @c type for
  *  every lookup that fatbin's attend kernels take. */
@@ -236,7 +230,11 @@ struct vram_nvidia_index
     using typename base_t::search_result_t;
     using typename base_t::traversal_context_t;
 
-    using fragment_t = cuda_fragment_t;
+    /** Sixteen bytes every NVIDIA kit loads at once - the host's spelling of the kernels' @c uint4,
+     *  which only the CUDA SDK declares. */
+    struct alignas(16) fragment_t {
+        u32_t x, y, z, w;
+    };
     static_assert(sizeof(fragment_t) == base_t::fragment_bytes_k);
 
     /** The capability of the quads kit the ladder picked under @c capability_, surfaced in the

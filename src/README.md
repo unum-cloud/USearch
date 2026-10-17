@@ -144,4 +144,4 @@ Every basic class unit lists the same modalities, sequence, shapes and geospatia
 - Overlap distances land as the share of missed windows, from zero to one, rather than the kernels' fixed point.
 - Checkpoints are one SafeGraphs monolith whose metric token is `levenshtein`, `levenshtein-utf8`, `overlap`, `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`, with `connectivity`, `window_widths` and `points` in the provenance.
 
-`view_ram`, `refine`, `merge`, `sample` and a cursor opened at a key answer `usearch_status_unsupported_k`, as do the four alignment kinds and a `.json` manifest, while `init_vram` and `load_vram` for shapes answer `usearch_status_device_k`.
+`refine` and `absorb` serve RAM indexes, while `view_ram`, `sample`, `split`, a cursor opened at start keys and a cursor asked for links answer `usearch_status_unsupported_k`, as do the four alignment kinds and a `.json` manifest.
