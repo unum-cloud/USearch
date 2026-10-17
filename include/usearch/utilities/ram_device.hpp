@@ -239,8 +239,8 @@ struct forkunion_executor_t {
     /** Nothing is ever pending: every fan-out blocks inside, so a drain is a no-op. */
     status_t drain() noexcept { return status_t::success_k; }
 
-    /** Runs @p callback on every thread with the thread index and its compute domain; must
-     *  be @c noexcept. */
+    /** Runs @p callback on every thread with the thread index and its compute domain; must be
+     *  @c noexcept. A pool running another dispatch answers @c contended_k, and nothing ran. */
     template <typename callback_type_>
     status_t for_threads(callback_type_&& callback) noexcept {
         if (!pool_) return status_t::uninitialized_k;
@@ -248,12 +248,12 @@ struct forkunion_executor_t {
                                                std::size_t compute_domain) {
             (*static_cast<std::remove_reference_t<callback_type_>*>(context))(thread, compute_domain);
         };
-        if (fu_pool_for_threads(pool_, trampoline, &callback) != fu_success_k) return status_t::uninitialized_k;
-        return status_t::success_k;
+        return dispatch_status_(fu_pool_for_threads(pool_, trampoline, &callback));
     }
 
-    /** Runs @p callback over @p tasks items, stolen dynamically, with the task index, the
-     *  thread index and its compute domain; must be @c noexcept. */
+    /** Runs @p callback over @p tasks items, stolen dynamically, with the task index, the thread
+     *  index and its compute domain; must be @c noexcept. A pool running another dispatch answers
+     *  @c contended_k, and nothing ran. */
     template <typename callback_type_>
     status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
         if (!pool_) return status_t::uninitialized_k;
@@ -262,12 +262,22 @@ struct forkunion_executor_t {
                                             std::size_t compute_domain) {
             (*static_cast<std::remove_reference_t<callback_type_>*>(context))(task, thread, compute_domain);
         };
-        if (fu_pool_for_n_dynamic(pool_, tasks, trampoline, &callback) != fu_success_k)
-            return status_t::uninitialized_k;
-        return status_t::success_k;
+        return dispatch_status_(fu_pool_for_n_dynamic(pool_, tasks, trampoline, &callback));
     }
 
   private:
+
+    /** What a fan-out answers for ForkUnion's @p status: a nested or concurrent dispatch is
+     *  @c contended_k, a pool without workers @c uninitialized_k. */
+    static status_t dispatch_status_(fu_status_t status) noexcept {
+        switch (status) {
+        case fu_success_k: return status_t::success_k;
+        case fu_contended_k: return status_t::contended_k;
+        case fu_not_spawned_k: return status_t::uninitialized_k;
+        case fu_invalid_argument_k: return status_t::invalid_argument_k;
+        default: return status_t::internal_k;
+        }
+    }
 
     /** One arena per thread, colocated with it once at @ref acquire; contexts point into it,
      *  so its chunks never move. */

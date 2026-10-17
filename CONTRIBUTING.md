@@ -223,7 +223,8 @@ cmake -D CMAKE_BUILD_TYPE=Release \
 cmake --build build_artifacts --config Release
 ```
 
-For Android development, you can cross-compile for ARM architectures without requiring the full Android NDK setup.
+The `android_arm64_library` and `android_armv7_library` presets need Android NDK r28 or newer, whose libc++ ships `std::atomic_ref`, found through `ANDROID_NDK_ROOT`.
+For Android development, you can also cross-compile for ARM architectures without requiring the full Android NDK setup.
 Here's an example targeting 32-bit ARM (`armeabi-v7a`):
 
 ```sh

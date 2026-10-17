@@ -368,8 +368,9 @@ using waiter_of = typename waiter_for_cpu_class<cpu_class_>::type;
 
 /** The atomic reference one CPU class pairs: single-instruction LSE read-modify-writes under RCpc
  *  acquiring loads on the Armv8.3+ classes, conditional adds on the CMPCCXADD Xeons, @c amocas on
- *  Zacas RISC-V - the floors, the older classes, and any class whose @c FORKUNION_TARGET_<BIT> is
- *  off in the probe list take the standard one. */
+ *  Zacas RISC-V, and on WebAssembly threads a @c memory.atomic.notify after every releasing write,
+ *  so the sleeping waiter wakes on it - the floors, the older classes, and any class whose
+ *  @c FORKUNION_TARGET_<BIT> is off in the probe list take the standard one. */
 template <cpu_class_t cpu_class_>
 struct atomic_ref_for_cpu_class {
     template <typename value_type_>
@@ -435,6 +436,18 @@ template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     template <typename value_type_>
     using type = fu::risc5_zacas_atomic_ref<value_type_>;
+};
+#endif
+#if FORKUNION_TARGET_WASM_WAIT
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::wasm32_v128_k> {
+    template <typename value_type_>
+    using type = fu::wasm_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::wasm64_extended_k> {
+    template <typename value_type_>
+    using type = fu::wasm_atomic_ref<value_type_>;
 };
 #endif
 
