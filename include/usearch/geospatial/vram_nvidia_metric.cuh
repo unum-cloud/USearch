@@ -20,8 +20,8 @@
 #include <limits>   // `std::numeric_limits` - an unknown pitch, field or range
 #include <utility>  // `std::index_sequence` - every rung's kernels
 
-#include <numkong/geospatial/cuda.cuh> // `nk_terrain_outside_view_f32_cuda_`, `nk_sqrt_f64_cuda_`
-#include <numkong/types.h>             // `NUMKONG_ARCH_CUDA_AMPERE_` - the kit this unit carries
+#include <numkong/geospatial.h> // `nk_terrain_outside_view_f32_cuda_`, `nk_sqrt_f64_cuda_` - with its CUDA backend
+#include <numkong/types.h>      // `NUMKONG_ARCH_CUDA_AMPERE_` - the kit this unit carries
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_device.hpp"        // `vram_kernel_symbol` - a kernel's symbol

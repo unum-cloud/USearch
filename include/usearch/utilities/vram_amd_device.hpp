@@ -69,6 +69,7 @@ enum hip_device_attribute_t : int {
     hip_attribute_compute_capability_minor_k = 61,
     hip_attribute_multiprocessor_count_k = 63,
     hip_attribute_shared_memory_per_block_optin_k = 75,
+    hip_attribute_shared_memory_per_multiprocessor_k = 76,
 };
 
 /** The @c hipMemoryAdvise values USearch gives managed memory. */
@@ -297,6 +298,9 @@ struct hip_device_specs_t {
     /** Widest dynamic shared memory one block can be granted at launch. */
     std::size_t shared_memory_per_block_bytes = 0;
 
+    /** Local data share one compute unit splits between its resident blocks. */
+    std::size_t shared_memory_per_multiprocessor_bytes = 0;
+
     /** The class whose kernels run here, unknown for an architecture USearch ships none for. */
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
 
@@ -304,7 +308,8 @@ struct hip_device_specs_t {
     static expected<hip_device_specs_t> query(int ordinal) noexcept {
         hip_api_t const& runtime = hip_api();
         hip_device_specs_t specs {ordinal};
-        int device = 0, major = 0, minor = 0, multiprocessors = 0, shared_memory_per_block = 0;
+        int device = 0, major = 0, minor = 0, multiprocessors = 0, shared_memory_per_block = 0,
+            shared_memory_per_multiprocessor = 0;
         if (!runtime || runtime.get_device(&device, ordinal) != hip_success_k ||
             runtime.get_device_attribute(&multiprocessors, hip_attribute_multiprocessor_count_k, ordinal) !=
                 hip_success_k ||
@@ -312,10 +317,13 @@ struct hip_device_specs_t {
             runtime.get_device_attribute(&minor, hip_attribute_compute_capability_minor_k, ordinal) != hip_success_k ||
             runtime.get_device_attribute(&shared_memory_per_block, hip_attribute_shared_memory_per_block_optin_k,
                                          ordinal) != hip_success_k ||
+            runtime.get_device_attribute(&shared_memory_per_multiprocessor,
+                                         hip_attribute_shared_memory_per_multiprocessor_k, ordinal) != hip_success_k ||
             runtime.get_device_memory(&specs.vram_bytes, device) != hip_success_k)
             return {{ordinal}, status_t::device_error_k};
         specs.multiprocessor_count = static_cast<u32_t>(multiprocessors);
         specs.shared_memory_per_block_bytes = static_cast<std::size_t>(shared_memory_per_block);
+        specs.shared_memory_per_multiprocessor_bytes = static_cast<std::size_t>(shared_memory_per_multiprocessor);
         specs.gpu_class = amd_class_of(major, minor);
         return {specs, status_t::success_k};
     }

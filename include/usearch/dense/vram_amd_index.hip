@@ -50,9 +50,15 @@ bool vram_amd_index<vector_dtype_, capability_, kernels_type_, vectors_allocator
                                 (vram_cache_rows_k * sizeof(norms_t) +
                                  sizeof(vram_gathered<kit_t, typename schedule_t::warp_t>) +
                                  sizeof(typename schedule_t::shared_t));
-    return statics + std::size_t {vram_warps_per_block_k} *
-                         max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp()) <=
-           device_.shared_memory_per_block_bytes;
+    std::size_t const block_bytes = statics +
+                                    std::size_t {vram_warps_per_block_k} *
+                                        max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp());
+    // Every block a builder seats takes its own scratch, so the most any builder seats must fit on
+    // one compute unit, or the launch seats fewer blocks than its grid and arena were sized for.
+    std::size_t const resident_blocks = max_of(resident_blocks_(vram_kernel_t::insert_k, 0),
+                                               resident_blocks_(vram_kernel_t::refine_k, 0));
+    return block_bytes <= device_.shared_memory_per_block_bytes &&
+           resident_blocks * block_bytes <= device_.shared_memory_per_multiprocessor_bytes;
 }
 
 #pragma region Kernels

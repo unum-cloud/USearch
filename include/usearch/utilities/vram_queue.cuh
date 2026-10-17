@@ -449,18 +449,13 @@ struct vram_register_frontier {
      *  itself, so nothing is folded. */
     template <typename emit_type_>
     __device__ __forceinline__ void for_each_rank(u32_t count, u32_t lane, emit_type_&& emit) const noexcept {
-        // Up to eight slots, slot by slot at compile time keeps the pool in registers; sixteen fit
-        // better in local memory.
-        if constexpr (slots_ <= 8) {
+        // Slot by slot at compile time keeps every rung's pool in registers, which a rolled loop
+        // over runtime ranks spills to local memory.
 #pragma unroll
-            for (u32_t slot = 0; slot < slots_; ++slot)
-                if (slot * warp_t::width_k < count) emit(slot * warp_t::width_k + lane, ranks_.entries_[slot]);
-            for (u32_t base = slots_ * warp_t::width_k; base < count; base += warp_t::width_k)
-                emit(base + lane, scored_node_t::sentinel());
-        }
-        else
-            for (u32_t base = 0; base < count; base += warp_t::width_k)
-                emit(base + lane, ranks_.rank_entry(base + lane));
+        for (u32_t slot = 0; slot < slots_; ++slot)
+            if (slot * warp_t::width_k < count) emit(slot * warp_t::width_k + lane, ranks_.entries_[slot]);
+        for (u32_t base = slots_ * warp_t::width_k; base < count; base += warp_t::width_k)
+            emit(base + lane, scored_node_t::sentinel());
     }
 
     /** The ranks are the container itself, so nothing settles before a selection reads them. */

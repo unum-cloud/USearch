@@ -67,10 +67,14 @@ enum cuda_device_attribute_t : int {
     cuda_attribute_multiprocessor_count_k = 16,
     cuda_attribute_compute_capability_major_k = 75,
     cuda_attribute_compute_capability_minor_k = 76,
+    cuda_attribute_shared_memory_per_multiprocessor_k = 81,
     cuda_attribute_shared_memory_per_block_optin_k = 97,
+    cuda_attribute_reserved_shared_memory_per_block_k = 111,
 };
 
-/** The @c CUfunction_attribute USearch raises: the dynamic shared memory a launch may ask for. */
+/** The @c CUfunction_attribute USearch reads, the static shared memory a kernel declares, and the
+ *  one it raises, the dynamic shared memory a launch may ask for. */
+inline constexpr int cuda_function_static_shared_bytes_k = 1;
 inline constexpr int cuda_function_dynamic_shared_bytes_k = 8;
 
 /** The @c CUmem_advise values USearch gives managed memory. */
@@ -147,6 +151,15 @@ struct cuda_launch_config_t {
     unsigned attributes_count = 0;
 };
 
+/** The driver's @c CUtensorMap: the opaque descriptor of one tensor in global memory that the
+ *  Tensor Memory Accelerator copies through, read by a kernel from its parameters. */
+struct alignas(64) cuda_tensor_map_t {
+    u64_t opaque[16] = {};
+};
+
+/** The @c CUtensorMapDataType USearch counts rows in, @c CU_TENSOR_MAP_DATA_TYPE_UINT64. */
+inline constexpr int cuda_tensor_map_u64_k = 4;
+
 /** The flags USearch passes: @c CU_STREAM_NON_BLOCKING, @c CU_EVENT_BLOCKING_SYNC,
  *  @c CU_EVENT_DISABLE_TIMING, @c CU_MEMHOSTALLOC_PORTABLE, @c CU_MEM_ATTACH_GLOBAL and
  *  @c CU_MEM_ALLOC_GRANULARITY_MINIMUM. */
@@ -162,7 +175,7 @@ inline constexpr unsigned cuda_memory_type_device_k = 2;
 
 static_assert(sizeof(cuda_allocation_properties_t) == 32 && sizeof(cuda_access_descriptor_t) == 12 &&
                   sizeof(cuda_copy_2d_t) == 128 && sizeof(cuda_launch_config_t) == 56 &&
-                  sizeof(cuda_launch_attribute_t) == 72,
+                  sizeof(cuda_launch_attribute_t) == 72 && sizeof(cuda_tensor_map_t) == 128,
               "The driver's 64-bit layouts");
 
 #pragma endregion Driver ABI
@@ -212,6 +225,7 @@ struct cuda_api_t {
     cuda_result_t (*module_load_data)(cuda_module_handle_t*, void const*) = nullptr;
     cuda_result_t (*module_unload)(cuda_module_handle_t) = nullptr;
     cuda_result_t (*module_get_function)(cuda_function_handle_t*, cuda_module_handle_t, char const*) = nullptr;
+    cuda_result_t (*function_get_attribute)(int*, int, cuda_function_handle_t) = nullptr;
     cuda_result_t (*function_set_attribute)(cuda_function_handle_t, int, int) = nullptr;
     cuda_result_t (*launch_kernel)(cuda_launch_config_t const*, cuda_function_handle_t, void**, void**) = nullptr;
     cuda_result_t (*memory_granularity)(std::size_t*, cuda_allocation_properties_t const*, int) = nullptr;
@@ -226,6 +240,11 @@ struct cuda_api_t {
     cuda_result_t (*memory_unmap)(cuda_device_address_t, std::size_t) = nullptr;
     cuda_result_t (*memory_set_access)(cuda_device_address_t, std::size_t, cuda_access_descriptor_t const*,
                                        std::size_t) = nullptr;
+
+    /** The one entry only the Blackwell row gathers use, resolved apart from the rest, so a driver
+     *  lacking it keeps every device and loses only the gathers. */
+    cuda_result_t (*encode_tensor_map_tiled)(cuda_tensor_map_t*, int, u32_t, void*, u64_t const*, u64_t const*,
+                                             u32_t const*, u32_t const*, int, int, int, int) = nullptr;
 
     /** Whether the driver loaded and initialized with every entry resolved. */
     explicit operator bool() const noexcept { return memory_set_access != nullptr; }
@@ -269,6 +288,7 @@ struct cuda_api_t {
             library.resolve("cuModuleLoadData", api.module_load_data) &&
             library.resolve("cuModuleUnload", api.module_unload) &&
             library.resolve("cuModuleGetFunction", api.module_get_function) &&
+            library.resolve("cuFuncGetAttribute", api.function_get_attribute) &&
             library.resolve("cuFuncSetAttribute", api.function_set_attribute) &&
             library.resolve("cuLaunchKernelEx", api.launch_kernel) &&
             library.resolve("cuMemGetAllocationGranularity", api.memory_granularity) &&
@@ -277,6 +297,7 @@ struct cuda_api_t {
             library.resolve("cuMemCreate", api.memory_create) && library.resolve("cuMemRelease", api.memory_release) &&
             library.resolve("cuMemMap", api.memory_map) && library.resolve("cuMemUnmap", api.memory_unmap) &&
             library.resolve("cuMemSetAccess", api.memory_set_access);
+        library.resolve("cuTensorMapEncodeTiled", api.encode_tensor_map_tiled);
         // A driver without a usable GPU fails its initialization, which lists no devices either.
         if (resolved && api.init(0) == cuda_success_k) return api;
         return {};
@@ -428,6 +449,12 @@ struct cuda_device_specs_t {
     /** Widest dynamic shared memory one block can be granted at launch, on explicit request. */
     std::size_t shared_memory_per_block_bytes = 0;
 
+    /** Shared memory one multiprocessor splits between its resident blocks. */
+    std::size_t shared_memory_per_multiprocessor_bytes = 0;
+
+    /** Shared memory the driver keeps from every resident block beside what it asks for. */
+    std::size_t reserved_shared_memory_per_block_bytes = 0;
+
     /** This device's generation on the @c cuda_arch_t scale - the kit chains' runtime ceiling. */
     cuda_arch_t arch() const noexcept { return static_cast<cuda_arch_t>(compute_major * 100 + compute_minor * 10); }
 
@@ -436,7 +463,8 @@ struct cuda_device_specs_t {
         cuda_api_t const& api = cuda_api();
         int device = 0;
         cuda_device_specs_t specs {ordinal};
-        int multiprocessors = 0, shared_memory_per_block = 0;
+        int multiprocessors = 0, shared_memory_per_block = 0, shared_memory_per_multiprocessor = 0,
+            reserved_shared_memory_per_block = 0;
         if (!api || api.get_device(&device, ordinal) != cuda_success_k ||
             api.get_device_attribute(&multiprocessors, cuda_attribute_multiprocessor_count_k, device) !=
                 cuda_success_k ||
@@ -446,10 +474,16 @@ struct cuda_device_specs_t {
                 cuda_success_k ||
             api.get_device_attribute(&shared_memory_per_block, cuda_attribute_shared_memory_per_block_optin_k,
                                      device) != cuda_success_k ||
+            api.get_device_attribute(&shared_memory_per_multiprocessor,
+                                     cuda_attribute_shared_memory_per_multiprocessor_k, device) != cuda_success_k ||
+            api.get_device_attribute(&reserved_shared_memory_per_block,
+                                     cuda_attribute_reserved_shared_memory_per_block_k, device) != cuda_success_k ||
             api.get_device_memory(&specs.vram_bytes, device) != cuda_success_k)
             return {{ordinal}, status_t::device_error_k};
         specs.multiprocessor_count = static_cast<u32_t>(multiprocessors);
         specs.shared_memory_per_block_bytes = static_cast<std::size_t>(shared_memory_per_block);
+        specs.shared_memory_per_multiprocessor_bytes = static_cast<std::size_t>(shared_memory_per_multiprocessor);
+        specs.reserved_shared_memory_per_block_bytes = static_cast<std::size_t>(reserved_shared_memory_per_block);
         return {specs, status_t::success_k};
     }
 };
@@ -1168,8 +1202,42 @@ struct cuda_module_t {
     int device_ = 0;
 };
 
-/** Default dynamic-shared opt-in threshold: launches asking for more must raise the kernel's
- *  attribute before the first launch. */
+/** A row-major matrix of equal rows as the two-dimensional tensor map the Tensor Memory Accelerator
+ *  gathers rows through, four at a time, one window of each per copy. The zeroed record spans no
+ *  rows, and kernels reading it gather none. */
+struct cuda_rows_map_t {
+
+    /** The driver's descriptor of the matrix. */
+    cuda_tensor_map_t tensor_map;
+
+    /** Rows the map spans, which its signed coordinates cap below 2^31; zero without a map. */
+    u32_t rows_count = 0;
+
+    /** Bytes of one row a box spans: the whole row, or a leading window of it. */
+    u32_t window_bytes = 0;
+};
+
+/** Encodes @p rows_count rows of @p row_bytes bytes from @p first_row in eight-byte words, a box
+ *  spanning @p window_bytes of one row, unswizzled, reading zeros past a row's end. Answers the
+ *  zeroed record where the driver lacks the encoder or refuses the shape; the device it encodes for
+ *  must be current. */
+inline cuda_rows_map_t cuda_encode_rows_map(void* first_row, u32_t row_bytes, u32_t rows_count,
+                                            u32_t window_bytes) noexcept {
+    cuda_api_t const& api = cuda_api();
+    if (!api.encode_tensor_map_tiled || !rows_count || row_bytes % 16 || window_bytes % 16) return {};
+    cuda_rows_map_t map;
+    u64_t const dimensions[2] = {row_bytes / 8, rows_count}, strides[1] = {row_bytes};
+    u32_t const box[2] = {window_bytes / 8, 1}, steps[2] = {1, 1};
+    // No interleave, no swizzle, no L2 promotion, and zeros out of bounds.
+    if (api.encode_tensor_map_tiled(&map.tensor_map, cuda_tensor_map_u64_k, 2, first_row, dimensions, strides, box,
+                                    steps, 0, 0, 0, 0) != cuda_success_k)
+        return {};
+    map.rows_count = rows_count, map.window_bytes = window_bytes;
+    return map;
+}
+
+/** Shared memory a block may take, its static and dynamic parts together, before its kernel opts
+ *  in to more. */
 inline constexpr u32_t cuda_static_scratch_limit_k = 48 * 1024;
 
 /** Whether a launch waits for its stream predecessor to finish, or may start while it drains. */
@@ -1177,16 +1245,21 @@ enum class cuda_overlap_t : bool { serialized_k, overlapping_k };
 
 /** Launches @p function over @p blocks of @p threads on @p stream - the only launch path - passing
  *  each argument by address, as the driver takes them, so each must already be the kernel's own
- *  type, raising the kernel's dynamic-shared ceiling first when @p shared_bytes outgrow the static
- *  window; answers the launch's own error, like a bad configuration or too much shared memory. With
- *  @p overlapping the kernel may start while its predecessor on @p stream drains, which only a
- *  kernel waiting on that predecessor at entry may ask for. */
+ *  type, raising the kernel's dynamic-shared ceiling first when @p shared_bytes and its static
+ *  shared memory outgrow the default window; answers the launch's own error, like a bad
+ *  configuration or too much shared memory. With @p overlapping the kernel may start while its
+ *  predecessor on @p stream drains, which only a kernel waiting on that predecessor at entry may
+ *  ask for. */
 template <typename... argument_types_>
 status_t cuda_launch(cuda_function_handle_t function, u32_t blocks, u32_t threads, u32_t shared_bytes,
                      cuda_stream_handle_t stream, cuda_overlap_t overlapping, argument_types_... arguments) noexcept {
     static_assert((std::is_trivially_copyable_v<argument_types_> && ...), "Kernels take their arguments by bytes");
     if (!function) return status_t::device_error_k;
-    if (shared_bytes > cuda_static_scratch_limit_k &&
+    int static_bytes = 0;
+    if (shared_bytes && cuda_api().function_get_attribute(&static_bytes, cuda_function_static_shared_bytes_k,
+                                                          function) != cuda_success_k)
+        return status_t::device_error_k;
+    if (shared_bytes + static_cast<u32_t>(static_bytes) > cuda_static_scratch_limit_k &&
         cuda_api().function_set_attribute(function, cuda_function_dynamic_shared_bytes_k,
                                           static_cast<int>(shared_bytes)) != cuda_success_k)
         return status_t::device_error_k;
@@ -1200,6 +1273,11 @@ status_t cuda_launch(cuda_function_handle_t function, u32_t blocks, u32_t thread
 }
 
 static_assert(cuda_reservable_allocator<cuda_virtual_memory_allocator<byte_t>>);
+
+/** Claim counters a traversal context keeps: three for each of the insert waves one fill zeroes
+ *  ahead, so overlapping launches chain wave after wave with no fill between them. Waves double
+ *  from 32 rows, so no 32-bit ID range spans more than 28. */
+inline constexpr u32_t cuda_claim_counters_k = 3 * 32;
 
 /** One stream's device-side scratch for driving a CUDA index: the traversal arena, the batch
  *  staging, the telemetry counters and the attend miss word, riding the stream its allocator names
@@ -1232,7 +1310,7 @@ struct cuda_traversal_context {
     cuda_traversal_context(allocator_t allocator = {}) noexcept
         : allocator_ {(cuda_set_device(allocator.device()), allocator)}, //
           telemetry_ {cuda_make_unique(telemetry_allocator_t {allocator_}, 1)},
-          assigned_rows_ {cuda_make_unique(counter_allocator_t {allocator_}, 1)},
+          assigned_rows_ {cuda_make_unique(counter_allocator_t {allocator_}, cuda_claim_counters_k)},
           missed_ {cuda_make_unique(counter_allocator_t {allocator_}, 1)},
           host_counters_ {take_counters_(allocator_.landings())},
           arena_ {nullptr, cuda_deleter<allocator_t> {allocator_, 0}},
@@ -1337,7 +1415,7 @@ struct cuda_traversal_context {
     cuda_unique_ptr<vram_telemetry_block_t, telemetry_allocator_t> telemetry_;
 
     /** Rows of the current launch's batch warps have assigned themselves so far: a builder's rows,
-     *  or a walk's queries. */
+     *  or a walk's queries; @ref cuda_claim_counters_k words, the first serving one launch. */
     cuda_unique_ptr<u32_t, counter_allocator_t> assigned_rows_;
 
     /** Raised by the last attend's walks at a node their value lookup had no row for, zeroed when

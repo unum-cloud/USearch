@@ -19,7 +19,9 @@
  *  whole-row Tensor Memory Accelerator copies from Hopper on. The schedule also scores a walk's
  *  batch: through the kit's @c mma.sync step from registers where the kit has one, and otherwise
  *  through its scalar dots, a lane loading one fragment at once through Hopper and two from
- *  Blackwell on, whose 256-bit loads serve the random row gathers better.
+ *  Blackwell on, whose 256-bit loads serve the random row gathers better. The datacenter Blackwell
+ *  instead lands the batch's rows four at a time through @c tile::gather4 copies of one tensor map,
+ *  scoring each window of four rows while the next lands.
  *
  *  Fragments are 16 bytes of scalars held in registers, and metrics with precomputable norms
  *  finalize "through the dot". Row geometry - how many fragments span one vector, how many lanes
@@ -1887,8 +1889,9 @@ struct ampere_cp_async_schedule_t {
  *  @c cp.async.bulk, and each stage's bytes complete on that stage's @c mbarrier, so the copies
  *  hold no registers and every lane waits on the barrier, not on its own copies. A row is one
  *  contiguous span of whole 16-byte fragments, so no tensor map is needed and no row length is
- *  capped. Each barrier advances one phase per staging that fills its stage. The two schedules
- *  differ in how many adjacent fragments a walking lane loads at once. */
+ *  capped. Each barrier advances one phase per staging that fills its stage. The schedules differ
+ *  in how many adjacent fragments a walking lane loads at once, and the datacenter Blackwell one
+ *  scores its walks' batches from rows a tensor map gathers four at a time. */
 
 /** Arms @p stages barriers from @p barriers on, one arrival each, from the warp's first lane. */
 __device__ __forceinline__ void cuda_tma_initialize_barriers(u64_t* barriers, u32_t stages, u32_t lane) noexcept {
@@ -1938,6 +1941,144 @@ __device__ __forceinline__ void cuda_tma_wait_barrier(u64_t* barrier, u32_t pari
                      : "r"(cuda_shared_address(barrier)), "r"(parity)
                      : "memory");
     } while (!landed);
+}
+
+/** One warp's gathered rows in static shared memory: two stages of four-row windows, each landing
+ *  on its own barrier, beside the tensor map they come through. */
+template <u32_t window_bytes_>
+struct cuda_gather_stages {
+
+    /** Two stages of four rows' windows of up to @p window_bytes_ each, aligned as copies land. */
+    alignas(128) byte_t stages[2][4 * window_bytes_];
+
+    /** One barrier per stage. */
+    u64_t barriers[2];
+
+    /** The kernel parameter's tensor map, by its generic address. */
+    cuda_tensor_map_t const* tensor_map;
+
+    /** Rows the map spans, zero where the warp gathers none. */
+    u32_t rows_count;
+
+    /** Bytes of one row a copy lands. */
+    u32_t window_bytes;
+
+    /** Bit @b s is the parity of the phase stage @b s is filling. */
+    u32_t phases;
+};
+
+/** Queues @p unit of a batch of @p gathered_count candidates into its stage of @p gather: window
+ *  @p unit modulo @p windows of up to @p quads_per_unit quads, every quad's four rows landing back
+ *  to back at @p quad_bytes apart through one @c tile::gather4 copy its own lane issues. Rows past
+ *  the batch re-read its first row. */
+template <u32_t window_bytes_>
+__device__ __forceinline__ void cuda_tma_gather_unit(cuda_gather_stages<window_bytes_>& gather, u32_t const* ids,
+                                                     u32_t gathered_count, u32_t unit, u32_t windows,
+                                                     u32_t quads_per_unit, u32_t quad_bytes, u32_t lane) noexcept {
+    u32_t const stage = unit & 1u, window = unit % windows, first_quad = unit / windows * quads_per_unit;
+    u32_t const unit_quads = min_of(quads_per_unit, divide_round_up(gathered_count, 4u) - first_quad);
+    u32_t const barrier = cuda_shared_address(gather.barriers + stage);
+    // The stage's earlier generic reads must precede the copies' asynchronous writes.
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+    if (lane == 0)
+        asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(barrier),
+                     "r"(unit_quads * 4 * gather.window_bytes)
+                     : "memory");
+    __syncwarp();
+    if (lane >= unit_quads) return;
+    u32_t const first_row = 4 * (first_quad + lane);
+    u32_t rows[4];
+#pragma unroll
+    for (u32_t row = 0; row != 4; ++row) rows[row] = ids[first_row + row < gathered_count ? first_row + row : 0];
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4.mbarrier::complete_tx::bytes" //
+        " [%0], [%1, {%2, %3, %4, %5, %6}], [%7];" ::"r"(cuda_shared_address(gather.stages[stage] + lane * quad_bytes)),
+        "l"(reinterpret_cast<u64_t>(gather.tensor_map)), "r"(window * gather.window_bytes / 8), "r"(rows[0]),
+        "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(barrier)
+        : "memory");
+}
+
+/**
+ *  @brief Scores a walk's batch from rows the Tensor Memory Accelerator gathers into @p gather,
+ *      each @c tile::gather4 copy landing the same window of four candidates' rows.
+ *
+ *  A unit is one window of as many quads of candidates as a stage seats and the lanes cover, a
+ *  single quad once rows outgrow a window; the warp scores one stage while the next unit lands in
+ *  the other. A power-of-two group of lanes owns each quad, every lane a 16-byte column of its
+ *  window and the quad's four accumulators, so one query fragment serves four rows. Past a quad's
+ *  last window, each accumulator folds into the group's first lane. A window reaching past the row
+ *  reads zeros, which no query fragment meets.
+ *
+ *  @return This lane's scored entry, or the sentinel on lanes past @p gathered_count.
+ */
+template <vram_quads_kit kit_, u32_t window_bytes_>
+__device__ __forceinline__ vram_scored_node<node_id_t> cuda_tma_gather_quads( //
+    cuda_gather_stages<window_bytes_>& gather, vram_flat_view<kit_> const& storage,
+    typename kit_::fragment_t const* query_span, typename kit_::norms_t query_state,
+    vram_gathered<kit_, cuda_warp_t>& gathered, u32_t gathered_count, u32_t lane) noexcept {
+
+    using fragment_t = typename kit_::fragment_t;
+    using dot_t = typename kit_::dot_t;
+    constexpr u32_t width_k = cuda_warp_t::width_k;
+    u32_t const window_bytes = gather.window_bytes;
+    u32_t const window_fragments = window_bytes / sizeof(fragment_t);
+    u32_t const windows = divide_round_up(storage.row_fragments, window_fragments);
+    // Every copy lands on a 128-byte boundary, as tensor copies require.
+    u32_t const quad_bytes = round_up_to_multiple(4 * window_bytes, 128u);
+    u32_t const lanes_per_quad = min_of(1u << (32 - __clz(window_fragments - 1)), width_k);
+    u32_t const quads_per_unit = min_of(width_k / lanes_per_quad,
+                                        static_cast<u32_t>(sizeof(gather.stages[0])) / quad_bytes);
+    u32_t const quads = divide_round_up(gathered_count, 4u);
+    u32_t const units = divide_round_up(quads, quads_per_unit) * windows;
+    u32_t const unit_quad = lane / lanes_per_quad, column = lane % lanes_per_quad;
+    bool const live = lane < gathered_count;
+    // Requested before the rows, so the two round trips overlap.
+    typename kit_::norms_t const target_state = live ? storage.norm_for(gathered.ids[lane]) : typename kit_::norms_t {};
+    u32_t phases = gather.phases;
+    for (u32_t unit = 0; unit != min_of(units, 2u); ++unit)
+        cuda_tma_gather_unit(gather, gathered.ids, gathered_count, unit, windows, quads_per_unit, quad_bytes, lane);
+
+    dot_t accumulators[4];
+#pragma unroll 1
+    for (u32_t unit = 0; unit != units; ++unit) {
+        u32_t const stage = unit & 1u, window = unit % windows;
+        u32_t const quad = unit / windows * quads_per_unit + unit_quad;
+        bool const scoring = unit_quad < quads_per_unit && quad < quads;
+        cuda_tma_wait_barrier(gather.barriers + stage, (phases >> stage) & 1u);
+        phases ^= 1u << stage;
+        if (window == 0) {
+#pragma unroll
+            for (u32_t row = 0; row != 4; ++row) accumulators[row] = {};
+        }
+        for (u32_t fragment = column; scoring && fragment < window_fragments; fragment += lanes_per_quad) {
+            u32_t const row_fragment = window * window_fragments + fragment;
+            if (row_fragment >= storage.row_fragments) break;
+            fragment_t const query_value = query_span[row_fragment];
+            byte_t const* const columns = gather.stages[stage] + unit_quad * quad_bytes + fragment * sizeof(fragment_t);
+#pragma unroll
+            for (u32_t row = 0; row != 4; ++row)
+                accumulators[row] = kit_::accumulate_dot(
+                    *reinterpret_cast<fragment_t const*>(columns + row * window_bytes), query_value, accumulators[row]);
+        }
+        // Warp-uniform, so the reduction's full-mask shuffles stay legal.
+        if (window + 1 == windows) {
+#pragma unroll
+            for (u32_t row = 0; row != 4; ++row) {
+                dot_t const dot = vram_reduce<cuda_warp_t>(accumulators[row], lanes_per_quad);
+                if (scoring && column == 0 && 4 * quad + row < gathered_count) gathered.dots[4 * quad + row] = dot;
+            }
+        }
+        if (unit + 2 < units)
+            cuda_tma_gather_unit(gather, gathered.ids, gathered_count, unit + 2, windows, quads_per_unit, quad_bytes,
+                                 lane);
+    }
+    if (lane == 0) gather.phases = phases;
+    cuda_warp_t::sync();
+    if (!live) return vram_scored_node<node_id_t>::sentinel();
+    vram_scored_node<node_id_t> const scored = vram_scored_node<node_id_t>::make(
+        kit_::distance(storage.kernel, gathered.dots[lane], query_state, target_state), gathered.ids[lane]);
+    gathered.scored[lane] = scored;
+    return scored;
 }
 
 /** The Hopper staging: whole-row Tensor Memory Accelerator copies, a walking lane loading one
@@ -1999,11 +2140,130 @@ struct hopper_tma_schedule_t {
     }
 };
 
-/** The Blackwell staging, datacenter and RTX alike: the Hopper copies, a walking lane loading two
- *  adjacent fragments at once, whose 256-bit loads serve the random row gathers better. */
+/**
+ *  @brief The datacenter Blackwell staging: the Hopper copies, a walking lane loading two adjacent
+ *      fragments at once, whose 256-bit loads serve the random row gathers better, and a walk's
+ *      batches scored from rows one @c tile::gather4 copy lands four at a time.
+ *
+ *  A walking kernel binds each warp's gathers to its parameter's tensor map at entry, through
+ *  @ref bind; @ref score_batch then lands the batch through @ref cuda_tma_gather_quads, or loads it
+ *  lane by lane where the kernel bound no map or the map misses any of the batch's rows. The stages
+ *  of every walking warp live in static shared memory, sized by the kernel's resident blocks
+ *  through @ref gather_window_bytes.
+ */
 struct blackwell_tma_schedule_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k | nk_cap_blackwellrtx_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_ || NUMKONG_TARGET_BLACKWELLRTX;
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_BLACKWELL_;
+    using warp_t = cuda_warp_t;
+    inline static constexpr u32_t stages_k = 2;
+    inline static constexpr u32_t fragments_per_load_k = 2;
+
+    /** Shared memory of one multiprocessor, and what the driver keeps of it per resident block. */
+    inline static constexpr u32_t multiprocessor_shared_bytes_k = 228 * 1024;
+    inline static constexpr u32_t block_reserved_shared_bytes_k = 1024;
+
+    /** Bytes of one row a gather lands at most under @p resident_blocks blocks per multiprocessor:
+     *  one 16-byte column per lane, halved while the two stages of four rows that every warp of a
+     *  block keeps outgrow the block's share of the multiprocessor. */
+    static constexpr u32_t gather_window_bytes(u32_t resident_blocks) noexcept {
+        u32_t window = warp_t::width_k * 16;
+        while (vram_warps_per_block_k * stages_k * 4 * window >
+               multiprocessor_shared_bytes_k / resident_blocks - block_reserved_shared_bytes_k)
+            window /= 2;
+        return window;
+    }
+
+    /** One warp's gathered rows under @p resident_blocks_ blocks per multiprocessor. */
+    template <u32_t resident_blocks_>
+    using gather_stages = cuda_gather_stages<gather_window_bytes(resident_blocks_)>;
+
+    /** One barrier per stage, in the warp's static shared memory. */
+    struct shared_t {
+        u64_t barriers[stages_k];
+    };
+
+    /** The stages' barriers. */
+    u64_t* barriers_;
+
+    /** Rows per stage of the latest staging, and the leading rows landed. */
+    u32_t rows_per_stage_ = 0, landed_rows_ = 0;
+
+    /** Bit @b s is the parity of the phase stage @b s is filling. */
+    u32_t phases_ = 0;
+
+    __device__ __forceinline__ blackwell_tma_schedule_t(shared_t& shared, u32_t lane) noexcept
+        : barriers_(shared.barriers) {
+        cuda_tma_initialize_barriers(barriers_, stages_k, lane);
+    }
+
+    /** Binds the calling warp's gathers under @p resident_blocks_ blocks per multiprocessor to
+     *  @p rows_map, the kernel's own parameter, warming its tensor map, and arms their barriers;
+     *  a map whose windows outgrow the stages binds no rows. */
+    template <u32_t resident_blocks_>
+    static __device__ __forceinline__ void bind(cuda_rows_map_t const& rows_map, u32_t lane) noexcept {
+        gather_stages<resident_blocks_>& gather = gather_stages_<resident_blocks_>();
+        if (lane == 0) {
+            bool const seated = 4 * rows_map.window_bytes <= sizeof(gather.stages[0]);
+            gather.tensor_map = &rows_map.tensor_map;
+            gather.rows_count = seated ? rows_map.rows_count : 0;
+            gather.window_bytes = rows_map.window_bytes;
+            gather.phases = 0;
+            if (gather.rows_count)
+                asm volatile("prefetch.tensormap [%0];" ::"l"(reinterpret_cast<u64_t>(&rows_map.tensor_map))
+                             : "memory");
+        }
+        cuda_tma_initialize_barriers(gather.barriers, stages_k, lane);
+    }
+
+    /** Scores a walk's batch from rows gathered four at a time, or as @ref cuda_score_batch does at
+     *  this schedule's load width where the bound map misses any of them. */
+    template <vram_quads_kit kit_, u32_t resident_blocks_>
+    static __device__ __forceinline__ vram_scored_node<node_id_t> score_batch( //
+        vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
+        typename kit_::norms_t query_state, vram_gathered<kit_, warp_t>& gathered, u32_t gathered_count,
+        u32_t lane) noexcept {
+        gather_stages<resident_blocks_>& gather = gather_stages_<resident_blocks_>();
+        bool const unmapped = lane < gathered_count && gathered.ids[lane] >= gather.rows_count;
+        if (warp_t::ballot(unmapped))
+            return cuda_score_batch<kit_, resident_blocks_, fragments_per_load_k>( //
+                storage, query_span, query_state, gathered, gathered_count, lane);
+        return cuda_tma_gather_quads<kit_>(gather, storage, query_span, query_state, gathered, gathered_count, lane);
+    }
+
+    template <typename storage_, typename cache_>
+    __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
+                                               u32_t lane) noexcept {
+        rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
+        if (cache.ids_) {
+            landed_rows_ = rows;
+            return;
+        }
+        cuda_tma_copy_rows(barriers_, rows_per_stage_, storage, cache, ids, rows, lane);
+    }
+
+    __device__ __forceinline__ void await_rows(u32_t rows) noexcept {
+        for (; landed_rows_ < rows; landed_rows_ += rows_per_stage_) {
+            u32_t const stage = landed_rows_ / rows_per_stage_;
+            cuda_tma_wait_barrier(barriers_ + stage, (phases_ >> stage) & 1u);
+            phases_ ^= 1u << stage;
+        }
+    }
+
+  private:
+
+    /** The calling warp's gathered rows, one per warp of the block, in its static shared memory. */
+    template <u32_t resident_blocks_>
+    static __device__ __forceinline__ gather_stages<resident_blocks_>& gather_stages_() noexcept {
+        __shared__ gather_stages<resident_blocks_> gathers[vram_warps_per_block_k];
+        return gathers[threadIdx.x / warp_t::width_k];
+    }
+};
+
+/** The RTX Blackwell staging: the Hopper copies, a walking lane loading two adjacent fragments at
+ *  once, whose 256-bit loads serve the random row gathers better. */
+struct blackwellrtx_tma_schedule_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwellrtx_k;
+    inline static constexpr bool compiled_k = NUMKONG_TARGET_BLACKWELLRTX;
     using warp_t = cuda_warp_t;
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 2;
@@ -2022,7 +2282,7 @@ struct blackwell_tma_schedule_t {
     /** Bit @b s is the parity of the phase stage @b s is filling. */
     u32_t phases_ = 0;
 
-    __device__ __forceinline__ blackwell_tma_schedule_t(shared_t& shared, u32_t lane) noexcept
+    __device__ __forceinline__ blackwellrtx_tma_schedule_t(shared_t& shared, u32_t lane) noexcept
         : barriers_(shared.barriers) {
         cuda_tma_initialize_barriers(barriers_, stages_k, lane);
     }
@@ -2061,9 +2321,9 @@ struct blackwell_tma_schedule_t {
 
 #pragma region Ladders
 
-/*  Each ladder lists the newest kit first. The Blackwell kits and schedule serve datacenter and RTX
- *  Blackwell alike, so their @c capability_k names both bits, and @c picked_k keeps the one the
- *  class carries. */
+/*  Each ladder lists the newest kit first. The Blackwell kits serve datacenter and RTX Blackwell
+ *  alike, so their @c capability_k names both bits, and @c picked_k keeps the one the class
+ *  carries; each Blackwell has its own schedule. */
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
@@ -2169,8 +2429,8 @@ struct quads_ladder<nk::u1x8_t, caps_> {
 };
 
 /** The staging schedule under @p caps_: whole-row Tensor Memory Accelerator copies on every class
- *  that has one, Hopper on, paired-fragment loads from Blackwell on, and the @c cp.async ring
- *  below. */
+ *  that has one, Hopper on, paired-fragment loads from Blackwell on, four-row gathers for the
+ *  datacenter Blackwell's walks, and the @c cp.async ring below. */
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct schedule_ladder<caps_> {
@@ -2178,6 +2438,7 @@ struct schedule_ladder<caps_> {
         caps_,                               //
         ampere_cp_async_schedule_t,          //
         blackwell_tma_schedule_t,            //
+        blackwellrtx_tma_schedule_t,         //
         hopper_tma_schedule_t                //
         >::type;
     static constexpr nk_capability_t picked_k = caps_ & schedule_t::capability_k;

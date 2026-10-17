@@ -201,8 +201,9 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
     bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept;
 
     /** Whether an insert or refine launch seats its per-warp scratch in shared memory beside the
-     *  static norms, batch buffers and schedule state; when it cannot, the warp's arena slice
-     *  keeps it, as Apple's always does. Defined in @c vram_amd_index.hip. */
+     *  static norms, batch buffers and schedule state, on every block a multiprocessor keeps
+     *  resident; when it cannot, the warp's arena slice keeps it, as Apple's always does. Defined
+     *  in @c vram_amd_index.hip. */
     bool build_scratch_fits() const noexcept;
 
     /** The bytes an executor's run must hold before a context carved over it can search or multiply

@@ -73,18 +73,20 @@ constexpr u32_t cuda_scan_ranges(u32_t grid, u32_t resident_blocks, u32_t blocks
 
 /** Blocks of @p kernel on its @p slots rung resident per multiprocessor under @p capability_ over
  *  @p dtype_ - the register budget its launch bounds set, the load window its body sizes, and its
- *  grid's share of every multiprocessor: two for the builders and the back-links riding their grid
- *  and arena, the most whose share of the register file holds the walk and its selection without
- *  spilling; a walk's by its rung; three for the scan, as many as the shared memory of the widest
- *  parts holds the staged candidates of; eight for the sweeps striding the graph, oversubscribed so
- *  enough rows stay in flight; and one for the rest, whose grids follow their work. */
+ *  grid's share of every multiprocessor: three for the builders up to eight slots and two past
+ *  them, the back-links riding their grid and arena, the most whose share of the register file
+ *  holds the walk and its selection without spilling; a walk's by its rung; three for the scan, as
+ *  many as the shared memory of the widest parts holds the staged candidates of; eight for the
+ *  sweeps striding the graph, oversubscribed so enough rows stay in flight; and one for the rest,
+ *  whose grids follow their work. */
 template <nk_capability_t capability_, nk_dtype_t dtype_>
 constexpr u32_t cuda_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept {
     switch (kernel) {
+    // Three blocks' budget spills the 16-slot walks, and the back-links ride their walks' grids.
     case vram_kernel_t::insert_k:
     case vram_kernel_t::back_link_k:
     case vram_kernel_t::refine_k:
-    case vram_kernel_t::merge_back_links_k: return 2;
+    case vram_kernel_t::merge_back_links_k: return slots <= 8 ? 3 : 2;
     case vram_kernel_t::search_k:
     case vram_kernel_t::search_indexer_k:
     case vram_kernel_t::multiply_k: return slots <= 8 ? 4 : 3;
@@ -164,6 +166,26 @@ constexpr bool cuda_overlaps_launches(nk_capability_t capability) noexcept {
     return (capability & (nk_cap_hopper_k | nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0;
 }
 
+/** Whether @p kernel walks, scoring its batches through the schedule, which may gather their rows
+ *  through the tensor map the kernel's arguments carry. */
+constexpr bool cuda_gathers_rows(vram_kernel_t kernel) noexcept {
+    switch (kernel) {
+    case vram_kernel_t::insert_k:
+    case vram_kernel_t::refine_k:
+    case vram_kernel_t::search_k:
+    case vram_kernel_t::search_indexer_k:
+    case vram_kernel_t::multiply_k:
+    case vram_kernel_t::attend_k: return true;
+    default: return false;
+    }
+}
+
+/** The one argument every NVIDIA dense kernel takes: the records every vendor's kernels read, and
+ *  the vectors matrix as the tensor map a walk may gather its rows through. */
+struct cuda_arguments_t : vram_arguments_t {
+    cuda_rows_map_t rows_map;
+};
+
 #pragma endregion Kernels
 
 /**
@@ -236,8 +258,9 @@ struct vram_nvidia_index
     bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept;
 
     /** Whether an insert or refine launch seats its per-warp scratch in shared memory beside the
-     *  static norms, batch buffers and schedule state; when it cannot, the warp's arena slice
-     *  keeps it, as Apple's always does. Defined in @c vram_nvidia_index.cuh. */
+     *  static norms, batch buffers and schedule state, on every block a multiprocessor keeps
+     *  resident; when it cannot, the warp's arena slice keeps it, as Apple's always does. Defined
+     *  in @c vram_nvidia_index.cuh. */
     bool build_scratch_fits() const noexcept;
 
     /** The bytes an executor's run must hold before a context carved over it can search or multiply
@@ -409,6 +432,11 @@ struct vram_nvidia_index
             if (failed(epochs_status)) return {{}, epochs_status};
             epoch_base = first_epoch;
         }
+        // The counters zero ahead of the imports, so a cast kernel importing the queries leads
+        // straight into the walk, which may then overlap its drain.
+        if (cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != cuda_success_k ||
+            cuda_fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != cuda_success_k)
+            return {{}, status_t::device_error_k};
         // Pitched uploads: device rows pad to whole fragments, and the pad bytes must be zero for
         // the zero-tail distance identity to hold.
         if ((import_bytes || packed_row_bytes() != row_bytes()) &&
@@ -416,9 +444,6 @@ struct vram_nvidia_index
             return {{}, status_t::device_error_k};
         if (status_t const imported = import_rows_(staging, queries, window, stream); failed(imported))
             return {{}, imported};
-        if (cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != cuda_success_k ||
-            cuda_fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != cuda_success_k)
-            return {{}, status_t::device_error_k};
 
         walk_launch_t walk;
         walk.queries = reinterpret_cast<fragment_t const*>(staging);
@@ -818,7 +843,7 @@ struct vram_nvidia_index
         module_ = std::move(module);
         vram_kernel_symbol_t symbol;
         for (cuda_rung_t const rung : cuda_rungs) {
-            vram_kernel_symbol(symbol, "dense", "cuda_kernel", "vram_arguments_t", rung.kernel, capability_,
+            vram_kernel_symbol(symbol, "dense", "cuda_kernel", "cuda_arguments_t", rung.kernel, capability_,
                                vector_dtype_, rung.slots, u32_t {0});
             cuda_function_handle_t& function = kernels_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)];
             if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
@@ -832,14 +857,22 @@ struct vram_nvidia_index
     }
 
     /** Launches @p function over @p blocks of the standard warp complement on @p stream, raising
-     *  its dynamic-shared ceiling first when @p shared_bytes outgrow the static window. */
+     *  its dynamic-shared ceiling first when @p shared_bytes outgrow the default window, with
+     *  @p rows_map beside @p arguments for a walk to gather its rows through. */
     static status_t launch_(cuda_function_handle_t function, u32_t blocks, u32_t shared_bytes,
-                            cuda_stream_handle_t stream, vram_arguments_t const& arguments) noexcept {
+                            cuda_stream_handle_t stream, vram_arguments_t const& arguments,
+                            cuda_rows_map_t const& rows_map = {}) noexcept {
         return cuda_launch(
             function, blocks, block_threads_k, shared_bytes, stream,
             cuda_overlaps_launches(capability_) ? cuda_overlap_t::overlapping_k : cuda_overlap_t::serialized_k,
-            arguments);
+            cuda_arguments_t {arguments, rows_map});
     }
+
+    /** The vectors matrix as the tensor map the walks gather rows through, spanning the ceiling the
+     *  first reservation froze, so the storage grows under it: encoded by the first walk launch and
+     *  kept, while launches racing it use their own. Zeroed where the schedule gathers no rows or
+     *  the driver cannot encode the map. Defined in @c vram_nvidia_index.cuh. */
+    cuda_rows_map_t rows_map_() noexcept;
 
     /** Launches the rows of @p build in waves, each queued behind the last and as wide as the IDs
      *  below it, never narrower than @c vram_admission_ramp_floor_k, so every ID a wave admits
@@ -856,27 +889,39 @@ struct vram_nvidia_index
         static_assert(resident_blocks_(vram_kernel_t::back_link_k, 0) == resident_blocks_(vram_kernel_t::insert_k, 0));
         u32_t const blocks = device_.multiprocessor_count * resident_blocks_(vram_kernel_t::insert_k, pool_slots);
         u32_t const back_link_scratch = build.arena_shape.cache_bytes ? 0u : merge_scratch_bytes_per_warp();
-        auto zeroed = [&](u32_t* counter) noexcept {
-            return cuda_fill_async(counter, 0, sizeof(u32_t), stream) == cuda_success_k;
+        cuda_rows_map_t const rows_map = rows_map_();
+        auto zeroed = [&](u32_t* counters, u32_t count) noexcept {
+            return cuda_fill_async(counters, 0, count * sizeof(u32_t), stream) == cuda_success_k;
         };
-        for (u32_t wave_first = build.first_id; wave_first != build.end_id;) {
+        // Overlapping launches claim from three counters a wave, the insert's, the back-link's and
+        // the touched count, which one fill zeroes ahead of the waves they serve, so no fill sits
+        // between two launches and keeps the later one from overlapping the earlier one's drain.
+        constexpr bool chained_k = cuda_overlaps_launches(capability_);
+        constexpr u32_t chained_waves_k = cuda_claim_counters_k / 3;
+        for (u32_t wave_first = build.first_id, wave = 0; wave_first != build.end_id; ++wave) {
             u32_t const wave_end = static_cast<u32_t>(
                 min_of<u64_t>(build.end_id, u64_t {wave_first} + max_of(wave_first, vram_admission_ramp_floor_k)));
             u32_t const offset = wave_first - build.first_id;
+            u32_t const slot = wave % chained_waves_k;
+            u32_t* const counters = build.assigned_rows + (chained_k ? 3 * slot : 0);
             arguments.build = build;
             arguments.build.staging = build.staging + std::size_t {offset} * row_bytes();
             arguments.build.first_id = wave_first;
             arguments.build.end_id = wave_end;
             arguments.build.epoch_base = build.epoch_base + offset;
-            status_t launched = zeroed(build.assigned_rows) && zeroed(build.touched_count) ? status_t::success_k
-                                                                                           : status_t::device_error_k;
+            arguments.build.assigned_rows = counters;
+            if constexpr (chained_k) arguments.build.touched_count = counters + 2;
+            bool const counters_zeroed = chained_k ? slot != 0 || zeroed(build.assigned_rows, cuda_claim_counters_k)
+                                                   : zeroed(build.assigned_rows, 1) && zeroed(build.touched_count, 1);
+            status_t launched = counters_zeroed ? status_t::success_k : status_t::device_error_k;
             if (succeeded(launched))
                 launched = launch_(insert, blocks, vram_warps_per_block_k * build.scratch_bytes_per_warp, stream,
-                                   arguments);
+                                   arguments, rows_map);
             if (failed(launched)) return offset ? fail_(launched) : launched;
             // The wave's rows are queued now, so a failure past here can no longer be un-claimed.
             arguments.build.scratch_bytes_per_warp = back_link_scratch;
-            if (!zeroed(build.assigned_rows)) return fail_(status_t::device_error_k);
+            if constexpr (chained_k) arguments.build.assigned_rows = counters + 1;
+            else if (!zeroed(build.assigned_rows, 1)) return fail_(status_t::device_error_k);
             if (status_t const linked = launch_(back_link, blocks, vram_warps_per_block_k * back_link_scratch, stream,
                                                 arguments);
                 failed(linked))
@@ -907,7 +952,8 @@ struct vram_nvidia_index
                             launch.round};
         return launch_(kernel_function_(vram_kernel_t::refine_k, launch.pool_slots),
                        device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.pool_slots),
-                       vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments);
+                       vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments,
+                       rows_map_());
     }
 
     /** Scatters the walked rows' shadow neighbors into the reverse buckets, then merges every
@@ -933,7 +979,7 @@ struct vram_nvidia_index
             failed(launched))
             return launched;
         // The merge sweeps the whole ID space and skips the rows the scatter left untouched,
-        // carving its slices from the arena sized for the refine's grid, which its count matches.
+        // carving its slices from the arena sized for the refine's grid, so it launches that grid.
         static_assert(resident_blocks_(vram_kernel_t::merge_back_links_k, 0) ==
                       resident_blocks_(vram_kernel_t::refine_k, 0));
         arguments.refine = {storage(),
@@ -951,7 +997,7 @@ struct vram_nvidia_index
                             launch.nodes_count,
                             0};
         return launch_(kernel_function_(vram_kernel_t::merge_back_links_k, 0),
-                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::merge_back_links_k, 0),
+                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.pool_slots),
                        vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, stream, arguments);
     }
 
@@ -980,7 +1026,7 @@ struct vram_nvidia_index
     status_t launch_walk_(vram_kernel_t kernel, cuda_function_handle_t function, walk_launch_t const& walk,
                           vram_arguments_t const& arguments, traversal_context_t& context) noexcept {
         return launch_(function, walk_blocks_(walk.queries_count, resident_blocks_(kernel, walk_slots_(walk))),
-                       vram_warps_per_block_k * walk.scratch_bytes_per_warp, context.stream(), arguments);
+                       vram_warps_per_block_k * walk.scratch_bytes_per_warp, context.stream(), arguments, rows_map_());
     }
 
     /** Walks every query of @p walk, landing its nearest @p count IDs and, unless null, their
@@ -1054,7 +1100,7 @@ struct vram_nvidia_index
         attend.columns = static_cast<u32_t>(dimensions());
         std::memcpy(attend.value_lookup, &value_lookup, sizeof(value_lookup));
         vram_kernel_symbol_t symbol;
-        vram_kernel_symbol(symbol, "dense", "cuda_kernel", "vram_arguments_t", vram_kernel_t::attend_k, capability_,
+        vram_kernel_symbol(symbol, "dense", "cuda_kernel", "cuda_arguments_t", vram_kernel_t::attend_k, capability_,
                            vector_dtype_, walk_slots_(walk), u32_t {value_lookup_type_::device_lookup_k});
         return launch_walk_(vram_kernel_t::attend_k, module_.function(symbol.text), walk, arguments, context);
     }
@@ -1221,6 +1267,13 @@ struct vram_nvidia_index
      *  attends left to their launches. */
     cuda_module_t module_;
     cuda_function_handle_t kernels_[static_cast<u32_t>(vram_kernel_t::count_k)][gpu_rungs_per_kernel_k] = {};
+
+    /** The map @ref rows_map_ keeps once published. */
+    cuda_rows_map_t rows_map_kept_ {};
+
+    /** Zero until a launch claims the map's encoding, one while it writes @ref rows_map_kept_, and
+     *  two once published, read and written through atomic references. */
+    u32_t rows_map_state_ = 0;
 };
 
 } // namespace unum::usearch::dense
