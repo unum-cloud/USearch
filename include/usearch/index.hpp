@@ -1293,8 +1293,8 @@ class splitmix64_t {
         return x ^ (x >> 31u);
     }
     constexpr explicit splitmix64_t(result_type value = 0) noexcept : state_(value) {}
-    static constexpr result_type min() noexcept { return 0; }
-    static constexpr result_type max() noexcept { return (std::numeric_limits<result_type>::max)(); }
+    static constexpr result_type(min)() noexcept { return 0; }
+    static constexpr result_type(max)() noexcept { return (std::numeric_limits<result_type>::max)(); }
     void seed(result_type value = 0) noexcept { state_ = value; }
     result_type operator()() noexcept { return mix_uint64(state_ += 0x9E3779B97F4A7C15ULL); }
     void discard(unsigned long long count) noexcept { state_ += result_type(count) * 0x9E3779B97F4A7C15ULL; }
