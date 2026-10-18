@@ -23,7 +23,7 @@ import os
 import numpy as np
 import pytest
 
-from usearch.eval import random_vectors
+from usearch.eval import Dataset, random_vectors
 from usearch.index import BatchMatches, Index, Indexes, Match, Matches, kmeans, search
 from usearch.io import load_matrix, save_matrix
 
@@ -123,6 +123,17 @@ def test_batch_matches_creation_and_methods():
     assert batch_matches[0].keys.tolist() == [1, 2]
     assert batch_matches[0].distances.tolist() == [0.5, 0.6]
     assert batch_matches.to_list() == [(1, 0.5), (2, 0.6), (3, 0.7), (4, 0.8)]
+
+
+@pytest.mark.parametrize("k", [1, 2, 3])
+def test_dataset_crop_neighbors(k: int):
+    vectors = np.eye(3, dtype=np.float32)
+    neighbors = np.array([[0, 1, 2], [1, 0, 2], [2, 0, 1]], dtype=np.uint64)
+    dataset = Dataset(keys=np.arange(3), vectors=vectors, queries=vectors, neighbors=neighbors)
+
+    dataset.crop_neighbors(k)
+
+    np.testing.assert_array_equal(dataset.neighbors, neighbors[:, :k])
 
 
 def test_multi_index():
