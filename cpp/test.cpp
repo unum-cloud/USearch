@@ -1544,16 +1544,15 @@ void test_level_generators() {
     metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
     index_dense_t index = index_dense_t::make(metric);
 
-    std::random_device seed_source;
-    std::mt19937 generator(seed_source());
+    std::mt19937 generator(42);
     std::uniform_real_distribution<float> distribution(0.0, 1.0);
 
     std::size_t key = 0;
     for (std::size_t step = 0; step != steps; ++step) {
-        index.reserve(index_limits_t((step + 1) * contexts * per_context_step, contexts));
+        expect(index.try_reserve(index_limits_t((step + 1) * contexts * per_context_step, contexts)));
         for (std::size_t idx = 0; idx != contexts * per_context_step; ++idx, ++key) {
             float vector[dimensions] = {distribution(generator), distribution(generator)};
-            index.add(key, vector, idx % contexts);
+            expect(index.add(key, vector, idx % contexts));
         }
     }
     expect_eq(index.size(), contexts * steps * per_context_step);

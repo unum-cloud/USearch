@@ -1053,6 +1053,9 @@ class index_dense_gt {
         // Reserving is monotonic: reducing thread limits must not shrink member-addressed storage.
         limits.members = (std::max)(limits.members, typed_->capacity());
         limits.members = (std::max)(limits.members, vectors_lookup_.size());
+        // Match the core's retained contexts so cast buffers and available thread IDs stay consistent.
+        limits.threads_add = (std::max)(limits.threads_add, typed_->limits().threads_add);
+        limits.threads_search = (std::max)(limits.threads_search, typed_->limits().threads_search);
 
         // The slot lookup system will generally prefer power-of-two sizes.
         if (config_.enable_key_lookups) {
