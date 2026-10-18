@@ -78,7 +78,8 @@ constexpr std::size_t basic_reader_minimal_searches_k = 16;
 
 /** Contract-auditing wrapper over any @c basic::metric: counts the verbs, verifies every
  *  drain is sized to that round's accepted pushes, flags abandoned pushed rounds, and can
- *  refuse pushes after an armed budget to drive every saturation path. */
+ *  refuse pushes after an armed budget to drive every saturation path, or past a round cap to
+ *  drive every fold. */
 template <typename inner_metric_type_, typename distance_type_>
 struct basic_auditing_metric {
     inner_metric_type_ inner;
@@ -95,6 +96,10 @@ struct basic_auditing_metric {
     /** Accepted pushes before refusal begins; the type's maximum means unarmed. */
     std::size_t budget_left = std::numeric_limits<std::size_t>::max();
 
+    /** Accepted pushes per round, refusing the rest until a drain; the type's maximum means
+     *  uncapped. */
+    std::size_t round_limit = std::numeric_limits<std::size_t>::max();
+
     template <typename query_type_>
     void reset(query_type_ const& query) noexcept {
         if (pushes_this_round) ++violations; // A pushed round was abandoned without a drain.
@@ -105,7 +110,7 @@ struct basic_auditing_metric {
     template <typename staged_type_>
     metric_staging_t push(staged_type_ const& staged) noexcept {
         if (!resets) ++violations; // A round was opened implicitly.
-        if (!budget_left) return ++refusals, metric_staging_t::refused_k;
+        if (!budget_left || pushes_this_round == round_limit) return ++refusals, metric_staging_t::refused_k;
         if (inner.push(staged) == metric_staging_t::refused_k) return ++refusals, metric_staging_t::refused_k;
         --budget_left, ++pushes, ++pushes_this_round;
         return metric_staging_t::staged_k;
@@ -969,10 +974,9 @@ std::size_t test_basic_starved(u64_t seed) {
                                                fixture_type_::make_key(nodes_count + 1)};
         auto query = fixture_type_::make_values(1, stream_key(seed, "starved", 3), counting_allocator_t {ledger});
 
-        // Warm a small round shape, then over-wire node 0 past its staging capacity, so
-        // a later frozen-budget search can only proceed by refusing the top-up. The backward
-        // edges are what make the fat row reachable: a walk saturates on rows it expands, and
-        // it can only expand what some other row points at.
+        // Warm a small round shape, then over-wire node 0 past its staging capacity, so a later
+        // frozen-budget search must refuse growing its staging to that row. The backward edges are
+        // what make the fat row reachable: a walk only expands what some other row points at.
         context_t small_context {stream_key(seed, "starved", 1), counting_allocator_t {ledger}};
         failures += expect_eq(index.search(query[0], metric, small_context, {8, 1}).status, status_t::success_k);
         for (std::size_t target = 1; target != nodes_count; ++target) {
@@ -992,26 +996,17 @@ std::size_t test_basic_starved(u64_t seed) {
         failures += expect_eq(index.health(cold_context).status, status_t::bad_alloc_k);
 
         // Warm scratch under the same budget: the claimed ID must still publish, only
-        // thinner - the fresh row's growth is the one refused allocation.
-        failures += expect_eq(
-            index.insert({extras.data(), 1}, {extra_keys.data(), 1}, metric, {}, warm_context, keep_closest_t {4})
-                .status,
-            status_t::success_k);
+        // thinner - the fresh row's growth is the one refused allocation, and it is counted.
+        auto const [thinner, thinner_status] = index.insert({extras.data(), 1}, {extra_keys.data(), 1}, metric, {},
+                                                            warm_context, keep_closest_t {4});
+        failures += expect_eq(thinner_status, status_t::success_k);
+        failures += expect(thinner.telemetry.saturated_walks > 0);
         failures += expect_eq(index.size(), nodes_count + 1);
         failures += expect_eq(index.degree_of(static_cast<node_id_t>(nodes_count)).value, 0u);
 
-        // The saturated walk: each query is a node's own stored value, and every row points at the
-        // over-wired one, so at least the walk for node 0 must expand it, which cannot stage under
-        // the frozen budget. The receipt is asserted across the batch and every answer stays ranked.
-        std::size_t saturations = 0;
-        for (std::size_t sample = 0; sample != nodes_count; ++sample) {
-            auto const [result, status] = index.search(index.published_value_of(static_cast<node_id_t>(sample)), metric,
-                                                       small_context, {8, 1});
-            failures += expect_eq(status, status_t::success_k);
-            failures += basic_expect_ascending(small_context);
-            saturations += result.telemetry.saturated_walks;
-        }
-        failures += expect(saturations > 0);
+        // A search stages one round of the widest row, sized up front: the warm context, too small
+        // for the over-wired row, refuses all-or-nothing rather than saturating partway.
+        failures += expect_eq(index.search(query[0], metric, small_context, {8, 1}).status, status_t::bad_alloc_k);
 
         // Lifting the budget makes every refusal retryable.
         ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
@@ -2364,7 +2359,7 @@ std::size_t test_basic_metric_contract(u64_t seed) {
         auto values = fixture_type_::make_values(nodes_k, stream_key(seed, "contract"), counting_allocator_t {ledger});
         auto queries = fixture_type_::make_values(4, stream_key(seed, "contract", 1), counting_allocator_t {ledger});
 
-        failures += expect(bool(index.reserve(nodes_k + 1)));
+        failures += expect(bool(index.reserve(nodes_k + 2)));
         std::vector<typename index_t::node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
                                                keep_diverse_t {basic_connectivity_k});
@@ -2394,27 +2389,63 @@ std::size_t test_basic_metric_contract(u64_t seed) {
         failures += expect_eq(unfolded_status, status_t::success_k);
         failures += expect(sated_result.telemetry.computed_distances < unfolded_result.telemetry.computed_distances);
 
-        // Armed refusal: the walk must survive every saturation path & stay ranked.
+        // Armed refusal: the walk must survive every saturation path, stay ranked, and say so.
+        std::size_t saturations = 0;
         for (std::size_t budget : {basic_connectivity_k, std::size_t {1}, std::size_t {0}}) {
             metric.arm(budget);
             auto const [result, status] = index.search(queries[0], metric, context);
             failures += expect_eq(status, status_t::success_k);
             failures += basic_expect_ascending(context);
+            saturations += result.telemetry.saturated_walks;
             metric.disarm();
         }
+        failures += expect(saturations > 0);
+        failures += expect_eq(metric.violations, 0u);
+
+        // A round narrower than a row folds instead of refusing: the walk ranks unsaturated, the
+        // diversity rule compares every candidate as one wide round would, and a twin of a stored
+        // value lands in that value's full row through the re-selection.
+        constexpr std::size_t narrow_round_k = 3;
+        auto const [wide, wide_status] = index.search(queries[0], metric, context);
+        failures += expect_eq(wide_status, status_t::success_k);
+        keep_diverse_t const diverse {basic_connectivity_k};
+        diverse(index, metric, context);
+        std::vector<node_id_t> wide_selection;
+        for (auto const& selected : context.selected_neighbors) wide_selection.push_back(selected.node_id);
+        metric.round_limit = narrow_round_k;
+        diverse(index, metric, context);
+        failures += expect_eq(context.selected_neighbors.size(), wide_selection.size());
+        for (std::size_t position = 0; position != context.selected_neighbors.size(); ++position)
+            failures += expect_eq(context.selected_neighbors[position].node_id, wide_selection[position]);
+        auto const [narrow, narrow_status] = index.search(queries[0], metric, context);
+        failures += expect_eq(narrow_status, status_t::success_k);
+        failures += expect_eq(narrow.telemetry.saturated_walks, 0u);
+
+        node_id_t full_row = 0;
+        while (full_row + 1u != index.size() && index.degree_of(full_row).value != basic_connectivity_k) ++full_row;
+        failures += expect_eq(index.degree_of(full_row).value, basic_connectivity_k);
+        auto twins = fixture_type_::make_values(nodes_k, stream_key(seed, "contract"), counting_allocator_t {ledger});
+        typename index_t::key_t const twin_key = fixture_type_::make_key(nodes_k);
+        node_id_t twin_id = 0;
+        failures += expect_eq(
+            index.insert({twins.data() + full_row, 1}, {&twin_key, 1}, metric, {&twin_id, 1}, context, diverse).status,
+            status_t::success_k);
+        failures += expect(index.link(twin_id, full_row).value == membership_t::present_k);
+        failures += expect(index.link(full_row, twin_id).value == membership_t::present_k);
+        metric.round_limit = std::numeric_limits<std::size_t>::max();
         failures += expect_eq(metric.violations, 0u);
 
         // An armed insert wires a thinner node but still publishes it.
         metric.arm(2);
         auto one_more = fixture_type_::make_values(1, stream_key(seed, "contract", 2), counting_allocator_t {ledger});
-        typename index_t::key_t const one_more_key = fixture_type_::make_key(nodes_k);
+        typename index_t::key_t const one_more_key = fixture_type_::make_key(nodes_k + 1);
         failures += expect_eq(index
                                   .insert({one_more.data(), 1}, {&one_more_key, 1}, metric, {}, context,
                                           keep_diverse_t {basic_connectivity_k})
                                   .status,
                               status_t::success_k);
         metric.disarm();
-        failures += expect_eq(index.size(), nodes_k + 1);
+        failures += expect_eq(index.size(), nodes_k + 2);
         failures += expect_eq(metric.violations, 0u);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);

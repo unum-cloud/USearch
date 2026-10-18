@@ -156,18 +156,16 @@ template <vram_basic_kit kit_, u32_t rung_, u32_t pool_slots_, vram_kernel_t ker
 __device__ __forceinline__ void cuda_insert(vram_build_view<node_id_type_> const& view) {
     using selector_t = typename kit_::selector_t;
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
-    // The scratch slice hosts the query span, then the pivot span; the visited set is in the arena.
+    // The scratch slice hosts the query span, the pivot span and the selection spans over the
+    // walk's whole pool; the visited set is in the arena.
     extern __shared__ byte_t dynamic_scratch[];
-    __shared__ node_id_type_ gathered_ids[vram_warps_per_block_k][vram_cache_rows_k];
-    __shared__ node_id_type_ selected_ids[vram_warps_per_block_k][vram_cache_rows_k];
-    __shared__ u32_t kept_positions[vram_warps_per_block_k][vram_cache_rows_k];
-    __shared__ f32_t candidate_distances[vram_warps_per_block_k][vram_cache_rows_k];
+    __shared__ node_id_type_ gathered_ids[vram_warps_per_block_k][cuda_warp_t::width_k];
     __shared__ typename schedule_t::shared_t schedule_state;
 
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t, node_id_type_>(view, dynamic_scratch);
     u32_t const warp = slice.warp, lane = slice.lane;
-    vram_selection_scratch<node_id_type_> const selection {selected_ids[warp], nullptr, kept_positions[warp],
-                                                           candidate_distances[warp]};
+    vram_selection_scratch<node_id_type_> const selection = vram_selection_scratch<node_id_type_>::carve(
+        slice.scratch + 2 * view.span_bytes, view.selection_rows);
     using frontier_t = std::conditional_t<pool_slots_ == 0, vram_arena_frontier<cuda_warp_t, node_id_type_>,
                                           vram_register_frontier<pool_slots_, cuda_warp_t, node_id_type_>>;
     schedule_t schedule {schedule_state};
@@ -192,7 +190,8 @@ __device__ __forceinline__ void cuda_insert(vram_build_view<node_id_type_> const
                 vram_insert_one<kit_, selector_t>( //
                     view, schedule, node_id, visited, slice.scratch, slice.scratch + view.span_bytes,
                     gathered_ids[warp], selection, context, lane);
-            context.telemetry.tail_drops = context.frontier.dropped();
+            context.telemetry.tail_compactions = context.frontier.compactions();
+            context.telemetry.tail_unseated = context.frontier.unseated();
             context.telemetry.visited_saturations = visited.saturations_;
             context.telemetry.template flush<cuda_warp_t, vram_traversal_t::inserting_k>(view.telemetry, lane);
         });
@@ -204,24 +203,19 @@ template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 __device__ __forceinline__ void cuda_back_link(vram_build_view<node_id_type_> const& view) {
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
-    __shared__ node_id_type_ candidate_ids[vram_warps_per_block_k][vram_cache_rows_k];
-    __shared__ vram_scored_node<node_id_type_> scored_entries[vram_warps_per_block_k][vram_cache_rows_k];
-    __shared__ u32_t kept_positions[vram_warps_per_block_k][vram_cache_rows_k];
-    __shared__ f32_t candidate_distances[vram_warps_per_block_k][vram_cache_rows_k];
     __shared__ typename schedule_t::shared_t schedule_state;
 
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t, node_id_type_>(view, dynamic_scratch);
-    u32_t const warp = slice.warp, lane = slice.lane;
-    vram_selection_scratch<node_id_type_> const selection {nullptr, scored_entries[warp], kept_positions[warp],
-                                                           candidate_distances[warp]};
+    u32_t const lane = slice.lane;
+    vram_selection_scratch<node_id_type_> const selection = vram_selection_scratch<node_id_type_>::carve(
+        slice.scratch + 2 * view.span_bytes, view.selection_rows);
     schedule_t schedule {schedule_state};
     cuda_for_each_assigned( //
         schedule, view.storage, view.assigned_rows, 0u, *view.touched_count, slice, [&](u32_t offset) {
             node_id_type_ const node_id = view.touched_ids[offset];
             vram_telemetry_t telemetry;
             vram_back_link_one<kit_, typename kit_::selector_t>( //
-                view, schedule, node_id, slice.scratch, slice.scratch + view.span_bytes, candidate_ids[warp], selection,
-                telemetry, lane);
+                view, schedule, node_id, slice.scratch, slice.scratch + view.span_bytes, selection, telemetry, lane);
             if (lane == 0) view.link_heads[node_id] = std::numeric_limits<node_id_type_>::max();
             telemetry.template flush<cuda_warp_t, vram_traversal_t::inserting_k>(view.telemetry, lane);
         });
@@ -233,7 +227,7 @@ template <vram_basic_kit kit_, u32_t rung_, u32_t slots_, typename node_id_type_
 __device__ __forceinline__ void cuda_walk(vram_search_view<node_id_type_> const& view) {
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
-    __shared__ node_id_type_ gathered_ids[vram_warps_per_block_k][vram_cache_rows_k];
+    __shared__ node_id_type_ gathered_ids[vram_warps_per_block_k][cuda_warp_t::width_k];
     __shared__ typename schedule_t::shared_t schedule_state;
 
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t, node_id_type_>(view, dynamic_scratch);
@@ -277,6 +271,7 @@ __device__ __forceinline__ vram_build_view<node_id_type_> vram_view(vram_build<n
             build.arena,
             vram_view(build.arena_shape),
             build.expansion,
+            build.selection_rows,
             build.epoch_base,
             build.telemetry,
             build.assigned_rows,

@@ -20,12 +20,9 @@ enum metal_extent_t : unsigned int {
     /** Simdgroups per threadgroup, one walk each. */
     metal_simdgroups_k = 4,
 
-    /** Lanes per simdgroup, the width every warp collective spans. */
+    /** Lanes per simdgroup, the width every warp collective spans; every pipeline must report it
+     *  as its @c threadExecutionWidth, or the device refuses it. */
     metal_simdgroup_width_k = 32,
-
-    /** Rows of the per-walk candidate cache; also bounds the diversity selection's prefix and the
-     *  staging spans. */
-    metal_cache_rows_k = 64,
 
 };
 
@@ -45,7 +42,8 @@ enum metal_counter_t : unsigned int {
     metal_reselections_k = 14,
     metal_locked_drops_k = 16,
     metal_saturations_k = 18,
-    metal_tail_drops_k = 20,
+    metal_tail_compactions_k = 20,
+    metal_tail_unseated_k = 22,
     metal_counter_words_k = 24,
 };
 

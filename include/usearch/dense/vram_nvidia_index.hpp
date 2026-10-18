@@ -206,10 +206,9 @@ struct vram_nvidia_index
                               neighbors_allocator_type_, traversals_allocator_type_>;
     using base_t::arena_shape_for;
     using base_t::base_t;
+    using base_t::build_scratch_bytes_per_warp;
     using base_t::connectivity;
     using base_t::dimensions;
-    using base_t::insert_scratch_bytes_per_warp;
-    using base_t::merge_scratch_bytes_per_warp;
     using base_t::non_zero_expansion_factor;
     using base_t::packed_row_bytes;
     using base_t::row_bytes;
@@ -255,11 +254,11 @@ struct vram_nvidia_index
      *  @c vram_nvidia_index.cuh, where the kits are visible. */
     bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept;
 
-    /** Whether an insert or refine launch seats its per-warp scratch in shared memory beside the
-     *  static norms, batch buffers and schedule state, on every block a multiprocessor keeps
+    /** Whether a builder launch seats @p scratch_bytes_per_warp of per-warp scratch in shared
+     *  memory beside the batch buffers and schedule state, on every block a multiprocessor keeps
      *  resident; when it cannot, the warp's arena slice keeps it, as Apple's always does. Defined
      *  in @c vram_nvidia_index.cuh. */
-    bool build_scratch_fits() const noexcept;
+    bool build_scratch_fits(u32_t scratch_bytes_per_warp) const noexcept;
 
     /** The bytes an executor's run must hold before a context carved over it can search or multiply
      *  @p rows rows under @p config, landing @c config.count columns per row, one aligned term per
@@ -272,14 +271,13 @@ struct vram_nvidia_index
         };
         // Search widens the pool to cover its count while multiply walks the bare factor, so the
         // wider one sizes.
-        u32_t const expansion = max_of<u32_t>(
-            config.expansion_factor >= config.count ? config.expansion_factor : config.count * 2,
-            non_zero_expansion_factor(config));
+        u32_t const expansion = max_of<u32_t>(gpu_walk_breadth(config.expansion_factor, config.count),
+                                              non_zero_expansion_factor(config));
         bool const wide = expansion > vram_widest_pool_slots_k * 32;
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         u32_t const pool_slots = pool_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
         gpu_arena_shape_t const arena_shape = arena_shape_for(
-            wide ? expansion : pool_slots * 32,
+            walk_selection_rows_(expansion, pool_slots),
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
         // A scan walks no arena, and keeps its matches past the outputs on a fragment boundary; the
         // walks seat as many blocks as a search on the same rung, an attend no more.
@@ -306,8 +304,8 @@ struct vram_nvidia_index
     template <typename, typename, typename, typename, typename, template <typename> class>
     friend struct sharded_indexes;
 
-    using base_t::audit_sweeps_cap_k;
     using base_t::build_arena_shape_;
+    using base_t::builder_scratch_bytes_per_warp_;
     using base_t::device_;
     using base_t::fail_;
     using base_t::import_bytes_;
@@ -317,9 +315,11 @@ struct vram_nvidia_index
     using base_t::neighbor_rows_;
     using base_t::neighbors_matrix_;
     using base_t::pool_slots_for_;
+    using base_t::reselection_rows_;
     using base_t::rows_refusal_;
     using base_t::vectors_matrix_;
     using base_t::walk_blocks_;
+    using base_t::walk_selection_rows_;
     using typename base_t::attend_heads_t;
     using typename base_t::audit_landing_t;
     using typename base_t::refine_scratch_t;
@@ -402,8 +402,7 @@ struct vram_nvidia_index
         frontier_kind_t const frontier = expansion > vram_widest_pool_slots_k * 32 ? frontier_kind_t::wide_arena_k
                                                                                    : frontier_kind_t::register_ladder_k;
         u32_t const pool_slots = pool_slots_for_(expansion, minimum_slots);
-        gpu_arena_shape_t const arena_shape = arena_shape_for(
-            frontier == frontier_kind_t::wide_arena_k ? expansion : pool_slots * 32, frontier);
+        gpu_arena_shape_t const arena_shape = arena_shape_for(walk_selection_rows_(expansion, pool_slots), frontier);
         // A scan walks nothing, so it neither sizes nor zeroes an arena; a search, an indexed
         // search and a multiply seat as many blocks on one rung.
         bool const walks = traversal == traversal_t::walk_k;
@@ -504,7 +503,7 @@ struct vram_nvidia_index
 
         // The expansion covers the count, so the ladder's pool holds every rank, and past it the
         // arena frontier ranks everything it saw.
-        u32_t const expansion = config.expansion_factor >= config.count ? config.expansion_factor : config.count * 2;
+        u32_t const expansion = gpu_walk_breadth(config.expansion_factor, config.count);
         // The pool must cover the requested count, whatever the expansion asked for.
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         std::size_t const results_count = queries_count * config.count;
@@ -693,7 +692,7 @@ struct vram_nvidia_index
         u32_t const pool_slots = pool_slots_for_(expansion, 4);
         // Walking across makes two walks into one visited set, so the slice is shaped for both.
         u32_t const walks = parts > 1 ? 2 : 1;
-        gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion * walks, pool_slots * walks);
+        gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, pool_slots, walks);
         std::size_t const arena_warps = device_.multiprocessor_count *
                                         resident_blocks_(vram_kernel_t::refine_k, pool_slots) * vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
@@ -737,44 +736,57 @@ struct vram_nvidia_index
         return launch_refine_back_links_(launch, context);
     }
 
-    /** Queues a reachability sweep to convergence from as many stride-spread landmarks as one
-     *  search draws - the connectivity - then a count of the rows it never reached, collecting
-     *  their IDs when @p scratch has room for them, then the landing of every counter. Nothing
-     *  waits; the caller reads @p landing once its event fired. */
+    /** Queues a reachability audit from as many stride-spread landmarks as one search draws - the
+     *  connectivity - and its first sweep, through @ref queue_sweeps_. Nothing waits; the caller
+     *  reads @p landing once its event fired, and queues further sweeps from sweep 2 while the last
+     *  one still expanded. */
     status_t queue_audit_(traversal_context_t& context, refine_scratch_t const& scratch,
                           audit_landing_t* landing) noexcept {
         std::size_t const rows = size();
         cuda_stream_handle_t const stream = context.stream();
-        std::size_t const seed_count = min_of<std::size_t>(connectivity(), rows);
-        // The bitsets, the levels and sweeps' expanded counters and the unreached counter lie back
+        // The bitsets, the levels, the sweeps' expanded counters and the unreached counter lie back
         // to back.
-        if (cuda_fill_async(scratch.reached.words, 0, (scratch.words * 3 + audit_sweeps_cap_k + 1) * sizeof(u32_t),
-                            stream) != cuda_success_k)
+        if (cuda_fill_async(scratch.reached.words, 0, (scratch.words * 3 + 4) * sizeof(u32_t), stream) !=
+            cuda_success_k)
             return status_t::device_error_k;
-        vram_bitset_t frontier = scratch.frontier;
-        vram_bitset_t next_frontier = scratch.next_frontier;
-        if (status_t const launched = launch_audit_seeds_(scratch.reached, frontier, rows, seed_count, stream);
+        if (status_t const launched = launch_audit_seeds_(scratch.reached, scratch.frontier, rows,
+                                                          min_of<std::size_t>(connectivity(), rows), stream);
             failed(launched))
             return launched;
+        return queue_sweeps_(context, scratch, landing, 1);
+    }
 
-        // Every sweep up to the cap queues blind: one queued past convergence finds the one before
-        // it expanded nothing and leaves at entry.
-        for (std::size_t sweep_number = 1; sweep_number != audit_sweeps_cap_k; ++sweep_number) {
-            u32_t const* const expanded_before = sweep_number == 1 ? nullptr : scratch.expanded + sweep_number - 1;
-            if (cuda_fill_async(next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k)
+    /** Queues the audit's sweeps from @p first_sweep up to twice it, so the batches double until
+     *  one ends past convergence, then a count of the rows no sweep reached so far, collecting
+     *  their IDs when @p scratch has room for them, then the landing of every counter, the last
+     *  sweep's expanded count among them. */
+    status_t queue_sweeps_(traversal_context_t& context, refine_scratch_t const& scratch, audit_landing_t* landing,
+                           u32_t first_sweep) noexcept {
+        std::size_t const rows = size();
+        cuda_stream_handle_t const stream = context.stream();
+        // A sweep queued past convergence finds the one before it expanded nothing and leaves at
+        // entry; odd sweeps grow the first frontier, even ones the second.
+        for (u32_t sweep_number = first_sweep; sweep_number != 2 * first_sweep; ++sweep_number) {
+            bool const odd = sweep_number & 1u;
+            vram_bitset_t const frontier = odd ? scratch.frontier : scratch.next_frontier;
+            vram_bitset_t const next_frontier = odd ? scratch.next_frontier : scratch.frontier;
+            u32_t* const expanded = scratch.expanded + odd;
+            u32_t const* const expanded_before = sweep_number == 1 ? nullptr : scratch.expanded + !odd;
+            if (cuda_fill_async(next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k ||
+                cuda_fill_async(expanded, 0, sizeof(u32_t), stream) != cuda_success_k)
                 return status_t::device_error_k;
-            if (status_t const launched = launch_audit_sweep_(scratch.reached, frontier, next_frontier,
-                                                              scratch.expanded + sweep_number, expanded_before,
-                                                              scratch.expanded, rows, stream);
+            if (status_t const launched = launch_audit_sweep_(scratch.reached, frontier, next_frontier, expanded,
+                                                              expanded_before, scratch.levels, rows, stream);
                 failed(launched))
                 return launched;
-            std::swap(frontier, next_frontier);
         }
+        if (cuda_fill_async(scratch.unreached, 0, sizeof(u32_t), stream) != cuda_success_k)
+            return status_t::device_error_k;
         if (status_t const launched = launch_audit_islands_(scratch.reached, rows, scratch.island_ids,
                                                             scratch.unreached, stream);
             failed(launched))
             return launched;
-        return land_counters_(scratch, landing, stream);
+        return land_counters_(scratch, landing, 2 * first_sweep - 1, stream);
     }
 
     /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected
@@ -886,7 +898,9 @@ struct vram_nvidia_index
         // which the back-link's resident count matches.
         static_assert(resident_blocks_(vram_kernel_t::back_link_k, 0) == resident_blocks_(vram_kernel_t::insert_k, 0));
         u32_t const blocks = device_.multiprocessor_count * resident_blocks_(vram_kernel_t::insert_k, pool_slots);
-        u32_t const back_link_scratch = build.arena_shape.cache_bytes ? 0u : merge_scratch_bytes_per_warp();
+        u32_t const back_link_rows = reselection_rows_();
+        u32_t const back_link_scratch = build.arena_shape.scratch_bytes ? 0u
+                                                                        : build_scratch_bytes_per_warp(back_link_rows);
         cuda_rows_map_t const rows_map = rows_map_();
         auto zeroed = [&](u32_t* counters, u32_t count) noexcept {
             return cuda_fill_async(counters, 0, count * sizeof(u32_t), stream) == cuda_success_k;
@@ -898,7 +912,7 @@ struct vram_nvidia_index
         constexpr u32_t chained_waves_k = cuda_claim_counters_k / 3;
         for (u32_t wave_first = build.first_id, wave = 0; wave_first != build.end_id; ++wave) {
             u32_t const wave_end = static_cast<u32_t>(
-                min_of<u64_t>(build.end_id, u64_t {wave_first} + max_of(wave_first, vram_admission_ramp_floor_k)));
+                vram_admission_wave_end(wave_first, build.end_id, vram_dense_admission_share_log2_k));
             u32_t const offset = wave_first - build.first_id;
             u32_t const slot = wave % chained_waves_k;
             u32_t* const counters = build.assigned_rows + (chained_k ? 3 * slot : 0);
@@ -918,6 +932,7 @@ struct vram_nvidia_index
             if (failed(launched)) return offset ? fail_(launched) : launched;
             // The wave's rows are queued now, so a failure past here can no longer be un-claimed.
             arguments.build.scratch_bytes_per_warp = back_link_scratch;
+            arguments.build.selection_rows = back_link_rows;
             if constexpr (chained_k) arguments.build.assigned_rows = counters + 1;
             else if (!zeroed(build.assigned_rows, 1)) return fail_(status_t::device_error_k);
             if (status_t const linked = launch_(back_link, blocks, vram_warps_per_block_k * back_link_scratch, stream,
@@ -932,10 +947,12 @@ struct vram_nvidia_index
     /** Walks the rows of @p launch, landing their re-selected neighbors in its shadow matrix. */
     status_t launch_refine_(refine_launch_t const& launch, traversal_context_t& context) noexcept {
         vram_arguments_t arguments {};
+        u32_t const selection_rows = walk_selection_rows_(launch.expansion, launch.pool_slots);
         arguments.refine = {storage(), //
                             launch.shadow_neighbors,
                             launch.nodes.bound,
-                            launch.arena_shape.cache_bytes ? 0u : insert_scratch_bytes_per_warp(),
+                            launch.arena_shape.scratch_bytes ? 0u : build_scratch_bytes_per_warp(selection_rows),
+                            selection_rows,
                             launch.nodes.first,
                             launch.arena,
                             launch.arena_shape,
@@ -983,7 +1000,8 @@ struct vram_nvidia_index
         arguments.refine = {storage(),
                             launch.shadow_neighbors,
                             launch.nodes_count,
-                            launch.arena_shape.cache_bytes ? 0u : merge_scratch_bytes_per_warp(),
+                            launch.arena_shape.scratch_bytes ? 0u : build_scratch_bytes_per_warp(reselection_rows_()),
+                            reselection_rows_(),
                             0,
                             launch.arena,
                             launch.arena_shape,

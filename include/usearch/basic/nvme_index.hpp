@@ -196,7 +196,7 @@ class nvme_index {
     /** The walk breadth @p config asks for, or twice the widest neighbors row when it asks for
      *  none. */
     std::size_t non_zero_expansion_factor(search_config_t const& config) const noexcept {
-        return config.expansion_factor ? config.expansion_factor : connectivity() * 2;
+        return config.expansion_factor ? config.expansion_factor : default_expansion_factor(connectivity());
     }
 
     /**
@@ -552,6 +552,9 @@ class nvme_index {
         /** Each walk's pool breadth. */
         std::size_t expansion_factor = 0;
 
+        /** The queue sizes every walk starts from, at that breadth over the widest part's rows. */
+        nvme_queue_sizes_t queue_sizes {};
+
         /** Flights one walk ever holds at once: its landmarks or one expansion and every neighbor
          *  it scores, and one expansion and its neighbors more per further hop in flight. */
         std::size_t walk_flights = 0;
@@ -609,11 +612,11 @@ class nvme_index {
                                     std::size_t expansion_factor, std::size_t staged_bytes) noexcept {
         using slice_t = arena_allocator<byte_t>;
         // Parts differ in their widest rows, so the widest of all sizes every walk.
-        std::size_t connectivity = 0;
-        for (part_t const& part : parts) connectivity = max_of<std::size_t>(connectivity, part.connectivity);
+        std::size_t const connectivity = nvme_widest_row(parts);
         walk_shape_t shape;
         shape.rows_count = rows_count;
         shape.expansion_factor = expansion_factor;
+        shape.queue_sizes = nvme_queue_sizes(expansion_factor, connectivity);
         shape.buffers_per_flight = row_type_::key_reads_k == nvme_key_reads_t::scored_k ? 2 : 1;
         std::size_t const first_hop = max_of<std::size_t>(round_up_to_multiple<std::size_t>(connectivity, 4),
                                                           connectivity + 1);
@@ -626,10 +629,10 @@ class nvme_index {
         std::size_t const flights = walks * shape.walk_flights;
         shape.buffers = flights * shape.buffers_per_flight;
         // What `row_walker::reserve` carves, slice by slice, after padding to the first boundary.
-        std::size_t const per_walk = slice_t::reserved_bytes(results_array_t::memory_usage(expansion_factor)) +
-                                     slice_t::reserved_bytes(frontier_queue_t::memory_usage(expansion_factor * 4)) +
+        std::size_t const per_walk = slice_t::reserved_bytes(results_array_t::memory_usage(shape.queue_sizes.results)) +
                                      slice_t::reserved_bytes(
-                                         visited_set_t::memory_usage(expansion_factor * connectivity));
+                                         frontier_queue_t::memory_usage(shape.queue_sizes.frontier)) +
+                                     slice_t::reserved_bytes(visited_set_t::memory_usage(shape.queue_sizes.visited));
         shape.scratch_bytes = walks * per_walk + slice_t::reserved_bytes(walks * sizeof(walk_t)) +
                               slice_t::reserved_bytes(rows * sizeof(row_type_)) +
                               rows * slice_t::reserved_bytes(staged_bytes) +

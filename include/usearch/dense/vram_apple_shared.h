@@ -21,20 +21,14 @@ enum metal_fragment_t : unsigned int {
     metal_fragment_bytes_k = 16,
 };
 
-/** Bytes of the fixed spans a walk carves from its arena slice, past its query and cache rows and
- *  its visited set, in carving order, and their sum. */
+/** Bytes of the batch spans a walk carves first in its scratch, the CUDA walk's shared
+ *  @c vram_gathered: one batch's scored nodes, IDs and dots, a simdgroup's width each, and their
+ *  sum. */
 enum metal_span_bytes_t : unsigned int {
     metal_scored_span_bytes_k = metal_simdgroup_width_k * 8,
-    metal_sorted_span_bytes_k = metal_cache_rows_k * 8,
-    metal_cache_norms_span_bytes_k = metal_cache_rows_k * 8,
-    metal_ids_span_bytes_k = metal_cache_rows_k * 4,
+    metal_ids_span_bytes_k = metal_simdgroup_width_k * 4,
     metal_dots_span_bytes_k = metal_simdgroup_width_k * 4,
-    metal_selected_ids_span_bytes_k = metal_cache_rows_k * 4,
-    metal_kept_positions_span_bytes_k = metal_cache_rows_k * 4,
-    metal_distances_span_bytes_k = metal_cache_rows_k * 4,
-    metal_spans_bytes_k = metal_scored_span_bytes_k + metal_sorted_span_bytes_k + metal_cache_norms_span_bytes_k +
-                          metal_ids_span_bytes_k + metal_dots_span_bytes_k + metal_selected_ids_span_bytes_k +
-                          metal_kept_positions_span_bytes_k + metal_distances_span_bytes_k,
+    metal_batch_spans_bytes_k = metal_scored_span_bytes_k + metal_ids_span_bytes_k + metal_dots_span_bytes_k,
 };
 
 /** The metrics the host lowers its kernel kind onto: the walk ranks Euclidean by its square. */
@@ -81,7 +75,7 @@ struct metal_arguments_t {
     unsigned int row_fragments, lanes_per_row, steps_per_row, connectivity;
     unsigned int metric, has_norms, first_id, end_id;
     unsigned int sampling_bound, queries_count, count, epoch_base;
-    unsigned int visited_slots, hash_shift, cache_rows, slice_bytes;
+    unsigned int visited_slots, hash_shift, selection_rows, slice_bytes;
     unsigned int heads_count, row_fragments_magic, use_node_ids, expansion;
     unsigned int tail_entries, parts, round;
 };

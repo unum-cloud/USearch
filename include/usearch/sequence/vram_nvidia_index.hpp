@@ -13,7 +13,9 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <span> // `std::span` - the rungs and the window widths
+#include <iterator> // `std::size` - the widest Levenshtein rung
+#include <limits>   // `std::numeric_limits` - the bytes a Myers word covers
+#include <span>     // `std::span` - the rungs and the window widths
 
 #include <stringzilla/capabilities.h> // `sz_capability_t` - the kits' capabilities
 
@@ -30,8 +32,19 @@ namespace unum::usearch::sequence {
 using namespace unum::usearch::utilities;
 
 /** Myers words of the longest query each Levenshtein rung's kernels score, narrowest first: a warp
- *  walks each query up to sixteen words, 1 KiB, a block past them, up to 4 KiB. */
+ *  walks each query up to sixteen words, 1 KiB, a block past them, up to 4 KiB, where a block's
+ *  shared memory runs out. */
 inline constexpr u32_t vram_levenshtein_words_k[] = {2, 4, 8, 16, 32, 64};
+
+/** Bytes of the longest row @p words Myers words score, a bit of a 64-bit word per byte; a row
+ *  of @c b bytes holds at most @c b runes, so it bounds rune rows too. */
+constexpr std::size_t vram_levenshtein_bytes(u32_t words) noexcept {
+    return std::size_t {words} * std::numeric_limits<u64_t>::digits;
+}
+
+/** Bytes of the longest row the widest Levenshtein rung scores; longer ones are refused. */
+inline constexpr std::size_t vram_levenshtein_widest_bytes_k = vram_levenshtein_bytes(
+    vram_levenshtein_words_k[std::size(vram_levenshtein_words_k) - 1]);
 
 /** The lone overlap rung: a warp scores every row whatever its length, so nothing splits by it. */
 inline constexpr u32_t vram_overlap_rungs_k[] = {0};

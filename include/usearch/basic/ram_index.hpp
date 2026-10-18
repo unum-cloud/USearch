@@ -240,18 +240,22 @@ struct keep_diverse_t {
             selected.push_back_reserved(candidate);
             if (selected.size() == connectivity) break;
             // The kept neighbor queries the later candidates, as the node queried them all: an
-            // asymmetric distance compares only like with like.
-            metric.reset(index.published_value_of(candidate.node_id));
-            std::size_t staged_count = 0;
-            while (position + 1 + staged_count != pool_size &&
-                   metric.push(index.published_value_of(context.results[position + 1 + staged_count].node_id)) ==
-                       metric_staging_t::staged_k)
-                ++staged_count;
-            metric.drain({nearest_kept.data() + pool_size, staged_count}, context.results.top().distance);
-            context.telemetry.computed_distances += staged_count;
-            for (std::size_t later = 0; later != staged_count; ++later)
-                nearest_kept[position + 1 + later] = min_of(nearest_kept[position + 1 + later],
-                                                            nearest_kept[pool_size + later]);
+            // asymmetric distance compares only like with like. A full staging drains and the rest
+            // stage in the next round, so every later candidate meets every kept neighbor.
+            for (std::size_t first = position + 1; first != pool_size;) {
+                metric.reset(index.published_value_of(candidate.node_id));
+                std::size_t staged_count = 0;
+                while (first + staged_count != pool_size &&
+                       metric.push(index.published_value_of(context.results[first + staged_count].node_id)) ==
+                           metric_staging_t::staged_k)
+                    ++staged_count;
+                if (!staged_count) break;
+                metric.drain({nearest_kept.data() + pool_size, staged_count}, context.results.top().distance);
+                context.telemetry.computed_distances += staged_count;
+                for (std::size_t later = 0; later != staged_count; ++later)
+                    nearest_kept[first + later] = min_of(nearest_kept[first + later], nearest_kept[pool_size + later]);
+                first += staged_count;
+            }
         }
 
         // The kept picks are a subsequence of the ascending pool, so one merge-walk tells a kept
@@ -875,6 +879,7 @@ struct ram_index {
                 count > range.size() - first)
                 return;
             insert_config_t const walk = resolved_config_(config, selector.connectivity);
+            index_->widen_(selector.connectivity);
             for (std::size_t position = 0; position != count; ++position)
                 index_->template land_<synchronization_>(static_cast<node_id_t>(range.first + first + position),
                                                          values[position], keys[position], metric, context, selector,
@@ -973,20 +978,26 @@ struct ram_index {
 
     /** Sizes @p context for walks under @p connectivity and @p config - the fallible half of an
      *  insertion, hoisted ahead of @ref plan_insert since no step may allocate it. The pools, the
-     *  staging surfaces and the selections never allocate again, the frontier sheds within its
-     *  reservation, and the visited set alone may re-table as a walk widens - once per doubling per
-     *  context lifetime, which a context kept across walks amortizes. Idempotent; a zero
-     *  @p connectivity answers @c config_mismatch_k. */
+     *  staging surfaces and the selections never allocate again, and the frontier holds a full
+     *  pool's unexpanded members plus one round's admissions, which shedding past the pool's radius
+     *  keeps it within, so only ties at that radius grow it. The visited set starts at one row per
+     *  pooled candidate and alone re-tables as a walk widens - once per doubling per context
+     *  lifetime, which a context kept across walks amortizes. Idempotent; a zero @p connectivity
+     *  answers @c config_mismatch_k. */
     template <typename context_allocator_type_>
     static status_t reserve_traversal(traversal_context_over<context_allocator_type_>& context,
                                       std::size_t connectivity, insert_config_t config) noexcept {
         if (!connectivity) return status_t::config_mismatch_k;
         insert_config_t const walk = resolved_config_(config, connectivity);
-        std::size_t const round_capacity = max_of(walk.fan_out * connectivity, connectivity + 1);
-        std::size_t const pool_capacity = max_of(walk.expansion_factor, connectivity + 1);
+        std::size_t const round_capacity = ram_index::round_capacity(connectivity, config);
+        // A re-selection's pool: the walk's breadth plus the node's own row, which also covers a
+        // back-link's full row plus the newcomer.
+        std::size_t const pool_capacity = walk.expansion_factor + connectivity;
         if (status_t const sized = context.results.reserve(pool_capacity); failed(sized)) return sized;
-        if (status_t const sized = context.frontier.reserve(walk.expansion_factor * 4); failed(sized)) return sized;
-        if (status_t const sized = context.visited.reserve(walk.expansion_factor * 4); failed(sized)) return sized;
+        if (status_t const sized = context.frontier.reserve(pool_capacity + round_capacity); failed(sized))
+            return sized;
+        if (status_t const sized = context.visited.reserve(walk.expansion_factor * connectivity); failed(sized))
+            return sized;
         if (status_t const sized = context.staged_ids.reserve(round_capacity); failed(sized)) return sized;
         // A diversity selector keeps a distance per pooled candidate beside the round it drains.
         if (status_t const sized = context.staged_distances.reserve(max_of(round_capacity, pool_capacity * 2));
@@ -994,6 +1005,13 @@ struct ram_index {
             return sized;
         if (status_t const sized = context.selected_neighbors.reserve(connectivity + 1); failed(sized)) return sized;
         return context.reverse_ids.reserve(connectivity);
+    }
+
+    /** Candidates one metric round of a walk under @p connectivity and @p config stages: its rows
+     *  per round of the widest row, or a full row plus the newcomer a back-link re-selects - what
+     *  a metric's staging holds to score every round at once. */
+    static std::size_t round_capacity(std::size_t connectivity, insert_config_t config) noexcept {
+        return max_of(resolved_config_(config, connectivity).fan_out * connectivity, connectivity + 1);
     }
 
     /** Appends one directed edge @p from → @p to - purely structural: no metric,
@@ -1024,7 +1042,9 @@ struct ram_index {
             status = node.neighbors.reserve(node.neighbors.size() + 1);
             if (succeeded(status)) node.neighbors.push_back_reserved(to);
         }
+        std::size_t const degree = node.neighbors.size();
         if constexpr (locked_k) node.unlock();
+        widen_(degree);
         return {membership, status};
     }
 
@@ -1642,7 +1662,7 @@ struct ram_index {
             index_ = receivers_[receiver];
             audit = std::move(receiver_audits_[receiver]);
             audit.visible = static_cast<node_id_t>(part_sizes_[receiver]);
-            audit.seed_count = min_of<std::size_t>(connectivity_32_k, part_sizes_[receiver]);
+            audit.seed_count = min_of<std::size_t>(index_->connectivity(), part_sizes_[receiver]);
             audit.restart_sweep();
             nodes_ = {0, static_cast<node_id_t>(part_seams_[receiver])};
             round_ = 0;
@@ -1965,9 +1985,9 @@ struct ram_index {
 
 #pragma region Search
 
-    /** Optional tuning knobs for @c search(); zeros mean "derive from
-     *  @c connectivity_32_k" - the searcher does not know the budgets the graph was
-     *  wired with. */
+    /** Optional tuning knobs for @c search(); zeros mean "derive from @ref connectivity" - the
+     *  searcher does not know the budgets the graph was wired with, so the graph tracks its
+     *  widest. */
     struct search_config_t {
 
         /** Breadth of the candidate pool; raise to trade latency for recall. */
@@ -2040,9 +2060,9 @@ struct ram_index {
     expected<search_result_t> search(query_type_ const& query, metric_type_& metric, fold_type_&& fold, //
                                      traversal_context_over<context_allocator_type_>& context,
                                      search_config_t config = {}) noexcept {
-        insert_config_t const walk = resolved_config_({config.expansion_factor, config.fan_out}, connectivity_32_k);
-        if (status_t const sized = reserve_traversal(context, connectivity_32_k, walk); failed(sized))
-            return {{}, sized};
+        std::size_t const widest_row = connectivity();
+        insert_config_t const walk = resolved_config_({config.expansion_factor, config.fan_out}, widest_row);
+        if (status_t const sized = reserve_traversal(context, widest_row, walk); failed(sized)) return {{}, sized};
         std::size_t const expansion_factor = walk.expansion_factor;
         std::size_t const fan_out = walk.fan_out;
         context.results.clear();
@@ -2067,7 +2087,7 @@ struct ram_index {
 
         traversal_telemetry_t const telemetry_before = context.telemetry;
         search_around_<synchronization_>(query, metric, snapshot_admission_t {first_invisible_id}, expansion_factor,
-                                         fan_out, connectivity_32_k, context, fold);
+                                         fan_out, widest_row, context, fold);
 
         // A refused walk still ranked whatever it reached; the telemetry says the ranking is
         // short because scratch ran out, not because the graph had nothing better.
@@ -2100,6 +2120,20 @@ struct ram_index {
     /** Rows the covered node chunks hold, as inserts, loads and @c reserve grow them; safe any
      *  time. */
     std::size_t capacity() const noexcept { return nodes_.capacity(); }
+
+    /** The widest neighbor row any wiring may have written - the largest budget an insert or a
+     *  refine wired with, a manually linked row, a loaded or a moved-in one - and never under one,
+     *  so an edgeless graph still draws a landmark. A search derives its unset knobs from it; safe
+     *  any time. */
+    std::size_t connectivity() const noexcept {
+        return max_of<std::size_t>(atomic_ref<std::size_t const>(widest_row_).load(std::memory_order_relaxed), 1);
+    }
+
+    /** The walk breadth @p config asks for, or the one a search derives from @ref connectivity
+     *  when it asks for none. */
+    std::size_t non_zero_expansion_factor(search_config_t const& config) const noexcept {
+        return resolved_config_({config.expansion_factor, config.fan_out}, connectivity()).expansion_factor;
+    }
 
     /** Bytes the node records' chunks and the key multimap span. The neighbor rows and whatever the
      *  values allocate on their own are left out, since counting them would walk every record. */
@@ -2281,7 +2315,7 @@ struct ram_index {
         // The coverage guard is load-bearing twice over: it ends the probe once the graph
         // is covered, and it keeps every seed provably unvisited, which bounds the stack.
         context.visited.clear();
-        std::size_t const seed_count = min_of<std::size_t>(connectivity_32_k, node_count);
+        std::size_t const seed_count = min_of<std::size_t>(connectivity(), node_count);
         for (std::size_t seed = 0; seed != seed_count && context.visited.size() != node_count; ++seed) {
             node_id_t draw = uniform_below<node_id_t> {visible}(context.random_generator);
             while (context.visited.contains(draw)) draw = draw + 1 == visible ? 0 : draw + 1;
@@ -2497,6 +2531,7 @@ struct ram_index {
             auto [seats, seat_status] = index_->key_map_.claim(node_range.size());
             if (failed(seat_status)) return seat_status;
             // The plan vetted both prefix-sum columns and every ID, so the slices are trusted.
+            std::size_t widest_row = 0;
             for (node_id_t const node : node_range) {
                 node_t& record = index_->nodes_[node];
                 record.key = columns.keys[node];
@@ -2508,6 +2543,7 @@ struct ram_index {
                 if (status_t const grown = row.reserve(ids_bound - ids_first); failed(grown)) return grown;
                 for (std::size_t link = ids_first; link != ids_bound; ++link)
                     row.push_back_reserved(columns.neighbor_ids[link]);
+                widest_row = max_of(widest_row, row.size());
 
                 std::size_t const bytes_first = columns.value_offsets[node];
                 std::size_t const bytes_bound = columns.value_offsets[node + 1];
@@ -2518,6 +2554,7 @@ struct ram_index {
 
                 index_->key_map_.insert(seats, record.key, node);
             }
+            index_->widen_(widest_row);
             atomic_add(atomic_ref<std::size_t>(covered), node_range.size(), std::memory_order_release);
             return status_t::success_k;
         }
@@ -2601,10 +2638,19 @@ struct ram_index {
     /** @p config with its zeros derived from @p connectivity: a pool twice the budget, and enough
      *  expanded rows per round for one metric round to stage a full pool. */
     static insert_config_t resolved_config_(insert_config_t config, std::size_t connectivity) noexcept {
-        if (!config.expansion_factor) config.expansion_factor = connectivity * 2;
+        if (!config.expansion_factor) config.expansion_factor = default_expansion_factor(connectivity);
         if (!config.fan_out)
             config.fan_out = max_of<std::size_t>(divide_round_up(config.expansion_factor, connectivity), 1);
         return config;
+    }
+
+    /** Raises @ref connectivity to @p row, a row some wiring may write; a relaxed peek first, so a
+     *  graph at its budget never writes the shared line. */
+    void widen_(std::size_t row) noexcept {
+        atomic_ref<std::size_t> widest {widest_row_};
+        std::size_t observed = widest.load(std::memory_order_relaxed);
+        while (observed < row &&
+               !widest.compare_exchange_weak(observed, row, std::memory_order_relaxed, std::memory_order_relaxed)) {}
     }
 
     /** Forgets every record below @p visible, every key and every counter: what @c clear does under
@@ -2618,6 +2664,7 @@ struct ram_index {
             record.state = 0;
         }
         key_map_.clear();
+        atomic_ref<std::size_t>(widest_row_).store(0, std::memory_order_relaxed);
         atomic_ref<std::size_t>(claimed_count_).store(0, std::memory_order_relaxed);
         atomic_ref<node_id_t>(next_dispensed_id_).store(0, std::memory_order_relaxed);
         atomic_ref<node_id_t>(last_visible_id_).store(0, std::memory_order_release);
@@ -2646,7 +2693,7 @@ struct ram_index {
         if (failed(reached.resize(words)) || failed(linked_once.resize(words)) || failed(linked_twice.resize(words)) ||
             failed(expanded.resize(words)))
             return {health_plan_t {allocator}, status_t::bad_alloc_k};
-        std::size_t const seed_count = min_of<std::size_t>(connectivity_32_k, visible);
+        std::size_t const seed_count = min_of<std::size_t>(connectivity(), visible);
         return {health_plan_t {*this, visible, seed_count, std::move(reached), std::move(linked_once),
                                std::move(linked_twice), std::move(expanded)},
                 status_t::success_k};
@@ -2718,6 +2765,8 @@ struct ram_index {
                 if (status_t const grown = donor->nodes_[node].neighbors.reserve_exactly(connectivity); failed(grown))
                     return refuse(grown);
 
+        widen_(connectivity);
+        for (ram_index const* donor : donors) widen_(donor->connectivity());
         node_id_t const bound = min_of(nodes.bound, static_cast<node_id_t>(rows));
         plan.nodes_ = {min_of(nodes.first, bound), bound};
         plan.donors_ = donors;
@@ -2787,6 +2836,10 @@ struct ram_index {
             if (status_t const grown = nodes_[node_id].neighbors.reserve_exactly(connectivity); failed(grown))
                 return refuse(grown);
 
+        for (ram_index* receiver : receivers) {
+            receiver->widen_(connectivity);
+            receiver->widen_(this->connectivity());
+        }
         plan.index_ = receivers[0];
         plan.source_rows_ = rows;
         plan.part_capacity_ = capacity;
@@ -2799,7 +2852,8 @@ struct ram_index {
 
     /**
      *  @brief One node's re-selection: a walk across into @p across alone fills the pool first,
-     *      then the node's own row seeds a walk over every ID below @p visible.
+     *      then the node's own row seeds a walk over every ID below @p visible and joins the pool
+     *      past that walk's breadth.
      *  @return Whether the new neighbors differ as a set from the ones replaced.
      *
      *  @p selector picks from that pool, the rewrite runs under the node's lock, and every kept
@@ -2825,6 +2879,7 @@ struct ram_index {
         seed_from_row_(node_id, value, metric, every, walk.expansion_factor, context);
         search_around_<concurrent_k>(value, metric, every, walk.expansion_factor, walk.fan_out, selector.connectivity,
                                      context, dummy_fold_t {});
+        pool_row_(node_id, value, metric, every, context);
         selector(*this, metric, context);
 
         // Neighbors are distinct, so equal sizes and every pick present mean the same set.
@@ -2850,9 +2905,10 @@ struct ram_index {
         return changed;
     }
 
-    /** Seeds a re-selection's walk with @p node_id 's own row: one round scores every admitted,
-     *  unvisited neighbor into the pool and the frontier, so every link already wired competes. A
-     *  refused staging seeds nothing, and the walk samples landmarks instead. */
+    /** Seeds a re-selection's walk with @p node_id 's own row: its admitted, unvisited neighbors
+     *  score into the pool and the frontier, in as many rounds as the metric's staging takes, so
+     *  every link already wired competes. A refused copy seeds nothing, and the walk samples
+     *  landmarks instead. */
     template <typename metric_type_, typename admission_type_, typename context_type_>
     void seed_from_row_(node_id_t node_id, value_t const& value, metric_type_& metric, admission_type_ const& admission,
                         std::size_t expansion_factor, context_type_& context) noexcept {
@@ -2862,25 +2918,67 @@ struct ram_index {
             ++context.telemetry.saturated_walks;
             return;
         }
-        metric.reset(value);
-        std::size_t staged_count = 0;
+        // Each round compacts its IDs into the prefix of the row copy it has already read past.
+        for (std::size_t position = 0; position != degree;) {
+            metric.reset(value);
+            std::size_t staged_count = 0;
+            for (; position != degree; ++position) {
+                node_id_t const neighbor_id = context.staged_ids[position];
+                if (!admission.admits(neighbor_id) || context.visited.contains(neighbor_id)) continue;
+                if (metric.push(published_value_of(neighbor_id)) == metric_staging_t::refused_k) break;
+                [[maybe_unused]] membership_t const marked = context.visited.insert(neighbor_id);
+                context.staged_ids[staged_count++] = neighbor_id;
+            }
+            if (!staged_count) return;
+            drain_round(metric, staged_count, context, unbounded_radius<distance_t>());
+            for (std::size_t lane = 0; lane != staged_count; ++lane) {
+                scored_node_t const scored {context.staged_ids[lane], context.staged_distances[lane]};
+                [[maybe_unused]] bool const ranked = context.results.insert(scored_node_t {scored}, expansion_factor);
+                if (failed(context.frontier.insert(scored_node_t {scored}))) {
+                    ++context.telemetry.saturated_walks;
+                    return;
+                }
+            }
+        }
+    }
+
+    /** Adds @p node_id 's current row to the pool a re-selection picks from, past the walk's
+     *  breadth: the walk's nearer finds evict the far members, the long links among them, which
+     *  must still compete. Scored in as many rounds as the metric's staging takes; a refused copy
+     *  or growth, or a metric refusing an empty round, counts a saturated walk. */
+    template <typename metric_type_, typename admission_type_, typename context_type_>
+    void pool_row_(node_id_t node_id, value_t const& value, metric_type_& metric, admission_type_ const& admission,
+                   context_type_& context) noexcept {
+        context.staged_ids.clear();
+        auto const [degree, copy_status] = copy_row_<synchronization_t::concurrent_k>(node_id, context);
+        if (failed(copy_status) || failed(context.results.reserve(context.results.size() + degree))) {
+            ++context.telemetry.saturated_walks;
+            return;
+        }
+        std::size_t missing = 0;
         for (std::size_t position = 0; position != degree; ++position) {
             node_id_t const neighbor_id = context.staged_ids[position];
-            if (!admission.admits(neighbor_id) || context.visited.contains(neighbor_id)) continue;
-            if (metric.push(published_value_of(neighbor_id)) == metric_staging_t::refused_k) break;
-            [[maybe_unused]] membership_t const marked = context.visited.insert(neighbor_id);
-            context.staged_ids[staged_count++] = neighbor_id;
+            bool pooled = !admission.admits(neighbor_id);
+            for (std::size_t member = 0; member != context.results.size() && !pooled; ++member)
+                pooled = context.results[member].node_id == neighbor_id;
+            if (!pooled) context.staged_ids[missing++] = neighbor_id;
         }
-        context.staged_ids.resize_reserved(staged_count);
-        if (!staged_count) return;
-        drain_round(metric, staged_count, context, unbounded_radius<distance_t>());
-        for (std::size_t lane = 0; lane != staged_count; ++lane) {
-            scored_node_t const scored {context.staged_ids[lane], context.staged_distances[lane]};
-            [[maybe_unused]] bool const ranked = context.results.insert(scored_node_t {scored}, expansion_factor);
-            if (failed(context.frontier.insert(scored_node_t {scored}))) {
+        for (std::size_t first = 0; first != missing;) {
+            metric.reset(value);
+            std::size_t staged_count = 0;
+            while (first + staged_count != missing &&
+                   metric.push(published_value_of(context.staged_ids[first + staged_count])) ==
+                       metric_staging_t::staged_k)
+                ++staged_count;
+            if (!staged_count) {
                 ++context.telemetry.saturated_walks;
                 return;
             }
+            drain_round(metric, staged_count, context, unbounded_radius<distance_t>());
+            for (std::size_t lane = 0; lane != staged_count; ++lane)
+                context.results.insert(scored_node_t {context.staged_ids[first + lane], context.staged_distances[lane]},
+                                       context.results.size() + 1);
+            first += staged_count;
         }
     }
 
@@ -2914,8 +3012,11 @@ struct ram_index {
         std::size_t const selected_count = min_of(context.selected_neighbors.size(), connectivity);
         // A failed load leaves its unpublished rows filled; this one starts from nothing.
         record.neighbors.clear();
-        // A refused row growth wires a thinner node - the dispensed ID must still publish.
-        std::size_t const wired_count = succeeded(record.neighbors.reserve(selected_count)) ? selected_count : 0;
+        // A refused row growth wires a thinner node, counted like a refused walk, since the
+        // dispensed ID must still publish.
+        bool const grown = succeeded(record.neighbors.reserve(selected_count));
+        context.telemetry.saturated_walks += !grown;
+        std::size_t const wired_count = grown ? selected_count : 0;
         for (std::size_t link = 0; link != wired_count; ++link) {
             record.neighbors.push_back_reserved(context.selected_neighbors[link].node_id);
             context.reverse_ids.push_back_reserved(context.selected_neighbors[link].node_id);
@@ -3070,9 +3171,10 @@ struct ram_index {
         return {walk_step_t::advanced_k, status_t::success_k};
     }
 
-    /** One round's expansion half: peels up to @p fan_out frontier entries within
-     *  the stopping radius, copies their rows, and pushes the admission- and
-     *  visited-filtered union into the metric, compacted in @c context.staged_ids. */
+    /** One round's expansion half: peels up to @p fan_out frontier entries within the stopping
+     *  radius, copies their rows, and pushes the admission- and visited-filtered union into the
+     *  metric, compacted in @c context.staged_ids. A full staging ends the round early, with the
+     *  entry it cut short back on the frontier. */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_, typename admission_type_,
               typename context_type_>
     walk_step_t expand_frontier_(query_type_ const& query, metric_type_& metric, admission_type_ const& admission,
@@ -3097,7 +3199,6 @@ struct ram_index {
                 return walk_step_t::saturated_k;
             }
             context.frontier.pop();
-            ++context.telemetry.visited_members;
 
             std::size_t kept = segment_start;
             for (std::size_t position = segment_start; position != segment_start + degree; ++position) {
@@ -3108,6 +3209,11 @@ struct ram_index {
                 if (context.visited.contains(neighbor_id)) continue;
                 if (metric.push(published_value_of(neighbor_id)) == metric_staging_t::refused_k) {
                     context.staged_ids.resize_reserved(kept);
+                    // A full staging ends the round: the entry goes back on the frontier, and
+                    // the next round stages the rest of its row past the IDs this one marked.
+                    // Only a metric refusing an empty round saturates the walk.
+                    if (kept && succeeded(context.frontier.insert(scored_node_t {best})))
+                        return walk_step_t::advanced_k;
                     ++context.telemetry.saturated_walks;
                     return walk_step_t::saturated_k;
                 }
@@ -3116,6 +3222,7 @@ struct ram_index {
                 ++kept;
             }
             context.staged_ids.resize_reserved(kept);
+            ++context.telemetry.visited_members;
         }
         return walk_step_t::advanced_k;
     }
@@ -3190,85 +3297,96 @@ struct ram_index {
 
     /** Wires the reverse edges of the freshly wired node before its batch's turn, walking the links
      *  snapshotted in @c context.reverse_ids: per neighbor - lock, append when room remains at zero
-     *  metric cost; otherwise copy the full row, unlock, re-select off-lock through the selector,
-     *  relock, and apply only if the row is still the one copied - a lost race falls back to
-     *  append-if-room, never a re-score. A row already linking back, as a refined node's neighbor
-     *  may, is left as it is. */
+     *  metric cost; otherwise copy the full row, unlock, score the copy and the newcomer off-lock
+     *  in as many rounds as the metric's staging takes, re-select through the selector, relock, and
+     *  apply only if the row is still the one copied - a lost race starts over from the lock, so
+     *  the newcomer competes for every row it selected. A row already linking back, as a refined
+     *  node's neighbor may, is left as it is. Only a refused allocation, or a metric refusing an
+     *  empty round, gives a link up, counted as a saturated walk. */
     template <synchronization_t synchronization_, typename metric_type_, typename selector_type_,
               typename context_type_>
     void back_link_(node_id_t new_node_id, metric_type_& metric, selector_type_ const& selector,
                     context_type_& context) noexcept {
+        for (std::size_t reverse = 0; reverse != context.reverse_ids.size(); ++reverse)
+            while (!back_link_one_<synchronization_>(context.reverse_ids[reverse], new_node_id, metric, selector,
+                                                     context)) {}
+    }
+
+    /** One reverse link of @ref back_link_ into @p neighbor_id 's row; @c false when the row raced
+     *  the re-selection and must be tried again from the lock. */
+    template <synchronization_t synchronization_, typename metric_type_, typename selector_type_,
+              typename context_type_>
+    bool back_link_one_(node_id_t neighbor_id, node_id_t new_node_id, metric_type_& metric,
+                        selector_type_ const& selector, context_type_& context) noexcept {
         constexpr bool locked_k = synchronization_ == synchronization_t::concurrent_k;
         std::size_t const connectivity = selector.connectivity;
         value_t const& new_value = published_value_of(new_node_id);
-        for (std::size_t reverse = 0; reverse != context.reverse_ids.size(); ++reverse) {
-            node_id_t const neighbor_id = context.reverse_ids[reverse];
-            node_t& node = nodes_[neighbor_id];
-
-            if constexpr (locked_k) node.lock();
-            bool linked_back = false;
-            for (node_id_t const linked : node.neighbors) linked_back = linked_back || linked == new_node_id;
-            if (linked_back) {
-                if constexpr (locked_k) node.unlock();
-                continue;
-            }
-            if (node.neighbors.size() < connectivity) {
-                // A refused growth loses one reverse link - tolerated, like refused staging.
-                if (succeeded(node.neighbors.reserve(node.neighbors.size() + 1)))
-                    node.neighbors.push_back_reserved(new_node_id);
-                if constexpr (locked_k) node.unlock();
-                continue;
-            }
-            std::size_t const degree = node.neighbors.size();
-            context.staged_ids.clear();
-            if (failed(context.staged_ids.reserve(degree))) {
-                if constexpr (locked_k) node.unlock();
-                continue; // A refused staging loses one reverse link.
-            }
-            for (std::size_t position = 0; position != degree; ++position)
-                context.staged_ids.push_back_reserved(node.neighbors[position]);
+        node_t& node = nodes_[neighbor_id];
+        if constexpr (locked_k) node.lock();
+        bool linked_back = false;
+        for (node_id_t const linked : node.neighbors) linked_back = linked_back || linked == new_node_id;
+        std::size_t const degree = node.neighbors.size();
+        if (linked_back || degree < connectivity) {
+            bool const grown = linked_back || succeeded(node.neighbors.reserve(degree + 1));
+            if (!linked_back && grown) node.neighbors.push_back_reserved(new_node_id);
             if constexpr (locked_k) node.unlock();
-            if (failed(context.staged_distances.reserve(degree + 1)) || failed(context.results.reserve(degree + 1)))
-                continue; // A refused staging loses one reverse link.
+            context.telemetry.saturated_walks += !grown;
+            return true;
+        }
+        context.staged_ids.clear();
+        bool const staged = succeeded(context.staged_ids.reserve(degree));
+        for (std::size_t position = 0; staged && position != degree; ++position)
+            context.staged_ids.push_back_reserved(node.neighbors[position]);
+        if constexpr (locked_k) node.unlock();
+        if (!staged || failed(context.staged_distances.reserve(degree + 1)) ||
+            failed(context.results.reserve(degree + 1))) {
+            ++context.telemetry.saturated_walks;
+            return true;
+        }
 
-            // Off-lock: pool = the copied row plus the newcomer, scored against the
-            // neighbor's own stored value in one builder round; every member is ranked, so nothing is too far.
+        // Off-lock: pool = the copied row plus the newcomer, scored against the neighbor's own
+        // stored value; every member is ranked, so nothing is too far.
+        context.staged_distances.resize_reserved(degree + 1);
+        std::size_t scored_count = 0;
+        while (scored_count != degree + 1) {
             metric.reset(published_value_of(neighbor_id));
             std::size_t staged_count = 0;
-            for (; staged_count != degree; ++staged_count)
-                if (metric.push(published_value_of(context.staged_ids[staged_count])) == metric_staging_t::refused_k)
+            for (std::size_t member = scored_count; member != degree + 1; ++member, ++staged_count)
+                if (metric.push(member == degree ? new_value : published_value_of(context.staged_ids[member])) ==
+                    metric_staging_t::refused_k)
                     break;
-            bool const complete = staged_count == degree && metric.push(new_value) == metric_staging_t::staged_k;
-            staged_count += complete;
-            drain_round(metric, staged_count, context, unbounded_radius<distance_t>());
-            if (!complete) continue; // Staging refused - keep the old row, lose one reverse link.
-
-            context.results.clear();
-            for (std::size_t position = 0; position != degree; ++position)
-                context.results.insert(scored_node_t {context.staged_ids[position], //
-                                                      context.staged_distances[position]},
-                                       degree + 1);
-            context.results.insert(scored_node_t {new_node_id, context.staged_distances[degree]}, degree + 1);
-            selector(*this, metric, context);
-
-            // Relock & revalidate: apply the re-selection only onto the exact row it was
-            // computed from; a raced row takes the cheap monotone fallback instead.
-            if constexpr (locked_k) node.lock();
-            bool unchanged = node.neighbors.size() == degree;
-            for (std::size_t position = 0; position != degree && unchanged; ++position)
-                unchanged = node.neighbors[position] == context.staged_ids[position];
-            if (unchanged) {
-                node.neighbors.clear();
-                std::size_t const kept_count = min_of(context.selected_neighbors.size(), connectivity);
-                for (std::size_t kept = 0; kept != kept_count; ++kept)
-                    node.neighbors.push_back_reserved(context.selected_neighbors[kept].node_id);
-            }
-            else if (node.neighbors.size() < connectivity &&
-                     succeeded(node.neighbors.reserve(node.neighbors.size() + 1))) {
-                node.neighbors.push_back_reserved(new_node_id);
-            }
-            if constexpr (locked_k) node.unlock();
+            if (!staged_count) break;
+            metric.drain({context.staged_distances.data() + scored_count, staged_count},
+                         unbounded_radius<distance_t>());
+            context.telemetry.computed_distances += staged_count;
+            scored_count += staged_count;
         }
+        if (scored_count != degree + 1) {
+            ++context.telemetry.saturated_walks;
+            return true;
+        }
+
+        context.results.clear();
+        for (std::size_t position = 0; position != degree; ++position)
+            context.results.insert(scored_node_t {context.staged_ids[position], context.staged_distances[position]},
+                                   degree + 1);
+        context.results.insert(scored_node_t {new_node_id, context.staged_distances[degree]}, degree + 1);
+        selector(*this, metric, context);
+
+        // Relock & revalidate: apply the re-selection only onto the exact row it was computed
+        // from; a raced row goes round again.
+        if constexpr (locked_k) node.lock();
+        bool unchanged = node.neighbors.size() == degree;
+        for (std::size_t position = 0; position != degree && unchanged; ++position)
+            unchanged = node.neighbors[position] == context.staged_ids[position];
+        if (unchanged) {
+            node.neighbors.clear();
+            std::size_t const kept_count = min_of(context.selected_neighbors.size(), connectivity);
+            for (std::size_t kept = 0; kept != kept_count; ++kept)
+                node.neighbors.push_back_reserved(context.selected_neighbors[kept].node_id);
+        }
+        if constexpr (locked_k) node.unlock();
+        return unchanged;
     }
 
     /** The watermark at unique acquisition; @c contended_k when the dispenser has
@@ -3341,6 +3459,10 @@ struct ram_index {
 
     /** The visibility watermark: every ID strictly below it is published. */
     alignas(default_alignment_k) node_id_t last_visible_id_ {0};
+
+    /** What @ref connectivity answers, only ever raised through @ref widen_; beside the watermark,
+     *  since every search reads both and this one stops moving once the graph's budget is met. */
+    std::size_t widest_row_ {0};
 
     /** Key → ID multimap, covered by each batch's seats and by @c reserve. */
     key_map_t key_map_;

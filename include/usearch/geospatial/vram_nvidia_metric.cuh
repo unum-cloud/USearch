@@ -18,7 +18,7 @@
 
 #include <iterator> // `std::size` - every rung's kernels
 #include <limits>   // `std::numeric_limits` - an unknown pitch, field or range
-#include <utility>  // `std::index_sequence` - every rung's kernels
+#include <utility>  // `std::index_sequence` - every rung's kernels, `std::swap` - the cone winners
 
 #include <numkong/geospatial.h> // `nk_terrain_outside_view_f32_cuda_`, `nk_sqrt_f64_cuda_` - with its CUDA backend
 #include <numkong/types.h>      // `NUMKONG_ARCH_CUDA_AMPERE_` - the kit this unit carries
@@ -85,11 +85,12 @@ struct vram_keep_octants_t {
         vram_telemetry_t&, u32_t lane) noexcept {
 
         using warp_t = typename kit_::warp_t;
-        static_assert(vram_cache_rows_k <= 64, "One bit per candidate position");
         constexpr u32_t cones_k = static_cast<u32_t>(surface_keep_octants_t::cones_k);
         tangent_frame_t const frame = cuda_tangent_frame(query);
-        u64_t kept = 0;
-        u32_t taken_cones = 0;
+        // A cone's first candidate is its nearest, so at most a winner per cone, ascending once
+        // sorted; every lane holds the same ones.
+        u32_t winners[cones_k];
+        u32_t winners_count = 0, taken_cones = 0;
         for (u32_t base = 0; base < candidates_count; base += warp_t::width_k) { // Warp-uniform bounds.
             u32_t const position = base + lane;
             u32_t const cone = position < candidates_count
@@ -99,21 +100,39 @@ struct vram_keep_octants_t {
             for (u32_t candidate_cone = 0; candidate_cone != cones_k; ++candidate_cone) {
                 typename warp_t::mask_t const in_cone = warp_t::ballot(cone == candidate_cone);
                 if (!in_cone || (taken_cones >> candidate_cone) & 1u) continue;
-                kept |= u64_t {1} << (base + warp_t::first(in_cone));
+                winners[winners_count++] = base + warp_t::first(in_cone);
                 taken_cones |= 1u << candidate_cone;
             }
         }
+        for (u32_t sorted = 1; sorted < winners_count; ++sorted)
+            for (u32_t index = sorted; index && winners[index - 1] > winners[index]; --index)
+                std::swap(winners[index - 1], winners[index]);
+        auto const won = [&](u32_t position) noexcept {
+            for (u32_t index = 0; index != winners_count; ++index)
+                if (winners[index] == position) return true;
+            return false;
+        };
 
-        // The farthest non-winners fill the rest of the row, as the CPU's long links do.
+        // The farthest non-winners fill the rest of the row, as the CPU's long links do: every
+        // position from the lowest of them on that no cone won.
         u32_t const budget = min_of(storage.connectivity, candidates_count);
-        u32_t const winners = static_cast<u32_t>(__popcll(static_cast<long long>(kept)));
-        u32_t retained = budget > winners ? budget - winners : 0;
-        for (u32_t position = candidates_count; position-- != 0 && retained;)
-            if (!((kept >> position) & 1u)) kept |= u64_t {1} << position, --retained;
+        u32_t retained = budget > winners_count ? budget - winners_count : 0;
+        u32_t first_long = candidates_count;
+        while (retained && first_long)
+            if (!won(--first_long)) --retained;
 
+        // Winners and long links merge ascending, the long links being every unwon position from
+        // the first on.
         u32_t kept_count = 0;
-        for (; kept && kept_count != storage.connectivity; kept &= kept - 1, ++kept_count)
-            if (lane == 0) kept_positions[kept_count] = static_cast<u32_t>(__ffsll(static_cast<long long>(kept)) - 1);
+        if (lane == 0) {
+            u32_t next_winner = 0;
+            for (u32_t position = 0; position != candidates_count && kept_count != storage.connectivity; ++position) {
+                bool const winner = next_winner != winners_count && winners[next_winner] == position;
+                next_winner += winner;
+                if (winner || position >= first_long) kept_positions[kept_count++] = position;
+            }
+        }
+        kept_count = warp_t::shuffle(kept_count, 0);
         warp_t::sync();
         return kept_count;
     }

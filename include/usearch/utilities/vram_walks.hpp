@@ -34,23 +34,42 @@ struct gpu_arena_shape_t {
     u32_t visited_slots;
     u32_t visited_hash_shift;
     u32_t tail_entries;
-    u32_t cache_bytes;
+    u32_t scratch_bytes;
 
     /** A multiple of 16, as the kernels' twin rounds it, for a walk over @p node_id_type_ IDs. */
     template <typename node_id_type_>
     constexpr std::size_t slice_bytes() const noexcept {
         std::size_t const bytes = visited_slots * gpu_visited_slot_bytes<node_id_type_> +
-                                  tail_entries * gpu_scored_node_bytes<node_id_type_> + cache_bytes;
+                                  tail_entries * gpu_scored_node_bytes<node_id_type_> + scratch_bytes;
         return (bytes + 15) & ~std::size_t {15};
     }
 };
 
-/** The slice of a walk expanding @p expansion candidates: the exact visited set, sized well past
- *  the expected visit count so probing stays short, then @p tail_entries of spill tail and
- *  @p cache_bytes of builder scratch. */
-constexpr gpu_arena_shape_t gpu_arena_shape(u32_t expansion, u32_t tail_entries, u32_t cache_bytes) noexcept {
-    u32_t const visited_slots = std::bit_ceil(64 * expansion);
-    return {visited_slots, 32 - static_cast<u32_t>(std::bit_width(visited_slots - 1)), tail_entries, cache_bytes};
+/** The breadth a walk asked for @p expansion walks when it reports @p count matches: never fewer
+ *  candidates than it reports. */
+constexpr u32_t gpu_walk_breadth(u32_t expansion, u32_t count) noexcept { return max_of(expansion, count); }
+
+/** IDs a converged walk over a pool of @p pool_rows ranks claims: a row of @p connectivity
+ *  neighbors or a draw of @p lanes landmarks per expansion, one expansion per rank, then a
+ *  re-selecting walk's own node and row. A walk past it re-scores, see @ref vram_visited_set. */
+constexpr u32_t gpu_walk_visits(u32_t pool_rows, u32_t connectivity, u32_t lanes) noexcept {
+    return (pool_rows + 1) * max_of(connectivity, lanes) + connectivity + 1;
+}
+
+/** Entries an arena frontier's spill tail holds: what @p expansion expansions stage, a row or a
+ *  landmark draw each, and a draw per restart, which precedes an expansion. */
+constexpr u32_t gpu_walk_tail_entries(u32_t expansion, u32_t connectivity, u32_t lanes) noexcept {
+    return expansion * (max_of(connectivity, lanes) + lanes);
+}
+
+/** The slice of a walk claiming at most @p visits IDs: the exact visited set, at most half full,
+ *  the load its linear probing is designed for, then @p tail_entries of spill tail, rounded to an
+ *  even count so the builder scratch past it starts on a 16-byte boundary for either entry width,
+ *  then @p scratch_bytes of that scratch. */
+constexpr gpu_arena_shape_t gpu_arena_shape(u32_t visits, u32_t tail_entries, u32_t scratch_bytes) noexcept {
+    u32_t const visited_slots = std::bit_ceil(2 * visits);
+    return {visited_slots, 32 - static_cast<u32_t>(std::bit_width(visited_slots - 1)), (tail_entries + 1) & ~1u,
+            scratch_bytes};
 }
 
 /** Rounds @p expansion to the register ladder's rungs of 2 to @c vram_widest_pool_slots_k slots

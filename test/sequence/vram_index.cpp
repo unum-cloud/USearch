@@ -218,13 +218,14 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             node_id_type_ const id = ids[query * wanted_k + rank];
             if (id == std::numeric_limits<node_id_type_>::max()) break;
-            // A float carries the overlap kind's fixed point rounded, the same way on either side.
+            // The pools keep 31 bits of a float, so the overlap kind's fixed point loses a mantissa
+            // bit more on the device.
             f32_t const distance = distances[query * wanted_k + rank];
             if (expect(id < count)) {
                 ++failures;
                 break;
             }
-            failures += expect_eq(distance, static_cast<f32_t>(exact[query][id]));
+            failures += expect_near(distance, static_cast<f32_t>(exact[query][id]));
             failures += expect(found.empty() || found.back() <= exact[query][id]);
             found.push_back(exact[query][id]);
         }

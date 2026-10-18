@@ -224,6 +224,35 @@ enum class nvme_key_reads_t : u8_t {
 
 #pragma region Walks
 
+/** The three queue reservations one walk starts from, at one expansion over parts whose widest row
+ *  holds @c connectivity neighbors - derived once with the call's shape and carried in it. */
+struct nvme_queue_sizes_t {
+
+    /** The navigation pool: the expansion factor. */
+    std::size_t results = 0;
+
+    /** A full pool's unexpanded members plus one expansion's admissions, which shedding past the
+     *  pool's radius keeps the walk within; ties at that radius grow it. */
+    std::size_t frontier = 0;
+
+    /** One row per pooled candidate - the first size a re-table doubles from. */
+    std::size_t visited = 0;
+};
+
+/** The queue sizes of a walk @p expansion_factor wide over rows of at most @p connectivity
+ *  neighbors. */
+constexpr nvme_queue_sizes_t nvme_queue_sizes(std::size_t expansion_factor, std::size_t connectivity) noexcept {
+    return {expansion_factor, expansion_factor + connectivity, expansion_factor * connectivity};
+}
+
+/** The most neighbors any row of @p parts holds - what sizes every walk over all of them. */
+template <typename part_type_>
+std::size_t nvme_widest_row(std::span<part_type_ const> parts) noexcept {
+    std::size_t widest = 0;
+    for (part_type_ const& part : parts) widest = max_of<std::size_t>(widest, part.connectivity);
+    return widest;
+}
+
 /** Where a walk stands between its reads. */
 enum class nvme_walk_stage_t : u8_t {
 
@@ -409,19 +438,20 @@ class row_walker {
             return status_t::bad_alloc_k;
 
         scratch_allocator_t const allocator {arena_};
-        std::size_t const expansion_factor = shape_.expansion_factor, connectivity = parts_[0].connectivity;
+        nvme_queue_sizes_t const queue_sizes = shape_.queue_sizes;
         for (std::size_t walk = 0; walk != walks; ++walk) {
             walk_t& constructed = *new (walk_slots + walk) walk_t {allocator};
             walks_ = {walk_slots, walk + 1};
-            if (failed(constructed.results.reserve(expansion_factor)) ||
-                failed(constructed.frontier.reserve(expansion_factor * 4)) ||
-                failed(constructed.visited.reserve(expansion_factor * connectivity)))
+            if (failed(constructed.results.reserve(queue_sizes.results)) ||
+                failed(constructed.frontier.reserve(queue_sizes.frontier)) ||
+                failed(constructed.visited.reserve(queue_sizes.visited)))
                 return status_t::bad_alloc_k;
         }
         for (std::size_t row = 0; row != rows; ++row) {
             row_t& constructed = *new (row_slots + row) row_t {inputs, allocator};
             rows_ = {row_slots, row + 1};
-            if (status_t const reserved = constructed.reserve(parts, connectivity); failed(reserved)) return reserved;
+            if (status_t const reserved = constructed.reserve(parts, nvme_widest_row(parts_)); failed(reserved))
+                return reserved;
         }
         for (std::size_t row = 0; row != rows; ++row) new (slot_states + row) nvme_row_slot_t {};
         for (std::size_t flight = 0; flight != flights; ++flight)

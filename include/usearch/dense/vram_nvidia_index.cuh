@@ -116,16 +116,13 @@ cuda_rows_map_t vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vec
 template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename kernels_type_,
           typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
 bool vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vectors_allocator_type_, neighbors_allocator_type_,
-                       traversals_allocator_type_>::build_scratch_fits() const noexcept {
+                       traversals_allocator_type_>::build_scratch_fits(u32_t scratch_bytes_per_warp) const noexcept {
     using kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
     using schedule_t = typename schedule_ladder<capability_>::schedule_t;
     std::size_t const statics = std::size_t {vram_warps_per_block_k} *
-                                (vram_cache_rows_k * sizeof(norms_t) +
-                                 sizeof(vram_gathered<kit_t, typename schedule_t::warp_t>) +
+                                (sizeof(vram_gathered<kit_t, typename schedule_t::warp_t>) +
                                  sizeof(typename schedule_t::shared_t) + cuda_gather_bytes_per_warp<schedule_t>());
-    std::size_t const block_bytes = statics +
-                                    std::size_t {vram_warps_per_block_k} *
-                                        max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp());
+    std::size_t const block_bytes = statics + std::size_t {vram_warps_per_block_k} * scratch_bytes_per_warp;
     // Every block a builder seats takes its own scratch, so the most any builder seats must fit on
     // one multiprocessor, or the launch seats fewer blocks than its grid and arena were sized for.
     std::size_t const resident_blocks = max_of(resident_blocks_(vram_kernel_t::insert_k, 0),

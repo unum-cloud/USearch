@@ -57,19 +57,27 @@ inline constexpr char metal_context_source_k[] = {0};
 using metal_selector_t = struct metal_selector_opaque_t*;
 
 /**
- *  @brief The Metal and Objective-C runtime entry points USearch calls, resolved on first use from
- *      the system's own Metal, Foundation and @c libobjc.
+ *  @brief The Metal, Objective-C runtime, I/O Kit and Core Foundation entry points USearch calls,
+ *      resolved on first use from the system's own frameworks and @c libobjc.
  *
  *  Every entry is null when any library is absent or lacks any of them, which leaves Apple with no
- *  devices. Foundation is opened for @c NSString alone, which no entry names. Each entry spells the
- *  C prototype of its symbol; @c objc_msgSend takes none of its own, so every send casts it to the
- *  call's exact one.
+ *  devices. Foundation is opened for @c NSString alone, which no entry names, and I/O Kit for the
+ *  GPU core count, which Metal does not report. Each entry spells the C prototype of its symbol,
+ *  with Core Foundation's references as plain pointers and I/O Kit's objects as their 32-bit Mach
+ *  ports; @c objc_msgSend takes none of its own, so every send casts it to the call's exact one.
  */
 struct metal_api_t {
     void* (*copy_all_devices)() = nullptr;
     void (*send)() = nullptr;
     metal_selector_t (*register_selector)(char const*) = nullptr;
     void* (*get_class)(char const*) = nullptr;
+    void* (*registry_entry_id_matching)(u64_t) = nullptr;
+    u32_t (*get_matching_service)(u32_t, void*) = nullptr;
+    void* (*search_registry_property)(u32_t, char const*, void const*, void const*, u32_t) = nullptr;
+    int (*release_registry_object)(u32_t) = nullptr;
+    void* (*create_string)(void const*, char const*, u32_t) = nullptr;
+    unsigned char (*get_number_value)(void const*, long, void*) = nullptr;
+    void (*release_reference)(void const*) = nullptr;
     void* (*autorelease_pool_push)() = nullptr;
     void (*autorelease_pool_pop)(void*) = nullptr;
 
@@ -83,11 +91,21 @@ struct metal_api_t {
         shared_library_t const foundation = shared_library_t::open(
             "/System/Library/Frameworks/Foundation.framework/Foundation");
         shared_library_t const runtime = shared_library_t::open("/usr/lib/libobjc.A.dylib");
+        shared_library_t const registry = shared_library_t::open("/System/Library/Frameworks/IOKit.framework/IOKit");
+        shared_library_t const core = shared_library_t::open(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation");
         metal_api_t api;
         bool const resolved = //
             foundation && metal.resolve("MTLCopyAllDevices", api.copy_all_devices) &&
             runtime.resolve("objc_msgSend", api.send) && runtime.resolve("sel_registerName", api.register_selector) &&
             runtime.resolve("objc_getClass", api.get_class) &&
+            registry.resolve("IORegistryEntryIDMatching", api.registry_entry_id_matching) &&
+            registry.resolve("IOServiceGetMatchingService", api.get_matching_service) &&
+            registry.resolve("IORegistryEntrySearchCFProperty", api.search_registry_property) &&
+            registry.resolve("IOObjectRelease", api.release_registry_object) &&
+            core.resolve("CFStringCreateWithCString", api.create_string) &&
+            core.resolve("CFNumberGetValue", api.get_number_value) &&
+            core.resolve("CFRelease", api.release_reference) &&
             runtime.resolve("objc_autoreleasePoolPush", api.autorelease_pool_push) &&
             runtime.resolve("objc_autoreleasePoolPop", api.autorelease_pool_pop);
         return resolved ? api : metal_api_t {};
@@ -142,8 +160,39 @@ inline gpu_class_t apple_class_of(void* device) noexcept {
     return gpu_class_t::unknown_k;
 }
 
+/** The GPU cores of @p device, which Metal does not report: the @c gpu-core-count its accelerator,
+ *  the I/O Registry entry Metal names by @c registryID, or that entry's parents and children list;
+ *  zero when none does. */
+inline u32_t apple_core_count_of(void* device) noexcept {
+    constexpr u32_t main_port_k = 0;          // `kIOMainPortDefault`
+    constexpr u32_t utf8_k = 0x08000100;      // `kCFStringEncodingUTF8`
+    constexpr u32_t search_options_k = 1 | 2; // `kIORegistryIterateRecursively | ...Parents`
+    constexpr long signed_64_bits_k = 4;      // `kCFNumberSInt64Type`
+    metal_api_t const& api = metal_api();
+    // The lookup consumes the matching dictionary, so only the service is released here.
+    u32_t const service = api.get_matching_service(
+        main_port_k, api.registry_entry_id_matching(metal_send<u64_t>(device, "registryID")));
+    if (!service) return 0;
+    void* const key = api.create_string(nullptr, "gpu-core-count", utf8_k);
+    void* const listed = key ? api.search_registry_property(service, "IOService", key, nullptr, search_options_k)
+                             : nullptr;
+    i64_t cores = 0;
+    if (listed && !api.get_number_value(listed, signed_64_bits_k, &cores)) cores = 0;
+    if (listed) api.release_reference(listed);
+    if (key) api.release_reference(key);
+    api.release_registry_object(service);
+    return cores > 0 ? static_cast<u32_t>(cores) : 0;
+}
+
 /** Bytes of the longest kernel name a pipeline is built for, its terminator included. */
 inline constexpr std::size_t metal_pipeline_name_capacity_k = 64;
+
+/** One built entry point as a launch reads it: the pipeline state, and the threads one threadgroup
+ *  of it holds at most, its @c maxTotalThreadsPerThreadgroup, which its register use bounds. */
+struct metal_pipeline_state_t {
+    void* pipeline = nullptr;
+    u32_t max_threads = 0;
+};
 
 /** One compiled entry point and the source library it shares with the other entry points; the name
  *  is copied, as callers spell it into their own buffers. */
@@ -151,30 +200,40 @@ struct metal_pipeline_t {
     char const* source = nullptr;
     char name[metal_pipeline_name_capacity_k] = {};
     void* library = nullptr;
-    void* pipeline = nullptr;
+    metal_pipeline_state_t state;
 };
 
 /** One listed Apple GPU's process-wide state: the device, its default queue - the twin of CUDA's
- *  null stream - its class, and every pipeline built for it, guarded by one lock. */
+ *  null stream - its class and cores, and every pipeline built for it, guarded by one lock. */
 struct metal_context_t {
     void* device = nullptr;
     void* queue = nullptr;
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
+
+    /** The GPU cores the I/O Registry lists for the device, zero when it lists none. */
+    u32_t multiprocessor_count = 0;
+
+    /** Lanes per simdgroup every pipeline built here reports, its @c threadExecutionWidth; zero
+     *  until the first builds. */
+    u32_t wave_lanes = 0;
+
     std::mutex lock;
     growing_buffer<metal_pipeline_t> pipelines {global_allocator};
 
     /** Kernel @p name's pipeline from the library built out of @p source, built on first use; a
      *  caller meeting another index's build sleeps until it ends, as a module load waits in the
-     *  CUDA and HIP drivers, and gets @c device_error_k when the build fails. */
-    expected<void*> pipeline(char const* source, char const* name) noexcept {
+     *  CUDA and HIP drivers, and gets @c device_error_k when the build fails. A pipeline whose
+     *  simdgroups are not the @c metal_simdgroup_width_k lanes every MSL source is written against
+     *  is refused with @c unsupported_k. */
+    expected<metal_pipeline_state_t> pipeline(char const* source, char const* name) noexcept {
         std::lock_guard guard {lock};
         void* library = nullptr;
         for (metal_pipeline_t const& entry : pipelines) {
             if (entry.source != source) continue;
             library = entry.library;
-            if (std::strcmp(entry.name, name) == 0) return {entry.pipeline, status_t::success_k};
+            if (std::strcmp(entry.name, name) == 0) return {entry.state, status_t::success_k};
         }
-        if (failed(pipelines.reserve(pipelines.size() + 1))) return {nullptr, status_t::bad_alloc_k};
+        if (failed(pipelines.reserve(pipelines.size() + 1))) return {{}, status_t::bad_alloc_k};
         metal_api_t const& api = metal_api();
         void* const pool = api.autorelease_pool_push();
         if (!library) {
@@ -195,11 +254,19 @@ struct metal_context_t {
             }
         }
         api.autorelease_pool_pop(pool);
-        if (!pipeline) return {nullptr, status_t::device_error_k};
-        metal_pipeline_t entry {source, {}, library, pipeline};
+        if (!pipeline) return {{}, status_t::device_error_k};
+        u32_t const width = static_cast<u32_t>(metal_send<std::size_t>(pipeline, "threadExecutionWidth"));
+        if (width != metal_simdgroup_width_k) {
+            metal_send<void>(pipeline, "release");
+            return {{}, status_t::unsupported_k};
+        }
+        wave_lanes = width;
+        u32_t const max_threads = static_cast<u32_t>(
+            metal_send<std::size_t>(pipeline, "maxTotalThreadsPerThreadgroup"));
+        metal_pipeline_t entry {source, {}, library, {pipeline, max_threads}};
         std::strncpy(entry.name, name, metal_pipeline_name_capacity_k - 1);
         pipelines.push_back_reserved(entry);
-        return {pipeline, status_t::success_k};
+        return {entry.state, status_t::success_k};
     }
 };
 
@@ -226,9 +293,9 @@ struct metal_contexts_t {
             context.device = metal_send(device, "retain");
             context.queue = queue;
             context.gpu_class = gpu_class;
-            // Metal exposes no public GPU core count, so the compute units stay zero.
+            context.multiprocessor_count = apple_core_count_of(device);
             gpu_device_t& listing = devices[count];
-            listing = {gpu_vendor_t::apple_k, static_cast<u32_t>(count), gpu_class, 0,
+            listing = {gpu_vendor_t::apple_k, static_cast<u32_t>(count), gpu_class, context.multiprocessor_count,
                        metal_send<u64_t>(device, "recommendedMaxWorkingSetSize")};
             char const* const name = metal_send<char const*>(metal_send(device, "name"), "UTF8String");
             if (name) std::strncpy(listing.name, name, sizeof(listing.name) - 1);
@@ -263,22 +330,45 @@ struct metal_device_specs_t {
     /** The device's position in the Apple listing, which every context and queue routes through. */
     int ordinal = 0;
 
+    /** GPU-core count, the accelerator's @c gpu-core-count in the I/O Registry - the launch-grid
+     *  currency. */
+    u32_t multiprocessor_count = 0;
+
     /** The class whose kernels run on it. */
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
 
-    /** The longest buffer one allocation may span. */
+    /** Lanes per simdgroup, the @c threadExecutionWidth every pipeline built for it reports. */
+    u32_t wave_lanes = 0;
+
+    /** Threads one threadgroup may hold, @c maxThreadsPerThreadgroup, before a pipeline's register
+     *  use lowers it. */
+    u32_t max_threads_per_block = 0;
+
+    /** Widest threadgroup memory one threadgroup can be granted, @c maxThreadgroupMemoryLength. */
+    std::size_t shared_memory_per_block_bytes = 0;
+
+    /** The longest buffer one allocation may span, @c maxBufferLength. */
     std::size_t max_buffer_bytes = 0;
 
-    /** The memory Metal recommends one process keep resident - the storage budget. */
+    /** The memory Metal recommends one process keep resident, @c recommendedMaxWorkingSetSize - the
+     *  storage budget. */
     std::size_t working_set_bytes = 0;
 
-    /** Queries Metal for @p ordinal's specification; meaningful only on @c success_k. */
+    /** Queries Metal and the I/O Registry for @p ordinal's specification, once a pipeline built for
+     *  the device reported its simdgroup width; meaningful only on @c success_k, and
+     *  @c unsupported_k for a device whose registry lists no core count. */
     static expected<metal_device_specs_t> query(int ordinal) noexcept {
         metal_context_t const* const context = metal_context(ordinal);
-        if (!context) return {{ordinal}, status_t::device_error_k};
-        return {{ordinal, context->gpu_class, metal_send<std::size_t>(context->device, "maxBufferLength"),
-                 static_cast<std::size_t>(metal_send<u64_t>(context->device, "recommendedMaxWorkingSetSize"))},
-                status_t::success_k};
+        if (!context || !context->wave_lanes) return {{ordinal}, status_t::device_error_k};
+        if (!context->multiprocessor_count) return {{ordinal}, status_t::unsupported_k};
+        void* const device = context->device;
+        metal_device_specs_t specs {ordinal, context->multiprocessor_count, context->gpu_class, context->wave_lanes};
+        specs.max_threads_per_block = static_cast<u32_t>(
+            metal_send<metal_size_t>(device, "maxThreadsPerThreadgroup").width);
+        specs.shared_memory_per_block_bytes = metal_send<std::size_t>(device, "maxThreadgroupMemoryLength");
+        specs.max_buffer_bytes = metal_send<std::size_t>(device, "maxBufferLength");
+        specs.working_set_bytes = static_cast<std::size_t>(metal_send<u64_t>(device, "recommendedMaxWorkingSetSize"));
+        return {specs, status_t::success_k};
     }
 };
 
@@ -719,7 +809,8 @@ struct metal_traversal_context {
         block.locked_drops = metal_tally(words, metal_locked_drops_k);
         block.visited_saturations = metal_tally(words, metal_saturations_k);
         block.changed_nodes = words[metal_changed_k];
-        block.tail_drops = metal_tally(words, metal_tail_drops_k);
+        block.tail_compactions = metal_tally(words, metal_tail_compactions_k);
+        block.tail_unseated = metal_tally(words, metal_tail_unseated_k);
         return block;
     }
 

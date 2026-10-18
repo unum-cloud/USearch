@@ -578,6 +578,10 @@ enum connectivity_t : u32_t {
     connectivity_128_k = 128,
 };
 
+/** The walk breadth a walk takes when its config asks for none: twice the neighbors one row
+ *  holds, in every design and residency. */
+constexpr std::size_t default_expansion_factor(std::size_t connectivity) noexcept { return connectivity * 2; }
+
 /** Element types USearch speaks when exchanging payloads - NumKong's numeric dtypes
  *  plus the packed, opaque, identity and text families that interchange formats carry
  *  and a compute library has no place for. Every storage width also has a neutral
@@ -1425,18 +1429,28 @@ struct scored_node_t {
  *  multiprocessor on every modern GPU, one lane group each. */
 inline constexpr u32_t vram_warps_per_block_k = 4;
 
-/** Rows of the per-warp shared candidate cache; also bounds the diversity-selection pool prefix
- *  and the staging arrays. */
-inline constexpr u32_t vram_cache_rows_k = 64;
-
 /** Ceiling on concurrently in-flight candidate-vector gathers per lane - the memory-parallelism
  *  window over the @b candidate axis; the NVIDIA index also caps the lanes sharing one row at it,
  *  so a wide row takes more steps rather than more reductions. */
 inline constexpr u32_t vram_max_gathers_in_flight_k = 8;
 
-/** IDs the first insert wave over an empty shard admits at once; every later wave doubles, as wide
- *  as the rows already below it. */
+/** IDs the first insert wave over an empty shard admits at once, a measured width: every GPU design
+ *  ramps its waves up from it. */
 inline constexpr u32_t vram_admission_ramp_floor_k = 32;
+
+/** Shares of the rows already below it an insert wave admits, as negative powers of two, both
+ *  measured: a dense wave as wide as those rows, which its back-links splice in before the next
+ *  wave walks, and a basic wave a quarter of them, the widest at which re-selected waves still
+ *  reach the recall of rows inserted one at a time, since a basic wave's rows link one another
+ *  only through the walk after the merge. */
+inline constexpr u32_t vram_dense_admission_share_log2_k = 0;
+inline constexpr u32_t vram_basic_admission_share_log2_k = 2;
+
+/** The end of the insert wave admitting from @p wave_first, its share @p share_log2 of the rows
+ *  below it and never under @c vram_admission_ramp_floor_k, short of @p end_id. */
+constexpr u64_t vram_admission_wave_end(u64_t wave_first, u64_t end_id, u32_t share_log2) noexcept {
+    return min_of(end_id, wave_first + max_of(wave_first >> share_log2, u64_t {vram_admission_ramp_floor_k}));
+}
 
 /** Slots of the widest register pool on the walks' rung ladder, @c vram_sorted_pool<16,warp_t>:
  *  as many ranks per lane. A walk expanding past that pool's width - this times the warp's lanes,
@@ -1453,8 +1467,9 @@ struct vram_telemetry_block_t {
      *  range. */
     u64_t local_scored, remote_scored;
 
-    /** Frontier tail entries shed past their slice, and visited-set claims out of probes. */
-    u64_t tail_drops, visited_saturations;
+    /** Frontier tails compacted to what can still rank, entries tied at that radius a compacted
+     *  tail still could not seat, and visited-set claims out of probes, which re-scored. */
+    u64_t tail_compactions, tail_unseated, visited_saturations;
 
     /** Nodes whose neighbors a refinement merge landed in a different sequence than they held. */
     u64_t changed_nodes;

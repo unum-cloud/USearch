@@ -542,6 +542,9 @@ struct terrain_t {
  */
 struct surface_keep_octants_t {
 
+    /** The pool an insertion needs for exact cone winners on skewed data, as the type documents. */
+    inline static constexpr std::size_t exact_pool_k = 128;
+
     /** The row budget: eight cone winners and four long links. */
     std::size_t connectivity = 12;
 
@@ -752,7 +755,7 @@ radius_result_t within(index_type_& index, query_type_ const& query, i64_t radiu
     i64_t const radius_squared = radius_centimetres * radius_centimetres;
     std::size_t const published = index.size();
 
-    std::size_t expansion = connectivity_32_k * 2;
+    std::size_t expansion = index.non_zero_expansion_factor(search_config_t {0, rows_per_round});
     std::size_t pool = 0;
     std::size_t previous_pool = 0;
     for (;;) {

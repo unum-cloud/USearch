@@ -62,8 +62,8 @@ template <sz_levenshtein_symbol_t symbol_>
 std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t bytes) noexcept {
     if constexpr (symbol_ == sz_levenshtein_runes_k) {
         // Distinct pages in a bitset over every page, distinct runes in an open table twice the
-        // longest row's runes wide, cleared only as wide as this row needs.
-        constexpr std::size_t table_slots_k = 2 * 64 * 64;
+        // widest rung's runes wide, cleared only as wide as this row needs.
+        constexpr std::size_t table_slots_k = 2 * vram_levenshtein_widest_bytes_k;
         u64_t pages[sz_levenshtein_utf8_pages_k / 64] = {};
         u32_t table[table_slots_k];
         std::size_t const slots = min_of<std::size_t>(std::bit_ceil(2 * bytes + 2), table_slots_k);
@@ -203,7 +203,9 @@ struct u8_ampere_levenshtein_kit_t {
     using selector_t = basic::vram_keep_diverse_t;
 
     static constexpr u32_t lanes_per_row(u32_t words) noexcept { return cuda_levenshtein_lanes_per_row_ampere(words); }
-    static constexpr bool serves(u32_t words, std::size_t bytes) noexcept { return bytes <= std::size_t {words} * 64; }
+    static constexpr bool serves(u32_t words, std::size_t bytes) noexcept {
+        return bytes <= vram_levenshtein_bytes(words);
+    }
     static std::size_t span_bytes(byte_t const* data, std::size_t bytes) noexcept {
         return cuda_levenshtein_span_bytes_ampere<sz_levenshtein_bytes_k>(data, bytes);
     }
@@ -234,7 +236,9 @@ struct utf8_ampere_levenshtein_kit_t {
     using selector_t = basic::vram_keep_diverse_t;
 
     static constexpr u32_t lanes_per_row(u32_t words) noexcept { return cuda_levenshtein_lanes_per_row_ampere(words); }
-    static constexpr bool serves(u32_t words, std::size_t bytes) noexcept { return bytes <= std::size_t {words} * 64; }
+    static constexpr bool serves(u32_t words, std::size_t bytes) noexcept {
+        return bytes <= vram_levenshtein_bytes(words);
+    }
     static std::size_t span_bytes(byte_t const* data, std::size_t bytes) noexcept {
         return cuda_levenshtein_span_bytes_ampere<sz_levenshtein_runes_k>(data, bytes);
     }

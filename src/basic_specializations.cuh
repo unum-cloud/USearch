@@ -135,16 +135,6 @@ using row_kit_of = typename row_kit_for_cpu_class<cpu_class_>::type;
  *  verb. */
 using thread_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
 
-/** Candidates one metric round may stage: the frontier rows one round expands, at most
- *  @p connectivity each, where a search derives its rows from 32 links and an insertion from
- *  @p connectivity, and never fewer than the landmarks a walk seeds with or the pool a back-link
- *  re-selects. */
-inline std::size_t round_capacity_of(std::size_t expansion, std::size_t connectivity) noexcept {
-    std::size_t const narrowest = min_of<std::size_t>(connectivity, connectivity_32_k);
-    std::size_t const fan_out = max_of<std::size_t>(divide_round_up(expansion, narrowest), 1);
-    return max_of(fan_out * connectivity, max_of<std::size_t>(connectivity, connectivity_32_k) + 1);
-}
-
 /** Key @p row of the caller's keys, through their stride; zero means packed. */
 inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t row) noexcept {
     std::size_t const stride = keys.stride ? keys.stride : sizeof(usearch_key_t);
@@ -218,8 +208,8 @@ struct thread_scratch {
         std::size_t const threads = executor.size();
         if (failed(contexts.reserve_exactly(threads)) || failed(metrics.reserve_exactly(threads)))
             return status_t::bad_alloc_k;
-        std::size_t const staging = round_capacity_of(expansion, connectivity);
         typename index_type_::insert_config_t const walk {expansion, 0};
+        std::size_t const staging = index_type_::round_capacity(connectivity, walk);
         for (std::size_t thread = 0; thread != threads; ++thread) {
             thread_allocator_t const allocator {executor.arena(thread)};
             contexts.push_back_reserved(context_t {seed + thread, allocator});

@@ -191,7 +191,7 @@ struct nvme_indexes {
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     std::size_t non_zero_expansion_factor(search_config_t const& config) const noexcept {
-        return config.expansion_factor ? config.expansion_factor : connectivity() * 2;
+        return config.expansion_factor ? config.expansion_factor : default_expansion_factor(connectivity());
     }
 
 #pragma region Search
@@ -2224,7 +2224,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
         workspace_ = workspace;
         alignment_ = config.alignment;
         dimensions_ = first.dimensions, connectivity_ = first.connectivity, value_row_bytes_ = first.value_row_bytes;
-        expansion_factor_ = config.expansion_factor ? config.expansion_factor : connectivity_ * 2;
+        expansion_factor_ = config.expansion_factor ? config.expansion_factor : default_expansion_factor(connectivity_);
         kernel_ = view.kernel();
         norms_bytes_ = view.stores_norms() ? sizeof(vector_norms_t) : 0;
         if (failed(fields_.reserve_exactly(1 + config.provenance.size()))) return status_t::bad_alloc_k;

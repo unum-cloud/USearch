@@ -306,9 +306,10 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
                                                              stream_key(seed, "wide"));
         failures += expect(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status ==
                            status_t::success_k);
-        // Apple keeps every builder's scratch in the arena, so only shared-memory devices can miss.
+        // Apple keeps every builder's scratch in the arena, so only shared-memory devices can miss,
+        // even caching no more than a full row and the node's own.
         if constexpr (requires { index.device_specs().shared_memory_per_block_bytes; })
-            failures += expect(!index.build_scratch_fits());
+            failures += expect(!index.build_scratch_fits(index.build_scratch_bytes_per_warp(connectivity_16_k + 1)));
         failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
         failures += expect_eq(index.size(), dense_growth_nodes_k);
         auto const [refined, refined_status] = index.refine({0, static_cast<node_id_t>(index.size())}, context);
@@ -341,7 +342,8 @@ std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_
         typename index_type_::insert_config_t broad_insert;
         broad_insert.expansion_factor = 1024;
         auto const [inserted, inserted_status] = index.insert(vectors.view(), {}, context, broad_insert);
-        failures += expect(inserted_status == status_t::success_k && inserted.tail_drops == 0);
+        failures += expect(inserted_status == status_t::success_k && inserted.tail_compactions == 0 &&
+                           inserted.tail_unseated == 0);
         if constexpr (kernel_ != nk_kernel_dot_k)
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
         typename index_type_::refine_config_t broad_refine;

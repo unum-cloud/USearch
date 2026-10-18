@@ -387,7 +387,8 @@ struct sharded_indexes {
             result_.computed_distances += inserted.value.computed_distances;
             result_.restarts += inserted.value.restarts;
             result_.unlinked_neighbors += inserted.value.unlinked_neighbors;
-            result_.tail_drops += inserted.value.tail_drops;
+            result_.tail_compactions += inserted.value.tail_compactions;
+            result_.tail_unseated += inserted.value.tail_unseated;
             result_.visited_saturations += inserted.value.visited_saturations;
             return status_t::success_k;
         }
@@ -926,18 +927,19 @@ struct sharded_indexes {
      *  @param[inout] distances Distances of the same ranking, parallel to @p keys.
      *
      *  The batched search over one row, so every shard walks at once and the rankings merge as
-     *  they land; each shard walks as broad as its expansion factor and keeps at most that many
-     *  matches. A failing shard keeps whatever the others already merged, so the reported count
-     *  and the ranking always agree.
+     *  they land; each shard keeps as many matches as the ranking is wide, walking as broad as its
+     *  expansion factor, or broader where the shard raises it to cover that width, as the batched
+     *  search does. A failing shard keeps whatever the others already merged, so the reported
+     *  count and the ranking always agree.
      */
     expected<search_result_t> search(vector_view_t query_vector, executor_t& executor, search_config_t config,
                                      std::span<key_t> keys, std::span<distance_t> distances) noexcept {
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (!query_vector.is_contiguous()) return {{}, status_t::unsupported_layout_k};
-        std::size_t const expansion = shards_[0].index->non_zero_expansion_factor(config);
-        std::size_t const width = min_of(min_of(keys.size(), distances.size()), expansion);
+        std::size_t const width = min_of(keys.size(), distances.size());
         if (!width) return {{}, pairs_with_(executor)};
-        config.expansion_factor = static_cast<typename index_t::small_size_t>(expansion);
+        config.expansion_factor = static_cast<typename index_t::small_size_t>(
+            shards_[0].index->non_zero_expansion_factor(config));
         config.count = static_cast<typename index_t::small_size_t>(width);
         batch_t batch {executor, allocator_};
         if (status_t const begun = begin_batch_(batch, 1, config); failed(begun)) return {{}, begun};
@@ -1864,7 +1866,8 @@ struct sharded_indexes {
             result.computed_distances += spent.scored;
             result.restarts += spent.restarts;
             result.unlinked_neighbors += spent.lock_skips;
-            result.tail_drops += spent.tail_drops;
+            result.tail_compactions += spent.tail_compactions;
+            result.tail_unseated += spent.tail_unseated;
             result.visited_saturations += spent.visited_saturations;
         }
         return status;
@@ -2418,7 +2421,8 @@ struct sharded_indexes {
                 merged.visited_members += spent.hops;
                 merged.computed_distances += spent.scored;
                 merged.restarts += spent.restarts;
-                merged.tail_drops += spent.tail_drops;
+                merged.tail_compactions += spent.tail_compactions;
+                merged.tail_unseated += spent.tail_unseated;
                 merged.visited_saturations += spent.visited_saturations;
                 if (shard != queued) merge(shard, traversals[shard]); // The refuser landed nothing to merge.
             }
@@ -2707,9 +2711,7 @@ struct sharded_indexes {
             if (status_t const vetted = vetted_part_(part, first); failed(vetted)) return vetted;
         connectivity_t const connectivity = static_cast<connectivity_t>(
             regular_width(first.neighbors.shape).value_or(0));
-        if (connectivity != connectivity_16_k && connectivity != connectivity_32_k &&
-            connectivity != connectivity_128_k)
-            return status_t::malformed_k;
+        if (!std::has_single_bit(static_cast<u32_t>(connectivity))) return status_t::malformed_k;
         std::size_t const dimensions = regular_width(first.value.shape).value_or(0);
         if (!dimensions) return status_t::malformed_k;
 

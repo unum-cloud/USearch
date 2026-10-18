@@ -27,6 +27,14 @@ using namespace unum::usearch::utilities;
 template <nk::numeric_dtype scalar_, nk_capability_t caps_>
 struct quads_ladder;
 
+/** The breadth a GPU insert walks, @p expansion_factor or, when it asks for none, a measured 128:
+ *  on SIFT-10M u8 at connectivity 32, inserting at the 64 of @ref default_expansion_factor instead
+ *  dropped recall@10 at search breadths 64, 128 and 1024 from 0.9302, 0.9717 and 0.9989 to 0.9158,
+ *  0.9610 and 0.9978. */
+constexpr std::size_t vram_insert_expansion(std::size_t expansion_factor) noexcept {
+    return expansion_factor ? expansion_factor : 128;
+}
+
 /** The NumKong dtype a column of @p dtype stores, or @c nk_dtype_unknown_k where NumKong has
  *  none. */
 constexpr nk_dtype_t nk_dtype_of(dtype_t dtype) noexcept {
@@ -250,7 +258,8 @@ expected<search_result_type_> for_each_window(std::size_t rows, std::size_t wind
         total.visited_members += landed.value.visited_members;
         total.computed_distances += landed.value.computed_distances;
         total.restarts += landed.value.restarts;
-        total.tail_drops += landed.value.tail_drops;
+        total.tail_compactions += landed.value.tail_compactions;
+        total.tail_unseated += landed.value.tail_unseated;
         total.visited_saturations += landed.value.visited_saturations;
         if (!landed) return {total, landed.status};
     }

@@ -198,10 +198,13 @@ struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
      *  links past it give way. */
     expected<refine_plan_t> plan_refine(std::span<index_t*> donors, std::size_t expansion) noexcept {
         typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        std::size_t const breadth = expansion ? expansion : 128;
+        std::size_t const breadth = expansion ? expansion : us::geospatial::surface_keep_octants_t::exact_pool_k;
         return index.plan_absorb(donors, planning, us::geospatial::surface_keep_octants_t {geometry.connectivity},
                                  {breadth, divide_round_up(breadth, widest_row())});
     }
+
+    /** Drives @p plan, then draws every node's long links again by the insertion's rule and seeds,
+     *  since the re-selection keeps only the cone selector's budget. */
     status_t refine(refine_plan_t& plan, refine_cursor_t& cursor, progress_ticks_t& ticks,
                     executor_t& executor) noexcept;
 
@@ -225,6 +228,11 @@ struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
     status_t sample(usearch_geospatial_sample_t const&) noexcept { return status_t::unsupported_k; }
 
   private:
+
+    /** Draws the long links of every published node in @p nodes, each from a generator keyed by
+     *  its ID, so a redraw over a re-selected row lands where the insertion's draws landed. */
+    status_t draw_long_links_(iota_view<node_id_t> nodes, thread_scratch<index_t, metric_t>& scratch,
+                              executor_t& executor) noexcept;
 
     /** Judges the pool's quad from @p first of @p context against @p query: the relation, time and
      *  terrain, then the predicate. */
@@ -417,9 +425,8 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::insert(usear
     using key_t = typename index_t::key_t;
     usearch_geospatial_observation_t const* const observations = arguments.observations;
     std::size_t const count = arguments.count;
-    // Exact cone winners need a pool of at least 128, as the selector documents.
-    std::size_t const breadth = arguments.expansion_factor ? arguments.expansion_factor : 128;
-    std::size_t const draws = long_links();
+    std::size_t const breadth = arguments.expansion_factor ? arguments.expansion_factor
+                                                           : us::geospatial::surface_keep_octants_t::exact_pool_k;
     std::size_t const row_width = widest_row();
     thread_scratch<index_t, metric_t> scratch;
     if (status_t const prepared = scratch.prepare(executor, row_width, breadth, index.size(), this->metric_factory_());
@@ -458,23 +465,42 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::insert(usear
 
     // Long links reach across the published graph, so they are drawn once the whole batch is
     // visible.
-    status_t linked = status_t::success_k;
-    drain_in_order(executor, range.size(), [&](std::size_t position, std::size_t thread) noexcept {
-        splitmix64_t generator {mix_bits(static_cast<u64_t>(range.first) + position)};
-        keep_first_failure(
-            linked, us::geospatial::draw_long_links(index, static_cast<node_id_t>(range.first + position), draws,
-                                                    scratch.metrics[thread], scratch.contexts[thread], generator));
-    });
-    if (failed(linked)) return {{}, linked};
+    if (status_t const linked = draw_long_links_(range, scratch, executor); failed(linked)) return {{}, linked};
     return {scratch.telemetry(), status_t::success_k};
+}
+
+template <cpu_class_t cpu_class_>
+status_t geospatial_ram_variant<cpu_class_>::draw_long_links_(iota_view<node_id_t> nodes,
+                                                              thread_scratch<index_t, metric_t>& scratch,
+                                                              executor_t& executor) noexcept {
+    std::size_t const draws = long_links();
+    status_t linked = status_t::success_k;
+    drain_in_order(executor, nodes.size(), [&](std::size_t position, std::size_t thread) noexcept {
+        node_id_t const node = static_cast<node_id_t>(nodes.first + position);
+        splitmix64_t generator {mix_bits(static_cast<u64_t>(node))};
+        keep_first_failure(linked, us::geospatial::draw_long_links(index, node, draws, scratch.metrics[thread],
+                                                                   scratch.contexts[thread], generator));
+    });
+    return linked;
 }
 
 template <cpu_class_t cpu_class_>
 status_t geospatial_ram_variant<cpu_class_>::refine(refine_plan_t& plan, refine_cursor_t& cursor,
                                                     progress_ticks_t& ticks, executor_t& executor) noexcept {
-    return drive_refinement<index_t>(plan, cursor, this->metric_factory_(),
-                                     us::geospatial::surface_keep_octants_t {geometry.connectivity}, widest_row(),
-                                     ticks, executor);
+    if (status_t const refined = drive_refinement<index_t>(
+            plan, cursor, this->metric_factory_(), us::geospatial::surface_keep_octants_t {geometry.connectivity},
+            widest_row(), ticks, executor);
+        failed(refined))
+        return refined;
+    // The re-selection kept the cone winners and the longest of the rest, so the drawn links of
+    // every row it rewrote are drawn again by the insertion's rule.
+    thread_scratch<index_t, metric_t> scratch;
+    if (status_t const prepared = scratch.prepare(executor, widest_row(),
+                                                  index.non_zero_expansion_factor(typename index_t::search_config_t {}),
+                                                  index.size(), this->metric_factory_());
+        failed(prepared))
+        return prepared;
+    return draw_long_links_({0, static_cast<node_id_t>(index.size())}, scratch, executor);
 }
 
 template <cpu_class_t cpu_class_>
@@ -488,7 +514,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::search(usear
     usearch_predicate_t const predicate = arguments.predicate;
     std::size_t const wanted = arguments.wanted, expansion = arguments.expansion_factor;
     // Pools narrower than the row they fill would short every row.
-    std::size_t const breadth = max_of(expansion ? expansion : std::size_t(connectivity_32_k) * 2, wanted);
+    std::size_t const breadth = max_of(index.non_zero_expansion_factor({expansion, 0}), wanted);
     thread_scratch<index_t, metric_t> scratch;
     if (status_t const prepared = scratch.prepare(executor, widest_row(), breadth, index.size(),
                                                   this->metric_factory_());
@@ -536,7 +562,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::within(
     progress_ticks_t& ticks, executor_t& executor) noexcept {
     using found_t = growing_buffer<geospatial_within_match_t, thread_allocator_t>;
     thread_scratch<index_t, metric_t> scratch;
-    std::size_t const breadth = std::size_t(connectivity_32_k) * 2;
+    std::size_t const breadth = index.non_zero_expansion_factor(typename index_t::search_config_t {});
     if (status_t const prepared = scratch.prepare(executor, widest_row(), breadth, index.size(),
                                                   this->metric_factory_());
         failed(prepared))
@@ -844,7 +870,7 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
     byte_t const* const bytes = reinterpret_cast<byte_t const*>(values);
     std::span<std::size_t const> const tape {offsets, count + 1};
     // Pools narrower than the row they fill would short every row.
-    std::size_t const pool = max_of(expansion ? expansion : std::size_t(connectivity_32_k) * 2, wanted);
+    std::size_t const pool = max_of(expansion ? expansion : default_expansion_factor(index.connectivity()), wanted);
     index_t::search_config_t const config {static_cast<u32_t>(pool), static_cast<u32_t>(pool)};
 
     // Past the walk's own scratch: the queries, the judged metres and counts, the pools and the

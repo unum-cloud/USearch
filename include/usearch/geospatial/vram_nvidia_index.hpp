@@ -44,6 +44,10 @@ struct vram_nvidia_index
   private:
     friend base_t;
 
+    /** The breadth an insert or a refine walks at least: the pool the cone selector needs to see
+     *  each cone's nearest candidate, as @c surface_keep_octants_t documents. */
+    inline static constexpr u32_t build_breadth_k = 128;
+
     /** The rung serving rows of @p longest bytes, or @c rungs_k when none does. Defined in
      *  @c vram_nvidia_metric.cuh, as are the members below reading the kit. */
     static std::size_t rung_serving_(std::size_t longest) noexcept;

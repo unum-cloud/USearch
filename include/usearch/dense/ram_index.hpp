@@ -813,7 +813,8 @@ struct ram_index {
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     template <typename config_type_>
     small_size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
-        return config.expansion_factor ? config.expansion_factor : static_cast<small_size_t>(connectivity() * 2);
+        return config.expansion_factor ? config.expansion_factor
+                                       : static_cast<small_size_t>(default_expansion_factor(connectivity()));
     }
 
     /** Scalar dimensions per stored vector; zero until the first reservation freezes it. */
@@ -987,13 +988,14 @@ struct ram_index {
     /** The four queue reservations a walk starts from, for one expansion factor and connectivity. */
     struct queue_sizes_t {
 
-        /** The navigation pool - the expansion factor. */
+        /** The navigation pool - the expansion factor - plus a re-selected node's own row. */
         std::size_t results;
 
         /** Every neighbor plus the newcomer while back-linking, or the admitted pool while filtering. */
         std::size_t refining_candidates;
 
-        /** Four expansions' worth, refilled by shedding rather than growth. */
+        /** A full pool's unexpanded members plus one expansion's admissions, which shedding past
+         *  the pool's radius keeps the walk within; only ties at that radius grow it. */
         std::size_t frontier;
 
         /** One node's neighbors per expansion - the first size a re-table doubles from. */
@@ -1001,8 +1003,8 @@ struct ram_index {
     };
 
     static constexpr queue_sizes_t queue_sizes_(std::size_t expansion_factor, std::size_t connectivity) noexcept {
-        return {expansion_factor, max_of<std::size_t>(connectivity + 1, expansion_factor), expansion_factor * 4u,
-                expansion_factor * connectivity};
+        return {expansion_factor + connectivity, max_of<std::size_t>(connectivity + 1, expansion_factor),
+                expansion_factor + connectivity, expansion_factor * connectivity};
     }
 
     static status_t reserve_queues_(traversal_context_t& context, queue_sizes_t sizes) noexcept {
@@ -3412,6 +3414,7 @@ struct ram_index {
             // newcomer stays out: its symmetric score was already recorded at selection time.
             if (nk::failed(context.staged_ids.resize({slots_count}))) {
                 neighbors.unlock(first_slot_value);
+                ++context.saturated_walks;
                 continue;
             }
             location_t const first_location = chunk_schedule_t::locate(first_slot_value);
@@ -3620,7 +3623,10 @@ struct ram_index {
                                   traversal_context_t& context) const noexcept {
         ids_tensor_t& staged_ids = context.staged_ids;
         small_size_t const slots_count = neighbors.capacity();
-        if (nk::failed(staged_ids.resize({slots_count}))) return 0;
+        if (nk::failed(staged_ids.resize({slots_count}))) {
+            ++context.saturated_walks;
+            return 0;
+        }
         node_id_t first_value = neighbors.peek_first();
         while (first_value == node_id_unknown_k) {
             neighbors.wait_while_locked();
@@ -3638,6 +3644,42 @@ struct ram_index {
         // Shrinking within the reservation never fails - the fill becomes the live shape.
         [[maybe_unused]] nk::status_t const shrunk = staged_ids.resize({staged_count});
         return staged_count;
+    }
+
+    /** Adds the published @p row members the walk's pool lacks, scored against the node, past the
+     *  walk's breadth: its nearer finds evict the far members, the long links among them, which
+     *  must still compete. @return The distances computed. */
+    std::size_t pool_row_(vector_view_t own_vector, vector_norms_t own_norms, std::span<node_id_t const> row,
+                          node_id_t first_invisible_id, traversal_context_t& context) const noexcept {
+        results_array_t& results = context.results;
+        std::array<node_id_t, 4> lane_ids;
+        std::array<vector_view_t, 4> lane_vectors;
+        std::array<vector_norms_t, 4> lane_norms;
+        small_size_t gathered = 0;
+        std::size_t computed = 0;
+        auto score_gathered = [&]() noexcept {
+            // Pad the tail lanes with lane zero; the padded outputs are never consumed.
+            for (small_size_t lane = gathered; lane != lane_ids.size(); ++lane)
+                lane_vectors[lane] = lane_vectors[0], lane_norms[lane] = lane_norms[0];
+            std::array<distance_t, 4> const lane_distances = distances(own_vector, own_norms, lane_vectors, lane_norms);
+            for (small_size_t lane = 0; lane != gathered; ++lane)
+                results.insert(scored_node_t(lane_ids[lane], lane_distances[lane]), results.size() + 1);
+            computed += gathered;
+            gathered = 0;
+        };
+        for (node_id_t const member : row) {
+            bool pooled = member >= first_invisible_id;
+            for (std::size_t position = 0; position != results.size() && !pooled; ++position)
+                pooled = results[position].node_id == member;
+            if (pooled) continue;
+            location_t const location = chunk_schedule_t::locate(member);
+            lane_ids[gathered] = member;
+            lane_vectors[gathered] = vector_for(location);
+            lane_norms[gathered] = norm_for(location);
+            if (++gathered == lane_ids.size()) score_gathered();
+        }
+        if (gathered) score_gathered();
+        return computed;
     }
 
     /**
@@ -3674,6 +3716,7 @@ struct ram_index {
         if (failed(search_around(own_vector, own_norms, snapshot_admission_t {first_invisible_id}, expansion_factor,
                                  context, context.results, dummy_fold_t {}, seeds)))
             ++context.saturated_walks;
+        context.computed_distances += pool_row_(own_vector, own_norms, seeds, first_invisible_id, context);
 
         selection_t& selected = context.selected_neighbors;
         std::size_t const refine_distances = select_diverse(context.results, node_connectivity, selected, context);
@@ -4139,7 +4182,8 @@ struct ram_index {
         std::size_t const node_connectivity = connectivity();
         assert(results.capacity() >= expansion_factor && "A pool short of the expansion never tightens the radius");
 
-        // About as many landmarks as the connectivity - a stochastic multi-start in 4-way batches.
+        // As many landmarks as one row holds, a stochastic multi-start drawn in the scoring
+        // kernels' 4-way batches, so the last batch may round past the connectivity.
         small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);
         for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch) {
             auto const [seeding, seed_status] = sample_landmarks<synchronization_>(

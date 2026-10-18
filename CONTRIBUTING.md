@@ -185,6 +185,23 @@ I'd recommend putting the following breakpoints when debugging the code in GDB:
 - `__GI_exit` - to stop at exit points - the end of running any executable.
 - `__builtin_unreachable` - to catch all the places where the code is expected to be unreachable.
 
+### Capacities & Bounds
+
+No cache, pool, selection, batch or buffer takes its size from a constant picked to fit, like `64` or `2 * connectivity`.
+Each size follows from what its consumer holds, such as a walk's whole pool, or a row's live neighbors, one row of newcomers and its own row, or it comes from the caller.
+Derive each bound once on the host and carry it to the kernels in the launch record, so that no kernel and no vendor tower recomputes it with a formula of its own.
+Hardware properties, like core counts, SIMD widths and shared-memory sizes, are read from the device at run time and never written into the code.
+Nothing is dropped past a capacity: excess candidates fold in rounds, and a failed allocation is counted.
+Graph walks have no hop budgets, thresholds or upper bounds that end them early.
+A walk runs until it converges, and a fixed device structure that fills up grows or falls back to a counted re-score.
+
+### No Tuning Knobs
+
+Every behavior follows from the inputs, the index's own geometry and the hardware it runs on, never from a hyper-parameter someone tuned.
+Don't add a flag, a constant or a heuristic whose value was searched until a benchmark looked good: such values fit one dataset and one machine, and they multiply into combinations nobody can test.
+When a choice has no derivation yet, derive it before landing it, from a cost model, a hardware property or a bound the algorithm guarantees, and state that derivation where the value is defined.
+A value that can only be measured, like an empirical wave width, says so in its docstring, names what was measured, and lives in one definition every backend reads.
+
 ### Cross Compilation
 
 Unlike GCC, LLVM handles cross compilation very easily.

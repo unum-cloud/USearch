@@ -6,7 +6,7 @@
  *  `b`, at a budget of two. Two inserters back-link their newcomers `N1` and `N2` into it, each
  *  before its batch's turn: a row with room takes an append, and a full one is copied, unlocked,
  *  re-selected off-lock from the copy and the newcomer, relocked, revalidated slot by slot against
- *  the copy, and rewritten only when unchanged; a changed row takes an append if room remains. The
+ *  the copy, and rewritten only when unchanged; a changed row goes round again from the lock. The
  *  selector keeps any one or two of the pool. Every append and the full-row pass re-check that the
  *  row does not hold the newcomer already. A linker runs `link(row, N1)` once the watermark covers
  *  `N1`, appending past the budget when the row lacks it; an unlinker runs `unlink(row, a)`, moving
@@ -27,7 +27,7 @@
  */
 #define thread_count 4
 #define location_count 6
-#define history_depth 13
+#define history_depth 25
 #include "weak_memory.pml"
 #include "watermark_turn.pml"
 
@@ -113,6 +113,7 @@ proctype back_linker(byte t) {
     :: !back_link_before_turn -> publish(t, seen)
     :: else
     fi;
+retry:
     lock_row(t, displaced);
     load(t, row_size, order_relaxed, size);
     if
@@ -126,6 +127,8 @@ proctype back_linker(byte t) {
     unlock_row(t);
     // off-lock: the selector keeps the nearest of the copy and the newcomer, and at most one more,
     // where picking the same member twice keeps one
+    nearest = 0;
+    other = 0;
     do
     :: nearest < degree -> nearest++
     :: break
@@ -159,13 +162,13 @@ proctype back_linker(byte t) {
         :: nearest != other -> store(t, row_slot(1), order_relaxed, kept_second); store(t, row_size, order_relaxed, 2)
         :: else -> store(t, row_size, order_relaxed, 1)
         fi
-    :: else ->
-        if
-        :: size < connectivity -> append_edge(t, size, newcomer(t))
-        :: else
-        fi
+    :: else
     fi;
     unlock_row(t);
+    if
+    :: !unchanged -> goto retry
+    :: else
+    fi;
 turn:
     if
     :: back_link_before_turn -> publish(t, seen)

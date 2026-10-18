@@ -65,6 +65,7 @@ struct vram_build_t {
     byte_t const* staging = nullptr;
     u32_t end_id = 0;
     u32_t scratch_bytes_per_warp = 0;
+    u32_t selection_rows = 0;
     node_id_t first_id = 0;
     byte_t* arena = nullptr;
     gpu_arena_shape_t arena_shape {};
@@ -100,6 +101,7 @@ struct vram_refine_t {
     u32_t* shadow_neighbors = nullptr;
     u32_t end_id = 0;
     u32_t scratch_bytes_per_warp = 0;
+    u32_t selection_rows = 0;
     node_id_t first_id = 0;
     byte_t* arena = nullptr;
     gpu_arena_shape_t arena_shape {};
@@ -397,7 +399,8 @@ struct vram_index {
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     template <typename config_type_>
     small_size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
-        return config.expansion_factor ? config.expansion_factor : connectivity() * 2;
+        return config.expansion_factor ? config.expansion_factor
+                                       : static_cast<small_size_t>(default_expansion_factor(connectivity()));
     }
 
     /** The pinned device's identity and limits, queried once at the first @c reserve. */
@@ -437,22 +440,13 @@ struct vram_index {
     /** Steps the lanes cooperating on one row take across it. */
     u32_t steps_per_row() const noexcept { return divide_round_up(row_fragments(), derived().lanes_per_row()); }
 
-    /** Bytes of one warp's dynamic-shared slice on the insertion path: the query span while
-     *  traversing, then the candidate cache & re-selection spans. */
-    u32_t insert_scratch_bytes_per_warp() const noexcept {
-        u32_t const selection_slots = min_of(static_cast<u32_t>(connectivity()), vram_cache_rows_k);
-        u32_t const selection_bytes = selection_slots * (gpu_scored_node_bytes<node_id_t> + 2 * sizeof(u32_t)) +
-                                      vram_cache_rows_k * sizeof(f32_t);
-        u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * vram_cache_rows_k;
-        return max_of(static_cast<u32_t>(row_bytes()), cache_bytes + selection_bytes);
-    }
-
-    /** Bytes of one warp's dynamic-shared slice on the refinement merge path: the candidate
-     *  cache - whose last row hosts the node's own vector - then the scored span and the
-     *  kept-row indices. */
-    u32_t merge_scratch_bytes_per_warp() const noexcept {
-        u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * vram_cache_rows_k;
-        return cache_bytes + vram_cache_rows_k * (gpu_scored_node_bytes<node_id_t> + sizeof(u32_t));
+    /** Bytes of one builder warp's slice over @p selection_rows cached candidates: the query span
+     *  while walking, then the candidate cache, and per cached candidate its score, three ID spans,
+     *  its distance and its norms. */
+    u32_t build_scratch_bytes_per_warp(u32_t selection_rows) const noexcept {
+        u32_t const candidate_bytes = static_cast<u32_t>(row_bytes() + gpu_scored_node_bytes<node_id_t> +
+                                                         3 * sizeof(u32_t) + sizeof(f32_t) + sizeof(norms_t));
+        return max_of(static_cast<u32_t>(row_bytes()), selection_rows * candidate_bytes);
     }
 
     /** The serialized extents: published nodes x logical dimensions & connectivity - the fragment
@@ -519,13 +513,16 @@ struct vram_index {
      *  set, the wide arena frontier adds its spill tail. */
     enum class frontier_kind_t : u32_t { register_ladder_k, wide_arena_k };
 
-    /** One warp's arena slice for a walk expanding @p expansion candidates: the exact visited set,
-     *  plus the spill tail when @p frontier_kind outgrows registers - a row of neighbors per
-     *  expansion, the most it spills. */
-    gpu_arena_shape_t arena_shape_for(u32_t expansion, frontier_kind_t frontier_kind) const noexcept {
-        return gpu_arena_shape(
-            expansion,
-            frontier_kind == frontier_kind_t::wide_arena_k ? static_cast<u32_t>(connectivity()) * expansion : 0, 0);
+    /** One warp's arena slice for @p walks walks sharing one visited set over pools of @p pool_rows
+     *  ranks: the exact visited set over every ID they claim, plus the spill tail when
+     *  @p frontier_kind outgrows registers, what their expansions stage. */
+    gpu_arena_shape_t arena_shape_for(u32_t pool_rows, frontier_kind_t frontier_kind, u32_t walks = 1) const noexcept {
+        u32_t const connectivity = static_cast<u32_t>(this->connectivity()), lanes = derived().wave_lanes();
+        u32_t const visits = walks * gpu_walk_visits(pool_rows, connectivity, lanes);
+        u32_t const tail = frontier_kind == frontier_kind_t::wide_arena_k
+                               ? walks * gpu_walk_tail_entries(pool_rows, connectivity, lanes)
+                               : 0;
+        return gpu_arena_shape(visits, tail, 0);
     }
 
     /** Requested geometry & capacity for a @c reserve() call; frozen by the first success. */
@@ -604,7 +601,7 @@ struct vram_index {
 
         /** Breadth of the construction candidate pool; rounded up to the register pools of 2 to 16
          *  warps' worth of ranks and walked exactly past them. Larger pools trade build speed for
-         *  graph quality. */
+         *  graph quality, and zero takes the measured breadth of @ref vram_insert_expansion. */
         small_size_t expansion_factor = 0;
     };
 
@@ -616,15 +613,16 @@ struct vram_index {
         auto aligned = [](std::size_t bytes) noexcept {
             return divide_round_up<std::size_t>(bytes, default_alignment_k) * default_alignment_k;
         };
-        u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
-        gpu_arena_shape_t const arena_shape = build_arena_shape_(config.expansion_factor, pool_slots);
+        u32_t const expansion = static_cast<u32_t>(vram_insert_expansion(config.expansion_factor));
+        u32_t const pool_slots = pool_slots_for_(expansion, 0);
+        gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, pool_slots, 1);
         std::size_t const arena_warps = device_.multiprocessor_count *
                                         derived_::resident_blocks_(derived_::kernel_t::insert_k, pool_slots) *
                                         vram_warps_per_block_k;
         std::size_t const results_bytes = // A default single query's device landing.
             non_zero_expansion_factor(search_config_t {}) * (sizeof(node_id_t) + sizeof(distance_t));
         // The staging also carries the back-link chains: a head per row after the batch, two words
-        // per edge and a count.
+        // per pick and a count.
         std::size_t const links_bytes = (size() + rows + 2 * rows * connectivity() + 1) * sizeof(u32_t);
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
                aligned(arena_warps * arena_shape.slice_bytes<node_id_t>()) +
@@ -646,10 +644,14 @@ struct vram_index {
          *  telemetry. */
         std::size_t unlinked_neighbors = 0;
 
-        /** Frontier tail entries shed past their arena slice - GPU-only telemetry. */
-        std::size_t tail_drops = 0;
+        /** Frontier tails compacted to what can still rank - GPU-only telemetry. */
+        std::size_t tail_compactions = 0;
 
-        /** Visited-set claims that ran out of probes and starved a walk - GPU-only telemetry. */
+        /** Entries tied at that radius a compacted tail still could not seat - GPU-only
+         *  telemetry. */
+        std::size_t tail_unseated = 0;
+
+        /** Visited-set claims that ran out of probes and re-scored - GPU-only telemetry. */
         std::size_t visited_saturations = 0;
 
         /** Refine-side distance work, folded into @c computed_distances here, so always zero. */
@@ -689,7 +691,8 @@ struct vram_index {
         inserted.value.computed_distances = spent.scored;
         inserted.value.restarts = spent.restarts;
         inserted.value.unlinked_neighbors = spent.lock_skips;
-        inserted.value.tail_drops = spent.tail_drops;
+        inserted.value.tail_compactions = spent.tail_compactions;
+        inserted.value.tail_unseated = spent.tail_unseated;
         inserted.value.visited_saturations = spent.visited_saturations;
         return inserted;
     }
@@ -702,7 +705,7 @@ struct vram_index {
     struct search_config_t {
 
         /** Breadth of the candidate pool, walked as given when it covers @c count and widened to
-         *  twice @c count otherwise; a single-query walk takes twice the connectivity for zero. */
+         *  @c count otherwise; a single-query walk takes twice the connectivity for zero. */
         small_size_t expansion_factor = 0;
 
         /** Matches reported per query; a walk past the widest register pool ranks every candidate
@@ -725,7 +728,8 @@ struct vram_index {
         std::size_t visited_members = 0;
         std::size_t computed_distances = 0;
         std::size_t restarts = 0;
-        std::size_t tail_drops = 0;
+        std::size_t tail_compactions = 0;
+        std::size_t tail_unseated = 0;
         std::size_t visited_saturations = 0;
     };
 
@@ -910,23 +914,20 @@ struct vram_index {
 
   protected:
 
-    /** Sweeps an audit numbers from one and stops below: every row joins one frontier at most, so
-     *  the levels are bounded by the landmarks' eccentricity, capped defensively. */
-    inline static constexpr std::size_t audit_sweeps_cap_k = 256;
-
     /** Device scratch one refine plan carves once and its passes and audits reuse, or the audit
-     *  share one @c health carves: the reached set and two frontiers, the levels counter beside
-     *  every sweep's expanded counter, the unreached, reconnected and claim counters an audit lands
-     *  together, then for a refine the passes' buffers, the unreached rows' IDs and in-link counts,
-     *  and the parts' bases. */
+     *  share one @c health carves: the reached set and two frontiers, the levels counter beside the
+     *  last two sweeps' expanded counters, by the sweep number's parity, the unreached, reconnected
+     *  and claim counters an audit lands together, then for a refine the passes' buffers, the
+     *  unreached rows' IDs and in-link counts, and the parts' bases. Sweeps run until one expands
+     *  nothing: every row joins one frontier at most, so the rows bound them. */
     struct refine_scratch_t {
         typename traversal_context_t::bytes_ptr_t bytes;
 
         /** The reached set and the two frontiers, one bit per row each. */
         vram_bitset_t reached, frontier, next_frontier;
 
-        /** Rows each sweep expanded, at the sweep's number, @b [audit_sweeps_cap_k]; slot zero,
-         *  which no sweep numbers, counts the levels that expanded anything. */
+        /** The levels that expanded anything, then the rows the last two sweeps expanded. */
+        u32_t* levels = nullptr;
         u32_t* expanded = nullptr;
         u32_t* unreached = nullptr;
         u32_t* reconnected = nullptr;
@@ -1007,26 +1008,38 @@ struct vram_index {
                 iota_view<node_id_t> const range = round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
                 walked_ = range.size();
                 if (walked_) status_ = index_->refine_pass_(*context_, scratch_, config_, range, {}, parts_, round_);
-                if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), stream);
+                if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), 0, stream);
                 break;
             }
             case phase_t::audit_k:
                 walked_ = 0;
-                status_ = index_->queue_audit_(*context_, scratch_, landing_.get());
+                status_ = queue_sweeps_();
                 break;
             case phase_t::heal_k:
                 // The island IDs replace the range: offsets below their count index them. Only
                 // island rows change, and no reached row points at one, so the audit before stands.
-                walked_ = islands_;
-                status_ = index_->refine_pass_(*context_, scratch_, config_, {0, islands_},
-                                               {scratch_.island_ids, islands_});
-                if (succeeded(status_)) status_ = index_->queue_reconnect_(scratch_, islands_, scratch_rows_, stream);
-                if (succeeded(status_)) status_ = index_->queue_audit_(*context_, scratch_, landing_.get());
+                // A continued audit sweeps on alone.
+                walked_ = next_sweep_ ? 0 : islands_;
+                if (walked_)
+                    status_ = index_->refine_pass_(*context_, scratch_, config_, {0, islands_},
+                                                   {scratch_.island_ids, islands_});
+                if (succeeded(status_) && !next_sweep_)
+                    status_ = index_->queue_reconnect_(scratch_, islands_, scratch_rows_, stream);
+                if (succeeded(status_)) status_ = queue_sweeps_();
                 break;
             default: return status_t::success_k;
             }
             if (succeeded(status_)) status_ = context_->record();
             return status_;
+        }
+
+        /** Queues the audit's next batch of sweeps, its seeds first when it starts. */
+        status_t queue_sweeps_() noexcept {
+            status_t const queued = next_sweep_
+                                        ? index_->queue_sweeps_(*context_, scratch_, landing_.get(), next_sweep_)
+                                        : index_->queue_audit_(*context_, scratch_, landing_.get());
+            next_sweep_ = next_sweep_ ? 2 * next_sweep_ : 2;
+            return queued;
         }
 
         /** Sleeps until the queued phase landed, on the context's event. */
@@ -1053,15 +1066,11 @@ struct vram_index {
                 phase_ = phase_t::audit_k;
                 return true;
             }
-            auto const [health, audit_status] = audited_(landed, scratch_rows_);
-            tally_.health = health;
+            // A last sweep that still expanded leaves rows unjudged, so the phase sweeps on.
+            if (landed.last_expanded) return true;
+            next_sweep_ = 0;
+            tally_.health = audited_(landed, scratch_rows_);
             tally_.islands_reconnected = landed.reconnected;
-            // Rows past an unconverged audit are unjudged, not unreached, so nothing heals them.
-            if (failed(audit_status)) {
-                status_ = audit_status;
-                phase_ = phase_t::done_k;
-                return false;
-            }
             u32_t const left = landed.unreached;
             if (phase_ == phase_t::audit_k) tally_.islands_found = left;
             // A round that frees no island frees none on the next either, since the picks it needs
@@ -1123,6 +1132,9 @@ struct vram_index {
         /** Rows the queued phase walks, and the islands the last audit left. */
         std::size_t walked_ = 0;
         u32_t islands_ = 0;
+
+        /** The audit sweep the next batch queues from, zero before an audit starts. */
+        u32_t next_sweep_ = 0;
         phase_t phase_ = phase_t::done_k;
         status_t status_ = status_t::success_k;
         refine_result_t tally_;
@@ -1162,14 +1174,13 @@ struct vram_index {
         if (!plan.landing_) return {std::move(plan), status_t::bad_alloc_k};
         // The widest walk's arena now, so no pass grows it; a fresh run is zeroed by the pass.
         u32_t const expansion = non_zero_expansion_factor(config);
+        u32_t const pool_slots = pool_slots_for_(expansion, 4);
         u32_t const walks = parts ? 2 : 1;
         std::size_t const arena_warps = device_.multiprocessor_count *
-                                        derived_::resident_blocks_(derived_::kernel_t::refine_k,
-                                                                   pool_slots_for_(expansion, 4)) *
+                                        derived_::resident_blocks_(derived_::kernel_t::refine_k, pool_slots) *
                                         vram_warps_per_block_k;
         if (!context.ensure_arena(arena_warps *
-                                  build_arena_shape_(expansion * walks, pool_slots_for_(expansion, 4) * walks)
-                                      .template slice_bytes<node_id_t>()))
+                                  build_arena_shape_(expansion, pool_slots, walks).template slice_bytes<node_id_t>()))
             return {std::move(plan), status_t::bad_alloc_k};
         stream_handle_t const stream = context.stream();
         // Zeroed once, so every pass adds up, and landed with every phase. A pageable upload stages
@@ -1216,8 +1227,8 @@ struct vram_index {
     /** Measures forward reachability from as many stride-spread landmarks as one search draws -
      *  the connectivity; any shortfall against @c size() is the population no search can
      *  discover. Read-only on the graph, so concurrent insertions may leave fresh nodes
-     *  uncounted. Waits once, on the context's event; @c overflow_k when the sweeps reached
-     *  their cap unconverged. */
+     *  uncounted. Waits on the context's event once per batch of sweeps, the batches doubling
+     *  until one expands nothing. */
     expected<health_result_t> health(traversal_context_t& context) noexcept {
         std::size_t const rows = size();
         if (!rows) return {{}, status_t::success_k};
@@ -1227,8 +1238,14 @@ struct vram_index {
         if (!landing) return {{}, status_t::bad_alloc_k};
         if (status_t const queued = derived().queue_audit_(context, scratch, landing.get()); failed(queued))
             return {{}, queued};
-        if (status_t const drained = context.drain(); failed(drained)) return {{}, drained};
-        return audited_(*landing, rows);
+        for (u32_t first_sweep = 2;; first_sweep *= 2) {
+            if (status_t const drained = context.drain(); failed(drained)) return {{}, drained};
+            if (!landing->last_expanded) break;
+            if (status_t const queued = derived().queue_sweeps_(context, scratch, landing.get(), first_sweep);
+                failed(queued))
+                return {{}, queued};
+        }
+        return {audited_(*landing, rows), status_t::success_k};
     }
 
     /** The bytes an executor's run must hold before a context carved over it can refine the rows
@@ -1240,11 +1257,10 @@ struct vram_index {
             return divide_round_up<std::size_t>(bytes, default_alignment_k) * default_alignment_k;
         };
         u32_t const expansion = non_zero_expansion_factor(config);
-        gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion * walks,
-                                                                 pool_slots_for_(expansion, 4) * walks);
+        u32_t const pool_slots = pool_slots_for_(expansion, 4);
+        gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, pool_slots, walks);
         std::size_t const arena_warps = device_.multiprocessor_count *
-                                        derived_::resident_blocks_(derived_::kernel_t::refine_k,
-                                                                   pool_slots_for_(expansion, 4)) *
+                                        derived_::resident_blocks_(derived_::kernel_t::refine_k, pool_slots) *
                                         vram_warps_per_block_k;
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
                aligned(arena_warps * arena_shape.slice_bytes<node_id_t>()) +
@@ -1954,10 +1970,10 @@ struct vram_index {
         stream_handle_t const stream = context.stream();
         std::size_t const import_bytes = import_bytes_(rows, new_rows.dtype);
         // Past the rows and their import window: the chain heads over every row, then the batch's
-        // edge links, the touched nodes and their count.
-        std::size_t const total_rows = first_id + rows, edges = rows * connectivity();
+        // pick links, the touched nodes and their count.
+        std::size_t const total_rows = first_id + rows, picks = rows * connectivity();
         std::size_t const links_offset = round_up_to_multiple<std::size_t>(rows * row_bytes() + import_bytes, 16);
-        std::size_t const links_bytes = (total_rows + 2 * edges + 1) * sizeof(u32_t);
+        std::size_t const links_bytes = (total_rows + 2 * picks + 1) * sizeof(u32_t);
         byte_t* const staging = context.ensure_staging(links_offset + links_bytes);
         if (!staging) return {{}, status_t::bad_alloc_k};
         u32_t* const link_heads = reinterpret_cast<u32_t*>(staging + links_offset);
@@ -1971,8 +1987,10 @@ struct vram_index {
             return {{}, imported};
 
         // Every inserting warp owns an arena slice for its exact visited set.
-        u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
-        gpu_arena_shape_t const arena_shape = build_arena_shape_(config.expansion_factor, pool_slots);
+        u32_t const expansion = static_cast<u32_t>(vram_insert_expansion(config.expansion_factor));
+        u32_t const pool_slots = pool_slots_for_(expansion, 0);
+        u32_t const selection_rows = walk_selection_rows_(expansion, pool_slots);
+        gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, pool_slots, 1);
         std::size_t const arena_warps = device_.multiprocessor_count *
                                         derived_::resident_blocks_(derived_::kernel_t::insert_k, pool_slots) *
                                         vram_warps_per_block_k;
@@ -1989,19 +2007,20 @@ struct vram_index {
         vram_build_t const build {storage(),
                                   staging,
                                   static_cast<u32_t>(total_rows),
-                                  arena_shape.cache_bytes ? 0u : insert_scratch_bytes_per_warp(),
+                                  arena_shape.scratch_bytes ? 0u : build_scratch_bytes_per_warp(selection_rows),
+                                  selection_rows,
                                   first_id,
                                   arena,
                                   arena_shape,
-                                  config.expansion_factor,
+                                  expansion,
                                   epoch_base,
                                   published_rows_(),
                                   context.telemetry_.get(),
                                   context.assigned_rows_.get(),
                                   link_heads,
                                   link_heads + total_rows,
-                                  link_heads + total_rows + edges,
-                                  link_heads + total_rows + 2 * edges};
+                                  link_heads + total_rows + picks,
+                                  link_heads + total_rows + 2 * picks};
         // The launch is the last fallible step; reading its verdict here keeps the claim
         // reversible.
         if (failed(derived().launch_insert_(build, pool_slots, context))) return {{}, status_t::device_error_k};
@@ -2163,7 +2182,8 @@ struct vram_index {
         submitted.value.visited_members = spent.hops;
         submitted.value.computed_distances = spent.scored;
         submitted.value.restarts = spent.restarts;
-        submitted.value.tail_drops = spent.tail_drops;
+        submitted.value.tail_compactions = spent.tail_compactions;
+        submitted.value.tail_unseated = spent.tail_unseated;
         submitted.value.visited_saturations = spent.visited_saturations;
         return submitted;
     }
@@ -2219,7 +2239,7 @@ struct vram_index {
         std::size_t const passes_words = use == scratch_use_t::refine_k
                                              ? rows * (3 + 2 * connectivity()) + words + parts
                                              : 0;
-        return (words * 3 + audit_sweeps_cap_k + 4 + passes_words) * sizeof(u32_t);
+        return (words * 3 + 7 + passes_words) * sizeof(u32_t);
     }
 
     /** Carves the scratch over the rows published now, for @c refine_k the whole of a refine's
@@ -2239,8 +2259,9 @@ struct vram_index {
         scratch.reached.words = reinterpret_cast<u32_t*>(scratch.bytes.get());
         scratch.frontier.words = scratch.reached.words + scratch.words;
         scratch.next_frontier.words = scratch.frontier.words + scratch.words;
-        scratch.expanded = scratch.next_frontier.words + scratch.words;
-        scratch.unreached = scratch.expanded + audit_sweeps_cap_k;
+        scratch.levels = scratch.next_frontier.words + scratch.words;
+        scratch.expanded = scratch.levels + 1;
+        scratch.unreached = scratch.expanded + 2;
         scratch.reconnected = scratch.unreached + 1;
         scratch.claims = scratch.reconnected + 1;
         if (use == scratch_use_t::refine_k) {
@@ -2257,24 +2278,24 @@ struct vram_index {
         return {std::move(scratch), status_t::success_k};
     }
 
-    /** Queues the copy of @p scratch 's counters into @p landing: the levels apart, then the last
-     *  sweep's count beside the unreached, reconnected and claim counters, which lie back to
+    /** Queues the copy of @p scratch 's counters into @p landing: the levels, the count of sweep
+     *  @p last_sweep, then the unreached, reconnected and claim counters, which lie back to
      *  back. */
-    static status_t land_counters_(refine_scratch_t const& scratch, audit_landing_t* landing,
+    static status_t land_counters_(refine_scratch_t const& scratch, audit_landing_t* landing, u32_t last_sweep,
                                    stream_handle_t stream) noexcept {
-        return succeeded(vendor_t::copy(&landing->levels, scratch.expanded, sizeof(u32_t), stream)) &&
-                       succeeded(vendor_t::copy(&landing->last_expanded, scratch.expanded + audit_sweeps_cap_k - 1,
-                                                sizeof(audit_landing_t) - sizeof(u32_t), stream))
+        return succeeded(vendor_t::copy(&landing->levels, scratch.levels, sizeof(u32_t), stream)) &&
+                       succeeded(vendor_t::copy(&landing->last_expanded, scratch.expanded + (last_sweep & 1u),
+                                                sizeof(u32_t), stream)) &&
+                       succeeded(vendor_t::copy(&landing->unreached, scratch.unreached,
+                                                sizeof(audit_landing_t) - 2 * sizeof(u32_t), stream))
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
 
-    /** The audit @p landing reports over @p rows rows: @c overflow_k when its last sweep still
-     *  expanded, since the rows past the cap are then unjudged rather than unreached. */
-    static expected<health_result_t> audited_(audit_landing_t const& landing, std::size_t rows) noexcept {
-        if (landing.last_expanded) return {{rows, rows - landing.unreached, audit_sweeps_cap_k}, status_t::overflow_k};
+    /** The converged audit @p landing reports over @p rows rows. */
+    static health_result_t audited_(audit_landing_t const& landing, std::size_t rows) noexcept {
         // A sweep that expands nothing ends the levels, and it counts as one, as on the CPU.
-        return {{rows, rows - landing.unreached, std::size_t {landing.levels} + 1}, status_t::success_k};
+        return {rows, rows - landing.unreached, std::size_t {landing.levels} + 1};
     }
 
 #pragma endregion Refinement
@@ -2386,14 +2407,33 @@ struct vram_index {
         return gpu_pool_slots(expansion_factor, default_slots, derived().wave_lanes());
     }
 
-    /** One building warp's arena slice on the rung of @p pool_slots, the arena frontier's over
-     *  @p expansion at zero, then the builders' scratch when shared memory cannot seat it. */
-    gpu_arena_shape_t build_arena_shape_(u32_t expansion, u32_t pool_slots) const noexcept {
-        gpu_arena_shape_t shape = pool_slots ? arena_shape_for(pool_slots * derived().wave_lanes(),
-                                                               frontier_kind_t::register_ladder_k)
-                                             : arena_shape_for(expansion, frontier_kind_t::wide_arena_k);
-        if (!derived().build_scratch_fits())
-            shape.cache_bytes = max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp());
+    /** Candidates a walk's diversity selection caches: the walk's whole pool, as the CPU's
+     *  selection judges, @p pool_slots ranks per lane on the register ladder, or the arena
+     *  frontier's @p expansion past it. */
+    u32_t walk_selection_rows_(u32_t expansion, u32_t pool_slots) const noexcept {
+        return pool_slots ? pool_slots * derived().wave_lanes() : expansion;
+    }
+
+    /** Candidates a re-selection caches, a back-link round's or a refinement merge's: a row of the
+     *  node's own neighbors or forward picks, a row's worth of incoming newcomers or reverse
+     *  proposals, and the node's own row last. */
+    u32_t reselection_rows_() const noexcept { return 2 * static_cast<u32_t>(connectivity()) + 1; }
+
+    /** Bytes of one builder warp's slice, its walk's or its re-selection's, whichever caches more:
+     *  an insert and its back-link, or a refine and its merge, share one arena shape. */
+    u32_t builder_scratch_bytes_per_warp_(u32_t expansion, u32_t pool_slots) const noexcept {
+        return build_scratch_bytes_per_warp(max_of(walk_selection_rows_(expansion, pool_slots), reselection_rows_()));
+    }
+
+    /** One building warp's arena slice for @p walks walks on the rung of @p pool_slots, the arena
+     *  frontier's over @p expansion at zero, then the builders' scratch when shared memory cannot
+     *  seat it. */
+    gpu_arena_shape_t build_arena_shape_(u32_t expansion, u32_t pool_slots, u32_t walks) const noexcept {
+        u32_t const scratch_bytes = builder_scratch_bytes_per_warp_(expansion, pool_slots);
+        gpu_arena_shape_t shape = arena_shape_for(
+            walk_selection_rows_(expansion, pool_slots),
+            pool_slots ? frontier_kind_t::register_ladder_k : frontier_kind_t::wide_arena_k, walks);
+        if (!derived().build_scratch_fits(scratch_bytes)) shape.scratch_bytes = scratch_bytes;
         return shape;
     }
 
