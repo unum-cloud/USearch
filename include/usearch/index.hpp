@@ -2489,7 +2489,9 @@ class index_gt {
         top_candidates_t top_for_refine{};
         next_candidates_t next_candidates{};
         visits_hash_set_t visits{};
-        std::default_random_engine level_generator{};
+        /// @brief Draws the levels of new nodes. Seeded per context: default-seeded, every thread would draw
+        ///        the same levels, starting over whenever `reserve` recreates the contexts.
+        std::default_random_engine level_generator{std::random_device{}()};
         std::size_t iteration_cycles{};
         std::size_t computed_distances{};
         std::size_t computed_distances_in_refines{};
