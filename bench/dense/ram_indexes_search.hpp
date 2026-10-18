@@ -242,7 +242,8 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     auto started = steady_clock_t::now();
     for (std::size_t base = bench.settings.skip_vectors.value; base != rows;) {
         std::size_t const count = std::min(batch_rows, rows - base);
-        for (std::size_t row = 0; row != count; ++row) keys[row] = static_cast<key_t>(base + row);
+        for (std::size_t row = 0; row != count; ++row)
+            keys[row] = static_cast<key_t>(bench.settings.first_vector.value + base + row);
 
         vectors_view_t batch;
         if constexpr (streamed_dataset_type_::zero_copy_k)

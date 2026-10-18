@@ -1,4 +1,4 @@
-# The pin for what only the suites and drivers link: {fmt} for the C++ smoke tests, benchmarks and MPI drivers, as
+# The pin for what only the suites and tools link: {fmt} for the C++ smoke tests, benchmarks and command-line tools, as
 # libstdc++ doesn't ship `std::print` yet on our toolchain. `FIND_PACKAGE_ARGS` lets a system-provided {fmt} satisfy the
 # dependency without touching the network, but only from the pinned version up - the copies distributions ship predate
 # `fmt::println` and would fail deep in the suites rather than here.

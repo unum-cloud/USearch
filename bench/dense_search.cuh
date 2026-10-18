@@ -255,14 +255,15 @@ ranking_verdict_t judge_ranking(std::span<key_type_ const> returned, std::span<k
 }
 
 /** Judges the merged hits after the clocks stopped - self-recall against own rows, or
- *  recall/overlap/ndcg against the ground truth - one sweep per query either way. */
+ *  recall/overlap/ndcg against the ground truth - one sweep per query either way. Hits are
+ *  dataset rows, so `--first-vector` shifts the self rows. */
 inline void judge_hits(settings_t const& settings, bench_results_t const& results, nk::matrix_view<u32_t> ground_truth,
                        std::size_t query_count) {
     if (settings.self_search == switch_t::present_k) {
         std::size_t found_at_1 = 0, found_at_k = 0;
         for (std::size_t query = 0; query != query_count; ++query) {
             auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
-            u32_t const own_row = static_cast<u32_t>(query);
+            u32_t const own_row = static_cast<u32_t>(settings.first_vector.value + query);
             found_at_1 += !returned.empty() && returned.front() == own_row;
             bool within = false;
             for (u32_t row : returned) within |= row == own_row;
@@ -481,7 +482,8 @@ void judge_search(settings_t const& settings, bench_indexer_heads<scalar_type_> 
     for (std::size_t query = 0; query != judged; ++query) {
         exact_scorer_t scorer = exact_scorer_of(heads, query);
         std::vector<exact_row_t> const best = exact_best_rows(scorer, vectors, top_k);
-        for (std::size_t rank = 0; rank != best.size(); ++rank) truth[query * top_k + rank] = best[rank].row;
+        for (std::size_t rank = 0; rank != best.size(); ++rank)
+            truth[query * top_k + rank] = best[rank].row + static_cast<u32_t>(settings.first_vector.value);
     }
     fmt::println("  oracle: exact top-{} of {} queries", top_k, judged);
     judge_hits(settings, results, nk::matrix_view<u32_t> {truth.data(), judged, top_k}, judged);

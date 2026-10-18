@@ -129,6 +129,10 @@ extern "C" {
 #define USEARCH_VERSION_MINOR 0
 #define USEARCH_VERSION_PATCH 0
 
+/** One byte of raw storage, read or written without interpretation: a key's identity, a borrowed
+ *  run's contents, the buffers callers hand in. */
+typedef uint8_t usearch_byte_t;
+
 /**
  *  @brief User-facing 128-bit key identifying one entry of any index - sixteen opaque bytes,
  *      rendered canonically as a lowercase dashed UUID, matching SafeGraphs' @c uuid key column.
@@ -137,7 +141,7 @@ extern "C" {
  *  many. Integer identities sit in the low bytes with the rest zeroed.
  */
 typedef struct usearch_key_t {
-    uint8_t bytes[16];
+    usearch_byte_t bytes[16];
 } usearch_key_t;
 
 /** Distance or similarity score between two entries, in the metric of the index that
@@ -154,7 +158,7 @@ typedef double usearch_distance_t;
 typedef struct usearch_bytes_view_t {
 
     /** First byte of the run; text is bytes that happen to decode. */
-    uint8_t const* data;
+    usearch_byte_t const* data;
 
     /** Bytes the run spans, with no terminator assumed or written. */
     size_t length;

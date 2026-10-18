@@ -176,8 +176,10 @@ constexpr std::optional<u64_t> identity_of(uuid_t const& key) noexcept {
     return identity;
 }
 
-/** The single-byte scalar every allocator deals in - the unit of raw storage. */
+/** The single-byte scalar every allocator deals in - the unit of raw storage, and the C++
+ *  counterpart of @c usearch_byte_t. */
 using byte_t = std::byte;
+static_assert(sizeof(byte_t) == sizeof(usearch_byte_t), "One raw byte on both sides of the C interface");
 
 /** A mutable run of raw bytes - the staging & carve currency of writers. */
 using bytes_span_t = std::span<byte_t>;

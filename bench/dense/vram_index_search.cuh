@@ -73,7 +73,8 @@ inline constexpr nk_dtype_t cuda_dtypes_ladder_k[] = {nk_bf16_k, nk_u1_k, nk_i8_
                                                       nk_e5m2_k, nk_i4_k, nk_u4_k, nk_e3m2_k, nk_e2m3_k};
 
 /** Resolves an ID, a node on one device or a key across the shards, to its value row in a device
- *  table of rows @c pitch bytes apart; the entries' @c kernel_attention_lookup_t adds the call. */
+ *  table of rows @c pitch bytes apart, the table starting at ID @c first_id; the entries'
+ *  @c kernel_attention_lookup_t adds the call. */
 struct attention_value_lookup_t {
 
     /** Names the lookup to the attend kernels the binary's fatbin carries. */
@@ -81,6 +82,7 @@ struct attention_value_lookup_t {
 
     byte_t const* rows;
     std::size_t pitch;
+    std::size_t first_id = 0;
 };
 
 /** The device knobs the CUDA binaries parse beside @c settings_t, before any dtype is known; the
@@ -265,6 +267,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     double seconds = 0;
     for (std::size_t offset = 0; offset < inserted_rows;) {
         std::size_t const first_row = bench.settings.skip_vectors.value + offset;
+        std::size_t const first_key = bench.settings.first_vector.value + first_row;
         std::size_t const batch = std::min(batch_rows, inserted_rows - offset);
         auto const staged = stage_batch(streamed, streamed.vectors, first_row, batch);
         auto const started = steady_clock_t::now();
@@ -275,7 +278,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
             return false;
         }
         for (std::size_t row = 0; row != batch; ++row)
-            streamed.id_to_row[batch_ids[row]] = static_cast<u32_t>(first_row + row);
+            streamed.id_to_row[batch_ids[row]] = static_cast<u32_t>(first_key + row);
         bench.lane.visited_members += result.visited_members;
         bench.lane.computed_distances += result.computed_distances;
         bench.lane.restarts += result.restarts;
@@ -488,16 +491,25 @@ int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dat
     settings_t const& settings = bench.settings;
 
     std::size_t const dimensions = dataset.dimensions();
-    std::size_t rows = dataset.vectors().extent(0);
+    std::size_t const total_rows = dataset.vectors().extent(0);
+    std::size_t const first_row = settings.first_vector.value;
+    if (first_row >= total_rows) {
+        fmt::println("--first-vector {} exceeds the {} dataset rows", first_row, total_rows);
+        return 1;
+    }
+    std::size_t rows = total_rows - first_row;
     if (settings.max_base_vectors.value) rows = std::min(rows, settings.max_base_vectors.value);
+    nk::matrix_view<dataset_scalar_type_> const dataset_vectors = dataset.vectors();
+    nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset_vectors(nk::range(first_row, first_row + rows),
+                                                                                 nk::slice);
 
     // Self-queries keep the harness usable on a lone vectors file, without recall.
     nk::matrix_view<dataset_scalar_type_> const source_queries =
-        dataset.has_queries() ? dataset.queries()
-                              : nk::matrix_view<dataset_scalar_type_> {dataset.vectors().data(),
-                                                                       std::min<std::size_t>(1000, rows), dimensions};
+        dataset.has_queries()
+            ? dataset.queries()
+            : sliced_vectors(nk::range(std::size_t {0}, std::min<std::size_t>(1000, rows)), nk::slice);
 
-    streamed_t streamed {bench, {dataset.vectors().data(), rows, dimensions}, source_queries};
+    streamed_t streamed {bench, sliced_vectors, source_queries};
 
     // Owns the staging trampoline rows, `[1,batch,dimensions]`.
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
@@ -521,9 +533,11 @@ int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dat
         streamed.establish_scale();
     }
 
-    if (dataset.has_ground_truth() && !settings.max_base_vectors.value) streamed.ground_truth = dataset.neighbors();
+    if (dataset.has_ground_truth() && !settings.max_base_vectors.value && !first_row)
+        streamed.ground_truth = dataset.neighbors();
     else if (dataset.has_ground_truth())
-        fmt::println("Ground truth ignored: --max-base-vectors truncates the graph it was computed for");
+        fmt::println(
+            "Ground truth ignored: --max-base-vectors or --first-vector reshapes the graph it was computed for");
     return phases(streamed) ? 0 : 1;
 }
 

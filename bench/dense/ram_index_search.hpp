@@ -228,7 +228,7 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     lane.computed_distances_in_reverse_refines += result.computed_distances_in_reverse_refines;
     lane.restarts += result.restarts;
     lane.saturated_walks += result.saturated_walks;
-    streamed.id_to_row[local_id] = static_cast<u32_t>(row);
+    streamed.id_to_row[local_id] = static_cast<u32_t>(bench.settings.first_vector.value + row);
 }
 
 template <typename streamed_dataset_type_>

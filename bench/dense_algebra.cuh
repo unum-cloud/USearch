@@ -138,16 +138,16 @@ struct algebra_inputs {
 };
 
 /** Opens everything @ref algebra_inputs holds for the searched queries of @p streamed, with value rows
- *  gathered into node order through @p id_to_row; the table spans every viewed row and every row an
- *  ID names. */
+ *  gathered into node order through @p id_to_row, each node's dataset row; the table spans every
+ *  viewed row and every row an ID names. */
 template <typename scalar_type_, typename streamed_dataset_type_>
 bool open_algebra_inputs(streamed_dataset_type_ const& streamed, algebra_settings_t const& algebra,
                          std::span<u32_t const> id_to_row, algebra_inputs<scalar_type_>& inputs) {
     settings_t const& settings = streamed.bench.settings;
     std::size_t const dimensions = searched_rows(streamed).extent(1);
-    std::size_t rows_count = streamed.vectors.extent(0);
-    for (u32_t const row : id_to_row) rows_count = std::max<std::size_t>(rows_count, std::size_t {row} + 1);
     std::size_t const first_row = settings.first_vector.value;
+    std::size_t rows_count = streamed.vectors.extent(0);
+    for (u32_t const row : id_to_row) rows_count = std::max<std::size_t>(rows_count, row - first_row + 1);
     if (!settings.heads_path.empty() || !settings.weights_path.empty())
         return fmt::println("--heads ranks searches alone; attend weighs plain logits"), false;
 
@@ -187,7 +187,7 @@ bool open_algebra_inputs(streamed_dataset_type_ const& streamed, algebra_setting
     std::size_t const row_bytes = inputs.value_row_bytes();
     inputs.node_values.resize(id_to_row.size() * row_bytes);
     for (std::size_t node = 0; node != id_to_row.size(); ++node) {
-        widen_row(inputs.value_rows.row(id_to_row[node]).as_vector(), std::span {widened});
+        widen_row(inputs.value_rows.row(id_to_row[node] - first_row).as_vector(), std::span {widened});
         for (f32_t& value : widened) value = (value + inputs.value_offset) * inputs.value_scale;
         [[maybe_unused]] nk_status_t const cast = nk_cast_serial(widened.data(), nk_f32_k,
                                                                  inputs.node_values.data() + node * row_bytes,
@@ -277,7 +277,7 @@ std::vector<exact_attention_t> exact_attention(nk::matrix_view<dataset_scalar_ty
 /** One pair a judged multiply scored: the key's dataset row and its dot. */
 struct scored_pair_t {
 
-    /** The key's viewed dataset row. */
+    /** The key's dataset row. */
     u32_t row;
 
     /** The dot the walk scored. */

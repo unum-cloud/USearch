@@ -54,7 +54,7 @@ __device__ void instantiate_cuda_kernels() noexcept {
 /** The attention lookup as the kernels call it: the host's record, byte for byte, which an attend
  *  kernel copies its argument into. */
 struct kernel_attention_lookup_t : attention_value_lookup_t {
-    __device__ void const* operator()(std::size_t id) const noexcept { return rows + id * pitch; }
+    __device__ void const* operator()(std::size_t id) const noexcept { return rows + (id - first_id) * pitch; }
 };
 static_assert(sizeof(kernel_attention_lookup_t) == sizeof(attention_value_lookup_t));
 

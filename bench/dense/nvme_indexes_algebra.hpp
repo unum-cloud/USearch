@@ -162,6 +162,9 @@ bool run_nvme_algebra(streamed_dataset_type_& streamed, algebra_settings_t const
  *  parts, judged against the exact oracle. */
 struct nvme_algebra_workload_t {
 
+    /** Keys the parts are viewed with, the dataset rows the value table is addressed by. */
+    using key_t = u32_t;
+
     /** The algebra knobs, borrowed for the run's lifetime. */
     algebra_settings_t const& algebra;
 

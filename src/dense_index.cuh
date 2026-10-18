@@ -4028,8 +4028,8 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
     std::size_t transport_ids = 0, pcie_ids = 0;
     for (std::size_t path = 0; path != nvme.paths_count; ++path) {
         std::string_view const named = as_text(nvme.paths[path]);
-        transport_ids += named.find("trtype:") != std::string_view::npos;
-        pcie_ids += named.find("trtype:PCIe") != std::string_view::npos;
+        transport_ids += names_transport_id(named);
+        pcie_ids += named.starts_with("spdk://") || named.find("trtype:PCIe") != std::string_view::npos;
     }
     if (transport_ids && transport_ids != nvme.paths_count)
         return propagate_error(usearch_status_config_mismatch_k, outcome,

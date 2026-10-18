@@ -39,9 +39,9 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     auto& bench = streamed.bench;
     settings_t const& settings = bench.settings;
     std::size_t const nodes_count = bench.indexes.size(), head_count = algebra.head_count.value;
-    // Keys are viewed rows, so every key finds its value row in place.
+    // Keys are dataset rows, so every key finds its value row past the first viewed one.
     std::vector<u32_t> rows(nodes_count);
-    std::iota(rows.begin(), rows.end(), u32_t {0});
+    std::iota(rows.begin(), rows.end(), static_cast<u32_t>(settings.first_vector.value));
     algebra_inputs<typename bench_t::scalar_t> inputs;
     if (!open_algebra_inputs(streamed, algebra, rows, inputs)) return false;
     std::size_t const query_count = inputs.rows.extent(0), columns = inputs.value_rows.extent(1),
@@ -85,7 +85,7 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     auto const values = inputs.node_values_view();
     auto const value_of = [&](std::span<key_t const> value_keys, std::span<vector_view_t> value_rows) noexcept {
         for (std::size_t lane = 0; lane != value_keys.size(); ++lane)
-            value_rows[lane] = values.row(value_keys[lane]).as_vector();
+            value_rows[lane] = values.row(value_keys[lane] - settings.first_vector.value).as_vector();
     };
     auto outputs = nk::matrix<f32_t>::zeros({query_count, columns}).value;
     std::vector<softmax_state_t> carry(query_count);

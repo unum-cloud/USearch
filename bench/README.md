@@ -95,7 +95,7 @@ build_host_release/usearch_bench_dense_ram_indexes_search \
 - `--max-schedule` defaults to the newest offered: wait instruction ceiling, or `standard`; CPU only.
 - `--threads` defaults to 7/8 of the logical cores: executor threads; CPU only.
 - `--memory-domain` defaults to the heap: NUMA domain to pin, or `all` on the multi-index; CPU only.
-- `--first-vector` defaults to `0`: first dataset row viewed, to slice one file across runs; CPU only.
+- `--first-vector` defaults to `0`: first dataset row viewed, keyed by its row, to slice one file across runs; recall against `--query-neighbors` is judged only over the whole file.
 - `--huge-pages` defaults to `0`: huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only.
 - `USEARCH_DEVICES` - an environment variable, not a flag - names USearch device ordinals, positions in `usearch_gpu_devices`, like `0` or `0,1`; the single-device binaries take the first, the sharded ones place one shard per ordinal, and unset takes the first NVIDIA device; GPU only.
 - `--merge` defaults to off: the inserted rows' second half builds as an index of its own, absorbed into the first half's before refinement and search, and the merge reports its wall time, distances and visits; `usearch_bench_dense_vram_indexes_search` only.

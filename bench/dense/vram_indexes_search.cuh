@@ -171,7 +171,8 @@ bool run_indexes_insertion(streamed_dataset_type_& streamed) {
     for (std::size_t offset = 0; offset < inserted_rows;) {
         std::size_t const first_row = bench.settings.skip_vectors.value + offset;
         std::size_t const batch = std::min(batch_rows, (offset < split ? split : inserted_rows) - offset);
-        std::iota(keys.begin(), keys.begin() + batch, static_cast<key_t>(first_row));
+        std::size_t const first_key = bench.settings.first_vector.value + first_row;
+        std::iota(keys.begin(), keys.begin() + batch, static_cast<key_t>(first_key));
         auto const staged = stage_batch(streamed, streamed.vectors, first_row, batch);
         auto& into = offset < split ? bench.indexes : bench.donor;
         auto const started = steady_clock_t::now();

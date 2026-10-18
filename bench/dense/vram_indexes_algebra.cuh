@@ -42,9 +42,9 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
     if (!algebra.pairs_path.empty()) return fmt::println("--pairs dumps host walks; device walks log no pairs"), false;
     std::size_t const nodes_count = bench.indexes.size(), head_count = algebra.head_count.value;
     std::size_t const wanted = settings.expansion_search.value;
-    // Keys are viewed rows, so every key finds its value row in place.
+    // Keys are dataset rows, so every key finds its value row past the first viewed one.
     std::vector<u32_t> rows(nodes_count);
-    std::iota(rows.begin(), rows.end(), u32_t {0});
+    std::iota(rows.begin(), rows.end(), static_cast<u32_t>(settings.first_vector.value));
     algebra_inputs<typename bench_t::scalar_t> inputs;
     if (!open_algebra_inputs(streamed, algebra, rows, inputs)) return false;
     std::size_t const query_count = inputs.rows.extent(0), columns = inputs.value_rows.extent(1),
@@ -94,7 +94,7 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
         fmt::println("Failed to place {:.2f} GB of values in managed memory", gigabytes(nodes_count * pitch));
         return false;
     }
-    attention_value_lookup_t const lookup {device_values.base(), pitch};
+    attention_value_lookup_t const lookup {device_values.base(), pitch, settings.first_vector.value};
     std::vector<softmax_state_t> carry(attend_rows);
     auto judged_outputs = nk::matrix<f32_t>::zeros({judged, columns}).value;
     nk::matrix_span<f32_t> const outputs {reinterpret_cast<f32_t*>(device_outputs.get()), attend_rows, columns};

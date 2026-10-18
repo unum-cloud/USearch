@@ -264,6 +264,7 @@ inline constexpr nk_kernel_kind_t metrics_k[] = {nk_kernel_dot_k, nk_kernel_angu
  *  --max-refines       0                            Upper bound on refinement passes after ingestion
  *  --expansion-refine  twice the connectivity       Candidate pool while refining
  *  --top-k             10                           Matches per query to judge
+ *  --first-vector      0                            First dataset row viewed, keyed by its row
  *  --max-base-vectors  the whole file               Cap on ingested rows
  *  --self-search       off                          Query every stored vector for itself
  *  --save              none                         Checkpoint name to serialize the indexes into
@@ -361,7 +362,7 @@ struct settings_t {
     /** Cap on ingested rows; absent ingests the whole file. */
     count_t max_base_vectors;
 
-    /** First dataset row to view - slices one file across independent runs. */
+    /** First dataset row to view, keyed by its row - slices one file across independent runs. */
     count_t first_vector {.minimum = 0};
 
     /** Huge pages the launcher provisioned before starting the process; zero expects none, any
@@ -398,7 +399,7 @@ struct settings_t {
 
 /** The flags every binary takes: the dataset, the stored dtype and metric, the graph and its refinement, the
  *  judged depth, the view, and the checkpoints. */
-inline std::array<flag_t, 20> common_flags(settings_t& settings) noexcept {
+inline std::array<flag_t, 21> common_flags(settings_t& settings) noexcept {
     return {{
         {"--base-vectors", "path", "base vectors, `.fbin` family", &settings.base_vectors_path},
         {"--query-vectors", "path", "query vectors, same dtype; the first 1000 base vectors by default",
@@ -415,6 +416,7 @@ inline std::array<flag_t, 20> common_flags(settings_t& settings) noexcept {
         {"--expansion-refine", "breadth", "refinement candidate pool; twice the connectivity by default",
          &settings.expansion_refine},
         {"--top-k", "count", "matches per query to judge; 10 by default", &settings.top_k},
+        {"--first-vector", "row", "first dataset row viewed, keyed by its row; 0 by default", &settings.first_vector},
         {"--max-base-vectors", "count", "cap on ingested rows; the whole file by default", &settings.max_base_vectors},
         {"--self-search", "", "query every stored vector for itself instead of the query file", &settings.self_search},
         {"--scan", "", "answer every query by an exact scan of every stored row instead of a walk", &settings.scan},
@@ -454,18 +456,17 @@ inline std::array<flag_t, 3> indexer_flags(settings_t& settings) noexcept {
 }
 
 /**
- *  @brief The flags only the CPU binaries take: the ceilings, the executor, the placement, and the view.
+ *  @brief The flags only the CPU binaries take: the ceilings, the executor, and the placement.
  *
  *  @verbatim
  *  --max-compute     the newest detected       Compute ceiling by microarchitecture, or serial
  *  --max-schedule    the newest offered        Scheduling ceiling by wait instruction, or standard
  *  --threads         7/8 of the logical cores  Worker threads
  *  --memory-domain   the heap                  NUMA domain to pin to; all in dense_ram_indexes
- *  --first-vector    0                         First dataset row to view
  *  --huge-pages      0                         Huge pages provisioned before launch, enforced
  *  @endverbatim
  */
-inline std::array<flag_t, 6> cpu_flags(settings_t& settings) noexcept {
+inline std::array<flag_t, 5> cpu_flags(settings_t& settings) noexcept {
     return {{
         {"--max-compute", "name", "compute ceiling by microarchitecture, like `icelake`, or `serial`",
          &settings.max_compute_name},
@@ -474,7 +475,6 @@ inline std::array<flag_t, 6> cpu_flags(settings_t& settings) noexcept {
         {"--threads", "count", "threads; 7/8 of the logical cores by default", &settings.threads},
         {"--memory-domain", "id", "pin memory & threads to one NUMA domain; `all` in `dense_ram_indexes` only",
          &settings.memory_domain_name},
-        {"--first-vector", "row", "first dataset row to view; 0 by default", &settings.first_vector},
         {"--huge-pages", "count", "huge pages provisioned before launch; enforced, so base-page fallbacks fail fast",
          &settings.huge_pages},
     }};

@@ -60,7 +60,7 @@ option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 int
 option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
 option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
-option(USEARCH_BUILD_DISTRIBUTED "Compile the MPI drivers in distributed/" OFF)
+option(USEARCH_BUILD_TOOLS "Compile the command-line tools in tools/, and their MPI build where MPI is found" OFF)
 option(USEARCH_BUILD_CUDA "Compile the NVIDIA index variants, tests and benchmarks with NVCC" ${USEARCH_CAN_BUILD_CUDA})
 option(USEARCH_BUILD_ROCM "Compile the AMD index variants and tests with ROCm's Clang" ${USEARCH_CAN_BUILD_ROCM})
 option(USEARCH_BUILD_METAL "Compile the Apple index variants and tests over Metal" ${USEARCH_CAN_BUILD_METAL})
@@ -134,7 +134,7 @@ set(usearch_build_punned_ OFF)
 if (USEARCH_BUILD_TEST
     OR USEARCH_BUILD_BENCH
     OR USEARCH_BUILD_LIB_C
-    OR USEARCH_BUILD_DISTRIBUTED
+    OR USEARCH_BUILD_TOOLS
 )
     set(usearch_build_punned_ ON)
 endif ()
@@ -292,12 +292,9 @@ if (usearch_build_punned_)
 endif ()
 if (USEARCH_BUILD_TEST
     OR USEARCH_BUILD_BENCH
-    OR USEARCH_BUILD_DISTRIBUTED
+    OR USEARCH_BUILD_TOOLS
 )
     include(fmt)
-endif ()
-if (USEARCH_BUILD_DISTRIBUTED)
-    include(mpi)
 endif ()
 if (USEARCH_USE_JEMALLOC)
     include(jemalloc)
@@ -473,10 +470,13 @@ function (usearch_setup_target target)
     if (USEARCH_BUILD_SPDK)
         target_compile_definitions(${target} PRIVATE USEARCH_BUILD_SPDK=1)
         target_include_directories(${target} SYSTEM PRIVATE ${USEARCH_SPDK_INCLUDE_DIRS})
-        target_link_libraries(
-            ${target} PRIVATE "-Wl,--whole-archive" "-Wl,-Bstatic" ${USEARCH_SPDK_LDFLAGS} "-Wl,-Bdynamic"
-                              "-Wl,--no-whole-archive" ${USEARCH_SPDK_SYSTEM_STATIC_LDFLAGS}
-        )
+        # An object library hands its link items to every consumer, which links the archives whole once already.
+        if (NOT target_type_ STREQUAL "OBJECT_LIBRARY")
+            target_link_libraries(
+                ${target} PRIVATE "-Wl,--whole-archive" "-Wl,-Bstatic" ${USEARCH_SPDK_LDFLAGS} "-Wl,-Bdynamic"
+                                  "-Wl,--no-whole-archive" ${USEARCH_SPDK_SYSTEM_STATIC_LDFLAGS}
+            )
+        endif ()
     endif ()
 
     # JeMalloc serves the processes this project starts, its executables; the C library links it in `c/`.
@@ -543,8 +543,8 @@ if (USEARCH_BUILD_LIB_C)
     add_subdirectory(c)
     add_subdirectory(cpp)
 endif ()
-if (USEARCH_BUILD_DISTRIBUTED)
-    add_subdirectory(distributed)
+if (USEARCH_BUILD_TOOLS)
+    add_subdirectory(tools)
 endif ()
 if (USEARCH_BUILD_LIB_PYTHON)
     add_subdirectory(python)
