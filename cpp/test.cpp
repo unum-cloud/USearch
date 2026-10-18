@@ -1564,6 +1564,74 @@ void test_level_generators() {
     expect(!all_multiples);
 }
 
+/**
+ *  @brief  Regression test: pruning a base-level neighbor list must never take a node's last incoming link, which
+ *          leaves the node unreachable by any search. Clustered points with outliers and a small connectivity used to
+ *          orphan about 2% of the nodes.
+ */
+void test_base_level_in_links() {
+    using index_t = index_gt<float, std::int64_t, std::uint32_t>;
+    using member_cref_t = typename index_t::member_cref_t;
+    using member_citerator_t = typename index_t::member_citerator_t;
+    using vector_of_vectors_t = std::vector<std::vector<float>>;
+    constexpr std::size_t count = 5000, dimensions = 32, clusters = 50;
+
+    // Clusters of Zipf-like sizes, and every hundredth point spread far around them. Built from the raw output of
+    // `std::mt19937`, which every standard library produces alike, unlike the `<random>` distributions.
+    std::mt19937 generator(42);
+    auto uniform = [&] { return (double(generator()) + 0.5) / 4294967296.0; };
+    auto normal = [&] {
+        return float(std::sqrt(-2.0 * std::log(uniform())) * std::cos(6.283185307179586 * uniform()));
+    };
+    vector_of_vectors_t centers(clusters, std::vector<float>(dimensions));
+    for (auto& center : centers)
+        std::generate(center.begin(), center.end(), normal);
+    std::vector<double> cumulative_weights(clusters);
+    double total_weight = 0;
+    for (std::size_t idx = 0; idx != clusters; ++idx)
+        cumulative_weights[idx] = total_weight += 1.0 / std::pow(double(idx + 1), 1.5);
+    vector_of_vectors_t vectors(count, std::vector<float>(dimensions));
+    for (std::size_t idx = 0; idx != count; ++idx) {
+        double pick = uniform() * total_weight;
+        std::size_t cluster = 0;
+        while (cluster + 1 != clusters && cumulative_weights[cluster] < pick)
+            ++cluster;
+        for (std::size_t dim = 0; dim != dimensions; ++dim)
+            vectors[idx][dim] = idx % 100 ? centers[cluster][dim] + 0.1f * normal() : 3.0f * normal();
+    }
+
+    struct metric_t {
+        vector_of_vectors_t const* vectors = nullptr;
+        float const* row(std::size_t slot) const noexcept { return (*vectors)[slot].data(); }
+        float operator()(member_cref_t const& a, member_cref_t const& b) const {
+            return metric_l2sq_gt<float, float>{}(row(get_slot(a)), row(get_slot(b)), dimensions);
+        }
+        float operator()(float const* vector, member_cref_t const& member) const {
+            return metric_l2sq_gt<float, float>{}(vector, row(get_slot(member)), dimensions);
+        }
+        float operator()(member_citerator_t const& a, member_citerator_t const& b) const {
+            return metric_l2sq_gt<float, float>{}(row(get_slot(a)), row(get_slot(b)), dimensions);
+        }
+        float operator()(float const* vector, member_citerator_t const& member) const {
+            return metric_l2sq_gt<float, float>{}(vector, row(get_slot(member)), dimensions);
+        }
+    };
+
+    // Added from one thread, every key lands in the slot of the same number.
+    aligned_wrapper_gt<index_t> aligned_index(index_config_t(4));
+    index_t& index = *aligned_index.index;
+    expect(index.reserve(index_limits_t(count, 1)));
+    metric_t metric{&vectors};
+    for (std::size_t idx = 0; idx != count; ++idx)
+        expect(bool(index.add(static_cast<std::int64_t>(idx), vectors[idx].data(), metric)));
+
+    std::vector<std::size_t> in_links(count, 0);
+    for (std::size_t slot = 0; slot != count; ++slot)
+        for (member_cref_t neighbor : index.neighbors(static_cast<std::uint32_t>(slot), 0))
+            ++in_links[get_slot(neighbor)];
+    expect_eq(static_cast<std::size_t>(std::count(in_links.begin(), in_links.end(), 0u)), std::size_t(0));
+}
+
 int main(int, char**) {
     install_crash_handlers();
 
@@ -1663,5 +1731,6 @@ int main(int, char**) {
     test_load_after_metric_make();
     test_view_of_truncated_file();
     test_level_generators();
+    test_base_level_in_links();
     return 0;
 }
