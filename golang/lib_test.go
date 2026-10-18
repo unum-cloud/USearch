@@ -549,14 +549,15 @@ func TestQuantizationTypes(t *testing.T) {
 		}
 
 		// Test FilteredSearch
+		excluded := Key(1)
 		handler := &FilteredSearchHandler{
 			Callback: func(key Key, handler *FilteredSearchHandler) int {
-				if key%2 == 0 {
+				if key != excluded && !handler.Data.(map[Key]bool)[key] {
 					return 1
 				}
 				return 0
 			},
-			Data: int64(1),
+			Data: map[Key]bool{1: true},
 		}
 
 		keys, _, err = index.FilteredSearch(vector, 1, handler)
@@ -600,14 +601,15 @@ func TestQuantizationTypes(t *testing.T) {
 		}
 
 		// Test F64 FilteredSearchUnsafe
+		excluded := Key(1)
 		handler := &FilteredSearchHandler{
 			Callback: func(key Key, handler *FilteredSearchHandler) int {
-				if key%2 == 0 {
+				if key != excluded && !handler.Data.(map[Key]bool)[key] {
 					return 1
 				}
 				return 0
 			},
-			Data: int64(1),
+			Data: map[Key]bool{1: true},
 		}
 
 		keys, _, err = index.FilteredSearchUnsafe(unsafe.Pointer(&vector[0]), 5, handler)
@@ -647,14 +649,15 @@ func TestQuantizationTypes(t *testing.T) {
 		}
 
 		// Test FilteredSearchI8
+		excluded := Key(1)
 		handler := &FilteredSearchHandler{
 			Callback: func(key Key, handler *FilteredSearchHandler) int {
-				if key%2 == 0 {
+				if key != excluded && !handler.Data.(map[Key]bool)[key] {
 					return 1
 				}
 				return 0
 			},
-			Data: int64(1),
+			Data: map[Key]bool{1: true},
 		}
 
 		keys, _, err = index.FilteredSearchI8(vector, 1, handler)
@@ -694,14 +697,15 @@ func TestQuantizationTypes(t *testing.T) {
 		}
 
 		// Test FilteredSearchU8
+		excluded := Key(1)
 		handler := &FilteredSearchHandler{
 			Callback: func(key Key, handler *FilteredSearchHandler) int {
-				if key%2 == 0 {
+				if key != excluded && !handler.Data.(map[Key]bool)[key] {
 					return 1
 				}
 				return 0
 			},
-			Data: int64(1),
+			Data: map[Key]bool{1: true},
 		}
 
 		keys, _, err = index.FilteredSearchU8(vector, 1, handler)
@@ -801,14 +805,15 @@ func TestUnsafeOperations(t *testing.T) {
 		}
 
 		// Test FilteredSearchUnsafe
+		excluded := Key(1)
 		handler := &FilteredSearchHandler{
 			Callback: func(key Key, handler *FilteredSearchHandler) int {
-				if key%2 == 0 {
+				if key != excluded && !handler.Data.(map[Key]bool)[key] {
 					return 0
 				}
 				return 1
 			},
-			Data: int64(1),
+			Data: map[Key]bool{1: true},
 		}
 
 		keys, _, err = index.FilteredSearchUnsafe(ptr, 5, handler)
