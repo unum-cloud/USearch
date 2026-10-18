@@ -73,7 +73,11 @@ assert len(matches[0]) <= 10
 
 You can also override the default `threads` and `copy` arguments in bulk workloads.
 The first controls the number of threads spawned for the task, where `threads=0` (the default) uses all available cores.
-The second controls whether the vector itself will be persisted inside the index.
+These workers belong to each call, rather than a process-wide thread pool; concurrent calls or multiple indexes can therefore oversubscribe the machine.
+Use `threads=1` when an outer worker pool already provides parallelism, or divide the available cores among concurrently active calls.
+Set `threads` on both `add` and `search`; `OMP_NUM_THREADS` does not control these C++ workers.
+
+The `copy` argument controls whether the vector itself will be persisted inside the index.
 If you can preserve the lifetime of the vector somewhere else, you can avoid the copy.
 
 > When using `BatchMatches`, be aware that unused positions in the results arrays will be filled with sentinel values, like the signaling `NaN` for floating-point distances.
