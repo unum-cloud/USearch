@@ -204,7 +204,7 @@ check_prose_paragraph_filled() {
             flowing = (inside || slashed) && !in_code && body != "" && body !~ /^\||https?:\/\// &&
                 body !~ /[^[:space:]]   *[^[:space:]]/ && text !~ /@end(code|verbatim)/ && text !~ /^[[:space:]]*\/\/[[:space:]]{4,}/
             block_tag = body ~ /^@[a-z]/ && body !~ /^@(c|p|ref|b|a|e|em)[[:space:]]/
-            continues = flowing && !block_tag && body !~ /^(- |[0-9]+\. |[A-Z][A-Za-z]*( [A-Za-z]+){0,2}: )/ && !opens
+            continues = flowing && !block_tag && body !~ /^(- |[0-9]+\. |[A-Z][A-Za-z]*( [A-Za-z]+)?( [A-Za-z]+)?: )/ && !opens
             if (!(continues && previous_flowing && previous_kind == (slashed ? "slashed" : "block")))
                 report_paragraph_room()
             if (flowing) hold_paragraph_line(FNR, body, characters(text))

@@ -900,9 +900,10 @@ std::size_t test_nvme_indexes_relocated(u64_t seed) {
     return failures + nvme_expect_rankings(reference, queries, nvme, ram);
 }
 
-/** A monolith saved past byte zero of a larger file views through its @c base: token like the plain
- *  monolith and leaves the bytes before it as they were, while a base off the file's block is
- *  refused. The base is a multiple of every page a mapping may start on. */
+/** A monolith saved past byte zero of a larger file views through its base like the plain monolith
+ *  and leaves the bytes before it as they were, while a base off the file's block is refused, as is
+ *  an address in no form @ref file_address_t lists. The base is a multiple of every page a mapping
+ *  may start on. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_byte_base(u64_t seed) {
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 4, wanted = 8;
@@ -916,6 +917,30 @@ std::size_t test_nvme_indexes_byte_base(u64_t seed) {
     std::size_t failures = reference.failures;
     if (failed(driver.status) || failures) return failures + expect(false);
 
+    struct address_case_t {
+        std::string_view path, location;
+        u32_t namespace_id;
+        u64_t byte_base;
+    };
+    for (address_case_t const& address : {
+             address_case_t {"/data/sift.safegraphs", "/data/sift.safegraphs", 0, 0},
+             address_case_t {"/dev/nvme1n1@64GiB", "/dev/nvme1n1", 0, 64ull << 30},
+             address_case_t {"/dev/nvme1n1@4096", "/dev/nvme1n1", 0, 4096},
+             address_case_t {"/data/run@64GiB@0", "/data/run@64GiB", 0, 0},
+             address_case_t {"spdk://0000:5e:00.0@64GiB", "0000:5e:00.0", 1, 64ull << 30},
+             address_case_t {"spdk://0000:5e:00.0/2@64GiB", "0000:5e:00.0", 2, 64ull << 30},
+             address_case_t {"trtype:PCIe traddr:0000:5e:00.0 ns:2 base:4096", "trtype:PCIe traddr:0000:5e:00.0", 2,
+                             4096},
+         }) {
+        auto const [parsed, parse_status] = parse_file_address(address.path);
+        failures += expect_eq(parse_status, status_t::success_k);
+        failures += expect_eq(parsed.location, address.location);
+        failures += expect_eq(parsed.namespace_id, address.namespace_id);
+        failures += expect_eq(parsed.byte_base, address.byte_base);
+    }
+    failures += expect_eq(parse_file_address("").status, status_t::invalid_argument_k);
+    failures += expect_eq(parse_file_address("/dev/nvme1n1@64GB").status, status_t::invalid_argument_k);
+
     // The manifest's path, which a monolith save leaves unused, holds the larger file.
     char const* const medium = reference.checkpoint.manifest.data();
     std::vector<byte_t> const leading(byte_base, byte_t {0xA5});
@@ -924,7 +949,7 @@ std::size_t test_nvme_indexes_byte_base(u64_t seed) {
         auto [file, open_status] = seekable_file_t::open(medium, file_mode_t::write_k);
         failures += expect(succeeded(open_status) && succeeded(file.write_at(0, leading)));
     }
-    std::string const based = fmt::format("{} base:{}", medium, byte_base);
+    std::string const based = fmt::format("{}@{}KiB", medium, byte_base / 1024);
     save_config_t config;
     config.layout = checkpoint_layout_t::monolith_k;
     failures += expect(succeeded(reference.built.save(based, config, reference.builder.executor)));
@@ -935,7 +960,7 @@ std::size_t test_nvme_indexes_byte_base(u64_t seed) {
     nvme_type_ viewed {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect_eq(viewed.view(based), status_t::success_k);
     failures += expect_eq(viewed.size(), rows_count);
-    std::string const misaligned = fmt::format("{} base:{}", medium, byte_base + 1);
+    std::string const misaligned = fmt::format("{}@{}", medium, byte_base + 1);
     failures += expect_eq(file_medium_t::open(misaligned).status, status_t::invalid_argument_k);
     if (failures) return failures;
 

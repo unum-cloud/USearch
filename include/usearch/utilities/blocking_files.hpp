@@ -58,12 +58,25 @@ namespace unum::usearch::utilities {
 /** How @ref seekable_file_t::open opens a file: reading an existing one, or creating a fresh one. */
 enum class file_mode_t { read_k, write_k };
 
-/** Where a part lives: the file, device node or SPDK namespace that holds it, and where its
- *  byte zero sits there, so a file or a device node takes the @c base: token an SPDK transport
- *  ID does. */
+/**
+ *  @brief Where a part lives: the file, device node or SPDK namespace that holds it, and where its
+ *      byte zero sits there. @ref parse_file_address reads it from any of these forms:
+ *
+ *  @code
+ *  /data/sift.safegraphs                              a file at byte zero
+ *  /dev/nvme1n1@64GiB                                 a device node from byte 64 GiB
+ *  spdk://0000:5e:00.0@64GiB                          namespace 1 of a local PCIe controller
+ *  spdk://0000:5e:00.0/2@64GiB                        namespace 2 of it
+ *  trtype:PCIe traddr:0000:5e:00.0 ns:2 base:4096     an SPDK transport ID with its keys
+ *  @endcode
+ *
+ *  A base is a whole number of B, KiB, MiB, GiB or TiB, all binary, bytes when bare; a file whose
+ *  name ends in such a suffix takes an explicit @c @0 after it.
+ */
 struct file_address_t {
 
-    /** A file, a device node, or the tokens of an SPDK transport ID. */
+    /** A file, a device node, the PCIe address of an @c spdk:// controller, or the tokens of an
+     *  SPDK transport ID. */
     std::string_view location;
 
     /** The namespace an SPDK transport ID names, zero for its first active one. */
@@ -84,8 +97,28 @@ bool parse_address_key_(std::string_view token, std::string_view key, value_type
     return value = parsed, true;
 }
 
-/** Splits @p path into its location and its trailing @c ns: and @c base: tokens, each a key and a
- *  decimal number, so a file name keeps its spaces; refuses a path that names no location. */
+/** Reads @p text, a whole decimal number and an optional binary unit, into @p bytes, left as it
+ *  was when the unit is unknown or the count overflows. */
+inline bool parse_byte_count_(std::string_view text, u64_t& bytes) noexcept {
+    u64_t count = 0;
+    std::from_chars_result const result = std::from_chars(text.data(), text.data() + text.size(), count);
+    if (result.ec != std::errc {}) return false;
+    std::string_view const suffix = text.substr(static_cast<std::size_t>(result.ptr - text.data()));
+    std::string_view const unit = suffix.empty() ? "B" : suffix;
+    constexpr std::string_view units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+    unsigned shift = 0;
+    for (std::string_view const known : units) {
+        if (unit == known) {
+            if (count > ~u64_t {0} >> shift) return false;
+            return bytes = count << shift, true;
+        }
+        shift += 10;
+    }
+    return false;
+}
+
+/** Splits @p path into the parts of a @ref file_address_t, in any form it lists; refuses a path
+ *  that names no location, a base in an unknown unit, and an unreadable namespace. */
 inline expected<file_address_t> parse_file_address(std::string_view path) noexcept {
     file_address_t parsed;
     std::string_view location = path.substr(0, path.find_last_not_of(" \t") + 1);
@@ -96,6 +129,24 @@ inline expected<file_address_t> parse_file_address(std::string_view path) noexce
             !parse_address_key_(token, "base:", parsed.byte_base))
             break;
         location = location.substr(0, location.find_last_not_of(" \t", space) + 1);
+    }
+    std::size_t const at = location.rfind('@');
+    if (at != std::string_view::npos && at + 1 < location.size() && location[at + 1] >= '0' &&
+        location[at + 1] <= '9') {
+        if (!parse_byte_count_(location.substr(at + 1), parsed.byte_base))
+            return {parsed, status_t::invalid_argument_k};
+        location = location.substr(0, at);
+    }
+    std::string_view const scheme = "spdk://";
+    if (location.starts_with(scheme)) {
+        location.remove_prefix(scheme.size());
+        std::size_t const slash = location.find('/');
+        parsed.namespace_id = 1;
+        if (slash != std::string_view::npos) {
+            if (!parse_address_key_(location.substr(slash + 1), "", parsed.namespace_id))
+                return {parsed, status_t::invalid_argument_k};
+            location = location.substr(0, slash);
+        }
     }
     parsed.location = location;
     return {parsed, location.empty() ? status_t::invalid_argument_k : status_t::success_k};
@@ -135,9 +186,9 @@ struct seekable_file_t {
     /** Truthy exactly while a file is open. */
     explicit operator bool() const noexcept { return descriptor_ != closed_k; }
 
-    /** Opens @p path, a file or a device and an optional @c base: token where the part starts,
-     *  every offset counting from there; the NUL terminator the OS demands is one transient
-     *  allocation through @p allocator. A write past byte zero opens an existing medium. */
+    /** Opens @p path, a file or a device in any form @ref file_address_t lists, every offset
+     *  counting from its base; the NUL terminator the OS demands is one transient allocation
+     *  through @p allocator. A write past byte zero opens an existing medium. */
     template <typename allocator_type_ = std::allocator<byte_t>>
     static expected<seekable_file_t> open(std::string_view path, file_mode_t mode,
                                           allocator_type_ allocator = {}) noexcept {

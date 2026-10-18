@@ -351,9 +351,9 @@ struct file_medium_t {
     file_medium_t& operator=(file_medium_t const&) = delete;
     ~file_medium_t() noexcept;
 
-    /** Opens @p path read-only, a file or a device and an optional @c base: token where the part
-     *  starts, a multiple of the block its direct reads need; the NUL terminator the OS demands is
-     *  one transient allocation. */
+    /** Opens @p path read-only, a file or a device in any form @ref file_address_t lists, its base
+     *  a multiple of the block its direct reads need; the NUL terminator the OS demands is one
+     *  transient allocation. */
     static expected<file_medium_t> open(std::string_view path) noexcept {
         auto const [parsed, parse_status] = parse_file_address(path);
         if (failed(parse_status)) return {file_medium_t {}, parse_status};
@@ -472,10 +472,10 @@ inline u32_t block_bytes_of(file_medium_t const& medium) noexcept { return mediu
 /** Where a part's byte zero sits on @p medium. */
 inline u64_t byte_base_of(file_medium_t const& medium) noexcept { return medium.byte_base; }
 
-/** Whether @p path names a namespace by its SPDK transport ID, which only the SPDK engine reaches,
- *  rather than a file or a device node. */
+/** Whether @p path names a namespace by its SPDK transport ID or an @c spdk:// address, which only
+ *  the SPDK engine reaches, rather than a file or a device node. */
 inline bool names_transport_id(std::string_view path) noexcept {
-    return path.find("trtype:") != std::string_view::npos;
+    return path.starts_with("spdk://") || path.find("trtype:") != std::string_view::npos;
 }
 
 #if USEARCH_WITH_LINUX_SPDK
@@ -691,19 +691,22 @@ struct spdk_medium_t {
         return {std::move(medium), status_t::success_k};
     }
 
-    /** Opens the namespace @p path names: a transport ID, plus @c ns:<ID> naming the namespace and
-     *  @c base:<bytes> where the part starts, through the process's environment, over hugepages
-     *  only for PCIe controllers. */
+    /** Opens the namespace @p path names, an @c spdk:// address or a transport ID in any form
+     *  @ref file_address_t lists, through the process's environment, over hugepages only for PCIe
+     *  controllers. */
     static expected<spdk_medium_t> open(std::string_view path) noexcept {
         auto const [parsed, parse_status] = parse_file_address(path);
         if (failed(parse_status)) return {spdk_medium_t {}, parse_status};
-        // The keys SPDK's parser does not know stay out of the transport ID it parses.
+        // The keys SPDK's parser does not know stay out of the transport ID it parses, and a bare
+        // PCIe address of an spdk:// path gains the keys it lacks.
+        std::string_view const pcie_keys = names_transport_id(parsed.location) ? "" : "trtype:PCIe traddr:";
         growing_buffer<char> transport_id {global_allocator};
-        std::size_t const length = parsed.location.size();
+        std::size_t const length = pcie_keys.size() + parsed.location.size();
         if (failed(transport_id.resize_uninitialized(length + 1))) return {spdk_medium_t {}, status_t::bad_alloc_k};
-        transport_id[parsed.location.copy(transport_id.data(), length)] = '\0';
+        parsed.location.copy(transport_id.data() + pcie_keys.copy(transport_id.data(), pcie_keys.size()), length);
+        transport_id[length] = '\0';
         linux_spdk_driver_t::config_t environment;
-        if (parsed.location.find("trtype:PCIe") == std::string_view::npos)
+        if (pcie_keys.empty() && parsed.location.find("trtype:PCIe") == std::string_view::npos)
             environment.memory = linux_spdk_memory_t::plain_pages_k;
         auto [driver, driver_status] = linux_spdk_driver_t::open(environment);
         if (failed(driver_status)) return {spdk_medium_t {}, driver_status};
