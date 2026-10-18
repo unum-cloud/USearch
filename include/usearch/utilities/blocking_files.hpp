@@ -23,10 +23,12 @@
 #include <cstddef> // `std::byte`
 #include <cstring> // `std::memcpy`, `std::memset`
 
-#include <memory>      // `std::allocator`, `std::allocator_traits`
-#include <span>        // `std::span`
-#include <string_view> // `std::string_view`
-#include <utility>     // `std::exchange`
+#include <charconv>     // `std::from_chars`, for the keys of a file address
+#include <memory>       // `std::allocator`, `std::allocator_traits`
+#include <span>         // `std::span`
+#include <string_view>  // `std::string_view`
+#include <system_error> // `std::errc`
+#include <utility>      // `std::exchange`
 
 #include "usearch/utilities/types.hpp"
 
@@ -37,8 +39,12 @@
 #include <windows.h> // `CreateFileA`, `CreateFileMappingA`, `MapViewOfFile`
 #else
 #include <fcntl.h>    // `open`
-#include <sys/stat.h> // `fstat`
+#include <sys/stat.h> // `fstat`, `S_ISBLK`
 #include <unistd.h>   // `pread`, `pwrite`, `ftruncate`, `close`
+#endif
+#if USEARCH_OS_LINUX_
+#include <sys/ioctl.h> // `ioctl`
+#include <sys/mount.h> // `BLKGETSIZE64`
 #endif
 #if !USEARCH_OS_WINDOWS_ && !USEARCH_OS_WASI_
 #include <dlfcn.h>    // `dlopen`, `dlsym` - GPU runtimes opened at first use
@@ -51,6 +57,49 @@ namespace unum::usearch::utilities {
 
 /** How @ref seekable_file_t::open opens a file: reading an existing one, or creating a fresh one. */
 enum class file_mode_t { read_k, write_k };
+
+/** Where a part lives: the file, device node or SPDK namespace that holds it, and where its
+ *  byte zero sits there, so a file or a device node takes the @c base: token an SPDK transport
+ *  ID does. */
+struct file_address_t {
+
+    /** A file, a device node, or the tokens of an SPDK transport ID. */
+    std::string_view location;
+
+    /** The namespace an SPDK transport ID names, zero for its first active one. */
+    u32_t namespace_id = 0;
+
+    /** Where the part's byte zero sits on the medium, a multiple of its block. */
+    u64_t byte_base = 0;
+};
+
+/** Reads @p token as @p key and a whole decimal number into @p value, left as it was otherwise. */
+template <typename value_type_>
+bool parse_address_key_(std::string_view token, std::string_view key, value_type_& value) noexcept {
+    value_type_ parsed = 0;
+    if (!token.starts_with(key)) return false;
+    std::from_chars_result const result = std::from_chars(token.data() + key.size(), token.data() + token.size(),
+                                                          parsed);
+    if (result.ec != std::errc {} || result.ptr != token.data() + token.size()) return false;
+    return value = parsed, true;
+}
+
+/** Splits @p path into its location and its trailing @c ns: and @c base: tokens, each a key and a
+ *  decimal number, so a file name keeps its spaces; refuses a path that names no location. */
+inline expected<file_address_t> parse_file_address(std::string_view path) noexcept {
+    file_address_t parsed;
+    std::string_view location = path.substr(0, path.find_last_not_of(" \t") + 1);
+    for (std::size_t space = location.find_last_of(" \t"); space != std::string_view::npos;
+         space = location.find_last_of(" \t")) {
+        std::string_view const token = location.substr(space + 1);
+        if (!parse_address_key_(token, "ns:", parsed.namespace_id) &&
+            !parse_address_key_(token, "base:", parsed.byte_base))
+            break;
+        location = location.substr(0, location.find_last_not_of(" \t", space) + 1);
+    }
+    parsed.location = location;
+    return {parsed, location.empty() ? status_t::invalid_argument_k : status_t::success_k};
+}
 
 /** An owned file descriptor with positional verbs only - no cursor, so any thread reads or
  *  writes any offset; every verb answers @c status_t. */
@@ -72,9 +121,12 @@ struct seekable_file_t {
 #endif
 
     seekable_file_t() = default;
-    seekable_file_t(seekable_file_t&& other) noexcept : descriptor_(std::exchange(other.descriptor_, closed_k)) {}
+    seekable_file_t(seekable_file_t&& other) noexcept
+        : descriptor_(std::exchange(other.descriptor_, closed_k)), byte_base_(std::exchange(other.byte_base_, 0u)) {}
     seekable_file_t& operator=(seekable_file_t&& other) noexcept {
-        return std::swap(descriptor_, other.descriptor_), *this;
+        std::swap(descriptor_, other.descriptor_);
+        std::swap(byte_base_, other.byte_base_);
+        return *this;
     }
     seekable_file_t(seekable_file_t const&) = delete;
     seekable_file_t& operator=(seekable_file_t const&) = delete;
@@ -83,25 +135,31 @@ struct seekable_file_t {
     /** Truthy exactly while a file is open. */
     explicit operator bool() const noexcept { return descriptor_ != closed_k; }
 
-    /** Opens @p path; the NUL terminator the OS demands is one transient allocation
-     *  through @p allocator. */
+    /** Opens @p path, a file or a device and an optional @c base: token where the part starts,
+     *  every offset counting from there; the NUL terminator the OS demands is one transient
+     *  allocation through @p allocator. A write past byte zero opens an existing medium. */
     template <typename allocator_type_ = std::allocator<byte_t>>
     static expected<seekable_file_t> open(std::string_view path, file_mode_t mode,
                                           allocator_type_ allocator = {}) noexcept {
+        auto const [parsed, parse_status] = parse_file_address(path);
+        if (failed(parse_status)) return {seekable_file_t {}, parse_status};
         using chars_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<char>;
         chars_allocator_t chars {allocator};
-        char* terminated = chars.allocate(path.size() + 1);
+        std::size_t const length = parsed.location.size();
+        char* terminated = chars.allocate(length + 1);
         if (!terminated) return {seekable_file_t {}, status_t::bad_alloc_k};
-        std::memcpy(terminated, path.data(), path.size());
-        terminated[path.size()] = '\0';
+        std::memcpy(terminated, parsed.location.data(), length);
+        terminated[length] = '\0';
         seekable_file_t file;
-        file.descriptor_ = open_(terminated, mode);
-        chars.deallocate(terminated, path.size() + 1);
+        file.descriptor_ = open_(terminated, mode, parsed.byte_base);
+        file.byte_base_ = parsed.byte_base;
+        chars.deallocate(terminated, length + 1);
         status_t const opened = file ? status_t::success_k : status_t::io_k;
         return {std::move(file), opened};
     }
 
-    /** Sets the file's length to @p bytes, so positional writes land in a pre-sized file. */
+    /** Sets the file's length to @p bytes past its base, so positional writes land in a pre-sized
+     *  file; a device keeps its size and answers @c overflow_k when the bytes do not fit. */
     status_t truncate(std::size_t bytes) noexcept;
 
     /** Writes every byte of @p source at @p offset, looping over short writes. */
@@ -110,7 +168,7 @@ struct seekable_file_t {
     /** Reads exactly @p destination.size() bytes at @p offset; a short read answers @c io_k. */
     status_t read_at(std::size_t offset, bytes_span_t destination) const noexcept;
 
-    /** Byte length of the file. */
+    /** Byte length of the file or the device past its base. */
     expected<std::size_t> length() const noexcept;
 
     /** Flushes every write so far to the device, so a later write can be ordered after them. */
@@ -122,32 +180,56 @@ struct seekable_file_t {
     /** Hands the descriptor to a caller that closes it from now on - what a mapping takes. */
     descriptor_t release() noexcept { return std::exchange(descriptor_, closed_k); }
 
+    /** Where offset zero sits in the file, which a mapping starts at. */
+    u64_t byte_base() const noexcept { return byte_base_; }
+
   private:
 
-    /** Opens @p path under @p mode, answering @c closed_k on failure. */
-    static descriptor_t open_(char const* path, file_mode_t mode) noexcept;
+    /** Opens @p path under @p mode for a part starting @p byte_base bytes in, answering
+     *  @c closed_k on failure. */
+    static descriptor_t open_(char const* path, file_mode_t mode, u64_t byte_base) noexcept;
 
     /** The wrapped descriptor; @c closed_k marks the empty state a move-out leaves behind. */
     descriptor_t descriptor_ = closed_k;
+
+    /** Where offset zero sits in the file. */
+    u64_t byte_base_ = 0;
 };
+
+#if USEARCH_OS_LINUX_
+
+/** Bytes the block device @p descriptor spans, zero when the kernel does not say. */
+inline u64_t block_device_bytes_(int descriptor) noexcept {
+    u64_t bytes = 0;
+    return ::ioctl(descriptor, BLKGETSIZE64, &bytes) == 0 ? bytes : 0;
+}
+
+#elif !USEARCH_OS_WINDOWS_
+
+inline u64_t block_device_bytes_(int) noexcept { return 0; }
+
+#endif
 
 #if USEARCH_OS_WINDOWS_
 
-inline seekable_file_t::descriptor_t seekable_file_t::open_(char const* path, file_mode_t mode) noexcept {
+inline seekable_file_t::descriptor_t seekable_file_t::open_(char const* path, file_mode_t mode,
+                                                            u64_t byte_base) noexcept {
     if (mode == file_mode_t::read_k)
         return ::CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
                              nullptr);
-    return ::CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    return ::CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, byte_base ? OPEN_EXISTING : CREATE_ALWAYS,
+                         FILE_ATTRIBUTE_NORMAL, nullptr);
 }
 
 inline status_t seekable_file_t::truncate(std::size_t bytes) noexcept {
     LARGE_INTEGER distance;
-    distance.QuadPart = static_cast<LONGLONG>(bytes);
+    distance.QuadPart = static_cast<LONGLONG>(byte_base_ + bytes);
     if (!::SetFilePointerEx(descriptor_, distance, nullptr, FILE_BEGIN)) return status_t::io_k;
     return ::SetEndOfFile(descriptor_) ? status_t::success_k : status_t::io_k;
 }
 
 inline status_t seekable_file_t::write_at(std::size_t offset, bytes_view_t source) noexcept {
+    offset += byte_base_;
     while (!source.empty()) {
         OVERLAPPED overlapped {};
         overlapped.Offset = static_cast<DWORD>(offset);
@@ -162,6 +244,7 @@ inline status_t seekable_file_t::write_at(std::size_t offset, bytes_view_t sourc
 }
 
 inline status_t seekable_file_t::read_at(std::size_t offset, bytes_span_t destination) const noexcept {
+    offset += byte_base_;
     while (!destination.empty()) {
         OVERLAPPED overlapped {};
         overlapped.Offset = static_cast<DWORD>(offset);
@@ -178,7 +261,8 @@ inline status_t seekable_file_t::read_at(std::size_t offset, bytes_span_t destin
 inline expected<std::size_t> seekable_file_t::length() const noexcept {
     LARGE_INTEGER size;
     if (!::GetFileSizeEx(descriptor_, &size)) return {0, status_t::io_k};
-    return {static_cast<std::size_t>(size.QuadPart), status_t::success_k};
+    u64_t const bytes = static_cast<u64_t>(size.QuadPart);
+    return {static_cast<std::size_t>(bytes - min_of(bytes, byte_base_)), status_t::success_k};
 }
 
 inline status_t seekable_file_t::sync() noexcept {
@@ -192,16 +276,24 @@ inline status_t seekable_file_t::close() noexcept {
 
 #else
 
-inline seekable_file_t::descriptor_t seekable_file_t::open_(char const* path, file_mode_t mode) noexcept {
-    int const flags = mode == file_mode_t::read_k ? O_RDONLY : (O_RDWR | O_CREAT | O_TRUNC);
+inline seekable_file_t::descriptor_t seekable_file_t::open_(char const* path, file_mode_t mode,
+                                                            u64_t byte_base) noexcept {
+    // A part past byte zero lands in a medium that exists, and the bytes before it stay.
+    int const created = byte_base ? 0 : O_CREAT | O_TRUNC;
+    int const flags = mode == file_mode_t::read_k ? O_RDONLY : (O_RDWR | created);
     return ::open(path, flags | O_CLOEXEC, 0644);
 }
 
 inline status_t seekable_file_t::truncate(std::size_t bytes) noexcept {
-    return ::ftruncate(descriptor_, static_cast<off_t>(bytes)) == 0 ? status_t::success_k : status_t::io_k;
+    struct stat description;
+    if (::fstat(descriptor_, &description) != 0) return status_t::io_k;
+    if (S_ISBLK(description.st_mode))
+        return byte_base_ + bytes <= block_device_bytes_(descriptor_) ? status_t::success_k : status_t::overflow_k;
+    return ::ftruncate(descriptor_, static_cast<off_t>(byte_base_ + bytes)) == 0 ? status_t::success_k : status_t::io_k;
 }
 
 inline status_t seekable_file_t::write_at(std::size_t offset, bytes_view_t source) noexcept {
+    offset += byte_base_;
     while (!source.empty()) {
         ssize_t const written = ::pwrite(descriptor_, source.data(), source.size(), static_cast<off_t>(offset));
         if (written < 0 && errno == EINTR) continue;
@@ -213,6 +305,7 @@ inline status_t seekable_file_t::write_at(std::size_t offset, bytes_view_t sourc
 }
 
 inline status_t seekable_file_t::read_at(std::size_t offset, bytes_span_t destination) const noexcept {
+    offset += byte_base_;
     while (!destination.empty()) {
         ssize_t const read = ::pread(descriptor_, destination.data(), destination.size(), static_cast<off_t>(offset));
         if (read < 0 && errno == EINTR) continue;
@@ -226,7 +319,9 @@ inline status_t seekable_file_t::read_at(std::size_t offset, bytes_span_t destin
 inline expected<std::size_t> seekable_file_t::length() const noexcept {
     struct stat description;
     if (::fstat(descriptor_, &description) != 0) return {0, status_t::io_k};
-    return {static_cast<std::size_t>(description.st_size), status_t::success_k};
+    u64_t const bytes = S_ISBLK(description.st_mode) ? block_device_bytes_(descriptor_)
+                                                     : static_cast<u64_t>(description.st_size);
+    return {static_cast<std::size_t>(bytes - min_of(bytes, byte_base_)), status_t::success_k};
 }
 
 inline status_t seekable_file_t::sync() noexcept {
@@ -420,10 +515,12 @@ inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexce
     auto const [bytes, length_status] = file.length();
     if (failed(length_status)) return {std::move(mapping), length_status};
     if (!bytes) return {std::move(mapping), status_t::malformed_k};
+    u64_t const byte_base = file.byte_base();
     mapping.file_handle_ = file.release();
     mapping.mapping_handle_ = ::CreateFileMappingA(mapping.file_handle_, nullptr, PAGE_READONLY, 0, 0, nullptr);
     if (!mapping.mapping_handle_) return {std::move(mapping), status_t::io_k};
-    void* base = ::MapViewOfFile(mapping.mapping_handle_, FILE_MAP_READ, 0, 0, 0);
+    void* base = ::MapViewOfFile(mapping.mapping_handle_, FILE_MAP_READ, static_cast<DWORD>(byte_base >> 32),
+                                 static_cast<DWORD>(byte_base), bytes);
     if (!base) return {std::move(mapping), status_t::io_k};
     mapping.data_ = static_cast<byte_t*>(base);
     mapping.bytes_ = bytes;
@@ -436,10 +533,12 @@ inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::
     auto [file, status] = seekable_file_t::open(path, file_mode_t::write_k);
     if (failed(status)) return {std::move(mapping), status};
     if (status_t const sized = file.truncate(bytes); failed(sized)) return {std::move(mapping), sized};
+    u64_t const byte_base = file.byte_base();
     mapping.file_handle_ = file.release();
     mapping.mapping_handle_ = ::CreateFileMappingA(mapping.file_handle_, nullptr, PAGE_READWRITE, 0, 0, nullptr);
     if (!mapping.mapping_handle_) return {std::move(mapping), status_t::io_k};
-    void* base = ::MapViewOfFile(mapping.mapping_handle_, FILE_MAP_WRITE, 0, 0, 0);
+    void* base = ::MapViewOfFile(mapping.mapping_handle_, FILE_MAP_WRITE, static_cast<DWORD>(byte_base >> 32),
+                                 static_cast<DWORD>(byte_base), bytes);
     if (!base) return {std::move(mapping), status_t::io_k};
     mapping.data_ = static_cast<byte_t*>(base);
     mapping.bytes_ = bytes;
@@ -521,8 +620,9 @@ inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexce
     auto const [bytes, length_status] = file.length();
     if (failed(length_status)) return {std::move(mapping), length_status};
     if (!bytes) return {std::move(mapping), status_t::malformed_k};
+    off_t const byte_base = static_cast<off_t>(file.byte_base());
     mapping.descriptor_ = file.release();
-    void* base = ::mmap(nullptr, bytes, PROT_READ, MAP_SHARED, mapping.descriptor_, 0);
+    void* base = ::mmap(nullptr, bytes, PROT_READ, MAP_SHARED, mapping.descriptor_, byte_base);
     if (base == MAP_FAILED) return {std::move(mapping), status_t::io_k};
     mapping.data_ = static_cast<byte_t*>(base);
     mapping.bytes_ = bytes;
@@ -535,8 +635,9 @@ inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::
     auto [file, status] = seekable_file_t::open(path, file_mode_t::write_k);
     if (failed(status)) return {std::move(mapping), status};
     if (status_t const sized = file.truncate(bytes); failed(sized)) return {std::move(mapping), sized};
+    off_t const byte_base = static_cast<off_t>(file.byte_base());
     mapping.descriptor_ = file.release();
-    void* base = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, mapping.descriptor_, 0);
+    void* base = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, mapping.descriptor_, byte_base);
     if (base == MAP_FAILED) return {std::move(mapping), status_t::io_k};
     mapping.data_ = static_cast<byte_t*>(base);
     mapping.bytes_ = bytes;

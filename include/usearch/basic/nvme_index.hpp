@@ -982,14 +982,14 @@ class nvme_index {
     }
 
     /**
-     *  @brief Builds @p directory over the @p rows + 1 prefix sums @p sums of the part @p file
+     *  @brief Builds @p directory over the @p rows + 1 prefix sums @p sums of the part @p medium
      *      holds, streamed through @p chunk, and answers the widest row they delimit in @p widest.
      *
      *  @param[in] data_offset Where the part's data segment starts, which @p sums count from.
      *  @param[in] extent Elements the column's data holds, which no sum may pass.
      */
     template <typename chunk_allocator_type_>
-    status_t build_directory_(seekable_file_t const& file, prefix_sums_t const& sums, std::size_t data_offset,
+    status_t build_directory_(file_medium_t const& medium, prefix_sums_t const& sums, std::size_t data_offset,
                               std::size_t rows, u64_t extent, growing_buffer<u64_t, chunk_allocator_type_>& chunk,
                               directory_t& directory, u64_t& widest) const noexcept {
         std::size_t const sum_bytes = dtype_bytes(sums.dtype);
@@ -999,7 +999,7 @@ class nvme_index {
         // front so no sum is overwritten before it widened.
         auto read_sums = [&](std::size_t first, std::size_t count) noexcept {
             bytes_span_t const target = bytes_of(chunk.data(), count).first(count * sum_bytes);
-            if (status_t const read = file.read_at(data_offset + sums.bytes.first + first * sum_bytes, target);
+            if (status_t const read = medium.read_at(data_offset + sums.bytes.first + first * sum_bytes, target);
                 failed(read))
                 return read;
             if (sum_bytes == sizeof(u64_t))
@@ -1032,14 +1032,14 @@ class nvme_index {
         return status_t::success_k;
     }
 
-    /** Reads the header of the part @p file holds into @p part, vetted against this instantiation
+    /** Reads the header of the part @p medium holds into @p part, vetted against this instantiation
      *  and, unless empty, @p metric, with the directories of its ragged columns streamed through
      *  @p chunk. */
     template <typename chunk_allocator_type_>
-    status_t read_part_(seekable_file_t const& file, std::string_view metric,
+    status_t read_part_(file_medium_t const& medium, std::string_view metric,
                         growing_buffer<u64_t, chunk_allocator_type_>& chunk, part_t& part) const noexcept {
         growing_buffer<byte_t, forkunion_allocator_t> header_bytes {allocator_};
-        if (status_t const read = nvme_read_header(file, header_bytes); failed(read)) return read;
+        if (status_t const read = nvme_read_header(medium, header_bytes); failed(read)) return read;
         safegraphs_name_t named;
         auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
             if (field.key == "metric") named = safegraphs_name_t {field.value};
@@ -1081,7 +1081,7 @@ class nvme_index {
         if (fixed_width) part.value_row_bytes = value.row_bytes();
         else {
             u64_t widest = 0;
-            if (status_t const built = build_directory_(file, *value.offsets, header.data_offset, nodes,
+            if (status_t const built = build_directory_(medium, *value.offsets, header.data_offset, nodes,
                                                         value.data.size() / part.value_element_bytes, chunk,
                                                         part.value_starts, widest);
                 failed(built))
@@ -1091,7 +1091,7 @@ class nvme_index {
         if (degree) part.connectivity = static_cast<u32_t>(degree);
         else {
             u64_t widest = 0;
-            if (status_t const built = build_directory_(file, *adjacency.offsets, header.data_offset, nodes,
+            if (status_t const built = build_directory_(medium, *adjacency.offsets, header.data_offset, nodes,
                                                         adjacency.data.size() / sizeof(node_id_t), chunk,
                                                         part.neighbor_starts, widest);
                 failed(built))
@@ -1102,20 +1102,18 @@ class nvme_index {
         return status_t::success_k;
     }
 
-    /** Opens the part file at @p path: its header and directories through a blocking reader, then
-     *  its medium for the engines. */
+    /** Opens the part file at @p path: its medium for the engines, then its header and directories
+     *  through blocking reads of that medium. */
     template <typename chunk_allocator_type_>
     status_t open_part_(std::string_view path, std::string_view metric,
                         growing_buffer<u64_t, chunk_allocator_type_>& chunk, medium_t& medium,
                         part_t& part) const noexcept {
         if constexpr (!std::is_constructible_v<medium_t, file_medium_t&&>) return status_t::config_mismatch_k;
         else {
-            auto [file, open_status] = seekable_file_t::open(path, file_mode_t::read_k, allocator_);
+            auto [file, open_status] = file_medium_t::open(path);
             if (failed(open_status)) return open_status;
             if (status_t const read = read_part_(file, metric, chunk, part); failed(read)) return read;
-            auto [file_medium, medium_status] = file_medium_t::open(path);
-            if (failed(medium_status)) return medium_status;
-            medium = medium_t {std::move(file_medium)};
+            medium = medium_t {std::move(file)};
             return status_t::success_k;
         }
     }

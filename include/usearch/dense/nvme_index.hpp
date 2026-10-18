@@ -51,7 +51,6 @@
 #include <numkong/tensor.hpp>
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/blocking_files.hpp"    // `seekable_file_t`
 #include "usearch/utilities/nvme_device.hpp"       // `nvme_executor`, `file_medium_t`, `io_request_t`
 #include "usearch/utilities/nvme_walks.hpp"        // `row_walker`, `nvme_part_t`, `nvme_begin_call`
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`, `sorted_buffer`, `arena_allocator`
@@ -312,8 +311,8 @@ struct nvme_index {
     /** Opens the part at @p path, a file or device or, in SPDK builds, a transport ID: its medium
      *  for the engines, and its header vetted against this instantiation, against @p kernel unless
      *  it is @c nk_kernel_unknown_k, which then takes the metric the header names, and, unless
-     *  @p key_dtype is @c unknown_k, for a key column no wider than it. A file's header comes
-     *  through one buffered read, a namespace's through blocking sector reads. */
+     *  @p key_dtype is @c unknown_k, for a key column no wider than it. The header comes through
+     *  the medium itself, in blocking block-aligned reads. */
     template <typename allocator_type_>
     static status_t open_part_(std::string_view path, dtype_t key_dtype, nk_kernel_kind_t& kernel,
                                allocator_type_ allocator, medium_t& medium, nvme_part_t& part) noexcept {
@@ -331,12 +330,10 @@ struct nvme_index {
         if (names_transport_id(path)) return status_t::unsupported_k;
         if constexpr (!std::is_constructible_v<medium_t, file_medium_t&&>) return status_t::config_mismatch_k;
         else {
-            auto [file, open_status] = seekable_file_t::open(path, file_mode_t::read_k, allocator);
+            auto [file, open_status] = file_medium_t::open(path);
             if (failed(open_status)) return open_status;
             if (status_t const read = read_part_(file, key_dtype, kernel, allocator, part); failed(read)) return read;
-            auto [file_medium, medium_status] = file_medium_t::open(path);
-            if (failed(medium_status)) return part = {}, medium_status;
-            medium = medium_t {std::move(file_medium)};
+            medium = medium_t {std::move(file)};
             return status_t::success_k;
         }
     }

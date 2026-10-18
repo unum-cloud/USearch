@@ -136,6 +136,7 @@ inline io_request_t nvme_covering_read(u64_t begin, u64_t bytes, u64_t block_byt
 /** Reads the prefix and the header of the part @p source holds, any reader with
  *  `read_at(offset, bytes)`, into @p header_bytes; @c malformed_k when it holds no monolith. */
 template <typename source_type_, typename allocator_type_>
+    requires requires(source_type_ const& source, bytes_span_t bytes) { source.read_at(0, bytes); }
 status_t nvme_read_header(source_type_ const& source, growing_buffer<byte_t, allocator_type_>& header_bytes) noexcept {
     std::array<byte_t, sizeof(safegraphs_prefix_t)> prefix_bytes {};
     if (status_t const read = source.read_at(0, prefix_bytes); failed(read)) return status_t::malformed_k;
@@ -148,22 +149,32 @@ status_t nvme_read_header(source_type_ const& source, growing_buffer<byte_t, all
     return status_t::success_k;
 }
 
-/** The metadata of the checkpoint at @p path without viewing it: a manifest or a monolith in a
- *  file, or in SPDK builds a monolith a transport ID names, whose header comes through the
- *  namespace as a view reads it. */
-inline expected<safegraphs_metadata_t> nvme_read_metadata(std::string_view path) noexcept {
+/** Reads the prefix and the header of the part at @p path into @p header_bytes through the medium
+ *  a view reads it by: a file or a device, or in SPDK builds a namespace a transport ID names,
+ *  each with an optional @c base: token; @c malformed_k when no monolith starts there. */
+template <typename allocator_type_>
+status_t nvme_read_header(std::string_view path, growing_buffer<byte_t, allocator_type_>& header_bytes) noexcept {
 #if USEARCH_WITH_LINUX_SPDK
     if (names_transport_id(path)) {
         auto [name_space, open_status] = spdk_medium_t::open(path);
-        if (failed(open_status)) return {safegraphs_metadata_t {}, open_status};
-        growing_buffer<byte_t> header_bytes {global_allocator};
-        if (status_t const read = nvme_read_header(name_space, header_bytes); failed(read))
-            return {safegraphs_metadata_t {}, read};
-        return safegraphs_read_metadata(to_span(header_bytes));
+        if (failed(open_status)) return open_status;
+        return nvme_read_header(name_space, header_bytes);
     }
 #endif
-    if (names_transport_id(path)) return {safegraphs_metadata_t {}, status_t::unsupported_k};
-    return safegraphs_read_metadata(path);
+    if (names_transport_id(path)) return status_t::unsupported_k;
+    auto [file, open_status] = file_medium_t::open(path);
+    if (failed(open_status)) return open_status;
+    return nvme_read_header(file, header_bytes);
+}
+
+/** The metadata of the checkpoint at @p path without viewing it: a manifest in a file, or a
+ *  monolith wherever @ref nvme_read_header reaches one, its header read as a view reads it. */
+inline expected<safegraphs_metadata_t> nvme_read_metadata(std::string_view path) noexcept {
+    growing_buffer<byte_t> header_bytes {global_allocator};
+    status_t const read = nvme_read_header(path, header_bytes);
+    if (read == status_t::malformed_k && !names_transport_id(path)) return safegraphs_read_manifest(path);
+    if (failed(read)) return {safegraphs_metadata_t {}, read};
+    return safegraphs_read_metadata(to_span(header_bytes));
 }
 
 #if USEARCH_OS_WINDOWS_

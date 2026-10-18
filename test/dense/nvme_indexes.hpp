@@ -900,6 +900,53 @@ std::size_t test_nvme_indexes_relocated(u64_t seed) {
     return failures + nvme_expect_rankings(reference, queries, nvme, ram);
 }
 
+/** A monolith saved past byte zero of a larger file views through its @c base: token like the plain
+ *  monolith and leaves the bytes before it as they were, while a base off the file's block is
+ *  refused. The base is a multiple of every page a mapping may start on. */
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
+std::size_t test_nvme_indexes_byte_base(u64_t seed) {
+    constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 4, wanted = 8;
+    constexpr std::size_t byte_base = 65536;
+    std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
+
+    nvme_reference<nvme_type_> reference {"nvme_byte_base", kernel_, rows_count, dimensions, seed};
+    nvme_type_ plain {forkunion_allocator_t {no_memory_domain_k}};
+    reference.view(plain, checkpoint_layout_t::monolith_k);
+    dense_indexes_executor<nvme_type_> driver;
+    std::size_t failures = reference.failures;
+    if (failed(driver.status) || failures) return failures + expect(false);
+
+    // The manifest's path, which a monolith save leaves unused, holds the larger file.
+    char const* const medium = reference.checkpoint.manifest.data();
+    std::vector<byte_t> const leading(byte_base, byte_t {0xA5});
+    std::vector<byte_t> kept(byte_base);
+    {
+        auto [file, open_status] = seekable_file_t::open(medium, file_mode_t::write_k);
+        failures += expect(succeeded(open_status) && succeeded(file.write_at(0, leading)));
+    }
+    std::string const based = fmt::format("{} base:{}", medium, byte_base);
+    save_config_t config;
+    config.layout = checkpoint_layout_t::monolith_k;
+    failures += expect(succeeded(reference.built.save(based, config, reference.builder.executor)));
+    {
+        auto [file, open_status] = seekable_file_t::open(medium, file_mode_t::read_k);
+        failures += expect(succeeded(open_status) && succeeded(file.read_at(0, kept)) && kept == leading);
+    }
+    nvme_type_ viewed {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect_eq(viewed.view(based), status_t::success_k);
+    failures += expect_eq(viewed.size(), rows_count);
+    std::string const misaligned = fmt::format("{} base:{}", medium, byte_base + 1);
+    failures += expect_eq(file_medium_t::open(misaligned).status, status_t::invalid_argument_k);
+    if (failures) return failures;
+
+    auto const queries = reference.leading_rows(queries_count);
+    nvme_rankings<nvme_type_> plain_rankings {queries_count, wanted}, based_rankings {queries_count, wanted};
+    failures += expect(succeeded(plain_rankings.search(plain, queries, driver.executor, rows_count).status));
+    failures += expect(succeeded(based_rankings.search(viewed, queries, driver.executor, rows_count).status));
+    failures += expect(based_rankings.counts == plain_rankings.counts);
+    return failures + nvme_expect_rankings(reference, queries, based_rankings, plain_rankings);
+}
+
 /** The single-part index over a monolith: under a walk as wide as the part it ranks every row like
  *  the RAM group, each node ID a distinct row at its exact distance, the rows named through the
  *  cursor's placement order. */
@@ -1608,6 +1655,7 @@ std::size_t test_nvme_configuration(char const* name, u64_t seed) {
     failures_count += test_nvme_indexes_failed_submit<engine_type_, dtype_, kernel_>(seed);
     failures_count += test_nvme_indexes_pipelined<indexes_t, kernel_>(seed);
     failures_count += test_nvme_indexes_relocated<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_byte_base<indexes_t, kernel_>(seed);
     failures_count += test_nvme_index_search<indexes_t, kernel_>(seed);
     failures_count += test_nvme_indexes_straddling<engine_type_, dtype_, kernel_, 512>(seed);
     failures_count += test_nvme_indexes_straddling<engine_type_, dtype_, kernel_, 4096>(seed);

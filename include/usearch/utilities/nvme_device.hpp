@@ -92,19 +92,18 @@
 #include <cstdint> // `std::uintptr_t`
 #include <cstring> // `std::memcpy`, `std::memset`
 
-#include <atomic>       // `std::atomic`, `std::atomic_ref`
-#include <bit>          // `std::countr_zero`
-#include <charconv>     // `std::from_chars`, for the keys of a transport-ID path
-#include <concepts>     // `std::same_as`
-#include <limits>       // `std::numeric_limits`, for the longest read a result counts
-#include <mutex>        // `std::unique_lock`
-#include <new>          // `std::nothrow`
-#include <span>         // `std::span`
-#include <string_view>  // `std::string_view`
-#include <system_error> // `std::errc`
-#include <type_traits>  // `std::conditional_t`, `std::is_same_v`, `std::is_trivially_copyable_v`
-#include <utility>      // `std::exchange`, `std::swap`, `std::move`
-#include <variant>      // `std::variant`, `std::visit`, `std::get_if`, `std::in_place_index`
+#include <atomic>      // `std::atomic`, `std::atomic_ref`
+#include <bit>         // `std::countr_zero`
+#include <concepts>    // `std::same_as`
+#include <limits>      // `std::numeric_limits`, for the longest read a result counts
+#include <memory>      // `std::allocator`, for the staging of a header read
+#include <mutex>       // `std::unique_lock`
+#include <new>         // `std::nothrow`
+#include <span>        // `std::span`
+#include <string_view> // `std::string_view`
+#include <type_traits> // `std::conditional_t`, `std::is_same_v`, `std::is_trivially_copyable_v`
+#include <utility>     // `std::exchange`, `std::swap`, `std::move`
+#include <variant>     // `std::variant`, `std::visit`, `std::get_if`, `std::in_place_index`
 
 #include <forkunion.h>         // `fu_pool_new`, `fu_pool_spawn`, `fu_pool_delete`
 #include <forkunion/types.hpp> // `fu::standard_yield_t`, `fu::wait_capped_t`, `fu::spin_mutex_t`
@@ -332,14 +331,19 @@ struct file_medium_t {
     /** The open descriptor, @c closed_k once moved out. */
     descriptor_t descriptor = closed_k;
 
+    /** Where the part's byte zero sits in the file or on the device. */
+    u64_t byte_base = 0;
+
     /** The granularity of a direct read's offset and length on it. */
     u32_t block_bytes = 0;
 
     file_medium_t() noexcept = default;
     file_medium_t(file_medium_t&& other) noexcept
-        : descriptor(std::exchange(other.descriptor, closed_k)), block_bytes(std::exchange(other.block_bytes, 0u)) {}
+        : descriptor(std::exchange(other.descriptor, closed_k)), byte_base(std::exchange(other.byte_base, 0u)),
+          block_bytes(std::exchange(other.block_bytes, 0u)) {}
     file_medium_t& operator=(file_medium_t&& other) noexcept {
         std::swap(descriptor, other.descriptor);
+        std::swap(byte_base, other.byte_base);
         std::swap(block_bytes, other.block_bytes);
         return *this;
     }
@@ -347,14 +351,26 @@ struct file_medium_t {
     file_medium_t& operator=(file_medium_t const&) = delete;
     ~file_medium_t() noexcept;
 
-    /** Opens @p path read-only and probes the block its direct reads need; the NUL terminator the
-     *  OS demands is one transient allocation. */
+    /** Opens @p path read-only, a file or a device and an optional @c base: token where the part
+     *  starts, a multiple of the block its direct reads need; the NUL terminator the OS demands is
+     *  one transient allocation. */
     static expected<file_medium_t> open(std::string_view path) noexcept {
+        auto const [parsed, parse_status] = parse_file_address(path);
+        if (failed(parse_status)) return {file_medium_t {}, parse_status};
         growing_buffer<char> terminated {global_allocator};
-        if (failed(terminated.resize_uninitialized(path.size() + 1))) return {file_medium_t {}, status_t::bad_alloc_k};
-        terminated[path.copy(terminated.data(), path.size())] = '\0';
-        return open_(terminated.data());
+        std::size_t const length = parsed.location.size();
+        if (failed(terminated.resize_uninitialized(length + 1))) return {file_medium_t {}, status_t::bad_alloc_k};
+        terminated[parsed.location.copy(terminated.data(), length)] = '\0';
+        auto [medium, open_status] = open_(terminated.data());
+        if (failed(open_status)) return {std::move(medium), open_status};
+        if (parsed.byte_base % medium.block_bytes) return {std::move(medium), status_t::invalid_argument_k};
+        medium.byte_base = parsed.byte_base;
+        return {std::move(medium), status_t::success_k};
     }
+
+    /** Fills @p bytes from @p offset bytes past the part's start, one block-aligned blocking read
+     *  through a staging buffer of its own, for the headers a view reads once. */
+    status_t read_at(u64_t offset, bytes_span_t bytes) const noexcept;
 
   private:
 
@@ -453,8 +469,8 @@ inline expected<file_medium_t> file_medium_t::open_(char const* path) noexcept {
 /** The block every read on @p medium rounds its offset and length to. */
 inline u32_t block_bytes_of(file_medium_t const& medium) noexcept { return medium.block_bytes; }
 
-/** Where a part's byte zero sits on @p medium; a file holds its part from its own start. */
-inline u64_t byte_base_of(file_medium_t const&) noexcept { return 0; }
+/** Where a part's byte zero sits on @p medium. */
+inline u64_t byte_base_of(file_medium_t const& medium) noexcept { return medium.byte_base; }
 
 /** Whether @p path names a namespace by its SPDK transport ID, which only the SPDK engine reaches,
  *  rather than a file or a device node. */
@@ -679,32 +695,19 @@ struct spdk_medium_t {
      *  @c base:<bytes> where the part starts, through the process's environment, over hugepages
      *  only for PCIe controllers. */
     static expected<spdk_medium_t> open(std::string_view path) noexcept {
+        auto const [parsed, parse_status] = parse_file_address(path);
+        if (failed(parse_status)) return {spdk_medium_t {}, parse_status};
+        // The keys SPDK's parser does not know stay out of the transport ID it parses.
         growing_buffer<char> transport_id {global_allocator};
-        u32_t namespace_id = 0;
-        u64_t byte_base = 0;
-        auto parsed = [](std::string_view token, std::string_view key, auto& value) noexcept {
-            if (!token.starts_with(key)) return false;
-            std::from_chars_result const result = std::from_chars(token.data() + key.size(),
-                                                                  token.data() + token.size(), value);
-            return result.ec == std::errc {} && result.ptr == token.data() + token.size();
-        };
-        for (std::size_t begin = path.find_first_not_of(" \t"); begin != std::string_view::npos;) {
-            std::size_t const end = min_of(path.find_first_of(" \t", begin), path.size());
-            std::string_view const token = path.substr(begin, end - begin);
-            begin = path.find_first_not_of(" \t", end);
-            // The keys SPDK's parser does not know stay out of the transport ID it parses.
-            if (parsed(token, "ns:", namespace_id) || parsed(token, "base:", byte_base)) continue;
-            for (char const character : token)
-                if (failed(transport_id.push_back(character))) return {spdk_medium_t {}, status_t::bad_alloc_k};
-            if (failed(transport_id.push_back(' '))) return {spdk_medium_t {}, status_t::bad_alloc_k};
-        }
-        if (transport_id.empty()) return {spdk_medium_t {}, status_t::invalid_argument_k};
-        transport_id.back() = '\0';
+        std::size_t const length = parsed.location.size();
+        if (failed(transport_id.resize_uninitialized(length + 1))) return {spdk_medium_t {}, status_t::bad_alloc_k};
+        transport_id[parsed.location.copy(transport_id.data(), length)] = '\0';
         linux_spdk_driver_t::config_t environment;
-        if (path.find("trtype:PCIe") == std::string_view::npos) environment.memory = linux_spdk_memory_t::plain_pages_k;
+        if (parsed.location.find("trtype:PCIe") == std::string_view::npos)
+            environment.memory = linux_spdk_memory_t::plain_pages_k;
         auto [driver, driver_status] = linux_spdk_driver_t::open(environment);
         if (failed(driver_status)) return {spdk_medium_t {}, driver_status};
-        return open(std::move(driver), transport_id.data(), namespace_id, byte_base);
+        return open(std::move(driver), transport_id.data(), parsed.namespace_id, parsed.byte_base);
     }
 
     /** Fills @p bytes from @p offset bytes past the part's start, one sector-aligned read on a
@@ -999,6 +1002,21 @@ struct blocking_reader_t {
 };
 
 #endif
+
+inline status_t file_medium_t::read_at(u64_t offset, bytes_span_t bytes) const noexcept {
+    if (bytes.empty()) return status_t::success_k;
+    u64_t const begin = byte_base + offset, first = begin - begin % block_bytes;
+    u64_t const bound = round_up_to_multiple<u64_t>(begin + bytes.size(), block_bytes);
+    if (bound - first > io_max_length_k) return status_t::overflow_k;
+    io_buffers<std::allocator<byte_t>> staging {std::allocator<byte_t> {}};
+    if (status_t const reserved = staging.reserve(1, bound - first); failed(reserved)) return reserved;
+    i32_t const moved = blocking_reader_t {}.read(descriptor, staging.buffer(0), static_cast<u32_t>(bound - first),
+                                                  first);
+    // The file may end inside its last block, so only the bytes asked for must land.
+    if (moved < 0 || static_cast<u64_t>(moved) < begin + bytes.size() - first) return status_t::io_k;
+    std::memcpy(bytes.data(), staging.buffer(0) + (begin - first), bytes.size());
+    return status_t::success_k;
+}
 
 /**
  *  @brief Portable blocking engine: @c submit services every enqueued read with one @c pread or

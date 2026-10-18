@@ -15,6 +15,7 @@
 #include <concepts>    // `std::convertible_to` - the string-view conversion's constraint
 #include <functional>  // `std::hash` - specialized for `uuid_t` below, `std::less`
 #include <limits>      // `std::numeric_limits` - the claim word's closed sentinel
+#include <optional>    // `std::optional` - the identity a `uuid_t` may render
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::type_identity_t`, `std::conditional_t` - the kit cascades
@@ -162,6 +163,17 @@ constexpr uuid_t uuid_of(u64_t identity) noexcept {
     for (std::size_t byte = 0; byte != sizeof(identity); ++byte)
         key.bytes[sizeof(key.bytes) - 1 - byte] = static_cast<std::byte>(identity >> (byte * 8));
     return key;
+}
+
+/** The integer identity @ref uuid_of renders as @p key, or none when its leading eight bytes are
+ *  not zero. */
+constexpr std::optional<u64_t> identity_of(uuid_t const& key) noexcept {
+    u64_t identity = 0;
+    for (std::size_t byte = 0; byte != sizeof(key.bytes); ++byte) {
+        if (byte < sizeof(identity) && key.bytes[byte] != std::byte {0}) return std::nullopt;
+        identity = identity << 8 | static_cast<u64_t>(key.bytes[byte]);
+    }
+    return identity;
 }
 
 /** The single-byte scalar every allocator deals in - the unit of raw storage. */

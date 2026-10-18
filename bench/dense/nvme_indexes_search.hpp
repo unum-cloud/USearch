@@ -23,9 +23,10 @@
 
 #include <algorithm>    // `std::min`, `std::nth_element`
 #include <array>        // `std::array`
-#include <bit>          // `std::bit_cast` - the header prefix
 #include <chrono>       // `std::chrono::steady_clock`
 #include <filesystem>   // `std::filesystem::is_directory` - a part moved by `USEARCH_NVME_PATHS`
+#include <limits>       // `std::numeric_limits` - the widest dataset row a key may name
+#include <optional>     // `std::optional` - the dataset row a found key names
 #include <span>         // `std::span`
 #include <string>       // `std::string`
 #include <string_view>  // `std::string_view`
@@ -45,13 +46,14 @@ namespace unum::usearch::bench::dense {
 #pragma region Settings
 
 /** The `--transport` names, parallel to @ref transports_k. */
-inline constexpr std::array<std::string_view, 4> transport_names_k {"auto", "blocking", "linux-aio", "linux-uring"};
+inline constexpr std::array<std::string_view, 5> transport_names_k {"auto", "blocking", "linux-aio", "linux-uring",
+                                                                    "linux-spdk"};
 
 /** The transports `--transport` picks among; `auto` takes io_uring, then AIO, then blocking
- *  reads. */
-inline constexpr std::array<io_transport_t, 4> transports_k {io_transport_t::automatic_k, io_transport_t::blocking_k,
-                                                             io_transport_t::linux_aio_k,
-                                                             io_transport_t::linux_uring_k};
+ *  reads, and only `linux-spdk` reaches the namespaces SPDK transport IDs name. */
+inline constexpr std::array<io_transport_t, 5> transports_k {io_transport_t::automatic_k, io_transport_t::blocking_k,
+                                                             io_transport_t::linux_aio_k, io_transport_t::linux_uring_k,
+                                                             io_transport_t::linux_spdk_k};
 
 /** The name of the transport an engine opened, in the grammar `--transport` parses. */
 inline std::string_view transport_name(io_transport_t transport) noexcept {
@@ -90,6 +92,12 @@ struct nvme_settings_t {
     /** The factor the producer rescaled its rows by before the downcast, from the first part's
      *  header; one when it recorded none. */
     f32_t scale = 1;
+#if USEARCH_WITH_LINUX_SPDK
+
+    /** The SPDK environment under @c linux-spdk, held from the header read past the views, since a
+     *  process starts it only once. */
+    linux_spdk_driver_t spdk_driver;
+#endif
 };
 
 /** The flags both NVMe binaries take: the parts, the queries, the engines, and the walks. */
@@ -98,7 +106,8 @@ inline std::array<flag_t, 8> nvme_flags(settings_t& settings, nvme_settings_t& n
         {"--view", "path", "manifest or monolith of the saved parts", &nvme.view_path},
         {"--query-vectors", "path", "query vectors, `.fbin` family, cast to the parts' stored dtype",
          &settings.query_vectors_path},
-        {"--transport", "name", "auto, blocking, linux-aio or linux-uring; auto by default", &nvme.transport_name},
+        {"--transport", "name", "auto, blocking, linux-aio, linux-uring or linux-spdk; auto by default",
+         &nvme.transport_name},
         {"--queue-depth", "reads", "reads every thread's engine keeps outstanding; 512 by default", &nvme.queue_depth},
         {"--expansion-search", "breadth", "search candidate pool; 96 by default", &settings.expansion_search},
         {"--top-k", "count", "matches per query to judge; 10 by default", &settings.top_k},
@@ -140,26 +149,21 @@ inline bool resolve_nvme_settings(nvme_settings_t& nvme) {
     return true;
 }
 
-/** The SafeGraphs header at the front of @p path, a file or a device: its prefix and the JSON the
- *  prefix sizes; empty when none starts there. */
-inline std::vector<byte_t> read_header_bytes(std::string_view path) {
-    auto [file, open_status] = seekable_file_t::open(path, file_mode_t::read_k);
-    std::array<byte_t, sizeof(safegraphs_prefix_t)> prefix_bytes {};
-    if (failed(open_status) || failed(file.read_at(0, prefix_bytes))) return {};
-    safegraphs_prefix_t const prefix = std::bit_cast<safegraphs_prefix_t>(prefix_bytes);
-    if (prefix.magic != safegraphs_prefix_t::magic_k) return {};
-    std::vector<byte_t> header(sizeof(prefix) + static_cast<std::size_t>(little_endian(prefix.header_length)));
-    if (failed(file.read_at(0, header))) return {};
-    return header;
-}
-
 /** Reads the stored dtype and the metric into @p settings, and the scale into @p nvme, from the
  *  first part's header, wherever `--view` and @c USEARCH_NVME_PATHS serve that part from. */
 inline bool read_parts_header(settings_t& settings, nvme_settings_t& nvme) {
+#if USEARCH_WITH_LINUX_SPDK
+    if (nvme.transport == io_transport_t::linux_spdk_k) {
+        auto [driver, driver_status] = linux_spdk_driver_t::open({});
+        if (failed(driver_status))
+            return fmt::println("The SPDK environment did not start: {}", status_to_string(driver_status)), false;
+        nvme.spdk_driver = std::move(driver);
+    }
+#endif
     std::string_view const view = nvme.view_path;
-    std::vector<byte_t> header = read_header_bytes(view);
+    growing_buffer<byte_t> header {global_allocator};
     std::string entry;
-    if (header.empty()) {
+    if (failed(nvme_read_header(view, header))) {
         // A manifest lists its entries before opening any part, so moved parts keep their names.
         auto per_part = [&](safegraphs_part_t part) noexcept {
             if (entry.empty()) entry = part.path;
@@ -176,15 +180,15 @@ inline bool read_parts_header(settings_t& settings, nvme_settings_t& nvme) {
                     : nvme.paths.front();
     else if (!entry.empty())
         first = fmt::format("{}{}", view.substr(0, view.size() - safegraphs_basename(view).size()), entry);
-    if (!first.empty()) header = read_header_bytes(first);
-    if (header.empty()) return fmt::println("Failed to read the SafeGraphs header of {}", first), false;
+    if (!first.empty() && failed(nvme_read_header(first, header)))
+        return fmt::println("Failed to read the SafeGraphs header of {}", first), false;
 
     safegraphs_name_t metric, scale;
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") metric = safegraphs_name_t {field.value};
         if (field.key == "scale") scale = safegraphs_name_t {field.value};
     };
-    auto const [parsed, parse_status] = safegraphs_read_header(bytes_view_t {header}, std::allocator<byte_t> {},
+    auto const [parsed, parse_status] = safegraphs_read_header(to_span(header), std::allocator<byte_t> {},
                                                                per_custom_field);
     if (failed(parse_status))
         return fmt::println("Failed to parse the SafeGraphs header of {}", first.empty() ? view : first), false;
@@ -254,6 +258,14 @@ bool open_nvme(nvme_settings_t const& nvme, fu_topology_t topology, nvme_context
     io_engine_config_t config;
     config.queue_depth = nvme.queue_depth.value;
     config.transport = nvme.transport;
+#if USEARCH_WITH_LINUX_SPDK
+    if (nvme.transport == io_transport_t::linux_spdk_k) {
+        auto [driver, driver_status] = linux_spdk_driver_t::open({});
+        if (failed(driver_status))
+            return fmt::println("The SPDK environment did not start: {}", status_to_string(driver_status)), false;
+        config.spdk_driver = std::move(driver);
+    }
+#endif
     auto [executor, spawn_status] = executor_t::spawn(topology, context.settings.threads.value, config);
     if (failed(spawn_status))
         return fmt::println("Failed to open the {} engines: {}", transport_name(nvme.transport),
@@ -340,7 +352,8 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
 
     typename nvme_t::search_config_t config;
     config.expansion_factor = static_cast<u32_t>(settings.expansion_search.value);
-    nk::matrix_span<key_t> const keys = nvme.results.hit_rows.span();
+    std::vector<key_t> found_keys(search_count * wanted);
+    nk::matrix_span<key_t> const keys {found_keys.data(), search_count, wanted};
     nk::matrix_span<distance_t> const distances = nvme.results.hit_distances.span();
     std::vector<std::size_t> counts(search_count);
     std::vector<u64_t> latencies_ns(search_count);
@@ -368,6 +381,13 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
     for (std::size_t query = 0; query != search_count; ++query) {
         nvme.results.hit_counts[query] = static_cast<u32_t>(counts[query]);
         latencies_us[query] = static_cast<float>(double(latencies_ns[query]) / 1000.0);
+        u32_t* const hit_rows = nvme.results.hit_rows.row(query).data();
+        for (std::size_t rank = 0; rank != counts[query]; ++rank) {
+            std::optional<u64_t> const row = identity_of(found_keys[query * wanted + rank]);
+            if (!row || *row > (std::numeric_limits<u32_t>::max)())
+                return fmt::println("Query {} found a key naming no dataset row", query), false;
+            hit_rows[rank] = static_cast<u32_t>(*row);
+        }
     }
     report_search_metrics(settings, search_count, seconds, nvme.executor.size(), sums, std::span {latencies_us});
     report_storage_metrics("query", search_count, seconds, result, {});
@@ -377,6 +397,11 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
 
 /** The search workload the cascade ends in, under the kernel the parts were built for. */
 struct nvme_search_workload_t {
+
+    /** Keys the parts are viewed with, which every key column widens into, each a dataset row as
+     *  @ref uuid_of renders it. */
+    using key_t = uuid_t;
+
     template <typename streamed_dataset_type_>
     bool run(streamed_dataset_type_& streamed) const {
         return run_nvme_search(streamed);
@@ -402,7 +427,7 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability
     requires quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
 int view_and_run(bench_launch<dataset_scalar_type_> const& launch, nvme_settings_t const& nvme,
                  workload_type_ const& workload) {
-    using nvme_t = nvme_indexes<u32_t, stored_dtype_, capability_>;
+    using nvme_t = nvme_indexes<typename workload_type_::key_t, stored_dtype_, capability_>;
     using context_t = nvme_context<nvme_t>;
     using vectors_t = nk::matrix_view<dataset_scalar_type_>;
     utilities::persisted_dataset<dataset_scalar_type_> const& dataset = launch.dataset;
