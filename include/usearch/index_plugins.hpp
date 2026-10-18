@@ -526,8 +526,10 @@ inline std::uint16_t f32_to_f16(float f32) noexcept {
  */
 inline float bf16_to_f32(std::uint16_t u16) noexcept {
 #if USEARCH_USE_NUMKONG
+    nk_bf16_t bits;
+    std::memcpy(&bits, &u16, sizeof(bits));
     nk_f32_t result;
-    nk_bf16_to_f32_serial((nk_bf16_t const*)&u16, &result);
+    nk_bf16_to_f32_serial(&bits, &result);
     return result;
 #else
     union float_or_unsigned_int_t {
