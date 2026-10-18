@@ -23,6 +23,8 @@
 #include <limits>      // `std::numeric_limits` - the exact scan's open radius
 #include <string>      // `std::string` - the lines end to end
 #include <string_view> // `std::string_view`
+#include <type_traits> // `std::type_identity` - the exact-scan metric a kind picks
+#include <vector>      // `std::vector` - one exact-scan metric per thread
 
 #include "usearch/sequence_index.h"
 #include "usearch/sequence/ram_metric.hpp"
@@ -144,7 +146,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
         usearch_sequence_insert(&arguments);
     };
     auto const search = [&](usearch_executor_t executor, usearch_arena_t arena, usearch_tape_view_t queries,
-                            std::size_t count, usearch_matches_view_t* matches,
+                            std::size_t count, std::size_t expansion, usearch_matches_view_t* matches,
                             usearch_traversal_stats_t* stats, usearch_outcome_t* reached) {
         usearch_sequence_search_t arguments {.index = index,
                                              .executor = executor,
@@ -154,7 +156,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                                              .matches = matches,
                                              .arena = arena,
                                              .wanted = settings.top_k.value,
-                                             .expansion_factor = settings.expansion_search.value,
+                                             .expansion_factor = expansion,
                                              .stats = stats};
         usearch_sequence_search(&arguments);
     };
@@ -186,30 +188,33 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
         usearch_sequence_view_nvme(&view);
         return storage;
     };
-    auto const run_with = [&](auto& oracle, status_t prepared, double unit) {
-        if (failed(prepared)) return fmt::println(stderr, "The exact scan could not size its rounds"), 1;
+    // One exact-scan metric per thread, so the judged queries spread over every thread.
+    auto const run_with = [&]<typename oracle_type_>(std::type_identity<oracle_type_>, auto&& prepare, double unit) {
+        std::vector<oracle_type_> oracles(settings.threads.value);
+        for (oracle_type_& oracle : oracles)
+            if (failed(prepare(oracle))) return fmt::println(stderr, "The exact scan could not size its rounds"), 1;
         return run_basic_bench<usearch_traversal_stats_t>(
             settings, tape, residency == "vram" ? &vram : nullptr, insert, search,
-            [&](std::size_t query, std::span<double> distances) {
-                scan_exactly(oracle, characters, tape.offsets, query, distances, unit);
+            [&](std::size_t thread, std::size_t query, std::span<double> distances) {
+                scan_exactly(oracles[thread], characters, tape.offsets, query, distances, unit);
             },
             serve);
     };
 
     int exit_code = 0;
-    if (metric == usearch_sequence_metric_overlap_k) {
-        sequence::overlap_metric<> oracle;
-        exit_code = run_with(oracle, oracle.init(oracle_round_k, window_widths.view()),
-                             1.0 / sequence::overlap_metric<>::resolution_k);
-    }
-    else if (metric == usearch_sequence_metric_levenshtein_utf8_k) {
-        sequence::levenshtein_metric<sz_cap_any_k, sz_levenshtein_runes_k> oracle;
-        exit_code = run_with(oracle, oracle.init(oracle_round_k), 1);
-    }
-    else {
-        sequence::levenshtein_metric<> oracle;
-        exit_code = run_with(oracle, oracle.init(oracle_round_k), 1);
-    }
+    if (metric == usearch_sequence_metric_overlap_k)
+        exit_code = run_with(
+            std::type_identity<sequence::overlap_metric<>> {},
+            [&](sequence::overlap_metric<>& oracle) { return oracle.init(oracle_round_k, window_widths.view()); },
+            1.0 / sequence::overlap_resolution_k);
+    else if (metric == usearch_sequence_metric_levenshtein_utf8_k)
+        exit_code = run_with(
+            std::type_identity<sequence::levenshtein_metric<sz_cap_any_k, sz_levenshtein_runes_k>> {},
+            [](auto& oracle) { return oracle.init(oracle_round_k); }, 1);
+    else
+        exit_code = run_with(
+            std::type_identity<sequence::levenshtein_metric<>> {},
+            [](auto& oracle) { return oracle.init(oracle_round_k); }, 1);
     usearch_sequence_free(index);
     usearch_executor_free(storage);
     if (residency == "nvme") std::remove(checkpoint.c_str());

@@ -16,7 +16,7 @@
  *  --metric            per binary                Distance kind, by its checkpoint token
  *  --connectivity      32                        Graph degree
  *  --expansion-add     256                       Candidate pool while inserting
- *  --expansion-search  96                        Candidate pool while searching
+ *  --expansion-search  96                        Candidate pools while searching, like 32,64,128
  *  --top-k             10                        Matches per query to judge
  *  --max-base-entries  the file but the queries  Cap on ingested entries
  *  --queries           1000                      Entries held out of the file's tail as queries
@@ -60,8 +60,8 @@ struct basic_settings_t {
     /** Insertion candidate pool. */
     count_t expansion_add {.value = 256};
 
-    /** Search candidate pool. */
-    count_t expansion_search {.value = 96};
+    /** Search breadths, each judged over the one graph the run builds. */
+    counts_t expansion_search {.values = {96}, .size = 1};
 
     /** Matches per query to return and judge. */
     count_t top_k {.value = 10};
@@ -95,7 +95,8 @@ inline std::array<flag_t, 11> basic_flags(basic_settings_t& settings) noexcept {
         {"--metric", "name", "distance kind, by its checkpoint token", &settings.metric_name},
         {"--connectivity", "degree", "graph degree; 32 by default", &settings.connectivity},
         {"--expansion-add", "breadth", "insertion candidate pool; 256 by default", &settings.expansion_add},
-        {"--expansion-search", "breadth", "search candidate pool; 96 by default", &settings.expansion_search},
+        {"--expansion-search", "breadths", "search breadths, like 32,64,128; 96 by default",
+         &settings.expansion_search},
         {"--top-k", "count", "matches per query to judge; 10 by default", &settings.top_k},
         {"--max-base-entries", "count", "cap on ingested entries; every entry the queries leave by default",
          &settings.max_base_entries},
@@ -166,16 +167,17 @@ struct serve_in_place_t {
 
 /**
  *  @brief Builds one index over the entries before @p query_first, searches it with the `--queries`
- *      from there on, and judges the first `--oracle-queries` against an exact scan.
+ *      from there on at every `--expansion-search` breadth, and judges the first `--oracle-queries`
+ *      against one exact scan each, spread over the threads.
  *
  *  @param[in] vram The devices of a VRAM index, whose executor drives them; @c NULL for a RAM
  *      index, driven by `--threads` threads.
  *  @param[in] insert Lands entries through the C interface:
  *      `(executor, keys, entries, count, stats, outcome)`.
- *  @param[in] search Answers queries into an arena:
- *      `(executor, arena, queries, count, matches, stats, outcome)`.
- *  @param[in] exact Fills one distance per base entry for the query at a tape row:
- *      `(row, distances)`.
+ *  @param[in] search Answers queries into an arena at a breadth:
+ *      `(executor, arena, queries, count, expansion, matches, stats, outcome)`.
+ *  @param[in] exact Fills one distance per base entry for the query at a tape row, from any of
+ *      `--threads` threads at once, each with its own scratch: `(thread, row, distances)`.
  *  @param[in] serve Moves the built index where the searches read it, answering the executor they
  *      run on, as `(executor, outcome)`; an NVMe residency saves it and views the checkpoint.
  *  @return The process exit code.
@@ -195,8 +197,8 @@ int run_basic_bench(basic_settings_t const& settings, tape_t const& tape, usearc
     std::size_t const threads = settings.threads.value, top_k = settings.top_k.value;
     fmt::println("- Threads: {}", threads);
     fmt::println("- Base entries: {} · queries: {} · top-k: {}", humanized(base_count), humanized(query_count), top_k);
-    fmt::println("- Connectivity: {} · expansion: {} adding, {} searching", settings.connectivity.value,
-                 settings.expansion_add.value, settings.expansion_search.value);
+    fmt::println("- Connectivity: {} · expansion: {} adding", settings.connectivity.value,
+                 settings.expansion_add.value);
 
     usearch_outcome_t outcome {};
     usearch_executor_t executor = nullptr;
@@ -239,49 +241,75 @@ int run_basic_bench(basic_settings_t const& settings, tape_t const& tape, usearc
     usearch_executor_t const serving = serve(executor, &outcome);
     if (outcome.message) return fmt::println(stderr, "Serve: {}", outcome.message), 1;
 
+    // One exact scan per judged query, spread over the threads, each scanning into its own row;
+    // every breadth is judged against the same two distances.
+    std::size_t const judged = std::min(settings.oracle_queries.value, query_count);
+    std::size_t const kept = std::min(top_k, base_count);
+    std::vector<double> nearest_exact(judged), kept_exact(judged), scanned(threads * base_count);
+    auto judge_exactly = [&](std::size_t query, std::size_t thread) noexcept {
+        std::span<double> const distances {scanned.data() + thread * base_count, base_count};
+        exact(thread, query_first + query, distances);
+        std::partial_sort(distances.begin(), distances.begin() + kept, distances.end());
+        nearest_exact[query] = distances[0], kept_exact[query] = distances[kept - 1];
+    };
+    using judge_t = decltype(judge_exactly);
+    fu_topology_t topology = nullptr;
+    fu_pool_t pool = nullptr;
+    time_point_t const judge_start = steady_clock_t::now();
+    bool const judging = fu_topology_new(&topology) == fu_success_k &&
+                         fu_pool_new("usearch_bench_oracle", fu_capabilities_all_k, &pool) == fu_success_k &&
+                         fu_pool_spawn(topology, pool, threads, fu_caller_inclusive_k) == fu_success_k &&
+                         fu_pool_for_n_dynamic(
+                             pool, judged,
+                             [](fu_lambda_context_t context, std::size_t query, std::size_t thread, std::size_t) {
+                                 (*static_cast<judge_t*>(context))(query, thread);
+                             },
+                             &judge_exactly) == fu_success_k;
+    if (pool) fu_pool_delete(pool);
+    if (topology) fu_topology_delete(topology);
+    if (!judging) return fmt::println(stderr, "The exact scan could not spread over {} threads", threads), 1;
+    fmt::println("- Exact scan: {} queries in {:.2f} s", judged,
+                 stdc::duration<double>(steady_clock_t::now() - judge_start).count());
+
     std::vector<double> found_scores(query_count * top_k);
     std::vector<std::size_t> found_counts(query_count);
     std::size_t const query_batch = std::min(settings.queries_per_core.value * threads, query_count);
-    stats_type_ searched {};
-    progress_bar_t searching {"search", query_count, settings.terminal};
-    time_point_t const search_start = steady_clock_t::now();
-    for (std::size_t first = 0; first < query_count; first += query_batch) {
-        std::size_t const count = std::min(query_batch, query_count - first);
-        usearch_matches_view_t matches {};
-        stats_type_ stats {};
-        search(serving, arena, tape.view(query_first + first), count, &matches, &stats, &outcome);
-        if (outcome.message) return fmt::println(stderr, "Search: {}", outcome.message), 1;
-        searched.computed_distances += stats.computed_distances;
-        for (std::size_t query = 0; query != count; ++query) {
-            std::size_t const landed = std::min(matches.counts[query], top_k);
-            found_counts[first + query] = landed;
-            std::copy_n(matches.scores + query * matches.columns, landed,
-                        found_scores.begin() + (first + query) * top_k);
+    for (std::size_t const expansion : settings.expansion_search.view()) {
+        stats_type_ searched {};
+        progress_bar_t searching {"search", query_count, settings.terminal};
+        time_point_t const search_start = steady_clock_t::now();
+        for (std::size_t first = 0; first < query_count; first += query_batch) {
+            std::size_t const count = std::min(query_batch, query_count - first);
+            usearch_matches_view_t matches {};
+            stats_type_ stats {};
+            search(serving, arena, tape.view(query_first + first), count, expansion, &matches, &stats, &outcome);
+            if (outcome.message) return fmt::println(stderr, "Search: {}", outcome.message), 1;
+            searched.computed_distances += stats.computed_distances;
+            for (std::size_t query = 0; query != count; ++query) {
+                std::size_t const landed = std::min(matches.counts[query], top_k);
+                found_counts[first + query] = landed;
+                std::copy_n(matches.scores + query * matches.columns, landed,
+                            found_scores.begin() + (first + query) * top_k);
+            }
+            searching.tick(first + count);
         }
-        searching.tick(first + count);
+        searching.finish();
+        double const search_seconds = stdc::duration<double>(steady_clock_t::now() - search_start).count();
+        double recall_at_one = 0, recall_at_k = 0;
+        for (std::size_t query = 0; query != judged; ++query) {
+            double const* const scores = found_scores.data() + query * top_k;
+            std::size_t hits = 0;
+            for (std::size_t rank = 0; rank != found_counts[query]; ++rank)
+                hits += within(scores[rank], kept_exact[query]);
+            recall_at_one += found_counts[query] && within(scores[0], nearest_exact[query]);
+            recall_at_k += static_cast<double>(std::min(hits, kept)) / static_cast<double>(kept);
+        }
+        fmt::println("- Expansion {}: recall@1 {:.4f} · recall@{} {:.4f} over {} judged · " //
+                     "{} queries in {:.2f} s · {}/s · {:.0f} distances per query",          //
+                     expansion, recall_at_one / judged, kept, recall_at_k / judged, judged, humanized(query_count),
+                     search_seconds, humanized(query_count / search_seconds),
+                     static_cast<double>(searched.computed_distances) / static_cast<double>(query_count));
     }
-    searching.finish();
-    double const search_seconds = stdc::duration<double>(steady_clock_t::now() - search_start).count();
-    fmt::println("- Search: {} queries in {:.2f} s · {}/s · {:.0f} distances per query", humanized(query_count),
-                 search_seconds, humanized(query_count / search_seconds),
-                 static_cast<double>(searched.computed_distances) / static_cast<double>(query_count));
-
-    std::size_t const judged = std::min(settings.oracle_queries.value, query_count);
-    std::size_t const kept = std::min(top_k, base_count);
-    std::vector<double> distances(base_count);
-    double recall_at_one = 0, recall_at_k = 0;
-    for (std::size_t query = 0; query != judged; ++query) {
-        exact(query_first + query, std::span {distances});
-        std::partial_sort(distances.begin(), distances.begin() + kept, distances.end());
-        double const* const scores = found_scores.data() + query * top_k;
-        std::size_t hits = 0;
-        for (std::size_t rank = 0; rank != found_counts[query]; ++rank)
-            hits += within(scores[rank], distances[kept - 1]);
-        recall_at_one += found_counts[query] && within(scores[0], distances[0]);
-        recall_at_k += static_cast<double>(std::min(hits, kept)) / static_cast<double>(kept);
-    }
-    fmt::println("- Recall@1: {:.4f} · recall@{}: {:.4f}, over {} queries the exact oracle judged",
-                 recall_at_one / judged, kept, recall_at_k / judged, judged);
 
     usearch_arena_free(arena);
     usearch_executor_free(executor);

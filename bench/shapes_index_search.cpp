@@ -131,8 +131,8 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, std:
         usearch_shapes_insert(&arguments);
     };
     auto const search = [&](usearch_executor_t executor, usearch_arena_t arena, usearch_tape_view_t queries,
-                            std::size_t count, usearch_matches_view_t* matches, usearch_traversal_stats_t* stats,
-                            usearch_outcome_t* reached) {
+                            std::size_t count, std::size_t expansion, usearch_matches_view_t* matches,
+                            usearch_traversal_stats_t* stats, usearch_outcome_t* reached) {
         usearch_shapes_search_t arguments {.index = index,
                                            .executor = executor,
                                            .outcome = reached,
@@ -141,19 +141,33 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, std:
                                            .matches = matches,
                                            .arena = arena,
                                            .wanted = settings.top_k.value,
-                                           .expansion_factor = settings.expansion_search.value,
+                                           .expansion_factor = expansion,
                                            .stats = stats};
         usearch_shapes_search(&arguments);
     };
 
     using kit_t = typename shapes::shapes_ladder<scalar_type_, nk_cap_any_k>::kit_t;
     using distance_t = typename kit_t::distance_t;
-    shapes::shapes_metric<kit_t, std::allocator<byte_t>> oracle {kind.kernel, {}};
-    if (failed(oracle.init(shapes_round_k))) return fmt::println(stderr, "The exact scan could not size its rounds"), 1;
-    std::vector<nk::shapes_packed<scalar_type_>> packs(shapes_round_k);
-    nk::shapes_packed<scalar_type_> query_pack;
-    std::array<distance_t, shapes_round_k> round;
-    auto const exact = [&](std::size_t query, std::span<double> distances) {
+
+    /** One thread's exact scan: its metric, the round's packs, the query's pack and the round's
+     *  distances. */
+    using oracle_metric_t = shapes::shapes_metric<kit_t, std::allocator<byte_t>>;
+    struct oracle_t {
+        oracle_metric_t metric;
+        std::vector<nk::shapes_packed<scalar_type_>> packs;
+        nk::shapes_packed<scalar_type_> query_pack;
+        std::array<distance_t, shapes_round_k> round;
+    };
+    std::vector<oracle_t> oracles;
+    oracles.reserve(settings.threads.value);
+    for (std::size_t thread = 0; thread != settings.threads.value; ++thread) {
+        oracles.push_back(
+            {oracle_metric_t {kind.kernel, {}}, std::vector<nk::shapes_packed<scalar_type_>>(shapes_round_k), {}, {}});
+        if (failed(oracles.back().metric.init(shapes_round_k)))
+            return fmt::println(stderr, "The exact scan could not size its rounds"), 1;
+    }
+    auto const exact = [&](std::size_t thread, std::size_t query, std::span<double> distances) {
+        auto& [oracle, packs, query_pack, round] = oracles[thread];
         bool packed = succeeded(pack_shape(coordinates, std::span {tape.offsets}, query, query_pack));
         if (packed) oracle.reset(query_pack);
         for (std::size_t first = 0; first < distances.size(); first += shapes_round_k) {

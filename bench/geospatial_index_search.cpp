@@ -129,8 +129,8 @@ int bench_geospatial_index_search(int argc, char const* const* argv) {
         usearch_geospatial_insert(&arguments);
     };
     auto const search = [&](usearch_executor_t executor, usearch_arena_t arena, usearch_tape_view_t queries,
-                            std::size_t count, usearch_matches_view_t* matches, usearch_traversal_stats_t* stats,
-                            usearch_outcome_t* reached) {
+                            std::size_t count, std::size_t expansion, usearch_matches_view_t* matches,
+                            usearch_traversal_stats_t* stats, usearch_outcome_t* reached) {
         usearch_geospatial_search_t arguments {.index = index,
                                                .executor = executor,
                                                .outcome = reached,
@@ -140,11 +140,11 @@ int bench_geospatial_index_search(int argc, char const* const* argv) {
                                                .matches = matches,
                                                .arena = arena,
                                                .wanted = settings.top_k.value,
-                                               .expansion_factor = settings.expansion_search.value,
+                                               .expansion_factor = expansion,
                                                .stats = stats};
         usearch_geospatial_search(&arguments);
     };
-    auto const exact = [&](std::size_t query, std::span<double> distances) {
+    auto const exact = [&](std::size_t, std::size_t query, std::span<double> distances) {
         for (std::size_t row = 0; row != distances.size(); ++row)
             distances[row] = std::sqrt(
                                  static_cast<f64_t>(geospatial::chord_squared(positions[query], positions[row]))) /

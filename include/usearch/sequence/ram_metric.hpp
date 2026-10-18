@@ -39,6 +39,7 @@
 
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::int64_t`
+#include <cstring> // `std::memcpy` - the bytes a prepared engine holds
 #include <cmath>   // `std::llround` - a width's matches off its share
 
 #include <limits>  // `std::numeric_limits` - the distance a failed round reports
@@ -358,13 +359,13 @@ struct overlap_ladder<caps_> {
 #pragma region Levenshtein Metric
 
 /**
- *  @brief Unit-cost Levenshtein over one round of candidates: @c reset prepares the query's engine,
- *      @c push stages candidate views, and @c drain streams every staged candidate through it in
- *      ascending length order, exact up to the radius.
+ *  @brief Unit-cost Levenshtein over one round of candidates: @c reset prepares the query's
+ *      engine, @c push stages candidate views, and @c drain streams every staged candidate through
+ *      it, which sweeps them in ascending length order, exact up to the radius.
  *
  *  One instance belongs to one thread and owns its engine, the arena the engine lives in, the
- *  staging, and the ordering; nothing reaches the allocator on the scoring path once @c init sized
- *  the round and the arena has held the widest query and round seen.
+ *  staging, and the sweep's distances; nothing reaches the allocator on the scoring path once
+ *  @c init sized the round and the arena has held the widest query and round seen.
  *
  *  @tparam capability_ The admitted ISA backends as a capability mask; the widest kit this build compiled in
  *      among them is picked.
@@ -381,8 +382,9 @@ class levenshtein_metric {
 
   private:
 
-    /** The query's engine, one query prepared; empty for an empty query. Its blocks live in
-     *  @c arena_, and its sweep scratch grows there to the largest round seen. */
+    /** The query's engine: one query prepared, an empty one as a row of no symbols, and nothing
+     *  before the first @ref reset. Its blocks live in @c arena_, and its sweep scratch grows there
+     *  to the largest round seen. */
     sz_levenshtein_engine_t engine_ {};
 
     /** Where the engine's blocks bump, rewound by every @ref reset. */
@@ -391,33 +393,24 @@ class levenshtein_metric {
     /** The round's candidates in push order. */
     growing_buffer<sz_string_view_t, allocator_t> staged_;
 
-    /** The candidates within reach of the radius, ascending by length: the sweep's own view. */
-    growing_buffer<sz_string_view_t, allocator_t> ranked_;
+    /** The bytes @c engine_ was prepared from, so a round reopening the same query keeps the
+     *  engine; grows to the longest query seen. */
+    growing_buffer<char, allocator_t> prepared_;
 
-    /** Two halves of the staging capacity: every staged candidate's length in the kit's symbols by
-     *  push slot, then those of @c ranked_ by rank; measured per round. */
-    growing_buffer<sz_size_t, allocator_t> symbol_counts_;
-
-    /** Two halves of the staging capacity: @c order_[rank] = slot, ascending by length, the radix
-     *  passes bouncing between them; the half the permutation does not end in takes the sweep's
-     *  distances by rank. */
-    growing_buffer<sz_size_t, allocator_t> order_;
-
-    /** 0, 1, 2, … - the order the sweep visits @c ranked_ in, which is the one it lies in. */
-    growing_buffer<sz_size_t, allocator_t> ranks_;
+    /** The sweep's distances by push slot, as wide as the staging. */
+    growing_buffer<sz_size_t, allocator_t> swept_;
     status_t last_status_ = status_t::uninitialized_k;
 
   public:
     levenshtein_metric(allocator_t const& allocator = {}) noexcept
-        : arena_(allocator), staged_(allocator), ranked_(allocator), symbol_counts_(allocator), order_(allocator),
-          ranks_(allocator) {}
+        : arena_(allocator), staged_(allocator), prepared_(allocator), swept_(allocator) {}
     levenshtein_metric(levenshtein_metric const&) = delete;
     levenshtein_metric& operator=(levenshtein_metric const&) = delete;
     levenshtein_metric(levenshtein_metric&&) noexcept = default;
     levenshtein_metric& operator=(levenshtein_metric&&) noexcept = default;
 
     /**
-     *  @brief Sizes the staging, the ranked views, the symbol counts and the ordering.
+     *  @brief Sizes the staging and the sweep's distances.
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at least the
      *      index's round capacity, @c max(fan_out × connectivity, connectivity + 1), or rounds saturate rather
      *      than fail. A round is bounded to @c u32_t slots by design.
@@ -425,13 +418,7 @@ class levenshtein_metric {
     status_t init(std::size_t staging_limit) noexcept {
         if (!staging_limit || staging_limit > (std::numeric_limits<u32_t>::max)()) return status_t::config_mismatch_k;
         if (status_t const staged = staged_.reserve_exactly(staging_limit); failed(staged)) return staged;
-        std::size_t const capacity = staged_.capacity();
-        if (status_t const ranked = ranked_.resize_uninitialized(capacity); failed(ranked)) return ranked;
-        if (status_t const counted = symbol_counts_.resize_uninitialized(2 * capacity); failed(counted)) return counted;
-        if (status_t const ordered = order_.resize_uninitialized(2 * capacity); failed(ordered)) return ordered;
-        last_status_ = ranks_.resize_uninitialized(capacity);
-        if (failed(last_status_)) return last_status_;
-        for (std::size_t rank = 0; rank != capacity; ++rank) ranks_[rank] = rank;
+        last_status_ = swept_.resize_uninitialized(staged_.capacity());
         return last_status_;
     }
 
@@ -439,14 +426,20 @@ class levenshtein_metric {
      *  since the scoring verbs answer nothing by contract. */
     status_t status() const noexcept { return last_status_; }
 
-    /** Opens a round for @p query, preparing its engine and discarding whatever the previous round
-     *  staged. */
+    /** Opens a round for @p query, preparing its engine unless it holds these bytes already, and
+     *  discarding whatever the previous round staged. */
     void reset(sz::string_view_t query) noexcept {
         staged_.clear();
+        if (engine_.count && succeeded(last_status_) && to_string_view(prepared_) == to_string_view(query)) return;
         engine_ = sz_levenshtein_engine_t {};
         arena_.clear();
-        last_status_ = status_t::success_k;
-        if (query.empty()) return;
+        // Grow-only, so a thread's arena keeps one block per doubling rather than one per query.
+        prepared_.clear();
+        last_status_ = prepared_.reserve(query.size());
+        if (failed(last_status_)) return;
+        prepared_.extend_uninitialized(query.size());
+        if (!query.empty()) std::memcpy(prepared_.data(), query.data(), query.size());
+        // An empty query prepares as one row of no symbols, scoring every candidate's own length.
         sz_string_view_t const view = as_string_view(query);
         sz_strings_view_t queries;
         sz_strings_from_string_views(&view, 1, &queries);
@@ -454,6 +447,7 @@ class levenshtein_metric {
         sz_status_t const prepared = kit_t::init(&engine_, &queries, kit_t::symbol_k, &allocator, nullptr);
         if (prepared == sz_success_k) return;
         engine_ = sz_levenshtein_engine_t {};
+        prepared_.clear();
         last_status_ = prepared == sz_bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k;
     }
 
@@ -468,118 +462,28 @@ class levenshtein_metric {
      *  @brief Scores everything staged in one sweep and closes the round.
      *
      *  Distances up to and including @p radius are exact; above it the value is some value above
-     *  the radius. A failed round reports the furthest distance, so a full pool rejects it and an
-     *  unfilled pool admits it last; @ref status is the only signal.
-     *
-     *  In length order the candidates whose length gap alone exceeds the radius form a prefix and a
-     *  suffix that never enter the sweep and report that gap - the suffix cut is what keeps a long
-     *  candidate out of a sweep of short ones - and the rest stream through it. Lengths count the
-     *  kit's symbols, each candidate's measured once per round.
+     *  the radius. The engine sweeps the round in ascending length order and skips each pair whose
+     *  lengths alone put it past the radius. A failed round reports the furthest distance, so a
+     *  full pool rejects it and an unfilled pool admits it last; @ref status is the only signal.
      *
      *  @param[out] distances One slot per staged candidate, in push order.
      *  @param[in] radius The furthest distance the caller still tells apart.
      */
     void drain(std::span<i64_t> distances, i64_t radius) noexcept {
         std::size_t const count = staged_.size();
-        if (failed(last_status_)) {
-            for (std::size_t slot = 0; slot != count; ++slot) distances[slot] = (std::numeric_limits<i64_t>::max)();
-            staged_.clear();
-            return;
-        }
-        for (std::size_t slot = 0; slot != count; ++slot)
-            symbol_counts_[slot] = symbols_(staged_[slot].start, staged_[slot].length);
-        i64_t const query_length = engine_.count ? static_cast<i64_t>(engine_.lengths[0]) : 0;
-        if (query_length == 0) {
-            for (std::size_t slot = 0; slot != count; ++slot)
-                distances[slot] = static_cast<i64_t>(symbol_counts_[slot]);
-            staged_.clear();
-            return;
-        }
-        ordering_t const ordering = order_by_length_(count);
-        sz_size_t const* const order = ordering.order;
-        sz_size_t* const swept = ordering.swept;
-        std::size_t first_within = 0, end_within = count;
-        while (first_within != count && query_length - static_cast<i64_t>(symbol_counts_[order[first_within]]) > radius)
-            ++first_within;
-        while (end_within != first_within &&
-               static_cast<i64_t>(symbol_counts_[order[end_within - 1]]) - query_length > radius)
-            --end_within;
-        for (std::size_t rank = 0; rank != first_within; ++rank)
-            distances[order[rank]] = query_length - static_cast<i64_t>(symbol_counts_[order[rank]]);
-        for (std::size_t rank = end_within; rank != count; ++rank)
-            distances[order[rank]] = static_cast<i64_t>(symbol_counts_[order[rank]]) - query_length;
-
-        // The sweep reads a view of its own, the candidates within reach in rank order, so its
-        // order, its counts and its distances all index that view and nothing past it.
-        std::size_t const within = end_within - first_within;
-        sz_size_t* const ranked_counts = symbol_counts_.data() + staged_.capacity();
-        for (std::size_t rank = 0; rank != within; ++rank) {
-            sz_size_t const slot = order[first_within + rank];
-            ranked_[rank] = staged_[slot], ranked_counts[rank] = symbol_counts_[slot];
-        }
         sz_strings_view_t candidates;
-        sz_strings_from_string_views(ranked_.data(), within, &candidates);
+        sz_strings_from_string_views(staged_.data(), count, &candidates);
         sz_size_t const bound = radius < (std::numeric_limits<i64_t>::max)()
                                     ? static_cast<sz_size_t>(max_of<i64_t>(radius, 0))
                                     : STRINGZILLA_SIZE_MAX;
         // A moved metric keeps its engine, whose growth must bump the arena it moved with.
         engine_.allocator.handle = &arena_;
-        sz_status_t const scored = kit_t::distances(&engine_, &candidates, ranked_counts, ranks_.data(), bound, swept,
-                                                    within, nullptr);
-        if (scored != sz_success_k) last_status_ = status_t::bad_alloc_k;
-        for (std::size_t rank = 0; rank != within; ++rank)
-            distances[order[first_within + rank]] = scored == sz_success_k ? static_cast<i64_t>(swept[rank])
-                                                                           : (std::numeric_limits<i64_t>::max)();
+        bool const scored = succeeded(last_status_) && kit_t::distances(&engine_, &candidates, nullptr, nullptr, bound,
+                                                                        swept_.data(), count, nullptr) == sz_success_k;
+        if (!scored && succeeded(last_status_)) last_status_ = status_t::bad_alloc_k;
+        for (std::size_t slot = 0; slot != count; ++slot)
+            distances[slot] = scored ? static_cast<i64_t>(swept_[slot]) : (std::numeric_limits<i64_t>::max)();
         staged_.clear();
-    }
-
-  private:
-
-    /** Symbols in @p length bytes at @p text: the bytes, or the runes StringZilla decodes. */
-    static std::size_t symbols_(sz_cptr_t text, std::size_t length) noexcept {
-        if constexpr (symbol_ == sz_levenshtein_runes_k) return sz_levenshtein_utf8_runes(text, length);
-        else return length;
-    }
-
-    /** The ascending-length permutation and the half of @c order_ left for the sweep's
-     *  distances. */
-    struct ordering_t {
-        sz_size_t const* order;
-        sz_size_t* swept;
-    };
-
-    /**
-     *  @brief The ascending-length permutation of the first @p count staged views.
-     *
-     *  A stable LSD radix over the bytes of their symbol counts, low byte first, visiting only the
-     *  bytes that differ across the round - so lengths under 256 cost one counting pass and one
-     *  scatter, and nothing allocates or throws.
-     *
-     *  @return Whichever half of @c order_ holds the finished permutation, and the other one.
-     */
-    ordering_t order_by_length_(std::size_t count) noexcept {
-        sz_size_t* source = order_.data();
-        sz_size_t* target = order_.data() + order_.size() / 2;
-        std::size_t all_ones = ~std::size_t(0), any_ones = 0;
-        for (std::size_t slot = 0; slot != count; ++slot) {
-            source[slot] = slot;
-            all_ones &= symbol_counts_[slot], any_ones |= symbol_counts_[slot];
-        }
-        std::size_t const varying = all_ones ^ any_ones;
-        for (std::size_t shift = 0; shift != std::numeric_limits<std::size_t>::digits; shift += 8) {
-            if (((varying >> shift) & 0xFF) == 0) continue;
-            std::size_t offsets[256] = {};
-            for (std::size_t rank = 0; rank != count; ++rank) ++offsets[(symbol_counts_[source[rank]] >> shift) & 0xFF];
-            std::size_t running = 0;
-            for (std::size_t digit = 0; digit != 256; ++digit) {
-                std::size_t const bucket = offsets[digit];
-                offsets[digit] = running, running += bucket;
-            }
-            for (std::size_t rank = 0; rank != count; ++rank)
-                target[offsets[(symbol_counts_[source[rank]] >> shift) & 0xFF]++] = source[rank];
-            std::swap(source, target);
-        }
-        return {source, target};
     }
 };
 
@@ -588,6 +492,17 @@ using levenshtein_metric_t = levenshtein_metric<>;
 #pragma endregion Levenshtein Metric
 
 #pragma region Overlap Metric
+
+/** The full scale of an overlap distance: the widest that still fits @c i64 times a @c u32 window
+ *  count. */
+inline constexpr i64_t overlap_resolution_k = i64_t(1) << 31;
+
+/** The share of the @p longer side's windows a pair misses with @p matches found, at full scale
+ *  when neither side has a window. */
+constexpr u64_t overlap_distance(u64_t longer, u64_t matches) noexcept {
+    return longer ? (longer - matches) * static_cast<u64_t>(overlap_resolution_k) / longer
+                  : static_cast<u64_t>(overlap_resolution_k);
+}
 
 /**
  *  @brief Window overlap over one round of candidates: @c reset hashes the query's windows at every width
@@ -612,8 +527,10 @@ class overlap_metric {
     using kit_t = typename overlap_ladder<capability_>::kit_t;
     using allocator_t = allocator_type_;
     using is_transparent = void;
-    /** The full scale of a distance: the widest that still fits @c i64 times a @c u32 window count. */
-    static constexpr i64_t resolution_k = i64_t(1) << 31;
+
+    /** The full scale of a distance, @ref overlap_resolution_k, which callers scaling distances
+     *  read off the metric type. */
+    static constexpr i64_t resolution_k = overlap_resolution_k;
 
   private:
 
@@ -626,6 +543,10 @@ class overlap_metric {
 
     /** The round's candidates in push order. */
     growing_buffer<sz_string_view_t, allocator_t> staged_;
+
+    /** The bytes @c engine_ was prepared from, so a round reopening the same query keeps the
+     *  engine; grows to the longest query seen. */
+    growing_buffer<char, allocator_t> prepared_;
 
     /** The widths windows are taken at, all sharing one B-tree. */
     growing_buffer<sz_size_t, allocator_t> window_widths_;
@@ -641,7 +562,7 @@ class overlap_metric {
 
   public:
     overlap_metric(allocator_t const& allocator = {}) noexcept
-        : arena_(allocator), staged_(allocator), window_widths_(allocator), scores_(allocator) {}
+        : arena_(allocator), staged_(allocator), prepared_(allocator), window_widths_(allocator), scores_(allocator) {}
     overlap_metric(overlap_metric const&) = delete;
     overlap_metric& operator=(overlap_metric const&) = delete;
     overlap_metric(overlap_metric&&) noexcept = default;
@@ -675,13 +596,20 @@ class overlap_metric {
      *  since the scoring verbs answer nothing by contract. */
     status_t status() const noexcept { return last_status_; }
 
-    /** Opens a round for @p query, building its B-tree once and discarding whatever the previous
-     *  round staged. */
+    /** Opens a round for @p query, building its B-tree unless it holds these bytes already, and
+     *  discarding whatever the previous round staged. */
     void reset(sz::string_view_t query) noexcept {
-        last_status_ = status_t::success_k;
-        staged_.clear(), query_windows_ = 0;
+        staged_.clear();
+        if (succeeded(last_status_) && to_string_view(prepared_) == to_string_view(query)) return;
+        query_windows_ = 0;
         engine_ = sz_overlap_engine_t {};
         arena_.clear();
+        // Grow-only, so a thread's arena keeps one block per doubling rather than one per query.
+        prepared_.clear();
+        last_status_ = prepared_.reserve(query.size());
+        if (failed(last_status_)) return;
+        prepared_.extend_uninitialized(query.size());
+        if (!query.empty()) std::memcpy(prepared_.data(), query.data(), query.size());
         for (std::size_t const width : window_widths_)
             if (width <= query.size()) query_windows_ += query.size() - width + 1;
         if (query_windows_ == 0) return;
@@ -693,6 +621,7 @@ class overlap_metric {
                                                  &allocator, nullptr);
         if (prepared == sz_success_k) return;
         engine_ = sz_overlap_engine_t {};
+        prepared_.clear();
         last_status_ = prepared == sz_bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k;
     }
 
@@ -773,7 +702,7 @@ class overlap_metric {
         }
         // The longer text has more windows at every width, so the widths' longer sides sum to the
         // longer side in all, and a union denominator would let repeats score below zero.
-        return static_cast<i64_t>((longer - matches) * static_cast<u64_t>(resolution_k) / longer);
+        return static_cast<i64_t>(overlap_distance(longer, matches));
     }
 };
 

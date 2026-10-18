@@ -271,12 +271,9 @@ struct levenshtein_ladder<sz_levenshtein_runes_k, caps_> {
     static constexpr sz_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
-/** The full scale of an overlap distance, as the CPU's @c overlap_metric::resolution_k. */
-inline constexpr u64_t cuda_overlap_resolution_k = u64_t {1} << 31;
-
 /**
  *  @brief The overlap distance from @p query to @p row, every lane of the warp taking part: the
- *      share of the longer side's windows the candidate misses, at @c cuda_overlap_resolution_k,
+ *      share of the longer side's windows the candidate misses, at @c overlap_resolution_k,
  *      exact within @p radius and above it past.
  *
  *  A float radius rounds, so the misses StringZilla may stop past are those of the integer radius a
@@ -286,15 +283,15 @@ __device__ __noinline__ inline u64_t cuda_overlap_score_ampere(sz_overlap_query_
                                                                distance_t radius, u32_t lane) noexcept {
     u64_t const candidate_windows = sz_overlap_windows(row.bytes, query.widths, query.widths_count);
     u64_t const longer = max_of<u64_t>(candidate_windows, query.windows);
-    if (!longer) return cuda_overlap_resolution_k;
+    if (!longer) return overlap_distance(longer, 0);
     sz_size_t misses_limit = STRINGZILLA_SIZE_MAX;
-    if (radius < static_cast<distance_t>(cuda_overlap_resolution_k)) {
+    if (radius < static_cast<distance_t>(overlap_resolution_k)) {
         u64_t const admitted = static_cast<u64_t>(radius > 0 ? radius : 0) + (u64_t {1} << 7);
-        misses_limit = ((admitted + 1) * longer - 1) / cuda_overlap_resolution_k;
+        misses_limit = ((admitted + 1) * longer - 1) / static_cast<u64_t>(overlap_resolution_k);
     }
     u64_t const matches = sz_overlap_candidate_matches_simt_(&query, reinterpret_cast<sz_cptr_t>(row.data), row.bytes,
                                                              misses_limit, lane % 32u, sz_shuffle_index_cuda_);
-    return (longer - matches) * cuda_overlap_resolution_k / longer;
+    return overlap_distance(longer, matches);
 }
 
 /** Window overlap on the Ampere floor: a warp lays the query's window hashes at every width out as
@@ -341,8 +338,7 @@ struct u8_ampere_overlap_kit_t {
         u64_t const candidate_windows = sz_overlap_windows(row.bytes, query.widths, query.widths_count);
         u64_t const longer = max_of<u64_t>(candidate_windows, query.windows);
         u64_t const shorter = min_of<u64_t>(candidate_windows, query.windows);
-        if (!longer) return static_cast<distance_t>(cuda_overlap_resolution_k);
-        return static_cast<distance_t>((longer - shorter) * cuda_overlap_resolution_k / longer);
+        return static_cast<distance_t>(overlap_distance(longer, shorter));
     }
     static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query, basic::vram_row_t row,
                                                        distance_t radius, u32_t lane) noexcept {
