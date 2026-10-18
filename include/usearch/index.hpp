@@ -96,7 +96,7 @@
 #include <cstring>   // `std::memset`
 #include <iterator>  // `std::reverse_iterator`
 #include <mutex>     // `std::unique_lock` - replacement candidate
-#include <random>    // `std::default_random_engine` - replacement candidate
+#include <random>    // `std::uniform_real_distribution`
 #include <stdexcept> // `std::runtime_exception`
 #include <thread>    // `std::thread`
 #include <utility>   // `std::pair`
@@ -1278,6 +1278,29 @@ template <typename element_at> struct hash_gt {
 };
 
 /**
+ *  @brief Eight-byte, non-cryptographic uniform random bit generator for STL distributions.
+ *  @see https://prng.di.unimi.it/splitmix64.c (public-domain reference implementation).
+ *  @details Every seed is valid, including zero. Generation and skipping use unsigned wraparound.
+ */
+class splitmix64_t {
+    std::uint64_t state_;
+
+  public:
+    using result_type = std::uint64_t;
+    static result_type mix_uint64(result_type x) noexcept {
+        x = (x ^ (x >> 30u)) * 0xBF58476D1CE4E5B9ULL;
+        x = (x ^ (x >> 27u)) * 0x94D049BB133111EBULL;
+        return x ^ (x >> 31u);
+    }
+    constexpr explicit splitmix64_t(result_type value = 0) noexcept : state_(value) {}
+    static constexpr result_type min() noexcept { return 0; }
+    static constexpr result_type max() noexcept { return (std::numeric_limits<result_type>::max)(); }
+    void seed(result_type value = 0) noexcept { state_ = value; }
+    result_type operator()() noexcept { return mix_uint64(state_ += 0x9E3779B97F4A7C15ULL); }
+    void discard(unsigned long long count) noexcept { state_ += result_type(count) * 0x9E3779B97F4A7C15ULL; }
+};
+
+/**
  *  @brief  SplitMix64 finalizer, used to scatter integer keys before masking.
  *
  *  On libstdc++ and libc++ `std::hash` is the identity for integers. Our open-addressing
@@ -1289,10 +1312,7 @@ template <typename element_at> struct hash_gt {
  */
 template <> struct hash_gt<std::uint64_t> {
     std::size_t operator()(std::uint64_t const& element) const noexcept {
-        std::uint64_t x = element;
-        x = (x ^ (x >> 30u)) * 0xBF58476D1CE4E5B9ULL;
-        x = (x ^ (x >> 27u)) * 0x94D049BB133111EBULL;
-        return static_cast<std::size_t>(x ^ (x >> 31u));
+        return static_cast<std::size_t>(splitmix64_t::mix_uint64(element));
     }
 };
 
@@ -2489,7 +2509,7 @@ class index_gt {
         top_candidates_t top_for_refine{};
         next_candidates_t next_candidates{};
         visits_hash_set_t visits{};
-        std::default_random_engine level_generator{};
+        splitmix64_t level_generator{};
         std::size_t iteration_cycles{};
         std::size_t computed_distances{};
         std::size_t computed_distances_in_refines{};
@@ -2686,6 +2706,10 @@ class index_gt {
         other = index_gt(config_, dynamic_allocator_, tape_allocator_);
         if (!other.reserve(limits_))
             return result.failed("Failed to reserve the contexts");
+
+        // A copy must continue the same node-level streams as the original.
+        for (std::size_t i = 0; i != contexts_.size(); ++i)
+            other.contexts_[i].level_generator = contexts_[i].level_generator;
 
         // Now all is left - is to allocate new `node_t` instances and populate
         // the `other.nodes_` array into it.
@@ -2892,9 +2916,14 @@ class index_gt {
 
     /**
      *  @brief  Increases the `capacity()` of the index to allow adding more vectors.
+     *  @note Thread reservations never shrink; `reset()` releases all contexts.
      *  @return `true` on success, `false` on memory allocation errors.
      */
     bool try_reserve(index_limits_t limits) usearch_noexcept_m {
+
+        // Keep previously allocated contexts, including streams for temporarily unused threads.
+        limits.threads_add = (std::max)(limits.threads_add, limits_.threads_add);
+        limits.threads_search = (std::max)(limits.threads_search, limits_.threads_search);
 
         if (limits.threads_add <= limits_.threads_add          //
             && limits.threads_search <= limits_.threads_search //
@@ -2918,9 +2947,18 @@ class index_gt {
         // Move the nodes info, and deallocate previous buffers.
         if (nodes_)
             std::memcpy(new_nodes.data(), nodes_.data(), sizeof(node_t) * size());
-        for (std::size_t i = 0; i != new_contexts.size(); ++i)
+        for (std::size_t i = 0; i != new_contexts.size(); ++i) {
             if (!new_contexts[i].top_for_refine.reserve(connectivity_max + 1))
                 return false;
+
+            // Copy rather than advance the old stream, so a failed reserve leaves it unchanged.
+            if (i < contexts_.size())
+                new_contexts[i].level_generator = contexts_[i].level_generator;
+            else {
+                // Mix logical thread slots instead of using adjacent seeds (or an OS thread ID).
+                new_contexts[i].level_generator.seed(splitmix64_t::mix_uint64(static_cast<std::uint64_t>(i) + 1));
+            }
+        }
 
         limits_ = limits;
         nodes_capacity_ = limits.members;
@@ -3211,11 +3249,13 @@ class index_gt {
         if (!next.reserve(config.expansion))
             return result.failed("Out of memory!");
 
+        // Each caller exclusively owns its context; sampling needs no shared graph lock.
+        level_t new_target_level = choose_random_level_(context.level_generator);
+
         // Determining how much memory to allocate for the node depends on the target level
         std::unique_lock<std::mutex> new_level_lock(global_mutex_);
         level_t max_level_copy = max_level_;                                             // Copy under lock
         compressed_slot_t entry_slot_copy = static_cast<compressed_slot_t>(entry_slot_); // Copy under lock
-        level_t new_target_level = choose_random_level_(context.level_generator);
 
         // Make sure we are not overflowing
         std::size_t capacity = nodes_capacity_.load();
@@ -4366,10 +4406,11 @@ class index_gt {
         }
     }
 
-    level_t choose_random_level_(std::default_random_engine& level_generator) const noexcept {
+    level_t choose_random_level_(splitmix64_t& level_generator) const noexcept {
         std::uniform_real_distribution<double> distribution(0.0, 1.0);
-        double r = -std::log(distribution(level_generator)) * pre_.inverse_log_connectivity;
-        return (level_t)r;
+        // Reflect into (0, 1] and guard against a rounded upper endpoint from the STL.
+        double uniform = (std::max)(1.0 - distribution(level_generator), (std::numeric_limits<double>::min)());
+        return static_cast<level_t>(-std::log(uniform) * pre_.inverse_log_connectivity);
     }
 
     struct candidates_range_t;

@@ -477,7 +477,9 @@ def test_index_oversubscribed_search(batch_size: int, threads: int):
 @pytest.mark.parametrize("quantization", [ScalarKind.F32, ScalarKind.I8])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64, np.float16])
 def test_index_clustering(ndim, metric, quantization, dtype, batch_size):
-    index = Index(ndim=ndim, metric=metric, dtype=quantization, multi=False)
+    # Clustering needs nodes on graph level 2. With connectivity 4, a node gets there with probability 1/16, so
+    # 500 nodes almost surely include one; with the default 16, about one 500-node index in seven has none.
+    index = Index(ndim=ndim, metric=metric, dtype=quantization, multi=False, connectivity=4)
     keys = np.arange(batch_size)
     vectors = random_vectors(count=batch_size, ndim=ndim, dtype=dtype)
     index.add(keys, vectors, threads=threads)

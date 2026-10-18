@@ -1534,6 +1534,36 @@ void test_view_of_truncated_file() {
     std::remove(path);
 }
 
+/**
+ *  @brief  Regression test: every thread context must draw node levels of its own. Default-seeded, all
+ *          contexts drew the same levels and started over after every `reserve`, so every per-level node
+ *          count was a multiple of `contexts * steps`, the upper levels too full and the top ones missing.
+ */
+void test_level_generators() {
+    constexpr std::size_t contexts = 16, steps = 16, per_context_step = 64, dimensions = 2;
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+    index_dense_t index = index_dense_t::make(metric);
+
+    std::mt19937 generator(42);
+    std::uniform_real_distribution<float> distribution(0.0, 1.0);
+
+    std::size_t key = 0;
+    for (std::size_t step = 0; step != steps; ++step) {
+        expect(index.try_reserve(index_limits_t((step + 1) * contexts * per_context_step, contexts)));
+        for (std::size_t idx = 0; idx != contexts * per_context_step; ++idx, ++key) {
+            float vector[dimensions] = {distribution(generator), distribution(generator)};
+            expect(index.add(key, vector, idx % contexts));
+        }
+    }
+    expect_eq(index.size(), contexts * steps * per_context_step);
+
+    // Independent draws put about 1024 nodes on level 1 and 64 on level 2: almost never multiples of 256.
+    bool all_multiples = true;
+    for (std::size_t level = 1; level <= index.max_level(); ++level)
+        all_multiples = all_multiples && index.stats(level).nodes % (contexts * steps) == 0;
+    expect(!all_multiples);
+}
+
 int main(int, char**) {
     install_crash_handlers();
 
@@ -1632,5 +1662,6 @@ int main(int, char**) {
     test_compact();
     test_load_after_metric_make();
     test_view_of_truncated_file();
+    test_level_generators();
     return 0;
 }
