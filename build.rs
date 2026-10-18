@@ -41,6 +41,11 @@ fn build_usearch() -> Result<(), Box<dyn Error>> {
             .define("NK_NATIVE_BF16", "0")
             .define("NK_NATIVE_F16", "0");
 
+        // The NumKong crate supplies a static library, not a Windows DLL.
+        if std::env::var("CARGO_CFG_TARGET_OS")? == "windows" {
+            build.define("NK_DYNAMIC", "");
+        }
+
         // Link the NumKong static library compiled by the numkong crate. Cargo propagates
         // the library search path via `links` metadata, but doesn't re-emit `-lnumkong`
         // for downstream native code. Our C++ libusearch.a references NumKong symbols

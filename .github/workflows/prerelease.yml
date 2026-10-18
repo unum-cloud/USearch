@@ -57,7 +57,7 @@ jobs:
           dry-run: "true"
 
   test_ubuntu_gcc:
-    name: Ubuntu (GCC 14)
+    name: Ubuntu (GCC 13)
     runs-on: ubuntu-24.04
     env:
       CC: gcc
@@ -195,9 +195,6 @@ jobs:
           pip install pytest pytest-repeat numpy numba cppyy
 
           python -m pip install .
-        env:
-          CXX: clang++
-          CC: clang++ # Override the default compiler
       - name: Test Python
         run: pytest
         # Rust
@@ -267,7 +264,8 @@ jobs:
           python -m pip install .
         env:
           CXX: clang++
-          CC: clang++ # Override the default compiler
+          CC: clang
+          ARCHFLAGS: "-arch arm64"
       - name: Test Python
         run: pytest
         # ObjC/Swift

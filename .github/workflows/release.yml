@@ -185,6 +185,8 @@ jobs:
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.6"
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -356,8 +358,11 @@ jobs:
           echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: Install NDK
-        run: |
-          ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: '"${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ env.ANDROID_NDK_VERSION }}"'
 
       - name: Build C/C++
         run: |
@@ -399,11 +404,11 @@ jobs:
     # GCC and silently drops the cross-target. Mirrors the prerelease
     # `test_ubuntu_cross_compilation` job.
     env:
-      CC: clang
-      CXX: clang++
-      AR: llvm-ar
-      NM: llvm-nm
-      RANLIB: llvm-ranlib
+      CC: clang-20
+      CXX: clang++-20
+      AR: llvm-ar-20
+      NM: llvm-nm-20
+      RANLIB: llvm-ranlib-20
     strategy:
       fail-fast: false
       matrix:
@@ -434,11 +439,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang mold make crossbuild-essential-arm64 crossbuild-essential-armhf
+          sudo apt-get install -y clang-20 llvm-20 mold make crossbuild-essential-arm64 crossbuild-essential-armhf
 
-      # `-fuse-ld=mold` keeps clang LTO on while sidestepping the
-      # experimental `lld 1:18.0-59~exp2` from Noble universe that
-      # segfaults on the widened `nk_shared` LTO unit.
+      # LLVM 18 crashes in the NumKong ThinLTO backend, including with mold.
+      # Keep LTO enabled with a consistent LLVM 20 toolchain.
       - name: Build JNI library
         run: |
           cmake -B build_artifacts \
@@ -457,7 +461,7 @@ jobs:
             -DUSEARCH_USE_NUMKONG=1 \
             -DNK_DYNAMIC_DISPATCH=1
 
-          cmake --build build_artifacts --config Release -j
+          cmake --build build_artifacts --config Release --verbose -j
 
       # Guard against silent host-toolchain fallback — the binary must actually
       # be for the target arch, otherwise packaging will ship a broken library.
@@ -604,8 +608,11 @@ jobs:
           distribution: "adopt"
 
       - name: Install NDK
-        run: |
-          ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: '"${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ env.ANDROID_NDK_VERSION }}"'
 
       - name: Build JNI library
         run: |
@@ -1198,6 +1205,13 @@ jobs:
     name: Publish C#
     runs-on: ubuntu-24.04
     needs: [build_csharp]
+    environment:
+      name: nuget
+      url: https://www.nuget.org/packages/Cloud.Unum.USearch
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
     env:
       SOLUTION: ${{ github.workspace }}/csharp
       USEARCH_LIBS: ${{ github.workspace }}/csharp/lib
@@ -1239,8 +1253,16 @@ jobs:
           dotnet pack "${{ env.SOLUTION }}" -c Release --output ${{ env.NUGET_PACKAGES }}
         working-directory: ${{ github.workspace }}
 
+      - name: Authenticate to NuGet
+        uses: NuGet/login@v1
+        id: nuget_login
+        with:
+          user: ${{ vars.NUGET_USER }}
+
       - name: Publish to NuGet
-        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg" --api-key "${{ secrets.NUGET_API }}" --source "${{
+        env:
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg" --api-key "$NUGET_API_KEY" --source "${{
           env.NUGET_SOURCE }}" --skip-duplicate
 
       - name: Prepare publish to GitHub Registry
@@ -1327,3 +1349,4 @@ jobs:
         with:
           url: ${{ secrets.DOCS_VERCEL }}
           method: "POST"
+          timeout: "30000"
