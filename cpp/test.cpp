@@ -22,6 +22,7 @@
 #include <algorithm>     // `std::shuffle`
 #include <random>        // `std::default_random_engine`
 #include <stdexcept>     // `std::terminate`
+#include <thread>        // `std::thread`
 #include <unordered_map> // `std::unordered_map`
 #include <vector>        // `std::vector`
 
@@ -1632,6 +1633,45 @@ void test_base_level_in_links() {
     expect_eq(static_cast<std::size_t>(std::count(in_links.begin(), in_links.end(), 0u)), std::size_t(0));
 }
 
+/**
+ *  @brief  Regression test for #735: every concurrently added vector must stay reachable by search. `add` used to
+ *          clear the links of the node being inserted before linking each level, erasing the reverse links that
+ *          concurrent insertions had added after finding it through its upper levels, and orphaning those nodes.
+ */
+void test_concurrent_add_reachability() {
+    constexpr std::size_t threads = 10, per_thread = 100, dimensions = 128, rounds = 5;
+    constexpr std::size_t total = threads * per_thread;
+    std::mt19937 generator(42); // Thread scheduling still varies from run to run
+    std::uniform_real_distribution<float> distribution(-1.0f, 1.0f);
+
+    std::size_t unreachable = 0;
+    for (std::size_t round = 0; round != rounds; ++round) {
+        metric_punned_t metric(dimensions, metric_kind_t::cos_k, scalar_kind_t::f32_k);
+        index_dense_t index = index_dense_t::make(metric);
+        index.reserve(index_limits_t(total, threads));
+        std::vector<std::vector<float>> vectors(total, std::vector<float>(dimensions));
+        for (auto& vector : vectors)
+            std::generate(vector.begin(), vector.end(), [&] { return distribution(generator); });
+
+        std::vector<std::thread> pool;
+        for (std::size_t thread = 0; thread != threads; ++thread)
+            pool.emplace_back([&, thread] {
+                for (std::size_t idx = thread * per_thread; idx != (thread + 1) * per_thread; ++idx)
+                    index.add(idx, vectors[idx].data(), thread);
+            });
+        for (auto& worker : pool)
+            worker.join();
+
+        // Asking for every member makes the search visit every node it can reach.
+        std::vector<index_dense_t::vector_key_t> keys(total);
+        for (std::size_t idx = 0; idx != total; ++idx) {
+            std::size_t found = index.search(vectors[idx].data(), total).dump_to(keys.data());
+            unreachable += std::find(keys.begin(), keys.begin() + found, idx) == keys.begin() + found;
+        }
+    }
+    expect_eq(unreachable, std::size_t(0));
+}
+
 int main(int, char**) {
     install_crash_handlers();
 
@@ -1732,5 +1772,6 @@ int main(int, char**) {
     test_view_of_truncated_file();
     test_level_generators();
     test_base_level_in_links();
+    test_concurrent_add_reachability();
     return 0;
 }

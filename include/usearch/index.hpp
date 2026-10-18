@@ -3340,8 +3340,10 @@ class index_gt {
             search_to_insert_(value, metric, prefetch, closest_slot, level, config.expansion, context);
             candidates_view_t closest_view;
             {
+                // No `clear` here: the node was zeroed when allocated, so any link it has now is a reverse link
+                // from a concurrent insertion that reached it through its upper levels. Erasing that link would
+                // leave the other node with no incoming link, unreachable by any search.
                 node_lock_t new_lock = node_lock_(new_slot);
-                neighbors_(new_node, level).clear();
                 closest_view = form_links_to_closest_(metric, new_slot, level, context);
                 closest_slot = closest_view[0].slot;
             }
@@ -4385,15 +4387,18 @@ class index_gt {
             refine_(metric, config_.connectivity, top, context, context.computed_distances_in_refines);
         usearch_assert_m(top_view.size() || !require_non_empty_ak, "This would lead to isolated nodes");
 
-        // Outgoing links from `new_slot`:
+        // Outgoing links from `new_slot`, after the reverse links that concurrent insertions may have added
+        // already, which must stay. A candidate that doesn't fit still gets its reverse link.
         neighbors_ref_t new_neighbors = neighbors_(new_node, level);
-        usearch_assert_m(!new_neighbors.size(), "The newly inserted element should have blank link list");
-        for (std::size_t idx = 0; idx != top_view.size(); idx++) {
-            usearch_assert_m(!new_neighbors[idx], "Possible memory corruption");
-            usearch_assert_m(level <= node_at_(top_view[idx].slot).level(), "Linking to missing level");
-            new_neighbors.push_back(top_view[idx].slot);
-            if (!level)
-                in_degree_increment_(top_view[idx].slot);
+        std::size_t const connectivity_max = level ? config_.connectivity : config_.connectivity_base;
+        for (std::size_t idx = 0; idx != top_view.size() && new_neighbors.size() < connectivity_max; idx++) {
+            compressed_slot_t slot = top_view[idx].slot;
+            usearch_assert_m(level <= node_at_(slot).level(), "Linking to missing level");
+            if (!contains_(new_neighbors, slot)) {
+                new_neighbors.push_back(slot);
+                if (!level)
+                    in_degree_increment_(slot);
+            }
         }
 
         return top_view;
