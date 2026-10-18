@@ -60,8 +60,8 @@ jobs:
           create-release: "true"
           github-token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
 
-  rebase:
-    name: Rebase Dev Branch
+  sync_dev:
+    name: Sync Development Branch
     needs: versioning
     runs-on: ubuntu-24.04
     steps:
@@ -69,20 +69,14 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # Use the maintainer token for the main-dev ruleset bypass.
+          token: ${{ secrets.SEMANTIC_REBASE_TOKEN }}
 
-      - name: Perform rebase
+      - name: Sync development branch with released main
         run: |
           git fetch origin main
-          git checkout main-dev
-          git rebase origin/main
-
-      - name: Push changes
-        uses: CasperWA/push-protected@v2
-        with:
-          token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
-          branch: main-dev
-          unprotect_reviews: True
-          force: True
+          # Fast-forward only; preserve any development work absent from main.
+          git push origin refs/remotes/origin/main:refs/heads/main-dev
 
   create_linux_deb_package:
     name: Build Linux Package
@@ -755,7 +749,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        python-version: ["310", "311", "312", "313", "314", "314t"]
+        python-version: ["311", "312", "313", "314", "314t", "315", "315t"]
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v6
@@ -772,7 +766,7 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' # We only need QEMU for Linux builds
         uses: docker/setup-qemu-action@v3
       - name: Install cibuildwheel
-        run: python -m pip install "cibuildwheel~=4.1"
+        run: python -m pip install "cibuildwheel~=4.3.1"
       - name: Build wheels
         run: cibuildwheel --output-dir wheelhouse
         env:
@@ -1257,7 +1251,7 @@ jobs:
         uses: NuGet/login@v1
         id: nuget_login
         with:
-          user: ${{ vars.NUGET_USER }}
+          user: ashvardanian
 
       - name: Publish to NuGet
         env:

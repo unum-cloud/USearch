@@ -205,7 +205,7 @@ setup(
     description="Smaller & Faster Single-File Vector Search Engine from Unum",
     author="Ash Vardanian",
     author_email="info@unum.cloud",
-    python_requires=">=3.10",
+    python_requires=">=3.11",
     url="https://github.com/unum-cloud/USearch",
     long_description=long_description,
     long_description_content_type="text/markdown",

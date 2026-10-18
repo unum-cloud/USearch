@@ -3,8 +3,8 @@
 #   - `macos` wheels for x86_64, arm64, and universal2;
 #   - `windows` wheels for AMD64, and ARM64. But not x86.
 #   - `manylinux` and `musllinux` wheels for Linux on x86_64, aarch64. But not i686, ppc64le, s390x;
-#   * for CPython versions from 3.10 to 3.14 (including free-threaded 3.14t).
-#   = meaning 7 platforms * 6 Python versions = 42 builds.
+#   * for CPython versions from 3.11 to 3.15 (including free-threaded 3.14t and 3.15t).
+#   = meaning 7 platforms * 7 Python versions = 49 builds.
 # Note: cibuildwheel 4.x dropped the experimental 3.13t free-threaded builds and the
 # `cpython-freethreading` enable flag; 3.14+ free-threading builds without any flag.
 [build-system]
@@ -24,14 +24,11 @@ minversion = "6.0"
 testpaths = ["python/scripts"]
 xfail_strict = true
 
-# Avoid running tests, as everything is happening in a super slow container
-# We have already run all the relavent Python tests in `prerelease.yml`
-#   test-requires = ["pytest", "numpy"]
-#   test-command = "pytest {project}/python/scripts"
+# Smoke-test the installed wheel; the full Python suite runs in `prerelease.yml`.
 [tool.cibuildwheel]
 build-verbosity = 0
-test-command = ""
-test-requires = []
+test-command = "pytest {project}/python/scripts/test_index.py -k test_index_search"
+test-requires = ["pytest", "numpy"]
 
 # Add "pp*" to skip PyPy builds, but they should work fine these days :)
 # https://cibuildwheel.readthedocs.io/en/stable/options/#build-skip
@@ -99,7 +96,7 @@ tests = ["numpy>=1.21", "pytest>=9.1.1", "pytest-repeat>=0.9.4"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 extend-exclude = ["*.md"]
 
 [tool.ruff.format]
