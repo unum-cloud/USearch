@@ -12,6 +12,7 @@ from urllib.error import HTTPError
 #! NumKong v7.5+ ships as a regular package (`numkong/__init__.py` plus a
 #! `numkong/_numkong.<ext-suffix>` extension). We require v7.5+ in
 #! `pyproject.toml`, so we load the compiled submodule directly.
+_numkong_error = None
 try:
     from numkong import _numkong as _numkong_ext
 
@@ -29,8 +30,19 @@ try:
         # resolve NumKong symbols at its own load time.
         numkong_lib = ctypes.CDLL(_numkong_path, mode=ctypes.RTLD_GLOBAL)
 
-except ImportError:
+except ModuleNotFoundError:
     pass  # If the user doesn't want NumKong, we assume they know what they're doing
+except ImportError as error:
+    # NumKong is installed, but its extension failed to load. The compiled module may not need it.
+    _numkong_error = error
+
+try:
+    from usearch import compiled as _compiled  # noqa: F401
+except ImportError as error:
+    if _numkong_error is None:
+        raise
+    # Without this, the error names a missing NumKong symbol and hides why NumKong didn't load.
+    raise ImportError(f"USearch needs NumKong, which is installed but failed to load: {_numkong_error}") from error
 
 
 from usearch.compiled import (
