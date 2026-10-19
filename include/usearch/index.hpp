@@ -2507,6 +2507,10 @@ class index_gt {
     struct usearch_align_m context_t {
         top_candidates_t top_candidates{};
         top_candidates_t top_for_refine{};
+        top_candidates_t dropped_by_refine{};
+        top_candidates_t orphans{};
+        top_candidates_t orphan_neighbors{};
+        top_candidates_t second_hop{};
         next_candidates_t next_candidates{};
         visits_hash_set_t visits{};
         splitmix64_t level_generator{};
@@ -2591,6 +2595,19 @@ class index_gt {
 
     /// @brief  Array of thread-specific buffers for temporary data.
     mutable buffer_gt<context_t, contexts_allocator_t> contexts_{};
+
+    /// @brief  A count of incoming links, wrapped in a type of this namespace, which `buffer_gt` needs.
+    struct in_degree_t {
+        std::atomic<std::uint32_t> count;
+    };
+    using in_degrees_allocator_t = typename dynamic_allocator_traits_t::template rebind_alloc<in_degree_t>;
+
+    /// @brief  The number of incoming links of every node on the base level. Pruning a neighbor list tries not to
+    ///         take a node's last one: no search could reach that node anymore. Exact while members are only
+    ///         added and updated; recounted by `copy`, `compact` and `isolate`, and by the first `reserve` after
+    ///         `load`, which any `add` needs.
+    buffer_gt<in_degree_t, in_degrees_allocator_t> in_degrees_{};
+    bool in_degrees_stale_{};
 
     context_t* context_or_null_(std::size_t thread) noexcept {
         return thread < contexts_.size() ? contexts_.data() + thread : nullptr;
@@ -2719,6 +2736,7 @@ class index_gt {
         other.nodes_count_ = nodes_count_.load();
         other.max_level_ = max_level_;
         other.entry_slot_ = entry_slot_;
+        other.recount_in_degrees_();
 
         // This controls nothing for now :)
         (void)config;
@@ -2868,6 +2886,9 @@ class index_gt {
         nodes_count_ = 0;
         max_level_ = -1;
         entry_slot_ = 0u;
+        for (std::size_t i = 0; i != in_degrees_.size(); ++i)
+            in_degrees_[i].count.store(0u, std::memory_order_relaxed);
+        in_degrees_stale_ = false;
     }
 
     /**
@@ -2883,6 +2904,8 @@ class index_gt {
         nodes_ = {};
         contexts_ = {};
         nodes_mutexes_ = {};
+        in_degrees_ = {};
+        in_degrees_stale_ = false;
         limits_ = index_limits_t{0, 0};
         nodes_capacity_ = 0;
         viewed_file_ = memory_mapped_file_t{};
@@ -2904,6 +2927,8 @@ class index_gt {
         std::swap(nodes_, other.nodes_);
         std::swap(nodes_mutexes_, other.nodes_mutexes_);
         std::swap(contexts_, other.contexts_);
+        std::swap(in_degrees_, other.in_degrees_);
+        std::swap(in_degrees_stale_, other.in_degrees_stale_);
 
         // Non-atomic parts.
         std::size_t capacity_copy = nodes_capacity_;
@@ -2941,14 +2966,19 @@ class index_gt {
         nodes_mutexes_t new_mutexes(limits.threads(), connectivity_max);
         buffer_gt<node_t, nodes_allocator_t> new_nodes(limits.members);
         buffer_gt<context_t, contexts_allocator_t> new_contexts(limits.threads());
-        if (!new_nodes || !new_contexts || !new_mutexes)
+        buffer_gt<in_degree_t, in_degrees_allocator_t> new_in_degrees(limits.members);
+        if (!new_nodes || !new_contexts || !new_mutexes || !new_in_degrees)
             return false;
 
         // Move the nodes info, and deallocate previous buffers.
         if (nodes_)
             std::memcpy(new_nodes.data(), nodes_.data(), sizeof(node_t) * size());
         for (std::size_t i = 0; i != new_contexts.size(); ++i) {
-            if (!new_contexts[i].top_for_refine.reserve(connectivity_max + 1))
+            if (!new_contexts[i].top_for_refine.reserve(connectivity_max + 1) ||
+                !new_contexts[i].dropped_by_refine.reserve(connectivity_max + 1) ||
+                !new_contexts[i].orphans.reserve((connectivity_max + 1) * connectivity_max) ||
+                !new_contexts[i].orphan_neighbors.reserve(connectivity_max + 1) ||
+                !new_contexts[i].second_hop.reserve(connectivity_max + 1))
                 return false;
 
             // Copy rather than advance the old stream, so a failed reserve leaves it unchanged.
@@ -2959,12 +2989,19 @@ class index_gt {
                 new_contexts[i].level_generator.seed(splitmix64_t::mix_uint64(static_cast<std::uint64_t>(i) + 1));
             }
         }
+        for (std::size_t i = 0; i != new_in_degrees.size(); ++i) {
+            std::uint32_t count = i < in_degrees_.size() ? in_degrees_[i].count.load(std::memory_order_relaxed) : 0u;
+            new_in_degrees[i].count.store(count, std::memory_order_relaxed);
+        }
 
         limits_ = limits;
         nodes_capacity_ = limits.members;
         nodes_ = std::move(new_nodes);
         contexts_ = std::move(new_contexts);
         nodes_mutexes_ = std::move(new_mutexes);
+        in_degrees_ = std::move(new_in_degrees);
+        if (in_degrees_stale_)
+            recount_in_degrees_();
         return true;
     }
 
@@ -3303,8 +3340,10 @@ class index_gt {
             search_to_insert_(value, metric, prefetch, closest_slot, level, config.expansion, context);
             candidates_view_t closest_view;
             {
+                // No `clear` here: the node was zeroed when allocated, so any link it has now is a reverse link
+                // from a concurrent insertion that reached it through its upper levels. Erasing that link would
+                // leave the other node with no incoming link, unreachable by any search.
                 node_lock_t new_lock = node_lock_(new_slot);
-                neighbors_(new_node, level).clear();
                 closest_view = form_links_to_closest_(metric, new_slot, level, context);
                 closest_slot = closest_view[0].slot;
             }
@@ -3431,6 +3470,9 @@ class index_gt {
                 // TODO: Go through existing neighbors removing reverse links
                 // for (compressed_slot_t slot : neighbors_(updated_node, level))
                 //     remove_link_(slot, updated_slot, level);
+                if (!level)
+                    for (compressed_slot_t slot : neighbors_(updated_node, level))
+                        in_degree_decrement_(slot);
                 neighbors_(updated_node, level).clear();
                 closest_view = form_links_to_closest_(metric, updated_slot, level, context);
                 if (closest_view.size())
@@ -3844,6 +3886,7 @@ class index_gt {
             if (!progress(i + 1, header_size.value))
                 return result.failed("Terminated by user");
         }
+        in_degrees_stale_ = true;
         return {};
     }
 
@@ -4168,6 +4211,7 @@ class index_gt {
         nodes_ = std::move(reordered_nodes);
         tape_allocator_ = std::move(reordered_tape);
         entry_slot_ = old_slot_to_new[entry_slot_];
+        recount_in_degrees_();
     }
 
     /**
@@ -4214,6 +4258,7 @@ class index_gt {
 
         // At the end report the latest numbers, because the reporter thread may be finished earlier
         progress(processed.load(), nodes_count);
+        recount_in_degrees_();
     }
 
   private:
@@ -4342,13 +4387,18 @@ class index_gt {
             refine_(metric, config_.connectivity, top, context, context.computed_distances_in_refines);
         usearch_assert_m(top_view.size() || !require_non_empty_ak, "This would lead to isolated nodes");
 
-        // Outgoing links from `new_slot`:
+        // Outgoing links from `new_slot`, after the reverse links that concurrent insertions may have added
+        // already, which must stay. A candidate that doesn't fit still gets its reverse link.
         neighbors_ref_t new_neighbors = neighbors_(new_node, level);
-        usearch_assert_m(!new_neighbors.size(), "The newly inserted element should have blank link list");
-        for (std::size_t idx = 0; idx != top_view.size(); idx++) {
-            usearch_assert_m(!new_neighbors[idx], "Possible memory corruption");
-            usearch_assert_m(level <= node_at_(top_view[idx].slot).level(), "Linking to missing level");
-            new_neighbors.push_back(top_view[idx].slot);
+        std::size_t const connectivity_max = level ? config_.connectivity : config_.connectivity_base;
+        for (std::size_t idx = 0; idx != top_view.size() && new_neighbors.size() < connectivity_max; idx++) {
+            compressed_slot_t slot = top_view[idx].slot;
+            usearch_assert_m(level <= node_at_(slot).level(), "Linking to missing level");
+            if (!contains_(new_neighbors, slot)) {
+                new_neighbors.push_back(slot);
+                if (!level)
+                    in_degree_increment_(slot);
+            }
         }
 
         return top_view;
@@ -4361,6 +4411,7 @@ class index_gt {
 
         top_candidates_t& top_for_refine = context.top_for_refine;
         std::size_t const connectivity_max = level ? config_.connectivity : config_.connectivity_base;
+        context.orphans.clear();
 
         // Reverse links from the neighbors:
         for (auto new_neighbor : new_neighbors) {
@@ -4387,6 +4438,8 @@ class index_gt {
 
             if (close_header.size() < connectivity_max) {
                 close_header.push_back(new_slot);
+                if (!level)
+                    in_degree_increment_(new_slot);
                 continue;
             }
 
@@ -4396,6 +4449,13 @@ class index_gt {
                 top_for_refine.insert_reserved(
                     {context.measure(citerator_at(close_slot), citerator_at(successor_slot), metric), successor_slot});
 
+            // Remember the current members: the refine may drop some of them
+            top_candidates_t& dropped = context.dropped_by_refine;
+            dropped.clear();
+            if (!level)
+                for (compressed_slot_t member_slot : close_header)
+                    dropped.insert_reserved({0, member_slot});
+
             // Export the results:
             close_header.clear();
             candidates_view_t top_view = refine_(metric, connectivity_max, top_for_refine, context,
@@ -4403,7 +4463,132 @@ class index_gt {
             usearch_assert_m(top_view.size(), "This would lead to isolated nodes");
             for (std::size_t idx = 0; idx != top_view.size(); idx++)
                 close_header.push_back(top_view[idx].slot);
+            if (!level)
+                keep_dropped_reachable_(close_header, new_slot, dropped, connectivity_max, context.orphans);
         }
+
+        // With no lock held, link every dropped member that is left without an incoming link
+        if (!level)
+            for (std::size_t idx = 0; idx != context.orphans.size(); ++idx)
+                link_from_neighborhood_(context.orphans.data()[idx].slot, connectivity_max, context);
+
+        // On the base level, try to leave the new node at least one incoming link
+        if (!level && !in_degree_(new_slot))
+            link_from_neighborhood_(new_slot, connectivity_max, context);
+    }
+
+    /**
+     *  @brief  After a base-level neighbor list was refined, tries to keep every member it dropped reachable: a
+     *          member that lost its last incoming link goes back into the list, after the kept members (which are
+     *          sorted by distance), or, when the list is full, is queued in `orphans` for `link_from_neighborhood_`.
+     */
+    void keep_dropped_reachable_(neighbors_ref_t close_header, compressed_slot_t new_slot, top_candidates_t& dropped,
+                                 std::size_t connectivity_max, top_candidates_t& orphans) noexcept {
+        if (contains_(close_header, new_slot))
+            in_degree_increment_(new_slot);
+
+        // Decide what was dropped before any rescue replaces a kept member
+        candidate_t* dropped_data = dropped.data();
+        std::size_t dropped_count = 0;
+        for (std::size_t idx = 0; idx != dropped.size(); ++idx)
+            if (!contains_(close_header, dropped_data[idx].slot))
+                dropped_data[dropped_count++] = dropped_data[idx];
+        dropped.shrink(dropped_count);
+
+        for (std::size_t idx = 0; idx != dropped_count; ++idx) {
+            compressed_slot_t dropped_slot = dropped_data[idx].slot;
+            if (!in_degree_decrement_(dropped_slot))
+                continue;
+            if (close_header.size() < connectivity_max) {
+                close_header.push_back(dropped_slot);
+                in_degree_increment_(dropped_slot);
+                continue;
+            }
+            orphans.insert_reserved({static_cast<distance_t>(orphans.size()), dropped_slot});
+        }
+    }
+
+    /**
+     *  @brief  Gives a base-level node without incoming links one, from the first of its own neighbors (closest
+     *          first) whose list has room, or else from the first of their neighbors with room. Never evicts a member.
+     *          Gives up if every one of those lists is full.
+     */
+    void link_from_neighborhood_(compressed_slot_t target_slot, std::size_t connectivity_max,
+                                 context_t& context) noexcept {
+        if (in_degree_(target_slot))
+            return;
+        top_candidates_t& first_hop = context.orphan_neighbors;
+        copy_base_neighbors_(target_slot, first_hop);
+        for (std::size_t idx = 0; idx != first_hop.size(); ++idx)
+            if (try_link_(first_hop.data()[idx].slot, target_slot, connectivity_max))
+                return;
+        top_candidates_t& second_hop = context.second_hop;
+        for (std::size_t idx = 0; idx != first_hop.size(); ++idx) {
+            copy_base_neighbors_(first_hop.data()[idx].slot, second_hop);
+            for (std::size_t hop_idx = 0; hop_idx != second_hop.size(); ++hop_idx)
+                if (try_link_(second_hop.data()[hop_idx].slot, target_slot, connectivity_max))
+                    return;
+        }
+    }
+
+    /// @brief  Copies the base-level neighbors of `slot`, in their order, into `into`.
+    void copy_base_neighbors_(compressed_slot_t slot, top_candidates_t& into) noexcept {
+        into.clear();
+        node_lock_t lock = node_lock_(slot);
+        for (compressed_slot_t member_slot : neighbors_(node_at_(slot), 0))
+            into.insert_reserved({static_cast<distance_t>(into.size()), member_slot});
+    }
+
+    /// @brief  Returns whether `target_slot` has an incoming link from `close_slot`, adding one if its list has room.
+    bool try_link_(compressed_slot_t close_slot, compressed_slot_t target_slot, std::size_t connectivity_max) noexcept {
+        if (close_slot == target_slot)
+            return false;
+        node_lock_t close_lock = node_lock_(close_slot);
+        neighbors_ref_t close_header = neighbors_(node_at_(close_slot), 0);
+        if (contains_(close_header, target_slot))
+            return true;
+        if (close_header.size() >= connectivity_max)
+            return false;
+        close_header.push_back(target_slot);
+        in_degree_increment_(target_slot);
+        return true;
+    }
+
+    static bool contains_(neighbors_ref_t neighbors, compressed_slot_t slot) noexcept {
+        for (compressed_slot_t member_slot : neighbors)
+            if (member_slot == slot)
+                return true;
+        return false;
+    }
+
+    std::uint32_t in_degree_(std::size_t slot) const noexcept {
+        return slot < in_degrees_.size() ? in_degrees_[slot].count.load(std::memory_order_relaxed) : 0u;
+    }
+
+    void in_degree_increment_(std::size_t slot) noexcept {
+        if (slot < in_degrees_.size())
+            in_degrees_[slot].count.fetch_add(1u, std::memory_order_relaxed);
+    }
+
+    /// @brief  Removes an incoming base-level link of `slot`, never going below zero. Returns whether none is left.
+    bool in_degree_decrement_(std::size_t slot) noexcept {
+        if (slot >= in_degrees_.size())
+            return false;
+        std::atomic<std::uint32_t>& count = in_degrees_[slot].count;
+        std::uint32_t expected = count.load(std::memory_order_relaxed);
+        while (expected && !count.compare_exchange_weak(expected, expected - 1u, std::memory_order_relaxed))
+            ;
+        return expected <= 1u;
+    }
+
+    /// @brief  Counts the incoming base-level links of every node from scratch.
+    void recount_in_degrees_() noexcept {
+        for (std::size_t i = 0; i != in_degrees_.size(); ++i)
+            in_degrees_[i].count.store(0u, std::memory_order_relaxed);
+        for (std::size_t i = 0; i != nodes_count_; ++i)
+            for (compressed_slot_t slot : neighbors_(node_at_(i), 0))
+                in_degree_increment_(slot);
+        in_degrees_stale_ = false;
     }
 
     level_t choose_random_level_(splitmix64_t& level_generator) const noexcept {
