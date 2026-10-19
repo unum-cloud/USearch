@@ -4080,7 +4080,7 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) 
     wait_running(executor, last);
     auto const drain = [](auto& typed) noexcept {
         auto const [claim, status] = typed.claim();
-        return failed(status) ? status : typed.drain();
+        return failed(status) ? status : typed.wait();
     };
     propagate_error(visit_executor(executor, drain), outcome);
 }

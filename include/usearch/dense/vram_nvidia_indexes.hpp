@@ -201,7 +201,7 @@ struct vram_nvidia_indexes
                                                                      static_cast<u32_t>(shards), stream)) ||
                     failed(shards_[0].index->land_attended_(reinterpret_cast<f32_t*>(blocks), shards, window_outputs,
                                                             window_carry, stream)) ||
-                    failed(first_traversal->drain()))
+                    failed(first_traversal->wait()))
                     merged = status_t::device_error_k;
             };
             expected<search_result_t> attended = this->for_each_shard_(batch, attend_shard, merge_shard, {});
@@ -254,7 +254,7 @@ struct vram_nvidia_indexes
         std::size_t const half_keys = min_of(window_rows_k, std::bit_ceil(rows));
         if (rows && staging.keys.size() < 2 * half_keys) {
             // Pinning needs a current context, and the copies out of the old halves must land.
-            if (failed(enter_(shard)) || failed(staging.crossed[0].drain()) || failed(staging.crossed[1].drain()))
+            if (failed(enter_(shard)) || failed(staging.crossed[0].wait()) || failed(staging.crossed[1].wait()))
                 return status_t::device_error_k;
             staging.keys.reset();
             if (failed(staging.keys.resize_uninitialized(2 * half_keys))) return status_t::bad_alloc_k;
@@ -282,7 +282,7 @@ struct vram_nvidia_indexes
             std::size_t const bound = min_of(first + half_keys, rows.bound);
             std::size_t const half = staging.chunks++ % 2;
             key_t* staged = staging.keys.data() + half * half_keys;
-            if (staging.chunks > 2 && failed(staging.crossed[half].drain())) return status_t::device_error_k;
+            if (staging.chunks > 2 && failed(staging.crossed[half].wait())) return status_t::device_error_k;
             shards_[shard].keys.for_each_span({first, bound}, [&](std::span<key_t> run) noexcept {
                 for (key_t const& key : run) *staged++ = key;
             });
@@ -434,7 +434,7 @@ struct vram_nvidia_indexes
                                     ranking_of(landings[0].get() + walked_bytes), block_bytes,
                                     static_cast<u32_t>(shards), merged, static_cast<u32_t>(queries_count), stream))) ||
                 cuda_copy_async(landed_counts.data(), counts.data(), counts.size_bytes(), stream) != cuda_success_k ||
-                failed(first_traversal->drain()))
+                failed(first_traversal->wait()))
                 merged_status = status_t::device_error_k;
         };
         expected<search_result_t> found = this->for_each_shard_(batch, search_shard, merge_shard,

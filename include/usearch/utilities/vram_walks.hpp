@@ -11,7 +11,7 @@
 
 #include <bit> // `std::bit_ceil`, `std::bit_width`, `std::countr_zero`
 
-#include "usearch/utilities/types.hpp" // `vram_widest_pool_slots_k`, `divide_round_up`
+#include "usearch/utilities/types.hpp" // `vram_widest_candidate_slots_k`, `divide_round_up`
 
 namespace unum::usearch::utilities {
 
@@ -49,11 +49,11 @@ struct gpu_arena_shape_t {
  *  candidates than it reports. */
 constexpr u32_t gpu_walk_breadth(u32_t expansion, u32_t count) noexcept { return max_of(expansion, count); }
 
-/** IDs a converged walk over a pool of @p pool_rows ranks claims: a row of @p connectivity
+/** IDs a converged walk keeping @p candidate_rows candidates claims: a row of @p connectivity
  *  neighbors or a draw of @p lanes landmarks per expansion, one expansion per rank, then a
  *  re-selecting walk's own node and row. A walk past it re-scores, see @ref vram_visited_set. */
-constexpr u32_t gpu_walk_visits(u32_t pool_rows, u32_t connectivity, u32_t lanes) noexcept {
-    return (pool_rows + 1) * max_of(connectivity, lanes) + connectivity + 1;
+constexpr u32_t gpu_walk_visits(u32_t candidate_rows, u32_t connectivity, u32_t lanes) noexcept {
+    return (candidate_rows + 1) * max_of(connectivity, lanes) + connectivity + 1;
 }
 
 /** Entries an arena frontier's spill tail holds: what @p expansion expansions stage, a row or a
@@ -72,19 +72,20 @@ constexpr gpu_arena_shape_t gpu_arena_shape(u32_t visits, u32_t tail_entries, u3
             scratch_bytes};
 }
 
-/** Rounds @p expansion to the register ladder's rungs of 2 to @c vram_widest_pool_slots_k slots
- *  of @p lanes ranks each, or to zero past them, where the arena frontier walks the expansion
+/** Rounds @p expansion to the register ladder's rungs of 2 to @c vram_widest_candidate_slots_k
+ *  slots of @p lanes ranks each, or to zero past them, where the arena frontier walks the expansion
  *  itself; @p default_slots when it asks for none. */
-constexpr u32_t gpu_pool_slots(u32_t expansion, u32_t default_slots, u32_t lanes = 32) noexcept {
+constexpr u32_t gpu_candidate_slots(u32_t expansion, u32_t default_slots, u32_t lanes = 32) noexcept {
     if (!expansion) return default_slots;
     u32_t const slots = std::bit_ceil(divide_round_up<u32_t>(expansion, lanes));
-    return slots > vram_widest_pool_slots_k ? 0 : max_of(slots, 2u);
+    return slots > vram_widest_candidate_slots_k ? 0 : max_of(slots, 2u);
 }
 
 /** Rungs per walking kernel: the arena frontier's zero, then 2, 4, 8 and 16 slots. */
 inline constexpr std::size_t gpu_rungs_per_kernel_k = 5;
 
-/** The rung of a walk over @p slots slots, as @ref gpu_pool_slots rounds them, in ladder order. */
+/** The rung of a walk over @p slots slots, as @ref gpu_candidate_slots rounds them, in ladder
+ *  order. */
 constexpr std::size_t gpu_rung_index(u32_t slots) noexcept {
     return slots ? static_cast<std::size_t>(std::countr_zero(slots)) : 0;
 }

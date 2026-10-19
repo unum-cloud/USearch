@@ -15,8 +15,8 @@
  *  @verbatim
  *  --metric            per binary                Distance kind, by its checkpoint token
  *  --connectivity      32                        Graph degree
- *  --expansion-add     256                       Candidate pool while inserting
- *  --expansion-search  96                        Candidate pools while searching, like 32,64,128
+ *  --expansion-add     256                       Candidates while inserting
+ *  --expansion-search  96                        Candidates while searching, like 32,64,128
  *  --top-k             10                        Matches per query to judge
  *  --max-base-entries  the file but the queries  Cap on ingested entries
  *  --queries           1000                      Entries held out of the file's tail as queries
@@ -57,7 +57,7 @@ struct basic_settings_t {
     /** Neighbors-list width per node. */
     count_t connectivity {.value = 32};
 
-    /** Insertion candidate pool. */
+    /** How many candidates an insertion keeps. */
     count_t expansion_add {.value = 256};
 
     /** Search breadths, each judged over the one graph the run builds. */
@@ -94,7 +94,7 @@ inline std::array<flag_t, 11> basic_flags(basic_settings_t& settings) noexcept {
     return {{
         {"--metric", "name", "distance kind, by its checkpoint token", &settings.metric_name},
         {"--connectivity", "degree", "graph degree; 32 by default", &settings.connectivity},
-        {"--expansion-add", "breadth", "insertion candidate pool; 256 by default", &settings.expansion_add},
+        {"--expansion-add", "breadth", "insertion candidates; 256 by default", &settings.expansion_add},
         {"--expansion-search", "breadths", "search breadths, like 32,64,128; 96 by default",
          &settings.expansion_search},
         {"--top-k", "count", "matches per query to judge; 10 by default", &settings.top_k},

@@ -954,7 +954,7 @@ inline status_t publish(usearch_arena_handle_t& arena, value_type_*& output, std
 
 /** Keeps the first failure of @p status, awaiting @p arena 's uploads either way. */
 inline status_t drained(usearch_arena_handle_t& arena, status_t status) noexcept {
-    status_t const waited = arena.device_memory.drain();
+    status_t const waited = arena.device_memory.wait();
     return failed(status) ? status : waited;
 }
 

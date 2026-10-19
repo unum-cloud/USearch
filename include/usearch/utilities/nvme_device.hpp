@@ -2626,7 +2626,7 @@ class nvme_executor {
     }
 
     /** Nothing is ever pending: every fan-out blocks inside, so a drain is a no-op. */
-    status_t drain() noexcept { return threads_.drain(); }
+    status_t wait() noexcept { return threads_.wait(); }
 
     /** Threads this executor drives. */
     std::size_t size() const noexcept { return threads_.size(); }

@@ -78,10 +78,10 @@ build_host_release/usearch_bench_dense_ram_indexes_search \
 - `--stored-dtype` defaults to the file's dtype: `f32`, `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4`, `u8`, `u4` or `u1`, cast on ingest; `f32` skips, as no CPU kit takes it yet.
 - `--metric` defaults to `angular`: `dot`, `angular`, `euclidean`, `hamming` or `jaccard`; the last two for `u1`.
 - `--connectivity` defaults to `32`: the graph degree, 16, 32 or 128.
-- `--expansion-add` defaults to `256`: candidate pool while inserting.
-- `--expansion-search` defaults to `96`: candidate pool while searching.
+- `--expansion-add` defaults to `256`: candidates kept while inserting.
+- `--expansion-search` defaults to `96`: candidates kept while searching.
 - `--max-refines` defaults to `0`: upper bound on refinement passes after ingestion.
-- `--expansion-refine` defaults to twice the connectivity: candidate pool while refining.
+- `--expansion-refine` defaults to twice the connectivity: candidates kept while refining.
 - `--top-k` defaults to `10`: matches judged per query.
 - `--max-base-vectors` defaults to the whole file: cap on ingested rows.
 - `--self-search` defaults to off: judge every stored vector as its own query; its variable takes `1`, `0`, `true` or `false`.
@@ -99,7 +99,7 @@ build_host_release/usearch_bench_dense_ram_indexes_search \
 - `--huge-pages` defaults to `0`: huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only.
 - `USEARCH_DEVICES` - an environment variable, not a flag - names USearch device ordinals, positions in `usearch_gpu_devices`, like `0` or `0,1`; the single-device binaries take the first, the sharded ones place one shard per ordinal, and unset takes the first NVIDIA device; GPU only.
 - `--merge` defaults to off: the inserted rows' second half builds as an index of its own, absorbed into the first half's before refinement and search, and the merge reports its wall time, distances and visits; `usearch_bench_dense_vram_indexes_search` only.
-- `--expansion-merge` defaults to `--expansion-add`: candidate pool of the absorbing refine, whose rows walk across the appended part; only with `--merge`.
+- `--expansion-merge` defaults to `--expansion-add`: candidates kept by the absorbing refine, whose rows walk across the appended part; only with `--merge`.
 - `--managed-memory` defaults to off: managed-memory flat matrices oversubscribing VRAM; GPU only, refused by both `vram_indexes` binaries.
 
 A bad value prints one line, like `--top-k="0" does not parse, expected a positive count` or `RETRIEVAL_TOP_K="0" does not parse, expected a positive count`, and exits with status 1.

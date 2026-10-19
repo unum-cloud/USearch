@@ -265,7 +265,7 @@ np.asarray(matches.distances)  # zero-copy; NumPy never entered the binding
 
 A count bounds its own row, and the cells past it hold nothing a call wrote.
 
-The candidate-pool breadth is a per-call setting rather than a property of the handle, so a recall sweep runs against one immutable index with no mutation between points.
+The breadth of the candidates is a per-call setting rather than a property of the handle, so a recall sweep runs against one immutable index with no mutation between points.
 Traversal telemetry rides a `DenseTraversalStats` the call fully overwrites, so one reading of `visited_members`, `computed_distances` and `restarts` always belongs to one call and never to the sweep around it:
 
 ```python

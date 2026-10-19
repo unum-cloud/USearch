@@ -79,7 +79,7 @@ namespace unum::usearch::dense {
  *  the expanded node's neighbors row, then one read of every unvisited neighbor's value row, and
  *  the landed rows are scored four at a time. Across the walks of a thread, everything overlaps.
  *  Rows fill an engine's queue first; whatever depth a short batch leaves idle lets each walk keep
- *  several hops in flight, expanding the next closest frontier nodes inside its pool's radius
+ *  several hops in flight, expanding the next closest frontier nodes inside its candidates' radius
  *  before earlier hops land, so a full batch walks hop by hop and a lone query takes the queue.
  */
 template <                                          //
@@ -131,7 +131,7 @@ struct nvme_index {
     /** Per-search tuning knobs; zeros mean "derive from connectivity". */
     struct search_config_t {
 
-        /** Breadth of each walk's candidate pool; defaults to twice the connectivity. */
+        /** How many candidates each walk keeps; defaults to twice the connectivity. */
         small_size_t expansion_factor = 0;
 
         /** How rows are reached; @c scan_k streams every part's value column, ignoring the
@@ -151,7 +151,7 @@ struct nvme_index {
         /** Total distance computations across the batch, padding lanes excluded. */
         std::size_t computed_distances = 0;
 
-        /** Re-seedings after a frontier drained before its pool filled. */
+        /** Re-seedings after a frontier drained before its candidates filled. */
         std::size_t restarts = 0;
 
         /** Walks a scratch refusal ended early, their rankings short. */
@@ -385,8 +385,8 @@ struct nvme_index {
 
 #pragma region Walks
 
-    /** One walk of one row over one shard: its pools, its visited set, and the flights it waits
-     *  on. */
+    /** One walk of one row over one shard: its candidates, its visited set, and the flights it
+     *  waits on. */
     struct walk_t {
 
         /** Nodes scored so far, the best ascending. */
@@ -427,7 +427,7 @@ struct nvme_index {
         /** Rows of the batch. */
         std::size_t rows_count = 0;
 
-        /** Each walk's pool breadth. */
+        /** Each walk's candidate breadth. */
         std::size_t expansion_factor = 0;
 
         /** The queue sizes every walk starts from, at that breadth over the widest part's rows. */
@@ -443,6 +443,10 @@ struct nvme_index {
         /** Hops each walk keeps in flight: the queue depth its thread's rows leave idle, one for a
          *  full batch. */
         std::size_t hops_per_walk = 1;
+
+        /** Hop slots each walk's span holds: its own @c hops_per_walk, and past the batch's end the
+         *  shares of every other row slot of its thread, which then sit idle. */
+        std::size_t hop_slots = 1;
 
         /** Buffers per flight: two when keys land beside values. */
         std::size_t buffers_per_flight = 1;
@@ -506,6 +510,8 @@ struct nvme_index {
                                        max_of<std::size_t>(1, divide_round_up(rows_count, threads)));
         shape.hops_per_walk = max_of<std::size_t>(1, queue_depth / (shape.rows_per_thread * hop_depth));
         shape.walk_flights = first_hop + (shape.hops_per_walk - 1) * (connectivity + 1);
+        // Past the batch's end a walk inherits the flights of the row slots that went idle.
+        shape.hop_slots = shape.hops_per_walk + (shape.rows_per_thread - 1) * shape.walk_flights / (connectivity + 1);
         std::size_t const rows = shape.rows_per_thread, walks = rows * parts.size();
         std::size_t const flights = walks * shape.walk_flights;
         shape.buffers = flights * shape.buffers_per_flight;
@@ -520,7 +526,7 @@ struct nvme_index {
                               slice_t::reserved_bytes(rows * sizeof(nvme_row_slot_t)) +
                               slice_t::reserved_bytes(flights * sizeof(nvme_flight<u32_t>)) +
                               slice_t::reserved_bytes(flights * sizeof(u32_t)) +
-                              slice_t::reserved_bytes(walks * shape.hops_per_walk * sizeof(u32_t)) +
+                              slice_t::reserved_bytes(walks * shape.hop_slots * sizeof(u32_t)) +
                               slice_t::reserved_bytes(shape.buffers * sizeof(io_request_t)) +
                               slice_t::reserved_bytes(shape.buffers * sizeof(io_completion_t)) + default_alignment_k;
         shape.buffer_bytes = staging_bytes_(media, parts);
@@ -534,8 +540,8 @@ struct nvme_index {
     }
 
     /** Scores the staged flights of @p walk as one quad, rescores and folds them through its row,
-     *  and merges them into its pool through @p walker; short tails replicate lane zero, and only
-     *  real lanes reach the pool or the telemetry. */
+     *  and merges them into its candidates through @p walker; short tails replicate lane zero, and
+     *  only real lanes reach the candidates or the telemetry. */
     template <typename walker_type_>
     [[gnu::always_inline]] static void score_staged_(walker_type_& walker, walk_t& walk) noexcept {
         using row_t = typename walker_type_::row_t;
@@ -643,7 +649,7 @@ struct nvme_index {
                 indexer_rescoring<capability_, scalar_t> {inputs.heads->row(row)}(ids, vectors, norms, scores, count);
         }
         fold_t fold(walk_t const&) const noexcept { return {}; }
-        results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
+        results_array_t const& stopping_candidates(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const& walk) noexcept {
             std::size_t const kept = min_of(walk.results.size(), inputs.node_ids.extent(1));
             for (std::size_t rank = 0; rank != kept; ++rank) {

@@ -44,8 +44,8 @@ struct vram_nvidia_index
   private:
     friend base_t;
 
-    /** The breadth an insert or a refine walks at least: the pool the cone selector needs to see
-     *  each cone's nearest candidate, as @c surface_keep_octants_t documents. */
+    /** The breadth an insert or a refine walks at least: the candidates the cone selector needs to
+     *  see each cone's nearest candidate, as @c surface_keep_octants_t documents. */
     inline static constexpr u32_t build_breadth_k = 128;
 
     /** The rung serving rows of @p longest bytes, or @c rungs_k when none does. Defined in
@@ -87,17 +87,18 @@ struct vram_nvidia_index
     cuda_function_handle_t kernels_[rungs_k][static_cast<u32_t>(vram_kernel_t::count_k)][gpu_rungs_per_kernel_k] = {};
 };
 
-/** One launch of @c cuda_admit, which keeps the first @c wanted entries of each walk's pool that
- *  the relation admits, ascending, beside their chords in metres and their count. */
+/** One launch of @c cuda_admit, which keeps the first @c wanted entries of each walk's candidates
+ *  that the relation admits, ascending, beside their chords in metres and their count. */
 template <typename node_id_type_>
 struct cuda_admit_arguments {
     basic::vram_ragged_storage<node_id_type_> storage;
 
-    /** The queries, @b [queries], and the pools their walks landed, @b [queries,pool] IDs. */
+    /** The queries, @b [queries], and the candidates their walks landed,
+     *  @b [queries,candidates_count] IDs. */
     earth_observation_t const* queries = nullptr;
-    node_id_type_ const* pool_ids = nullptr;
+    node_id_type_ const* candidate_ids = nullptr;
     u32_t queries_count = 0;
-    u32_t pool = 0;
+    u32_t candidates_count = 0;
     u32_t wanted = 0;
 
     relation_t relation = relation_t::near_k;

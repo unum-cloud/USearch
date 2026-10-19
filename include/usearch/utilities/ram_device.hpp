@@ -237,7 +237,7 @@ struct forkunion_executor_t {
     fu_topology_t topology() const noexcept { return topology_; }
 
     /** Nothing is ever pending: every fan-out blocks inside, so a drain is a no-op. */
-    status_t drain() noexcept { return status_t::success_k; }
+    status_t wait() noexcept { return status_t::success_k; }
 
     /** Runs @p callback on every thread with the thread index and its compute domain; must be
      *  @c noexcept. A pool running another dispatch answers @c contended_k, and nothing ran. */

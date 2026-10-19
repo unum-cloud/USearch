@@ -537,7 +537,7 @@ typedef struct usearch_sequence_insert_t {
     /** The sequences, as bytes end to end around @c count + 1 offsets. */
     usearch_tape_view_t sequences;
 
-    /** The @b optional candidate-pool breadth the build walk explores - the @c ef of the
+    /** The @b optional breadth of the candidates the build walk explores - the @c ef of the
      *  literature; zero derives. */
     size_t expansion_factor;
 
@@ -586,7 +586,7 @@ typedef struct usearch_sequence_refine_t {
      *  what no reconnection could reach. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with entries re-selected; a cancel stops the re-selection,
@@ -658,7 +658,7 @@ typedef struct usearch_sequence_search_t {
     /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
     size_t wanted;
 
-    /** The @b optional candidate-pool breadth the walk explores - the @c ef of the
+    /** The @b optional breadth of the candidates the walk explores - the @c ef of the
      *  literature; zero derives. */
     size_t expansion_factor;
 
@@ -789,7 +789,7 @@ typedef struct usearch_sequence_absorb_t {
     /** The @b optional output for the audit closing the heal. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth of the closing refine's walks; zero derives. */
+    /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with entries the closing refine re-selected; a cancel stops
@@ -857,7 +857,7 @@ typedef struct usearch_sequence_split_t {
     /** The @b optional output for the audits closing the heals, across the receivers. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth of the closing refines' walks; zero derives. */
+    /** The @b optional breadth of the candidates of the closing refines' walks; zero derives. */
     size_t expansion_factor;
 
     /** Picks the part roots: equal seeds over an unchanged index split equally. */
@@ -933,7 +933,7 @@ typedef struct usearch_sequence_refinement_init_t {
     /** Receiver handles in @c receivers, zero or at least two. */
     size_t receivers_count;
 
-    /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
     /** Picks the part roots when @c receivers are named, as in @c usearch_sequence_split. */
@@ -1171,7 +1171,7 @@ typedef struct usearch_sequence_sample_t {
     /** The @b optional radius around the anchors; zero bounds nothing. */
     usearch_distance_t radius;
 
-    /** The @b optional candidate-pool breadth of the walks behind the draws; zero derives. */
+    /** The @b optional breadth of the candidates of the walks behind the draws; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with draws written and @c wanted. */

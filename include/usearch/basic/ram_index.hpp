@@ -40,7 +40,7 @@ struct scored_node {
     node_id_type_ node_id;
     distance_type_ distance;
 
-    /** Orders scored nodes nearest-first; the comparator of the sorted results pool. */
+    /** Orders scored nodes nearest-first; the comparator of the sorted results. */
     struct closer_t {
         bool operator()(scored_node first, scored_node second) const noexcept {
             return first.distance < second.distance;
@@ -99,6 +99,8 @@ constexpr distance_type_ unbounded_radius() noexcept {
  *  stalling any other thread; pushed references stay valid until the round's @c drain
  *  returns, never longer. Every requirement is a call-validity check, so a metric is free
  *  to take converting parameters - @c std::string_view for @c std::string values.
+ *
+ *  A round's rows carry no order: results land by slot, and ties break by node ID.
  */
 template <typename metric_type_, typename value_type_, typename distance_type_>
 concept metric = value<value_type_> && requires(metric_type_& metric, value_type_ const& value, distance_type_ radius,
@@ -226,15 +228,16 @@ struct keep_diverse_t {
         selected.clear();
         // First half: each candidate's distance from its nearest kept neighbor; second: the round.
         auto& nearest_kept = context.staged_distances;
-        std::size_t const pool_size = context.results.size();
+        std::size_t const candidates_count = context.results.size();
         // A refused growth leaves the backfill alone to fill the row.
-        bool const scored = succeeded(nearest_kept.reserve(pool_size * 2));
+        bool const scored = succeeded(nearest_kept.reserve(candidates_count * 2));
         if (scored) {
-            nearest_kept.resize_reserved(pool_size * 2);
-            for (std::size_t position = 0; position != pool_size; ++position)
+            nearest_kept.resize_reserved(candidates_count * 2);
+            for (std::size_t position = 0; position != candidates_count; ++position)
                 nearest_kept[position] = context.results[position].distance;
         }
-        for (std::size_t position = 0; scored && position != pool_size && selected.size() != connectivity; ++position) {
+        for (std::size_t position = 0; scored && position != candidates_count && selected.size() != connectivity;
+             ++position) {
             auto const candidate = context.results[position];
             if (nearest_kept[position] < candidate.distance) continue;
             selected.push_back_reserved(candidate);
@@ -242,24 +245,25 @@ struct keep_diverse_t {
             // The kept neighbor queries the later candidates, as the node queried them all: an
             // asymmetric distance compares only like with like. A full staging drains and the rest
             // stage in the next round, so every later candidate meets every kept neighbor.
-            for (std::size_t first = position + 1; first != pool_size;) {
+            for (std::size_t first = position + 1; first != candidates_count;) {
                 metric.reset(index.published_value_of(candidate.node_id));
                 std::size_t staged_count = 0;
-                while (first + staged_count != pool_size &&
+                while (first + staged_count != candidates_count &&
                        metric.push(index.published_value_of(context.results[first + staged_count].node_id)) ==
                            metric_staging_t::staged_k)
                     ++staged_count;
                 if (!staged_count) break;
-                metric.drain({nearest_kept.data() + pool_size, staged_count}, context.results.top().distance);
+                metric.drain({nearest_kept.data() + candidates_count, staged_count}, context.results.top().distance);
                 context.telemetry.computed_distances += staged_count;
                 for (std::size_t later = 0; later != staged_count; ++later)
-                    nearest_kept[first + later] = min_of(nearest_kept[first + later], nearest_kept[pool_size + later]);
+                    nearest_kept[first + later] = min_of(nearest_kept[first + later],
+                                                         nearest_kept[candidates_count + later]);
                 first += staged_count;
             }
         }
 
-        // The kept picks are a subsequence of the ascending pool, so one merge-walk tells a kept
-        // candidate from a rejected one.
+        // The kept picks are a subsequence of the ascending candidates, so one merge-walk tells a
+        // kept candidate from a rejected one.
         std::size_t const diverse_count = selected.size();
         for (std::size_t position = 0, matched = 0;
              position != context.results.size() && selected.size() != connectivity; ++position) {
@@ -269,13 +273,13 @@ struct keep_diverse_t {
     }
 };
 
-/** Any link-selection heuristic: carries its own neighbors-per-node budget as
- *  @c connectivity, reads the ascending pool in @c context.results, resolves values
- *  through the index's @c published_value_of - every pooled ID is published or wired - scores
- *  pairs through the @p metric, and fills @c context.selected_neighbors. A selector
- *  may also write @c context.staged_distances - and nothing else: @c staged_ids and
- *  @c reverse_ids belong to the calling traversal. The context's allocator is the caller's,
- *  so a selector takes any @c traversal_context; the concept checks the index's own. */
+/** Any link-selection heuristic: carries its own neighbors-per-node budget as @c connectivity,
+ *  reads the ascending candidates in @c context.results, resolves values through the index's
+ *  @c published_value_of - every candidate ID is published or wired - scores pairs through the
+ *  @p metric, and fills @c context.selected_neighbors. A selector may also write
+ *  @c context.staged_distances - and nothing else: @c staged_ids and @c reverse_ids belong to the
+ *  calling traversal. The context's allocator is the caller's, so a selector takes any
+ *  @c traversal_context; the concept checks the index's own. */
 template <typename selector_type_, typename index_type_, typename metric_type_>
 concept selector = requires(selector_type_ const& selector, index_type_ const& index, metric_type_& metric,
                             typename index_type_::traversal_context_t& context) {
@@ -747,11 +751,8 @@ struct ram_index {
      *  selector's budget". */
     struct insert_config_t {
 
-        /** Breadth of the candidate pool during wiring. */
+        /** How many candidates a walk keeps during wiring. */
         std::size_t expansion_factor = 0;
-
-        /** Frontier entries expanded per metric round. */
-        std::size_t fan_out = 0;
     };
 
     /** Telemetry of one @c insert() batch. */
@@ -977,11 +978,11 @@ struct ram_index {
     }
 
     /** Sizes @p context for walks under @p connectivity and @p config - the fallible half of an
-     *  insertion, hoisted ahead of @ref plan_insert since no step may allocate it. The pools, the
-     *  staging surfaces and the selections never allocate again, and the frontier holds a full
-     *  pool's unexpanded members plus one round's admissions, which shedding past the pool's radius
-     *  keeps it within, so only ties at that radius grow it. The visited set starts at one row per
-     *  pooled candidate and alone re-tables as a walk widens - once per doubling per context
+     *  insertion, hoisted ahead of @ref plan_insert since no step may allocate it. The candidates,
+     *  the staging surfaces and the selections never allocate again, and the frontier holds the
+     *  full candidates' unexpanded members plus one round's admissions, which shedding past their
+     *  radius keeps it within, so only ties at that radius grow it. The visited set starts at one
+     *  row per candidate and alone re-tables as a walk widens - once per doubling per context
      *  lifetime, which a context kept across walks amortizes. Idempotent; a zero @p connectivity
      *  answers @c config_mismatch_k. */
     template <typename context_allocator_type_>
@@ -990,28 +991,30 @@ struct ram_index {
         if (!connectivity) return status_t::config_mismatch_k;
         insert_config_t const walk = resolved_config_(config, connectivity);
         std::size_t const round_capacity = ram_index::round_capacity(connectivity, config);
-        // A re-selection's pool: the walk's breadth plus the node's own row, which also covers a
-        // back-link's full row plus the newcomer.
-        std::size_t const pool_capacity = walk.expansion_factor + connectivity;
-        if (status_t const sized = context.results.reserve(pool_capacity); failed(sized)) return sized;
-        if (status_t const sized = context.frontier.reserve(pool_capacity + round_capacity); failed(sized))
+        // A re-selection's candidates: the walk's breadth plus the node's own row, which also
+        // covers a back-link's full row plus the newcomer.
+        std::size_t const candidates_capacity = walk.expansion_factor + connectivity;
+        if (status_t const sized = context.results.reserve(candidates_capacity); failed(sized)) return sized;
+        if (status_t const sized = context.frontier.reserve(candidates_capacity + round_capacity); failed(sized))
             return sized;
         if (status_t const sized = context.visited.reserve(walk.expansion_factor * connectivity); failed(sized))
             return sized;
         if (status_t const sized = context.staged_ids.reserve(round_capacity); failed(sized)) return sized;
-        // A diversity selector keeps a distance per pooled candidate beside the round it drains.
-        if (status_t const sized = context.staged_distances.reserve(max_of(round_capacity, pool_capacity * 2));
+        // A diversity selector keeps a distance per candidate beside the round it drains.
+        if (status_t const sized = context.staged_distances.reserve(max_of(round_capacity, candidates_capacity * 2));
             failed(sized))
             return sized;
         if (status_t const sized = context.selected_neighbors.reserve(connectivity + 1); failed(sized)) return sized;
         return context.reverse_ids.reserve(connectivity);
     }
 
-    /** Candidates one metric round of a walk under @p connectivity and @p config stages: its rows
-     *  per round of the widest row, or a full row plus the newcomer a back-link re-selects - what
-     *  a metric's staging holds to score every round at once. */
+    /** Candidates one metric round of a walk under @p connectivity and @p config stages: the rows
+     *  whose neighbors fill a walk's candidates, of the widest row, or a full row plus the newcomer
+     *  a back-link re-selects - what a metric's staging holds to score every round at once. */
     static std::size_t round_capacity(std::size_t connectivity, insert_config_t config) noexcept {
-        return max_of(resolved_config_(config, connectivity).fan_out * connectivity, connectivity + 1);
+        return max_of(
+            divide_round_up(resolved_config_(config, connectivity).expansion_factor, connectivity) * connectivity,
+            connectivity + 1);
     }
 
     /** Appends one directed edge @p from → @p to - purely structural: no metric,
@@ -1990,12 +1993,8 @@ struct ram_index {
      *  widest. */
     struct search_config_t {
 
-        /** Breadth of the candidate pool; raise to trade latency for recall. */
+        /** How many candidates a walk keeps; raise to trade latency for recall. */
         std::size_t expansion_factor = 0;
-
-        /** Frontier entries expanded per round; their unioned rows form one
-         *  metric round - the lever that feeds tiled engines their batch width. */
-        std::size_t fan_out = 0;
     };
 
     /** Telemetry of one @c search(); matches stay in the caller's context. */
@@ -2019,11 +2018,11 @@ struct ram_index {
      *  bracketed by the shared mutex's wait-free probes: a violated certification answers
      *  @c contended_k rather than a silently wrong result - detected, not memory-safe, since
      *  the plain reads may meet a row a lying mutator is regrowing.
-     *  Scoring runs off-lock, one @c reset / @c push / @c drain round per fan-out, and the
-     *  metric need not match the one that built the graph. Once the pool is full, its furthest
-     *  member's distance drains each round as the radius, so a metric may stop scoring a
-     *  candidate that cannot come under it. The query is a stored-value reference by default;
-     *  a @c transparent_metric accepts other query forms.
+     *  Scoring runs off-lock, one @c reset / @c push / @c drain per round, and the metric need not
+     *  match the one that built the graph. Once the candidates are full, their furthest member's
+     *  distance drains each round as the radius, so a metric may stop scoring a candidate that
+     *  cannot come under it. The query is a stored-value reference by default; a
+     *  @c transparent_metric accepts other query forms.
      *
      *  @param[in] query The similarity target, alive for the whole call.
      *  @param[inout] metric This thread's scoring instance.
@@ -2047,7 +2046,7 @@ struct ram_index {
      *  @param[in] query The similarity target, alive for the whole call.
      *  @param[inout] metric This thread's scoring instance.
      *  @param[inout] fold The reader of every scored round - see @c basic::fold. A @c sated_k ends
-     *      the walk successfully, before that round reaches the pool.
+     *      the walk successfully, before that round reaches the candidates.
      *  @param[inout] context The calling thread's scratch & telemetry over any allocator; holds the
      *      matches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
@@ -2061,10 +2060,9 @@ struct ram_index {
                                      traversal_context_over<context_allocator_type_>& context,
                                      search_config_t config = {}) noexcept {
         std::size_t const widest_row = connectivity();
-        insert_config_t const walk = resolved_config_({config.expansion_factor, config.fan_out}, widest_row);
+        insert_config_t const walk = resolved_config_({config.expansion_factor}, widest_row);
         if (status_t const sized = reserve_traversal(context, widest_row, walk); failed(sized)) return {{}, sized};
         std::size_t const expansion_factor = walk.expansion_factor;
-        std::size_t const fan_out = walk.fan_out;
         context.results.clear();
         context.frontier.clear();
         context.visited.clear();
@@ -2087,7 +2085,7 @@ struct ram_index {
 
         traversal_telemetry_t const telemetry_before = context.telemetry;
         search_around_<synchronization_>(query, metric, snapshot_admission_t {first_invisible_id}, expansion_factor,
-                                         fan_out, widest_row, context, fold);
+                                         widest_row, context, fold);
 
         // A refused walk still ranked whatever it reached; the telemetry says the ranking is
         // short because scratch ran out, not because the graph had nothing better.
@@ -2132,7 +2130,7 @@ struct ram_index {
     /** The walk breadth @p config asks for, or the one a search derives from @ref connectivity
      *  when it asks for none. */
     std::size_t non_zero_expansion_factor(search_config_t const& config) const noexcept {
-        return resolved_config_({config.expansion_factor, config.fan_out}, connectivity()).expansion_factor;
+        return resolved_config_({config.expansion_factor}, connectivity()).expansion_factor;
     }
 
     /** Bytes the node records' chunks and the key multimap span. The neighbor rows and whatever the
@@ -2157,7 +2155,7 @@ struct ram_index {
 
     /** The payload under a @b published or wired @p node_id, unchecked: for traversal-contract
      *  callers - selectors and the walks themselves - whose IDs come from the walk's admitted
-     *  pool, where the watermark gate of @c value_of would re-prove a known fact or refuse a
+     *  candidates, where the watermark gate of @c value_of would re-prove a known fact or refuse a
      *  row another insert wired ahead of its turn. */
     value_t const& published_value_of(node_id_t node_id) const noexcept { return nodes_[node_id].value; }
 
@@ -2635,12 +2633,10 @@ struct ram_index {
   private:
 #pragma region Internals and State
 
-    /** @p config with its zeros derived from @p connectivity: a pool twice the budget, and enough
-     *  expanded rows per round for one metric round to stage a full pool. */
+    /** @p config with its zero breadth derived from @p connectivity: candidates twice the
+     *  budget. */
     static insert_config_t resolved_config_(insert_config_t config, std::size_t connectivity) noexcept {
         if (!config.expansion_factor) config.expansion_factor = default_expansion_factor(connectivity);
-        if (!config.fan_out)
-            config.fan_out = max_of<std::size_t>(divide_round_up(config.expansion_factor, connectivity), 1);
         return config;
     }
 
@@ -2851,13 +2847,13 @@ struct ram_index {
     }
 
     /**
-     *  @brief One node's re-selection: a walk across into @p across alone fills the pool first,
-     *      then the node's own row seeds a walk over every ID below @p visible and joins the pool
-     *      past that walk's breadth.
+     *  @brief One node's re-selection: a walk across into @p across alone fills the candidates
+     *      first, then the node's own row seeds a walk over every ID below @p visible and joins the
+     *      candidates past that walk's breadth.
      *  @return Whether the new neighbors differ as a set from the ones replaced.
      *
-     *  @p selector picks from that pool, the rewrite runs under the node's lock, and every kept
-     *  neighbor is back-linked. No metric verb runs under a lock, and no row allocates.
+     *  @p selector picks from those candidates, the rewrite runs under the node's lock, and every
+     *  kept neighbor is back-linked. No metric verb runs under a lock, and no row allocates.
      */
     template <typename metric_type_, typename context_type_, typename selector_type_>
     bool refine_one_(node_id_t node_id, node_id_t visible, iota_view<node_id_t> across, insert_config_t walk,
@@ -2867,19 +2863,19 @@ struct ram_index {
         context.results.clear();
         context.frontier.clear();
         context.visited.clear();
-        // Visited before anything stages, so the node never joins its own pool.
+        // Visited before anything stages, so the node never joins its own candidates.
         [[maybe_unused]] membership_t const self_marked = context.visited.insert(node_id);
         part_admission_t const other {across.first, min_of(across.bound, visible)};
         if (other.first_id < other.first_invisible_id) {
-            search_around_<concurrent_k>(value, metric, other, walk.expansion_factor, walk.fan_out,
-                                         selector.connectivity, context, dummy_fold_t {});
+            search_around_<concurrent_k>(value, metric, other, walk.expansion_factor, selector.connectivity, context,
+                                         dummy_fold_t {});
             context.frontier.clear();
         }
         snapshot_admission_t const every {visible};
         seed_from_row_(node_id, value, metric, every, walk.expansion_factor, context);
-        search_around_<concurrent_k>(value, metric, every, walk.expansion_factor, walk.fan_out, selector.connectivity,
-                                     context, dummy_fold_t {});
-        pool_row_(node_id, value, metric, every, context);
+        search_around_<concurrent_k>(value, metric, every, walk.expansion_factor, selector.connectivity, context,
+                                     dummy_fold_t {});
+        add_row_candidates_(node_id, value, metric, every, context);
         selector(*this, metric, context);
 
         // Neighbors are distinct, so equal sizes and every pick present mean the same set.
@@ -2906,8 +2902,8 @@ struct ram_index {
     }
 
     /** Seeds a re-selection's walk with @p node_id 's own row: its admitted, unvisited neighbors
-     *  score into the pool and the frontier, in as many rounds as the metric's staging takes, so
-     *  every link already wired competes. A refused copy seeds nothing, and the walk samples
+     *  score into the candidates and the frontier, in as many rounds as the metric's staging takes,
+     *  so every link already wired competes. A refused copy seeds nothing, and the walk samples
      *  landmarks instead. */
     template <typename metric_type_, typename admission_type_, typename context_type_>
     void seed_from_row_(node_id_t node_id, value_t const& value, metric_type_& metric, admission_type_ const& admission,
@@ -2942,13 +2938,13 @@ struct ram_index {
         }
     }
 
-    /** Adds @p node_id 's current row to the pool a re-selection picks from, past the walk's
+    /** Adds @p node_id 's current row to the candidates a re-selection picks from, past the walk's
      *  breadth: the walk's nearer finds evict the far members, the long links among them, which
      *  must still compete. Scored in as many rounds as the metric's staging takes; a refused copy
      *  or growth, or a metric refusing an empty round, counts a saturated walk. */
     template <typename metric_type_, typename admission_type_, typename context_type_>
-    void pool_row_(node_id_t node_id, value_t const& value, metric_type_& metric, admission_type_ const& admission,
-                   context_type_& context) noexcept {
+    void add_row_candidates_(node_id_t node_id, value_t const& value, metric_type_& metric,
+                             admission_type_ const& admission, context_type_& context) noexcept {
         context.staged_ids.clear();
         auto const [degree, copy_status] = copy_row_<synchronization_t::concurrent_k>(node_id, context);
         if (failed(copy_status) || failed(context.results.reserve(context.results.size() + degree))) {
@@ -2958,10 +2954,10 @@ struct ram_index {
         std::size_t missing = 0;
         for (std::size_t position = 0; position != degree; ++position) {
             node_id_t const neighbor_id = context.staged_ids[position];
-            bool pooled = !admission.admits(neighbor_id);
-            for (std::size_t member = 0; member != context.results.size() && !pooled; ++member)
-                pooled = context.results[member].node_id == neighbor_id;
-            if (!pooled) context.staged_ids[missing++] = neighbor_id;
+            bool listed = !admission.admits(neighbor_id);
+            for (std::size_t member = 0; member != context.results.size() && !listed; ++member)
+                listed = context.results[member].node_id == neighbor_id;
+            if (!listed) context.staged_ids[missing++] = neighbor_id;
         }
         for (std::size_t first = 0; first != missing;) {
             metric.reset(value);
@@ -2999,9 +2995,9 @@ struct ram_index {
         if (new_node_id) {
             node_id_t const first_invisible_id =
                 atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-            search_around_<synchronization_>(
-                incoming, metric, dispensed_admission_t {this, first_invisible_id, new_node_id}, walk.expansion_factor,
-                walk.fan_out, connectivity, context, dummy_fold_t {});
+            search_around_<synchronization_>(incoming, metric,
+                                             dispensed_admission_t {this, first_invisible_id, new_node_id},
+                                             walk.expansion_factor, connectivity, context, dummy_fold_t {});
         }
         selector(*this, metric, context);
 
@@ -3171,17 +3167,19 @@ struct ram_index {
         return {walk_step_t::advanced_k, status_t::success_k};
     }
 
-    /** One round's expansion half: peels up to @p fan_out frontier entries within the stopping
+    /** One round's expansion half: peels up to @p filling_rows frontier entries within the stopping
      *  radius, copies their rows, and pushes the admission- and visited-filtered union into the
      *  metric, compacted in @c context.staged_ids. A full staging ends the round early, with the
      *  entry it cut short back on the frontier. */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_, typename admission_type_,
               typename context_type_>
     walk_step_t expand_frontier_(query_type_ const& query, metric_type_& metric, admission_type_ const& admission,
-                                 std::size_t expansion_factor, std::size_t fan_out, context_type_& context) noexcept {
+                                 std::size_t expansion_factor, std::size_t filling_rows,
+                                 context_type_& context) noexcept {
         context.staged_ids.clear();
         metric.reset(query);
-        for (std::size_t expanded_count = 0; expanded_count != fan_out && !context.frontier.empty(); ++expanded_count) {
+        for (std::size_t expanded_count = 0; expanded_count != filling_rows && !context.frontier.empty();
+             ++expanded_count) {
             scored_node_t const best = context.frontier.top();
             bool const results_full = context.results.size() == expansion_factor;
             if (results_full && best.distance > context.results.top().distance) {
@@ -3230,25 +3228,28 @@ struct ram_index {
     /**
      *  @brief The shared walk of @c search & @c insert: seed, then per round expand the
      *      nearest frontier entries and score the staged union in one builder round - every
-     *      scored round, seeds included, reaching the fold before the pool.
+     *      scored round, seeds included, reaching the fold before the candidates.
      *
      *  The walk locates only the IDs @p admission admits: a search's snapshot, or an insertion's
      *  snapshot widened by the rows wired ahead of their turns. It never fails hard: an exhausted
      *  admitted set, a refused staging or a sated fold ends it normally, and a refused re-table ends
      *  it early with the ranking it has and counts a saturated walk - an insertion wires the thinner
      *  row regardless, and a search reports the count so the caller can widen the scratch. Frontier
-     *  starvation with an unfilled pool re-seeds and counts a restart. The frontier-admission rule: a
-     *  candidate enters the frontier iff it improved the results pool, or the frontier would
+     *  starvation with unfilled candidates re-seeds and counts a restart. The frontier-admission
+     *  rule: a candidate enters the frontier iff it improved the results, or the frontier would
      *  otherwise be empty - the seedings.
      */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_, typename admission_type_,
               typename context_type_, typename fold_type_>
     void search_around_(query_type_ const& query, metric_type_& metric, admission_type_ const& admission,
-                        std::size_t expansion_factor, std::size_t fan_out, std::size_t connectivity,
-                        context_type_& context, fold_type_&& fold) noexcept {
+                        std::size_t expansion_factor, std::size_t connectivity, context_type_& context,
+                        fold_type_&& fold) noexcept {
+        // A round expands the rows whose neighbors fill a walk's candidates, as `round_capacity`
+        // sized.
+        std::size_t const filling_rows = divide_round_up(expansion_factor, connectivity);
         while (true) {
             // An empty frontier seeds: the first round, or a restart after it drained before the
-            // pool filled. Nothing left to seed from ends the walk.
+            // candidates filled. Nothing left to seed from ends the walk.
             if (context.frontier.empty()) {
                 if (context.results.size() >= expansion_factor) return;
                 bool const restarting = !context.results.empty();
@@ -3259,22 +3260,23 @@ struct ram_index {
                 continue;
             }
             walk_step_t const expanded = expand_frontier_<synchronization_>(query, metric, admission, expansion_factor,
-                                                                            fan_out, context);
+                                                                            filling_rows, context);
             if (expanded == walk_step_t::exhausted_k) return;
             walk_step_t const ranked = rank_round_(metric, expansion_factor, context, fold);
             if (expanded == walk_step_t::saturated_k || ranked != walk_step_t::advanced_k) return;
         }
     }
 
-    /** One round's scoring half: drains the staged union through the metric, hands it to the
-     *  fold, and pushes what improved the pool into the frontier, shedding the frontier past a
-     *  full pool's radius first so the pushes fit. */
+    /** One round's scoring half: drains the staged union through the metric, hands it to the fold,
+     *  and pushes what improved the candidates into the frontier, shedding the frontier past the
+     *  full candidates' radius first so the pushes fit. */
     template <typename metric_type_, typename context_type_, typename fold_type_>
     walk_step_t rank_round_(metric_type_& metric, std::size_t expansion_factor, context_type_& context,
                             fold_type_&& fold) const noexcept {
         std::size_t const staged_count = context.staged_ids.size();
         if (!staged_count) return walk_step_t::advanced_k;
-        // A full pool only admits what beats its furthest member, so that member's distance is the radius.
+        // Full candidates only admit what beats their furthest member, so that member's distance is
+        // the radius.
         bool const results_full = context.results.size() == expansion_factor;
         drain_round(metric, staged_count, context,
                     results_full ? context.results.top().distance : unbounded_radius<distance_t>());
@@ -3344,8 +3346,8 @@ struct ram_index {
             return true;
         }
 
-        // Off-lock: pool = the copied row plus the newcomer, scored against the neighbor's own
-        // stored value; every member is ranked, so nothing is too far.
+        // Off-lock: candidates = the copied row plus the newcomer, scored against the neighbor's
+        // own stored value; every member is ranked, so nothing is too far.
         context.staged_distances.resize_reserved(degree + 1);
         std::size_t scored_count = 0;
         while (scored_count != degree + 1) {

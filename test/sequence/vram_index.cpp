@@ -159,14 +159,14 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
         us::utilities::uuid_t const key = uuid_of(row);
         failures += expect_eq(ram_index
                                   .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
-                                          us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k, 0})
+                                          us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
                                   .status,
                               status_t::success_k);
     }
     std::size_t ram_matched = 0;
     for (std::size_t query = 0; query != queries_count; ++query) {
         failures += expect_eq(
-            ram_index.search(std::string_view {strings[count + query]}, metric, ram_context, {expansion_k, 0}).status,
+            ram_index.search(std::string_view {strings[count + query]}, metric, ram_context, {expansion_k}).status,
             status_t::success_k);
         std::vector<i64_t> found;
         for (std::size_t rank = 0; rank != min_of(wanted_k, ram_context.results.size()); ++rank)
@@ -218,8 +218,8 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             node_id_type_ const id = ids[query * wanted_k + rank];
             if (id == std::numeric_limits<node_id_type_>::max()) break;
-            // The pools keep 31 bits of a float, so the overlap kind's fixed point loses a mantissa
-            // bit more on the device.
+            // The candidates keep 31 bits of a float, so the overlap kind's fixed point loses a
+            // mantissa bit more on the device.
             f32_t const distance = distances[query * wanted_k + rank];
             if (expect(id < count)) {
                 ++failures;

@@ -161,7 +161,8 @@ struct i32_ampere_geospatial_kit_t {
     }
 
     /** No header bounds a chord. */
-    static __device__ __forceinline__ distance_t bound(nk_kernel_kind_t, query_t const&, basic::vram_row_t) noexcept {
+    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const&,
+                                                             basic::vram_row_t) noexcept {
         return 0;
     }
 
@@ -291,8 +292,8 @@ __device__ __forceinline__ bool cuda_admits(relation_t relation, f64_t radius_me
     return true;
 }
 
-/** One warp per query keeps, in rank order, the pool entries the relation admits, a warp-width of
- *  ranks at a time, until @c wanted landed or the pool ran out. */
+/** One warp per query keeps, in rank order, the candidates the relation admits, a warp-width of
+ *  ranks at a time, until @c wanted landed or the candidates ran out. */
 template <nk_capability_t capability_, typename node_id_type_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32)
     cuda_admit(cuda_admit_arguments<node_id_type_> arguments) {
@@ -303,13 +304,14 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32)
     for (u32_t query_index = blockIdx.x * vram_warps_per_block_k + threadIdx.x / warp_t::width_k;
          query_index < arguments.queries_count; query_index += warps) {
         earth_observation_t const query = arguments.queries[query_index];
-        node_id_type_ const* const pool_ids = arguments.pool_ids + u64_t {query_index} * arguments.pool;
+        node_id_type_ const* const candidate_ids = arguments.candidate_ids +
+                                                   u64_t {query_index} * arguments.candidates_count;
         node_id_type_* const matched_ids = arguments.matched_ids + u64_t {query_index} * arguments.wanted;
         f64_t* const matched_metres = arguments.matched_metres + u64_t {query_index} * arguments.wanted;
         u32_t landed = 0;
-        for (u32_t base = 0; base < arguments.pool && landed < arguments.wanted; base += warp_t::width_k) {
+        for (u32_t base = 0; base < arguments.candidates_count && landed < arguments.wanted; base += warp_t::width_k) {
             u32_t const rank = base + lane;
-            node_id_type_ const node_id = rank < arguments.pool ? pool_ids[rank] : unknown_k;
+            node_id_type_ const node_id = rank < arguments.candidates_count ? candidate_ids[rank] : unknown_k;
             bool admitted = false;
             i64_t chord = 0;
             if (node_id != unknown_k) {

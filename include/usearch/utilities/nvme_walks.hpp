@@ -15,7 +15,7 @@
  *    neighbors row, and @c key_dtype;
  *  - @c row_offset_ and @c row_length_, which locate any row of a part's key, value or neighbors
  *    column;
- *  - @c walk_t, one walk's pools, and @c walk_shape_t, the call's sizes;
+ *  - @c walk_t, one walk's candidates, and @c walk_shape_t, the call's sizes;
  *  - @c prime_scoring_, which prepares a row's query once the row primes;
  *  - @c score_staged_, which scores a walk's staged flights, folds and releases them, and ranks the
  *    rest through the walker's @c rank_.
@@ -228,14 +228,14 @@ enum class nvme_key_reads_t : u8_t {
  *  holds @c connectivity neighbors - derived once with the call's shape and carried in it. */
 struct nvme_queue_sizes_t {
 
-    /** The navigation pool: the expansion factor. */
+    /** How many candidates the walk keeps: the expansion factor. */
     std::size_t results = 0;
 
-    /** A full pool's unexpanded members plus one expansion's admissions, which shedding past the
-     *  pool's radius keeps the walk within; ties at that radius grow it. */
+    /** The full candidates' unexpanded members plus one expansion's admissions, which shedding past
+     *  their radius keeps the walk within; ties at that radius grow it. */
     std::size_t frontier = 0;
 
-    /** One row per pooled candidate - the first size a re-table doubles from. */
+    /** One row per candidate - the first size a re-table doubles from. */
     std::size_t visited = 0;
 };
 
@@ -256,7 +256,7 @@ std::size_t nvme_widest_row(std::span<part_type_ const> parts) noexcept {
 /** Where a walk stands between its reads. */
 enum class nvme_walk_stage_t : u8_t {
 
-    /** Finished, its pool merged into its row, or never primed. */
+    /** Finished, its candidates merged into its row, or never primed. */
     finished_k,
 
     /** Its landmarks are in flight in hop slot zero, and every row that lands enters the
@@ -430,7 +430,7 @@ class row_walker {
         nvme_row_slot_t* const slot_states = carve_<nvme_row_slot_t>(rows);
         flight_t* const flight_states = carve_<flight_t>(flights);
         u32_t* const free_flights = carve_<u32_t>(flights);
-        u32_t* const hop_flights = carve_<u32_t>(walks * shape_.hops_per_walk);
+        u32_t* const hop_flights = carve_<u32_t>(walks * shape_.hop_slots);
         io_request_t* const backlog = carve_<io_request_t>(shape_.buffers);
         io_completion_t* const completions = carve_<io_completion_t>(shape_.buffers);
         if (!walk_slots || !row_slots || !slot_states || !flight_states || !free_flights || !hop_flights || !backlog ||
@@ -459,7 +459,7 @@ class row_walker {
         slots_ = {slot_states, rows};
         flights_ = {flight_states, flights};
         free_flights_ = {free_flights, flights};
-        hop_flights_ = {hop_flights, walks * shape_.hops_per_walk};
+        hop_flights_ = {hop_flights, walks * shape_.hop_slots};
         free_count_ = flights;
         backlog_ = {backlog, shape_.buffers};
         completions_ = {completions, shape_.buffers};
@@ -588,12 +588,23 @@ class row_walker {
         return std::atomic_ref<std::size_t>(*shape_.cursor).load(std::memory_order_relaxed) >= shape_.rows_count;
     }
 
+    /** Hop slots a walk may hold now: its own share, and once the batch ran out, the shares of
+     *  the row slots that went idle; the shares only grow after that, so the free list never runs
+     *  dry. */
+    std::size_t live_hops_() const noexcept {
+        std::size_t const rows = shape_.rows_per_thread;
+        if (rows_in_flight_ == rows || !exhausted_()) return shape_.hops_per_walk;
+        std::size_t const inherited = (rows - rows_in_flight_) * shape_.walk_flights /
+                                      (rows_in_flight_ * (nvme_widest_row(parts_) + 1));
+        return min_of(shape_.hop_slots, shape_.hops_per_walk + inherited);
+    }
+
     u32_t take_flight_() noexcept { return free_flights_[--free_count_]; }
     void release_flight_(u32_t flight) noexcept { free_flights_[free_count_++] = flight; }
 
     /** The flights each hop slot of @p walk_index waits on; a zero slot is free. */
     std::span<u32_t> hop_flights_of_(u32_t walk_index) noexcept {
-        return hop_flights_.subspan(walk_index * shape_.hops_per_walk, shape_.hops_per_walk);
+        return hop_flights_.subspan(walk_index * shape_.hop_slots, shape_.hop_slots);
     }
 
     /** Whether a hop slot of @p walk_index still waits on a flight. */
@@ -780,9 +791,9 @@ class row_walker {
         tier_t::score_staged_(*this, walk);
     }
 
-    /** Merges the ascending @p scored rows of @p walk into its pool, and queues them for expansion:
-     *  every landmark, as the in-memory walk seeds the frontier, and a neighbor only when the pool
-     *  took it. */
+    /** Merges the ascending @p scored rows of @p walk into its candidates, and queues them for
+     *  expansion: every landmark, as the in-memory walk seeds the frontier, and a neighbor only
+     *  when the candidates took it. */
     [[gnu::always_inline]] void rank_(walk_t& walk, std::span<scored_node_t const> scored) noexcept {
         std::size_t const accepted = walk.results.insert(scored, shape_.expansion_factor);
         std::size_t const queued = walk.stage == nvme_walk_stage_t::seeding_k ? scored.size() : accepted;
@@ -790,8 +801,8 @@ class row_walker {
             if (failed(walk.frontier.insert(scored_node_t(scored[lane])))) return saturate_(walk);
     }
 
-    /** Expands the closest frontier nodes into the free hop slots of @p walk_index while each
-     *  lies inside a full pool's radius; with nothing in flight, re-seeds a frontier drained
+    /** Expands the closest frontier nodes into the free hop slots of @p walk_index while each lies
+     *  inside the full candidates' radius; with nothing in flight, re-seeds a frontier drained
      *  before the bound fills, or finishes. */
     void advance_(u32_t walk_index) noexcept {
         walk_t& walk = walks_[walk_index];
@@ -802,16 +813,16 @@ class row_walker {
         }
         row_t const& row = rows_[walk.row_slot];
         std::size_t const expansion_factor = shape_.expansion_factor;
-        results_array_t const& bound = row.bound(walk);
-        results_array_t const& pool = bound.size() == expansion_factor ? bound : walk.results;
-        bool const pool_full = pool.size() == expansion_factor;
-        std::span<u32_t> const hop_flights = hop_flights_of_(walk_index);
+        results_array_t const& stopping = row.stopping_candidates(walk);
+        results_array_t const& candidates = stopping.size() == expansion_factor ? stopping : walk.results;
+        bool const candidates_full = candidates.size() == expansion_factor;
+        std::span<u32_t> const hop_flights = hop_flights_of_(walk_index).first(live_hops_());
         for (u32_t slot = 0; slot != hop_flights.size() && !walk.frontier.empty(); ++slot) {
             if (hop_flights[slot]) continue;
             scored_node_t const candidate = walk.frontier.top();
-            if (pool_full && candidate.distance > pool.top().distance) break;
-            if (pool_full && walk.frontier.capacity() - walk.frontier.size() < parts_[walk.shard].connectivity)
-                walk.frontier.erase_below(pool.top());
+            if (candidates_full && candidate.distance > candidates.top().distance) break;
+            if (candidates_full && walk.frontier.capacity() - walk.frontier.size() < parts_[walk.shard].connectivity)
+                walk.frontier.erase_below(candidates.top());
             walk.frontier.pop();
             ++telemetry_.visited_members;
             u32_t const flight = take_flight_();
@@ -821,8 +832,8 @@ class row_walker {
         }
         if (in_flight_(walk_index)) return;
         // A walk only reaches nodes connected to its seeds, so a frontier drained before the
-        // bound fills re-seeds.
-        if (walk.frontier.empty() && bound.size() < expansion_factor) {
+        // stopping candidates fill re-seeds.
+        if (walk.frontier.empty() && stopping.size() < expansion_factor) {
             walk.stage = nvme_walk_stage_t::seeding_k;
             if (seed_(walk_index, 4)) return void(++telemetry_.restarts);
         }

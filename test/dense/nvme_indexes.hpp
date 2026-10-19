@@ -254,7 +254,7 @@ std::size_t nvme_expect_rankings(reference_type_ const& reference,
 
 /** Search on NVMe against the RAM group its parts came from: under a walk as wide as the index both
  *  rank every row, so every query's ranking matches rank for rank, each key at its exact distance;
- *  a default walk keeps its pool ascending over distinct rows at their exact distances. */
+ *  a default walk keeps its candidates ascending over distinct rows at their exact distances. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_search(u64_t seed) {
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;
@@ -803,8 +803,8 @@ std::size_t test_nvme_indexes_failed_submit(u64_t seed) {
 }
 
 /** Lone queries on a queue their walks leave idle keep several hops in flight, and find at least as
- *  many true neighbors as on a queue a hop fills, their pools only as wide as their results. Over
- *  blocking reads they also take fewer round trips, and a full batch on the deep queue, which
+ *  many true neighbors as on a queue a hop fills, their candidates only as wide as their results.
+ *  Over blocking reads they also take fewer round trips, and a full batch on the deep queue, which
  *  leaves no depth idle, ranks exactly as the shallow queue does. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_pipelined(u64_t seed) {
@@ -857,9 +857,11 @@ std::size_t test_nvme_indexes_pipelined(u64_t seed) {
     failures += expect_eq(deep_status, status_t::success_k);
     failures += expect(full.counts == hop_by_hop.counts && full.keys == hop_by_hop.keys &&
                        full.distances == hop_by_hop.distances);
-    failures += expect_eq(deep_result.visited_members, shallow_result.visited_members);
-    failures += expect_eq(deep_result.computed_distances, shallow_result.computed_distances);
-    failures += expect_eq(deep_result.neighbor_reads.count, shallow_result.neighbor_reads.count);
+    // Past the batch's end, deep queues let walks inherit idle flights and hold hops a walk
+    // advancing hop by hop never reaches, so they may only do more work, never less.
+    failures += expect(deep_result.visited_members >= shallow_result.visited_members);
+    failures += expect(deep_result.computed_distances >= shallow_result.computed_distances);
+    failures += expect(deep_result.neighbor_reads.count >= shallow_result.neighbor_reads.count);
     return failures;
 }
 

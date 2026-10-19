@@ -477,7 +477,7 @@ typedef struct usearch_shapes_insert_t {
     /** The shapes, points end to end around @c count + 1 point offsets. @ref shapes_index_tape */
     usearch_tape_view_t shapes;
 
-    /** The @b optional candidate-pool breadth the build walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the build walk explores; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with entries admitted and the batch length. */
@@ -527,7 +527,7 @@ typedef struct usearch_shapes_refine_t {
      *  what no reconnection could reach. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with entries re-selected; a cancel stops the re-selection,
@@ -599,7 +599,7 @@ typedef struct usearch_shapes_search_t {
     /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
     size_t wanted;
 
-    /** The @b optional candidate-pool breadth the walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the walk explores; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional admission filter, asked about a batch of candidates at a time. */
@@ -734,7 +734,7 @@ typedef struct usearch_shapes_absorb_t {
     /** The @b optional output for the audit closing the heal. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth of the closing refine's walks; zero derives. */
+    /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with entries the closing refine re-selected; a cancel stops
@@ -802,7 +802,7 @@ typedef struct usearch_shapes_split_t {
     /** The @b optional output for the audits closing the heals, across the receivers. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth of the closing refines' walks; zero derives. */
+    /** The @b optional breadth of the candidates of the closing refines' walks; zero derives. */
     size_t expansion_factor;
 
     /** Picks the part roots: equal seeds over an unchanged index split equally. */
@@ -878,7 +878,7 @@ typedef struct usearch_shapes_refinement_init_t {
     /** Receiver handles in @c receivers, zero or at least two. */
     size_t receivers_count;
 
-    /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
     /** Picks the part roots when @c receivers are named, as in @c usearch_shapes_split. */
@@ -1116,7 +1116,7 @@ typedef struct usearch_shapes_sample_t {
     /** The @b optional radius around the anchors; zero bounds nothing. */
     usearch_distance_t radius;
 
-    /** The @b optional candidate-pool breadth of the walks behind the draws; zero derives. */
+    /** The @b optional breadth of the candidates of the walks behind the draws; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with draws written and @c wanted. */

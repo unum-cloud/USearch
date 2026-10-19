@@ -325,7 +325,8 @@ struct nvme_indexes {
         if (!groups_count) return {{}, status_t::success_k};
         if (queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
 
-        // Every token row keeps its whole ranked pool, its keys resolved and merged across shards.
+        // Every token row keeps all of its ranked candidates, its keys resolved and merged across
+        // shards.
         using row_t = search_row<dummy_heads_t, dummy_predicate_t, distance_t>;
         std::size_t const width = non_zero_expansion_factor(config);
         walk_shape_t const shape = index_t::template walk_shape_<row_t>(
@@ -554,22 +555,22 @@ struct nvme_indexes {
 
 #pragma region Rows
 
-    /** The rows of a batched search across the shards: each walk's pool merges into the row's
+    /** The rows of a batched search across the shards: each walk's candidates merge into the row's
      *  ranking by locator, and the written locators resolve into keys once every walk finished. A
-     *  filtered row reads every scored row's key beside its value, admitting into one pool per
-     *  shard with each key kept beside its row, so its ranking merges keys directly and resolves
-     *  none. Each slot imports its query into its own staging, and distances land as
+     *  filtered row reads every scored row's key beside its value, admitting into one set of
+     *  candidates per shard with each key kept beside its row, so its ranking merges keys directly
+     *  and resolves none. Each slot imports its query into its own staging, and distances land as
      *  @p score_type_. */
     template <typename heads_type_, typename predicate_type_, typename score_type_>
     struct search_row {
         using key_t = key_type_;
 
-        /** Admits a walk's scored rows whose keys the predicate takes into its shard's pool, the
-         *  pool's keys shifted alongside, so slot i of both names one row. */
+        /** Admits a walk's scored rows whose keys the predicate takes into its shard's candidates,
+         *  the candidates' keys shifted alongside, so slot i of both names one row. */
         struct admitting_fold_t {
             predicate_type_& predicate;
-            results_array_t& pool;
-            key_t* pool_keys = nullptr;
+            results_array_t& candidates;
+            key_t* candidate_keys = nullptr;
             std::size_t limit = 0;
 
             walk_demand_t absorb(std::span<scored_node_t const> scored, std::span<dot_result_t const>,
@@ -578,14 +579,14 @@ struct nvme_indexes {
                 judge_keys(predicate, keys, std::span(verdicts).first(keys.size()));
                 for (std::size_t lane = 0; lane != scored.size(); ++lane) {
                     if (verdicts[lane] != admission_t::admit_k) continue;
-                    std::size_t const kept = pool.size();
+                    std::size_t const kept = candidates.size();
                     // The slot `sorted_buffer::insert` picks, so the keys open the same one.
                     std::size_t const slot = static_cast<std::size_t>(
-                        lower_bound(to_span(pool), scored[lane], closer_scored_node_t {}) - pool.data());
-                    if (!pool.insert(scored_node_t(scored[lane]), limit)) continue;
-                    std::memmove(pool_keys + slot + 1, pool_keys + slot,
+                        lower_bound(to_span(candidates), scored[lane], closer_scored_node_t {}) - candidates.data());
+                    if (!candidates.insert(scored_node_t(scored[lane]), limit)) continue;
+                    std::memmove(candidate_keys + slot + 1, candidate_keys + slot,
                                  (kept - (kept == limit) - slot) * sizeof(key_t));
-                    pool_keys[slot] = keys[lane];
+                    candidate_keys[slot] = keys[lane];
                 }
                 return walk_demand_t::continue_k;
             }
@@ -646,7 +647,7 @@ struct nvme_indexes {
                         .row(0)
                         .as_vector();
             inputs.counts[row] = 0;
-            for (results_array_t& pool : admitted) pool.clear();
+            for (results_array_t& candidates : admitted) candidates.clear();
         }
         void rescore(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& vectors,
                      std::array<vector_norms_t, 4> const& norms, scores_result<dot_result_t, 4>& scores,
@@ -660,26 +661,27 @@ struct nvme_indexes {
                         admitted_keys.data() + walk.shard * inputs.expansion_factor, inputs.expansion_factor};
             else return {};
         }
-        results_array_t const& bound(walk_t const& walk) const noexcept {
+        results_array_t const& stopping_candidates(walk_t const& walk) const noexcept {
             if constexpr (key_reads_k == nvme_key_reads_t::scored_k) return admitted[walk.shard];
             else return walk.results;
         }
         void finish_walk(walk_t const& walk) noexcept {
             std::span<score_type_> const distances = to_span(inputs.distances.row(row).as_vector());
             if constexpr (key_reads_k == nvme_key_reads_t::scored_k) {
-                // The walk is over, so its pool's IDs become slots of the keys kept beside it,
+                // The walk is over, so its candidates' IDs become slots of the keys kept beside it,
                 // which merge directly.
-                results_array_t& pool = admitted[walk.shard];
-                scored_node_t* const slots = pool.data();
-                for (std::size_t slot = 0; slot != pool.size(); ++slot)
+                results_array_t& candidates = admitted[walk.shard];
+                scored_node_t* const slots = candidates.data();
+                for (std::size_t slot = 0; slot != candidates.size(); ++slot)
                     slots[slot].node_id = static_cast<node_id_t>(slot);
-                found = merge_search_results(to_span(bound(walk)),
+                found = merge_search_results(to_span(stopping_candidates(walk)),
                                              admitted_keys.data() + walk.shard * inputs.expansion_factor,
                                              to_span(inputs.keys.row(row).as_vector()), distances, found);
             }
             else
-                found = merge_search_results(to_span(bound(walk)), nvme_shard_locators<u32_t> {walk.shard},
-                                             to_writable_span(locators), distances, found);
+                found = merge_search_results(to_span(stopping_candidates(walk)),
+                                             nvme_shard_locators<u32_t> {walk.shard}, to_writable_span(locators),
+                                             distances, found);
         }
         std::size_t outputs() const noexcept {
             if constexpr (key_reads_k == nvme_key_reads_t::scored_k) return 0;
@@ -742,7 +744,7 @@ struct nvme_indexes {
             pairs.resolve.shard = walk.shard;
             return pairs;
         }
-        results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
+        results_array_t const& stopping_candidates(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return pairs.written; }
         nvme_locator<u32_t> locator(std::size_t output) const noexcept { return locators[output]; }
@@ -834,7 +836,7 @@ struct nvme_indexes {
             attention(ids, vectors, norms, scores, count, keys);
         }
         fold_t fold(walk_t const&) const noexcept { return {}; }
-        results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
+        results_array_t const& stopping_candidates(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return 0; }
         nvme_locator<u32_t> locator(std::size_t) const noexcept { return {}; }
@@ -2084,9 +2086,9 @@ struct [[nodiscard]] nvme_rewrite_plan {
     };
     static_assert(sizeof(proposal_t) == 12, "Spills are read back as packed records");
 
-    /** Every row's candidate pool of one batch: the best rows by exact distance, with their bytes
+    /** Every row's candidates of one batch: the best rows by exact distance, with their bytes
      *  when the batch keeps them, so a selection reads nothing again. */
-    struct pools_t {
+    struct candidates_t {
         scored_node_t* entries = nullptr;
         byte_t* vectors = nullptr;
         u32_t* counts = nullptr;
@@ -2098,8 +2100,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
             return vectors + (row * slots + slot) * row_bytes;
         }
 
-        /** Keeps @p candidate in the pool of @p row, at most @p limit long, unless it is there
-         *  already or every kept one is closer; answers the slot it took, or @p limit. */
+        /** Keeps @p candidate among the candidates of @p row, at most @p limit long, unless it is
+         *  there already or every kept one is closer; answers the slot it took, or @p limit. */
         std::size_t offer(std::size_t row, scored_node_t candidate, std::size_t limit) const noexcept {
             scored_node_t* const kept = entries_of(row);
             std::size_t const count = counts[row];
@@ -2119,25 +2121,26 @@ struct [[nodiscard]] nvme_rewrite_plan {
         }
     };
 
-    /** The rows of a re-select batch: every scored row of every walk is offered to the row's pool
-     *  with its bytes, the row itself excepted. */
+    /** The rows of a re-select batch: every scored row of every walk is offered to the row's
+     *  candidates with its bytes, the row itself excepted. */
     struct reselect_row_t {
         using key_t = typename indexes_t::key_t;
         inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
 
-        /** Offers every scored lane of a quad to the row's pool with the bytes its rescoring
+        /** Offers every scored lane of a quad to the row's candidates with the bytes its rescoring
          *  saw. */
         struct fold_t {
             reselect_row_t* row = nullptr;
 
             walk_demand_t absorb(std::span<scored_node_t const> scored, std::span<dot_result_t const>) const noexcept {
                 inputs_t const& inputs = row->inputs;
-                pools_t const& pools = inputs.pools;
+                candidates_t const& candidates = inputs.candidates;
                 for (std::size_t lane = 0; lane != scored.size(); ++lane) {
                     if (scored[lane].node_id == inputs.first + row->row) continue;
-                    std::size_t const slot = pools.offer(row->row, scored[lane], inputs.limit);
+                    std::size_t const slot = candidates.offer(row->row, scored[lane], inputs.limit);
                     if (slot != inputs.limit)
-                        std::memcpy(pools.vector_of(row->row, slot), row->landed[lane].byte_data(), pools.row_bytes);
+                        std::memcpy(candidates.vector_of(row->row, slot), row->landed[lane].byte_data(),
+                                    candidates.row_bytes);
                 }
                 return walk_demand_t::continue_k;
             }
@@ -2146,7 +2149,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
         /** The batch every row of the call reads and fills. */
         struct inputs_t {
             vectors_view_t queries;
-            pools_t pools;
+            candidates_t candidates;
             node_id_t first = 0;
             std::size_t limit = 0;
         };
@@ -2163,7 +2166,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
 
         status_t reserve(std::size_t, std::size_t) noexcept { return status_t::success_k; }
 
-        /** Primes @p new_row; its pool keeps what earlier walks of the batch kept. */
+        /** Primes @p new_row; its candidates keep what earlier walks of the batch kept. */
         void prime(std::size_t new_row) noexcept {
             row = new_row;
             query = inputs.queries.row(row).as_vector();
@@ -2174,7 +2177,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
             landed = vectors;
         }
         fold_t fold(walk_t const&) noexcept { return {this}; }
-        results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
+        results_array_t const& stopping_candidates(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return 0; }
         nvme_locator<u32_t> locator(std::size_t) const noexcept { return {}; }
@@ -2418,7 +2421,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
 #pragma region Sizes
 
     std::size_t neighbors_row_bytes_() const noexcept { return connectivity_ * sizeof(node_id_t); }
-    std::size_t pool_slots_() const noexcept { return expansion_factor_ + connectivity_; }
+    std::size_t candidate_slots_() const noexcept { return expansion_factor_ + connectivity_; }
     std::size_t selection_bytes_() const noexcept { return connectivity_ * (sizeof(u32_t) + sizeof(vector_norms_t)); }
 
     /** Bytes a copy step stages per row: every column, and a second copy of them when key ranges
@@ -2429,17 +2432,18 @@ struct [[nodiscard]] nvme_rewrite_plan {
     }
 
     /** Bytes a re-select step carves per row: the query, the neighbors in and out and as they were,
-     *  the pool with its rows, the selection scratch, the back-links and the reads of the current
-     *  neighbors. */
+     *  the candidates with their rows, the selection scratch, the back-links and the reads of the
+     *  current neighbors. */
     std::size_t reselect_row_bytes_() const noexcept {
-        std::size_t const slots = pool_slots_();
+        std::size_t const slots = candidate_slots_();
         return value_row_bytes_ + 2 * neighbors_row_bytes_() + sizeof(u32_t) +
                slots * (sizeof(scored_node_t) + value_row_bytes_ + sizeof(u32_t)) + selection_bytes_() +
                connectivity_ * (sizeof(proposal_t) + sizeof(u32_t));
     }
 
-    /** Bytes a back-link batch carves per target row: the row in and out, its own value row, a pool
-     *  of twice the connectivity with its rows, the selection scratch and the reads. */
+    /** Bytes a back-link batch carves per target row: the row in and out, its own value row,
+     *  candidates numbering twice the connectivity with their rows, the selection scratch and the
+     *  reads. */
     std::size_t back_link_row_bytes_() const noexcept {
         std::size_t const slots = connectivity_ * 2;
         return neighbors_row_bytes_() + value_row_bytes_ + sizeof(u32_t) +
@@ -2648,17 +2652,17 @@ struct [[nodiscard]] nvme_rewrite_plan {
     }
 
     /**
-     *  @brief Picks the neighbors of pool row @p row into @p out, as the RAM insertion picks them:
-     *      walking its pool nearest-first, a candidate is kept only when no kept one is closer to
-     *      it than the row is, and the slots left take the nearest rejected candidates.
+     *  @brief Picks the neighbors of candidate row @p row into @p out, as the RAM insertion picks
+     *      them: walking its candidates nearest-first, a candidate is kept only when no kept one is
+     *      closer to it than the row is, and the slots left take the nearest rejected candidates.
      *
      *  Sentinels pad @p out.
      *  @return The picks; @p computed counts the distances it took.
      */
-    std::size_t select_diverse_(pools_t const& pools, std::size_t row, selection_t scratch, std::span<node_id_t> out,
-                                std::size_t& computed) const noexcept {
-        scored_node_t const* const entries = pools.entries_of(row);
-        std::size_t const count = pools.counts[row], limit = out.size();
+    std::size_t select_diverse_(candidates_t const& candidates, std::size_t row, selection_t scratch,
+                                std::span<node_id_t> out, std::size_t& computed) const noexcept {
+        scored_node_t const* const entries = candidates.entries_of(row);
+        std::size_t const count = candidates.counts[row], limit = out.size();
         for (u32_t slot = 0; slot != count; ++slot) scratch.order[slot] = slot;
         partial_sort(std::span<u32_t>(scratch.order, count), count, [&](u32_t first, u32_t second) noexcept {
             return entries[first].distance != entries[second].distance
@@ -2668,12 +2672,12 @@ struct [[nodiscard]] nvme_rewrite_plan {
         std::size_t picks = 0;
         for (std::size_t position = 0; position != count && picks != limit; ++position) {
             u32_t const slot = scratch.order[position];
-            byte_t const* const candidate = pools.vector_of(row, slot);
+            byte_t const* const candidate = candidates.vector_of(row, slot);
             vector_norms_t const candidate_norms = norms_of_(candidate);
             std::size_t kept = 0;
             for (; kept != picks; ++kept) {
                 ++computed;
-                if (distance_(candidate, candidate_norms, pools.vector_of(row, scratch.kept[kept]),
+                if (distance_(candidate, candidate_norms, candidates.vector_of(row, scratch.kept[kept]),
                               scratch.kept_norms[kept]) < entries[slot].distance)
                     break;
             }
@@ -3223,15 +3227,15 @@ struct [[nodiscard]] nvme_rewrite_plan {
 
     /** Re-selects target rows @p step.nodes: each walks the target part from random landmarks, the
      *  appended part of a merge or a build walking across into the resident part alone first, its
-     *  pool keeping the best rows it scored and its current neighbors, then a diverse pick lands as
-     *  its row and spills its back-links. A whole part the workspace holds is refined in RAM
-     *  instead. */
+     *  candidates keeping the best rows it scored and its current neighbors, then a diverse pick
+     *  lands as its row and spills its back-links. A whole part the workspace holds is refined in
+     *  RAM instead. */
     status_t reselect_(step_t const& step, executor_t& executor) noexcept {
         target_t& target = targets_[step.part];
         std::size_t const nodes = target.view.size(), count = step.nodes.size(), first = step.nodes.first;
         if (count == nodes && ram_fits_(nodes, neighbors_row_bytes_(), refine_slices_k))
             return refine_in_ram_(step.part, executor);
-        std::size_t const slots = pool_slots_(), connectivity = connectivity_;
+        std::size_t const slots = candidate_slots_(), connectivity = connectivity_;
         nvme_part_t const& part = part_of_(target);
         bytes_span_t space = workspace_;
         auto* const queries = carve_<byte_t>(space, count * value_row_bytes_);
@@ -3254,17 +3258,17 @@ struct [[nodiscard]] nvme_rewrite_plan {
         if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
             return read;
 
-        pools_t const pools {entries, vectors, counts, slots, value_row_bytes_};
+        candidates_t const candidates {entries, vectors, counts, slots, value_row_bytes_};
         std::memset(counts, 0, count * sizeof(u32_t));
         using row_t = reselect_row_t;
         typename row_t::inputs_t const inputs {
-            vectors_view_t {reinterpret_cast<scalar_t const*>(queries), count, dimensions_}, pools,
+            vectors_view_t {reinterpret_cast<scalar_t const*>(queries), count, dimensions_}, candidates,
             static_cast<node_id_t>(first), expansion_factor_};
         search_config_t config {};
         config.expansion_factor = static_cast<decltype(config.expansion_factor)>(expansion_factor_);
         // Appended rows first walk across into the resident part alone, since no resident row links
         // to them yet: the part read as ending at the appended base draws and expands nothing past
-        // it, and both walks fill the same pools.
+        // it, and both walks fill the same candidates.
         if (appended_base_ && first >= appended_base_) {
             u32_t& part_nodes = target.view.parts_[0].nodes;
             u32_t const all_nodes = std::exchange(part_nodes, static_cast<u32_t>(appended_base_));
@@ -3280,13 +3284,13 @@ struct [[nodiscard]] nvme_rewrite_plan {
         absorb_walks_(walked);
 
         // The current neighbors compete as the RAM refine's seeds do, their rows read into the
-        // pools' spare slots.
+        // candidates' spare slots.
         std::size_t current = 0;
         for (std::size_t row = 0; row != count; ++row)
             for (std::size_t slot = 0; slot != connectivity; ++slot) {
                 node_id_t const neighbor = neighbors[row * connectivity + slot];
                 if (neighbor >= nodes || neighbor == first + row) continue;
-                std::size_t const taken = pools.offer(row, {neighbor, 0}, slots);
+                std::size_t const taken = candidates.offer(row, {neighbor, 0}, slots);
                 if (taken != slots) points[current++] = static_cast<u32_t>(row * slots + taken);
             }
         if (status_t const read = read_points_(
@@ -3312,7 +3316,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
             std::span<node_id_t> const before {previous_neighbors + row * connectivity, connectivity};
             std::memcpy(before.data(), out.data(), connectivity * sizeof(node_id_t));
             std::size_t const picks = select_diverse_(
-                pools, row, selection_of_(orders, kept_slots, kept_norms, row, slots), out, local_computed);
+                candidates, row, selection_of_(orders, kept_slots, kept_norms, row, slots), out, local_computed);
             std::size_t matched = 0, previous = 0;
             for (std::size_t slot = 0; slot != connectivity; ++slot) {
                 previous += before[slot] < nodes && before[slot] != first + row;
@@ -3322,10 +3326,10 @@ struct [[nodiscard]] nvme_rewrite_plan {
             for (std::size_t pick = 0; pick != connectivity; ++pick) {
                 spilled[pick] = proposal_t {};
                 if (pick >= picks) continue;
-                scored_node_t const* const pool = pools.entries_of(row);
+                scored_node_t const* const row_entries = candidates.entries_of(row);
                 std::size_t slot = 0;
-                while (pool[slot].node_id != out[pick]) ++slot;
-                spilled[pick] = proposal_t {out[pick], static_cast<node_id_t>(first + row), pool[slot].distance};
+                while (row_entries[slot].node_id != out[pick]) ++slot;
+                spilled[pick] = proposal_t {out[pick], static_cast<node_id_t>(first + row), row_entries[slot].distance};
             }
             std::atomic_ref<std::size_t>(computed).fetch_add(local_computed, std::memory_order_relaxed);
             std::atomic_ref<std::size_t>(changed).fetch_add(matched != picks || previous != picks,
@@ -3358,7 +3362,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
         auto* const proposed = carve_<scored_node_t>(space, rows * connectivity);
         if (!proposed_counts || !proposed) return status_t::bad_alloc_k;
         std::memset(proposed_counts, 0, rows * sizeof(u32_t));
-        pools_t const proposals {proposed, nullptr, proposed_counts, connectivity, 0};
+        candidates_t const proposals {proposed, nullptr, proposed_counts, connectivity, 0};
 
         // The spill reads back in runs as wide as all that is left, which the batches reuse once it
         // is read, and every target keeps its closest sources.
@@ -3406,9 +3410,9 @@ struct [[nodiscard]] nvme_rewrite_plan {
             if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
                 return read;
 
-            // Point `p` below `count` reads the batch row itself, every later one a pool slot of
-            // some row.
-            pools_t const pools {entries, vectors, counts, slots, value_row_bytes_};
+            // Point `p` below `count` reads the batch row itself, every later one a candidate slot
+            // of some row.
+            candidates_t const candidates {entries, vectors, counts, slots, value_row_bytes_};
             std::size_t reads = 0;
             for (std::size_t row = 0; row != count; ++row) {
                 counts[row] = 0;
@@ -3418,11 +3422,11 @@ struct [[nodiscard]] nvme_rewrite_plan {
                 node_id_t const self = static_cast<node_id_t>(first + row);
                 for (std::size_t slot = 0; slot != connectivity; ++slot) {
                     node_id_t const neighbor = neighbors[row * connectivity + slot];
-                    if (neighbor < nodes && neighbor != self) pools.offer(row, {neighbor, 0}, slots);
+                    if (neighbor < nodes && neighbor != self) candidates.offer(row, {neighbor, 0}, slots);
                 }
                 scored_node_t const* const proposed_row = proposals.entries_of(local);
                 for (std::size_t slot = 0; slot != proposed_counts[local]; ++slot)
-                    pools.offer(row, {proposed_row[slot].node_id, 0}, slots);
+                    candidates.offer(row, {proposed_row[slot].node_id, 0}, slots);
                 for (std::size_t slot = 0; slot != counts[row]; ++slot)
                     points[reads++] = static_cast<u32_t>(count + row * slots + slot);
             }
@@ -3448,13 +3452,13 @@ struct [[nodiscard]] nvme_rewrite_plan {
                     byte_t const* const own = owns + row * value_row_bytes_;
                     vector_norms_t const own_norms = norms_of_(own);
                     for (std::size_t slot = 0; slot != counts[row]; ++slot) {
-                        byte_t const* const candidate = pools.vector_of(row, slot);
+                        byte_t const* const candidate = candidates.vector_of(row, slot);
                         entries[row * slots + slot].distance = distance_(own, own_norms, candidate,
                                                                          norms_of_(candidate));
                     }
                     std::size_t local_computed = counts[row];
                     std::span<node_id_t> const out {neighbors + row * connectivity, connectivity};
-                    select_diverse_(pools, row, selection_of_(orders, kept_slots, kept_norms, row, slots), out,
+                    select_diverse_(candidates, row, selection_of_(orders, kept_slots, kept_norms, row, slots), out,
                                     local_computed);
                     std::atomic_ref<std::size_t>(computed).fetch_add(local_computed, std::memory_order_relaxed);
                 });

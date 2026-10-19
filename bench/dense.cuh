@@ -259,10 +259,10 @@ inline constexpr nk_kernel_kind_t metrics_k[] = {nk_kernel_dot_k, nk_kernel_angu
  *  --stored-dtype      the file's dtype             Stored dtype, cast on ingest
  *  --metric            angular                      Distance kernel for building and searching
  *  --connectivity      32                           Graph degree: 16, 32 or 128
- *  --expansion-add     256                          Candidate pool while inserting
- *  --expansion-search  96                           Candidate pool while searching
+ *  --expansion-add     256                          Candidates while inserting
+ *  --expansion-search  96                           Candidates while searching
  *  --max-refines       0                            Upper bound on refinement passes after ingestion
- *  --expansion-refine  twice the connectivity       Candidate pool while refining
+ *  --expansion-refine  twice the connectivity       Candidates while refining
  *  --top-k             10                           Matches per query to judge
  *  --first-vector      0                            First dataset row viewed, keyed by its row
  *  --max-base-vectors  the whole file               Cap on ingested rows
@@ -328,11 +328,11 @@ struct settings_t {
     /** Neighbors-list width per node; must match a `connectivity_t` tiling. */
     count_t connectivity {.value = 32};
 
-    /** Insertion candidate pool, calibrated on SIFT 10M against @c expansion_search for the
-     *  build-once-search-forever regime. */
+    /** How many candidates an insertion keeps, calibrated on SIFT 10M against @c expansion_search
+     *  for the build-once-search-forever regime. */
     count_t expansion_add {.value = 256};
 
-    /** Search candidate pool; see @c expansion_add for the calibration. */
+    /** How many candidates a search keeps; see @c expansion_add for the calibration. */
     count_t expansion_search {.value = 96};
 
     /** Matches per query to return and judge. */
@@ -373,14 +373,15 @@ struct settings_t {
      *  absorbing refine is measured on its own; absent ingests every row into one index. */
     switch_t merge = switch_t::absent_k;
 
-    /** Merge candidate pool; absent inherits `--expansion-add`. */
+    /** How many candidates a merge keeps; absent inherits `--expansion-add`. */
     count_t expansion_merge;
 
     /** Upper bound on refinement passes after ingestion or a load; a pass that re-selects
      *  nothing ends the phase early, and zero skips it outright. */
     count_t max_refines {.minimum = 0};
 
-    /** Refinement candidate pool; absent takes the index's default, twice the connectivity. */
+    /** How many candidates a refinement keeps; absent takes the index's default, twice the
+     *  connectivity. */
     count_t expansion_refine;
 
     /** Any `.fbin`-family file of every query's indexer heads, consecutive rows per query; needs `--weights`. */
@@ -409,11 +410,11 @@ inline std::array<flag_t, 21> common_flags(settings_t& settings) noexcept {
          &settings.stored_dtype_name},
         {"--metric", "name", "dot, angular, euclidean, hamming or jaccard; angular by default", &settings.metric_name},
         {"--connectivity", "degree", "16, 32, or 128; 32 by default", &settings.connectivity},
-        {"--expansion-add", "breadth", "insertion candidate pool; 256 by default", &settings.expansion_add},
-        {"--expansion-search", "breadth", "search candidate pool; 96 by default", &settings.expansion_search},
+        {"--expansion-add", "breadth", "insertion candidates; 256 by default", &settings.expansion_add},
+        {"--expansion-search", "breadth", "search candidates; 96 by default", &settings.expansion_search},
         {"--max-refines", "passes", "upper bound on whole-graph refinement passes after ingestion; 0 by default",
          &settings.max_refines},
-        {"--expansion-refine", "breadth", "refinement candidate pool; twice the connectivity by default",
+        {"--expansion-refine", "breadth", "refinement candidates; twice the connectivity by default",
          &settings.expansion_refine},
         {"--top-k", "count", "matches per query to judge; 10 by default", &settings.top_k},
         {"--first-vector", "row", "first dataset row viewed, keyed by its row; 0 by default", &settings.first_vector},

@@ -595,7 +595,7 @@ typedef struct usearch_dense_insert_t {
     /** The rows to admit, converted on ingest to the stored type. */
     usearch_rows_view_t vectors;
 
-    /** The @b optional candidate-pool breadth the build walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the build walk explores; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with rows admitted, which reports and cannot cancel. */
@@ -657,7 +657,7 @@ typedef struct usearch_dense_refine_t {
      *  it right after; @c reachable short of @c audited is what no reconnection could reach. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with nodes re-selected; a cancel stops the re-selection,
@@ -752,7 +752,8 @@ typedef struct usearch_dense_search_t {
     /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
     size_t wanted;
 
-    /** The @b optional candidate-pool breadth a walk explores; zero derives, a scan ignores it. */
+    /** The @b optional breadth of the candidates a walk explores; zero derives, a scan ignores
+     *  it. */
     size_t expansion_factor;
 
     /** How rows are reached: a walk, the default, or an exact scan of every row, on all but AMD and
@@ -918,7 +919,7 @@ typedef struct usearch_dense_absorb_t {
     /** The @b optional output for the audit closing the heal. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth of the closing refine's walks; zero derives. */
+    /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with nodes the closing refine re-selected; a cancel stops it
@@ -996,7 +997,7 @@ typedef struct usearch_dense_split_t {
     /** The @b optional output for the audits closing the heals, across the receivers. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth of the closing refines' walks; zero derives. */
+    /** The @b optional breadth of the candidates of the closing refines' walks; zero derives. */
     size_t expansion_factor;
 
     /** Picks the part roots: equal seeds over an unchanged index split equally. */
@@ -1074,7 +1075,7 @@ typedef struct usearch_dense_refinement_init_t {
     /** Receiver handles in @c receivers, zero or at least two. */
     size_t receivers_count;
 
-    /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
     /** Picks the part roots when @c receivers are named, as in @c usearch_dense_split. */
@@ -1310,7 +1311,7 @@ typedef struct usearch_dense_sample_t {
     /** The @b optional radius around the anchors; zero bounds nothing. */
     usearch_distance_t radius;
 
-    /** The @b optional candidate-pool breadth of the walks behind the draws; zero derives. */
+    /** The @b optional breadth of the candidates of the walks behind the draws; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with draws written and @c wanted. */
@@ -1344,8 +1345,8 @@ typedef struct usearch_dense_search_stream_init_t {
     /** The single query row. */
     usearch_rows_view_t query;
 
-    /** The @b optional candidate-pool breadth the walk explores, as in @c usearch_dense_search_t; zero
-     *  derives. */
+    /** The @b optional breadth of the candidates the walk explores, as in
+     *  @c usearch_dense_search_t; zero derives. */
     size_t expansion_factor;
 } usearch_dense_search_stream_init_t;
 
@@ -1626,7 +1627,8 @@ typedef struct usearch_dense_multiply_t {
     /** The @b optional bound on pairs kept per row, the first ones its walk scored; zero keeps every pair. */
     size_t wanted;
 
-    /** The @b optional candidate-pool breadth, which widens the emitted pattern; zero derives. */
+    /** The @b optional breadth of the candidates, which widens the emitted pattern; zero
+     *  derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with rows resolved. */
@@ -1756,8 +1758,8 @@ typedef struct usearch_dense_attend_t {
     /** The @b optional scalar type the attended rows land as; zero takes the queries' own. */
     usearch_scalar_t outputs_scalar;
 
-    /** The @b optional candidate-pool breadth; zero derives. A wider pool walks further, folding more of
-     *  the tail. */
+    /** The @b optional breadth of the candidates; zero derives. Wider candidates walk further,
+     *  folding more of the tail. */
     size_t expansion_factor;
 
     /** The @b optional logit scale, conventionally the inverse square root of the head
@@ -1864,7 +1866,7 @@ typedef struct usearch_dense_maxsim_t {
     /** The upper bound on keys per query - the "k" over documents, not rows. */
     size_t wanted;
 
-    /** The @b optional candidate-pool breadth; zero derives. */
+    /** The @b optional breadth of the candidates; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with queries resolved. */

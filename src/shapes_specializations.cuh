@@ -128,7 +128,7 @@ struct shapes_ram_variant {
      *  connectivity, as an insertion's. */
     expected<refine_plan_t> plan_refine(std::span<index_t*> donors, std::size_t expansion) noexcept {
         typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion, 0});
+        return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion});
     }
     status_t refine(refine_plan_t& plan, refine_cursor_t& cursor, progress_ticks_t& ticks,
                     executor_t& executor) noexcept;

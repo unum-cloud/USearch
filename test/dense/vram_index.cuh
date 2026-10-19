@@ -238,8 +238,9 @@ std::size_t test_dense_foreign_metric() {
     return expect_eq(index->reserve({64, connectivity_16_k, 64}).status, status_t::unknown_kind_k);
 }
 
-/** Device search under indexer heads against the @c f64 oracle, every node ID its stored row: a pool as wide as the
- *  index walks every node, so each query lands exactly the top by the score Σₕ wₕ · ReLU(qₕ · k), at 1 − score. */
+/** Device search under indexer heads against the @c f64 oracle, every node ID its stored row:
+ *  candidates as wide as the index walk every node, so each query lands exactly the top by the
+ *  score Σₕ wₕ · ReLU(qₕ · k), at 1 − score. */
 template <typename index_type_, typename make_index_type_>
 std::size_t dense_expect_vram_indexer_search(make_index_type_ const& make_index, allocation_ledger_t& ledger,
                                              u64_t seed) {
@@ -259,7 +260,7 @@ std::size_t dense_expect_vram_indexer_search(make_index_type_ const& make_index,
 
     auto const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
     dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
-    // Past the widest register pool and past one ranking round, so the arena frontier's
+    // Past the widest register candidates and past one ranking round, so the arena frontier's
     // select runs.
     typename index_type_::search_config_t const exhaustive {4 * nodes_count, wanted};
     auto node_ids = nk::matrix<node_id_t>::zeros({queries_count, wanted}).value;
@@ -323,9 +324,9 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
-/** Builds and refines the growth set at an expansion past the widest register pool of 32 lanes, so
- *  both walk the arena frontier's rung: no tail entry drops, the walks still find the rows, and the
- *  ledger must balance. */
+/** Builds and refines the growth set at an expansion past the widest register candidates of 32
+ *  lanes, so both walk the arena frontier's rung: no tail entry drops, the walks still find the
+ *  rows, and the ledger must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;

@@ -285,7 +285,7 @@ found.scores;                 // One distance per match found
 Every view reads the arena's own memory rather than a copy, so reading a row costs nothing.
 Scores come back as a `Float64Array`, which is the width the ABI writes.
 
-The candidate-pool breadth rides every call rather than the construction, so a recall sweep runs against one immutable index with no mutation between points:
+The breadth of the candidates rides every call rather than the construction, so a recall sweep runs against one immutable index with no mutation between points:
 
 ```js
 index.on(executor).insert(keys, vectors, { expansionFactor: 128 });

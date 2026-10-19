@@ -496,7 +496,7 @@ struct DenseInsertConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     """
 
     var expansion_factor: Int
-    """The candidate-pool breadth the build walk explores; zero derives."""
+    """The breadth of the candidates the build walk explores; zero derives."""
     var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
     """Receives this call's traversal telemetry, fully overwritten; absent skips reporting."""
 
@@ -511,7 +511,7 @@ struct DenseInsertConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
         """Names only the knobs that differ from the derived ones.
 
         Args:
-            expansion_factor: The candidate-pool breadth the build walk explores; zero derives.
+            expansion_factor: The breadth of the candidates the build walk explores; zero derives.
             stats: Receives this call's traversal telemetry; absent skips reporting.
         """
         self.expansion_factor = expansion_factor
@@ -526,7 +526,7 @@ struct DenseRefineConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     """
 
     var expansion_factor: Int
-    """The candidate-pool breadth the re-selection walk explores; zero derives."""
+    """The breadth of the candidates the re-selection walk explores; zero derives."""
     var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
     """Receives this call's traversal telemetry, fully overwritten; absent skips reporting."""
 
@@ -541,7 +541,7 @@ struct DenseRefineConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
         """Names only the knobs that differ from the derived ones.
 
         Args:
-            expansion_factor: The candidate-pool breadth the re-selection walk explores; zero derives.
+            expansion_factor: The breadth of the candidates the re-selection walk explores; zero derives.
             stats: Receives this call's traversal telemetry; absent skips reporting.
         """
         self.expansion_factor = expansion_factor
@@ -561,7 +561,7 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     """
 
     var expansion_factor: Int
-    """The candidate-pool breadth the walk explores; zero derives."""
+    """The breadth of the candidates the walk explores; zero derives."""
     var traversal: Traversal
     """A walk, or an exact scan of every row on RAM and NVMe handles; VRAM answers `UNSUPPORTED`."""
     var predicate: Address
@@ -585,7 +585,7 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
         """Names only the knobs that differ from the derived ones.
 
         Args:
-            expansion_factor: The candidate-pool breadth the walk explores; zero derives.
+            expansion_factor: The breadth of the candidates the walk explores; zero derives.
             traversal: A walk, or an exact scan of every row on RAM and NVMe handles.
             predicate: A `usearch_predicate_callback_t` that must outlive the call; `NULL_ADDRESS` admits all.
             predicate_state: The opaque state forwarded into every predicate call.
@@ -606,7 +606,7 @@ struct DenseMaxsimConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     """
 
     var expansion_factor: Int
-    """The candidate-pool breadth; zero derives."""
+    """The breadth of the candidates; zero derives."""
     var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
     """Receives this call's traversal telemetry, fully overwritten; absent skips reporting."""
 
@@ -621,7 +621,7 @@ struct DenseMaxsimConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
         """Names only the knobs that differ from the derived ones.
 
         Args:
-            expansion_factor: The candidate-pool breadth; zero derives.
+            expansion_factor: The breadth of the candidates; zero derives.
             stats: Receives this call's traversal telemetry; absent skips reporting.
         """
         self.expansion_factor = expansion_factor
@@ -638,7 +638,7 @@ struct DenseMultiplyConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implici
     var wanted: Int
     """Pairs kept per row, the first ones its walk scored; zero keeps every pair."""
     var expansion_factor: Int
-    """The candidate-pool breadth, which widens the emitted pattern; zero derives."""
+    """The breadth of the candidates, which widens the emitted pattern; zero derives."""
     var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
     """Receives this call's traversal telemetry, fully overwritten; absent skips reporting."""
 
@@ -655,7 +655,7 @@ struct DenseMultiplyConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implici
 
         Args:
             wanted: Pairs kept per row, the first ones its walk scored; zero keeps every pair.
-            expansion_factor: The candidate-pool breadth, which widens the emitted pattern; zero derives.
+            expansion_factor: The breadth of the candidates, which widens the emitted pattern; zero derives.
             stats: Receives this call's traversal telemetry; absent skips reporting.
         """
         self.wanted = wanted
@@ -678,7 +678,7 @@ struct DenseAttendConfig[carry_origin: MutOrigin = MutUntrackedOrigin, stats_ori
     var carry: Span[DenseSoftmaxState, Self.carry_origin]
     """The softmax states, one per query row; empty skips them."""
     var expansion_factor: Int
-    """The candidate-pool breadth; zero derives. A wider pool walks further, folding more of the tail."""
+    """The breadth of the candidates; zero derives. Wider candidates walk further, folding more of the tail."""
     var score_scale: Float32
     """The logit scale, conventionally the inverse square root of the head width; zero derives it."""
     var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
@@ -700,7 +700,7 @@ struct DenseAttendConfig[carry_origin: MutOrigin = MutUntrackedOrigin, stats_ori
         Args:
             head_count: The query heads sharing the index's key-value head; zero means one.
             carry: The softmax states, one per query row; empty skips them.
-            expansion_factor: The candidate-pool breadth; zero derives.
+            expansion_factor: The breadth of the candidates; zero derives.
             score_scale: The logit scale; zero derives it from the index's frozen geometry.
             stats: Receives this call's traversal telemetry; absent skips reporting.
         """
@@ -715,13 +715,13 @@ struct DenseSearchStreamInitConfig(ImplicitlyCopyable):
     """The knobs of `usearch_dense_search_stream_init_t`; zeroed ones derive what the C interface derives."""
 
     var expansion_factor: Int
-    """The candidate-pool breadth the walk explores; zero derives."""
+    """The breadth of the candidates the walk explores; zero derives."""
 
     def __init__(out self, *, expansion_factor: Int = 0):
         """Names only the knobs that differ from the derived ones.
 
         Args:
-            expansion_factor: The candidate-pool breadth the walk explores; zero derives.
+            expansion_factor: The breadth of the candidates the walk explores; zero derives.
         """
         self.expansion_factor = expansion_factor
 
@@ -2395,7 +2395,7 @@ struct DenseIndex(DenseVerbs, Movable):
 
         Args:
             query: The single query row; a view of more rows has its first row read.
-            config: The candidate-pool breadth the walk explores.
+            config: The breadth of the candidates the walk explores.
 
         Returns:
             A stream yielding matches lazily, which borrows the index and the query.
@@ -2472,7 +2472,7 @@ trait DenseVerbs:
         Args:
             keys: One key per row of `vectors`; keys need not be unique.
             vectors: The rows to insert, converted on ingest to the stored type.
-            config: The candidate-pool breadth and the telemetry slot.
+            config: The breadth of the candidates and the telemetry slot.
 
         Raises:
             `Error` if the shapes disagree or the handle is read-only.
@@ -2493,7 +2493,7 @@ trait DenseVerbs:
             stats_origin: The lent telemetry slot's origin, inferred from the argument.
 
         Args:
-            config: The candidate-pool breadth the re-selection walk explores, and the telemetry slot.
+            config: The breadth of the candidates the re-selection walk explores, and the telemetry slot.
 
         Returns:
             How many nodes' neighbors changed; zero means the graph has settled.
@@ -2554,7 +2554,7 @@ trait DenseVerbs:
             queries: The query rows, one per search.
             wanted: Matches per query - the "k"; zero lands only the counts.
             arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
-            config: The candidate-pool breadth, the predicate, and the telemetry slot.
+            config: The breadth of the candidates, the predicate, and the telemetry slot.
 
         Returns:
             Every query's matches, read in place from the arena.
@@ -2661,7 +2661,7 @@ trait DenseVerbs:
         Args:
             left: The left-hand rows.
             arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
-            config: The pairs kept per row, the candidate-pool breadth, and the telemetry slot.
+            config: The pairs kept per row, the breadth of the candidates, and the telemetry slot.
 
         Returns:
             The ragged pairs and their offsets, read in place from the arena.
@@ -2711,7 +2711,7 @@ trait DenseVerbs:
                 RAM, and a device one on VRAM.
             value_lookup_state: The opaque state forwarded into every `value_lookup` call.
             arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
-            config: The heads per token, the carry, the candidate-pool breadth, the logit scale,
+            config: The heads per token, the carry, the breadth of the candidates, the logit scale,
                 and the telemetry slot.
 
         Returns:
@@ -2750,7 +2750,7 @@ trait DenseVerbs:
             rows_per_query: Rows in every query; uniform, so ColBERT's padding applies as is.
             wanted: Keys per query - the "k" over documents rather than rows; zero lands only the counts.
             arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
-            config: The candidate-pool breadth and the telemetry slot.
+            config: The breadth of the candidates and the telemetry slot.
 
         Returns:
             Every query's keys, summed maxima largest first, read in place from the arena.
@@ -2834,7 +2834,7 @@ struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
 
         Args:
             query: The single query row; a view of more rows has its first row read.
-            config: The candidate-pool breadth the walk explores.
+            config: The breadth of the candidates the walk explores.
 
         Returns:
             A stream yielding matches lazily, which borrows the index, the executor and the query.
@@ -3279,7 +3279,7 @@ struct DenseSearchStream[origin: ImmOrigin]:
             index: The handle to query.
             executor: The executor every pull runs on.
             query: The single query row.
-            expansion_factor: The candidate-pool breadth the walk explores; zero derives.
+            expansion_factor: The breadth of the candidates the walk explores; zero derives.
 
         Raises:
             `Error` with `UNSUPPORTED` while no residency implements the stream.

@@ -89,7 +89,7 @@ class nvme_index {
     /** Per-search knobs; zero derives from the parts' connectivity. */
     struct search_config_t {
 
-        /** Breadth of each walk's candidate pool; defaults to twice the widest neighbors row. */
+        /** How many candidates each walk keeps; defaults to twice the widest neighbors row. */
         std::size_t expansion_factor = 0;
     };
 
@@ -105,7 +105,7 @@ class nvme_index {
         /** Distances the metrics drained across the batch. */
         std::size_t computed_distances = 0;
 
-        /** Re-seedings after a frontier drained before its pool filled. */
+        /** Re-seedings after a frontier drained before its candidates filled. */
         std::size_t restarts = 0;
 
         /** Walks a scratch or staging refusal ended early, their rankings short. */
@@ -220,7 +220,7 @@ class nvme_index {
      *  @param[out] counts Matches written per query.
      *  @param[in] predicate The optional admission filter over keys, a quad at a time or key by
      *      key; it narrows each row to the entries it admits among a ranking as wide as the walk's
-     *      pool.
+     *      candidates.
      *  @param[in] judge The optional admission test over stored values, as
      *      `judge(query, values, verdicts, scratch_allocator) noexcept`, handed the codec's views
      *      of up to four landed rows with every verdict admitting; it hears only rows that would
@@ -510,8 +510,8 @@ class nvme_index {
 
 #pragma region Walks
 
-    /** One walk of one row over one shard: its pools, its visited set, and the flights it waits
-     *  on. */
+    /** One walk of one row over one shard: its candidates, its visited set, and the flights it
+     *  waits on. */
     struct walk_t {
 
         /** Nodes scored so far, the best ascending. */
@@ -549,7 +549,7 @@ class nvme_index {
         /** Rows of the batch. */
         std::size_t rows_count = 0;
 
-        /** Each walk's pool breadth. */
+        /** How many candidates each walk keeps. */
         std::size_t expansion_factor = 0;
 
         /** The queue sizes every walk starts from, at that breadth over the widest part's rows. */
@@ -565,6 +565,10 @@ class nvme_index {
         /** Hops each walk keeps in flight: the queue depth its thread's rows leave idle, one for a
          *  full batch. */
         std::size_t hops_per_walk = 1;
+
+        /** Hop slots each walk's span holds: its own @c hops_per_walk, and past the batch's end the
+         *  shares of every other row slot of its thread, which then sit idle. */
+        std::size_t hop_slots = 1;
 
         /** Buffers per flight: two when keys land beside values. */
         std::size_t buffers_per_flight = 1;
@@ -625,6 +629,8 @@ class nvme_index {
                                        max_of<std::size_t>(1, divide_round_up(rows_count, threads)));
         shape.hops_per_walk = max_of<std::size_t>(1, queue_depth / (shape.rows_per_thread * hop_depth));
         shape.walk_flights = first_hop + (shape.hops_per_walk - 1) * (connectivity + 1);
+        // Past the batch's end a walk inherits the flights of the row slots that went idle.
+        shape.hop_slots = shape.hops_per_walk + (shape.rows_per_thread - 1) * shape.walk_flights / (connectivity + 1);
         std::size_t const rows = shape.rows_per_thread, walks = rows * parts.size();
         std::size_t const flights = walks * shape.walk_flights;
         shape.buffers = flights * shape.buffers_per_flight;
@@ -639,7 +645,7 @@ class nvme_index {
                               slice_t::reserved_bytes(rows * sizeof(nvme_row_slot_t)) +
                               slice_t::reserved_bytes(flights * sizeof(nvme_flight<node_id_t>)) +
                               slice_t::reserved_bytes(flights * sizeof(u32_t)) +
-                              slice_t::reserved_bytes(walks * shape.hops_per_walk * sizeof(u32_t)) +
+                              slice_t::reserved_bytes(walks * shape.hop_slots * sizeof(u32_t)) +
                               slice_t::reserved_bytes(shape.buffers * sizeof(io_request_t)) +
                               slice_t::reserved_bytes(shape.buffers * sizeof(io_completion_t)) + default_alignment_k;
         shape.buffer_bytes = staging_bytes_(media, parts);
@@ -671,15 +677,15 @@ class nvme_index {
     }
 
     /** Hands the staged flights of @p walk to its row's metric as the codec's views of their landed
-     *  values, drains them within the pool's radius, at a refusal and once all are staged, lets a
-     *  judging row test them, releases them and ranks them through @p walker; a metric refusing a
-     *  lone value saturates the walk. */
+     *  values, drains them within the candidates' radius, at a refusal and once all are staged,
+     *  lets a judging row test them, releases them and ranks them through @p walker; a metric
+     *  refusing a lone value saturates the walk. */
     template <typename walker_type_>
     [[gnu::always_inline]] static void score_staged_(walker_type_& walker, walk_t& walk) noexcept {
         using row_t = typename walker_type_::row_t;
         row_t& row = walker.rows_[walk.row_slot];
-        // A full pool only admits what beats its furthest member, so that member's distance is the
-        // radius.
+        // Full candidates only admit what beats their furthest member, so that member's distance is
+        // the radius.
         distance_t const radius = walk.results.size() == walker.shape_.expansion_factor
                                       ? walk.results.top().distance
                                       : unbounded_radius<distance_t>();
@@ -725,7 +731,7 @@ class nvme_index {
 
 #pragma region Rows
 
-    /** The rows of a batched search across the shards: each walk's pool merges into the row's
+    /** The rows of a batched search across the shards: each walk's candidates merge into the row's
      *  ranking by locator, or with a judge every admitted row as it is scored, and the ranked
      *  locators resolve into keys once every walk finished, then pass the predicate into the
      *  outputs. Each slot keeps one metric from the caller's factory and the query of its current
@@ -796,7 +802,7 @@ class nvme_index {
             query = std::move(made);
             status = made_status;
         }
-        results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
+        results_array_t const& stopping_candidates(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const& walk) noexcept {
             // A judging row ranked what it admitted as each walk scored it.
             if constexpr (!judged_k)

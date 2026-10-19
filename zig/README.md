@@ -265,7 +265,7 @@ std.debug.print("{d} distances computed\n", .{stats.computed_distances});
 
 `Matches.row` answers one query's keys and distances, nearest first, as many as the walk found up to the "k" asked for.
 
-The candidate-pool breadth rides the call rather than the handle, so a recall sweep is a loop over expansion factors against one immutable index, with no mutation and no synchronization between points.
+The breadth of the candidates rides the call rather than the handle, so a recall sweep is a loop over expansion factors against one immutable index, with no mutation and no synchronization between points.
 `.traversal = .scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle answers it with `Error.Unsupported`.
 
 ### Filtering & Progress

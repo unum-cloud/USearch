@@ -1,8 +1,8 @@
 // Vector Search over equidimensional dense embeddings.
 //
 // Every verb is a batch over strided matrices, so a memory-mapped dataset reaches the index
-// with no reshape and no copy, and a single vector is a one-row matrix. The candidate-pool
-// breadth rides each call rather than the handle, which lets a recall sweep run against one
+// with no reshape and no copy, and a single vector is a one-row matrix. The breadth of the
+// candidates rides each call rather than the handle, which lets a recall sweep run against one
 // immutable index with no mutation between points.
 
 package usearch
@@ -344,7 +344,7 @@ type DenseMetadataReadBufferConfig struct {
 //
 // Mirrors usearch_dense_insert_t.
 type DenseInsertConfig struct {
-	// ExpansionFactor is the candidate-pool breadth the build walk explores; zero derives it
+	// ExpansionFactor is the breadth of the candidates the build walk explores; zero derives it
 	// from the geometry.
 	ExpansionFactor uint
 	// Progress reports the rows inserted; every row is claimed before the first report, so a
@@ -360,7 +360,7 @@ type DenseInsertConfig struct {
 //
 // Mirrors usearch_dense_refine_t.
 type DenseRefineConfig struct {
-	// ExpansionFactor is the candidate-pool breadth the re-selection walk explores; zero derives
+	// ExpansionFactor is the breadth of the candidates the re-selection walk explores; zero derives
 	// it from the geometry.
 	ExpansionFactor uint
 	// Progress reports the nodes swept and stops wherever it says to.
@@ -375,7 +375,7 @@ type DenseRefineConfig struct {
 //
 // Mirrors usearch_dense_search_t.
 type DenseSearchConfig struct {
-	// ExpansionFactor is the candidate-pool breadth the walk explores; zero derives it from
+	// ExpansionFactor is the breadth of the candidates the walk explores; zero derives it from
 	// the geometry, and a scan ignores it.
 	ExpansionFactor uint
 	// Traversal walks the graph by default; TraversalScan scores every row exactly, on RAM and
@@ -398,7 +398,7 @@ type DenseSearchConfig struct {
 //
 // Mirrors usearch_dense_maxsim_t.
 type DenseMaxsimConfig struct {
-	// ExpansionFactor is the candidate-pool breadth the walk explores; zero derives it from
+	// ExpansionFactor is the breadth of the candidates the walk explores; zero derives it from
 	// the geometry.
 	ExpansionFactor uint
 	// Progress reports the queries resolved and stops wherever it says to.
@@ -417,7 +417,7 @@ type DenseMultiplyConfig struct {
 	// Wanted bounds the pairs kept per left row, the first ones its walk scored; zero keeps every
 	// pair.
 	Wanted uint
-	// ExpansionFactor is the candidate-pool breadth, which widens the emitted pattern; zero
+	// ExpansionFactor is the breadth of the candidates, which widens the emitted pattern; zero
 	// derives it from the geometry.
 	ExpansionFactor uint
 	// Progress reports the rows resolved and stops wherever it says to.
@@ -440,7 +440,7 @@ type DenseAttendConfig struct {
 	Carry []DenseSoftmaxState
 	// OutputsScalar is the scalar type the attended rows land as; zero takes the queries' own.
 	OutputsScalar Scalar
-	// ExpansionFactor is the candidate-pool breadth; zero derives it. A wider pool walks further,
+	// ExpansionFactor is the breadth of the candidates; zero derives it. Wider candidates walk further,
 	// folding more of the tail.
 	ExpansionFactor uint
 	// ScoreScale is the logit scale, conventionally the inverse square root of the head
@@ -489,7 +489,7 @@ type DenseSaveBufferConfig struct {
 //
 // Mirrors usearch_dense_search_stream_init_t.
 type DenseSearchStreamInitConfig struct {
-	// ExpansionFactor is the candidate-pool breadth the walk explores; zero derives it from the
+	// ExpansionFactor is the breadth of the candidates the walk explores; zero derives it from the
 	// geometry.
 	ExpansionFactor uint
 }

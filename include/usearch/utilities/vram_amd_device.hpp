@@ -809,7 +809,7 @@ struct hip_event_t {
     }
 
     /** Sleeps until the recorded work finishes and answers whether the device finished it. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         return handle_ && hip_api().event_synchronize(handle_) == hip_success_k ? status_t::success_k
                                                                                 : status_t::device_error_k;
     }
@@ -856,10 +856,10 @@ struct hip_device_arena_t {
 
     /** Waits once for every upload queued so far - the end of the call holding the arena -
      *  sleeping on the stream's event. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         if (hip_set_device(device_) != hip_success_k) return status_t::device_error_k;
         if (status_t const recorded = event_->record(stream_); failed(recorded)) return recorded;
-        return event_->drain();
+        return event_->wait();
     }
 
     int device() const noexcept { return device_; }
@@ -971,12 +971,12 @@ struct hip_executor_t {
 
     /** Waits for every transfer and launch queued on every stream - the fleet's completion -
      *  marking each stream with its device bound, then sleeping on each mark in turn. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         for (stream_t& opened : streams_)
             if (hip_set_device(opened.device) != hip_success_k || failed(opened.event.record(opened.handle)))
                 return status_t::device_error_k;
         for (stream_t& opened : streams_)
-            if (status_t const drained = opened.event.drain(); failed(drained)) return drained;
+            if (status_t const drained = opened.event.wait(); failed(drained)) return drained;
         return status_t::success_k;
     }
 
@@ -1110,7 +1110,7 @@ struct hip_traversal_context {
     hip_traversal_context(allocator_t allocator = {}) noexcept
         : allocator_ {(hip_set_device(allocator.device()), allocator)}, //
           telemetry_ {hip_make_unique(telemetry_allocator_t {allocator_}, 1)},
-          assigned_rows_ {hip_make_unique(counter_allocator_t {allocator_}, 1)},
+          assigned_rows_ {hip_make_unique(counter_allocator_t {allocator_}, 2)},
           missed_ {hip_make_unique(counter_allocator_t {allocator_}, 1)},
           host_counters_ {take_counters_(allocator_.landings())},
           arena_ {nullptr, hip_deleter<allocator_t> {allocator_, 0}},
@@ -1140,10 +1140,10 @@ struct hip_traversal_context {
      *  completion, the executor's @c drain being the fleet's - sleeping on the context's event
      *  instead of spinning a core. Selects the context's device first, since an event records only
      *  on its own device. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         if (hip_set_device(device()) != hip_success_k) return status_t::device_error_k;
         if (status_t const recorded = record(); failed(recorded)) return recorded;
-        return event_.drain();
+        return event_.wait();
     }
 
     /** Marks everything queued on this context's stream so far as the submission @ref landed
@@ -1217,7 +1217,7 @@ struct hip_traversal_context {
     hip_unique_ptr<vram_telemetry_block_t, telemetry_allocator_t> telemetry_;
 
     /** Rows of the current launch's batch warps have assigned themselves so far: a builder's rows,
-     *  or a walk's queries. */
+     *  or a walk's queries; a walk's second word counts the walks running. */
     hip_unique_ptr<u32_t, counter_allocator_t> assigned_rows_;
 
     /** Raised by the last attend's walks at a node their value lookup had no row for, zeroed when

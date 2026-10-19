@@ -164,7 +164,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
         us::utilities::uuid_t const key = uuid_of(row);
         failures += expect_eq(ram_index
                                   .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
-                                          us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k, 0})
+                                          us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
                                   .status,
                               status_t::success_k);
     }
@@ -172,8 +172,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     for (std::size_t query = 0; query != queries_count; ++query) {
         std::array const cloud {std::span<scalar_type_ const> {stored[count + query]}};
         value_t const value = value_t::make(cloud, value_allocator, 0).value;
-        failures += expect_eq(ram_index.search(value, metric, ram_context, {expansion_k, 0}).status,
-                              status_t::success_k);
+        failures += expect_eq(ram_index.search(value, metric, ram_context, {expansion_k}).status, status_t::success_k);
         std::vector<f64_t> found;
         for (std::size_t rank = 0; rank != min_of(wanted_k, ram_context.results.size()); ++rank)
             found.push_back(static_cast<f64_t>(ram_context.results[rank].distance));

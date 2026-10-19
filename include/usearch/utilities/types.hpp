@@ -238,8 +238,8 @@ enum class walk_step_t : u32_t {
     /** The walk goes on: landmarks entered the frontier, or a round staged candidates to drain. */
     advanced_k,
 
-    /** Nothing left can improve the pool: every landmark is visited, or the frontier's nearest lies
-     *  past a full pool's radius. */
+    /** Nothing left can improve the candidates: every landmark is visited, or the frontier's
+     *  nearest lies past the full candidates' radius. */
     exhausted_k,
 
     /** Scratch or metric staging refused mid-step: drain what staged, then stop. */
@@ -361,7 +361,7 @@ bytes_type_ flat_rows(bytes_type_ matrix, std::size_t first, std::size_t count, 
 }
 
 /** Whether a filtered search admits one candidate or passes over it - rejected nodes
- *  still route the walk, they just never enter the reported pool. Mirrors
+ *  still route the walk, they just never enter the reported candidates. Mirrors
  *  @c usearch_admission_t value for value, so the two enums cannot drift. */
 enum class admission_t : int {
 
@@ -792,6 +792,24 @@ constexpr value_type_ min_of(value_type_ first, value_type_ second) noexcept {
 template <typename value_type_>
 constexpr value_type_ max_of(value_type_ first, value_type_ second) noexcept {
     return first < second ? second : first;
+}
+
+/** Rows whose neighbors fill a walk's @p expansion candidates at @p connectivity neighbors per row,
+ *  none while an index holds no geometry yet. */
+template <typename count_type_>
+constexpr count_type_ filling_rows(count_type_ expansion, count_type_ connectivity) noexcept {
+    return connectivity ? divide_round_up(expansion, connectivity) : count_type_ {0};
+}
+
+/** Rows a walk keeps popped ahead of its merges: the share of @p seats no other walk holds, when
+ *  @p live walks run and @p left are still to start counting this one, never past @p filling_rows,
+ *  the rows whose neighbors fill a walk's candidates. One at full occupancy, and one while a launch
+ *  is still filling, since the larger of @p live and @p left counts the walks. */
+template <typename count_type_>
+constexpr count_type_ walk_width(count_type_ seats, count_type_ live, count_type_ left,
+                                 count_type_ filling_rows) noexcept {
+    count_type_ const walks = max_of(live, min_of(left, seats));
+    return min_of(filling_rows, max_of<count_type_>(seats / walks, 1));
 }
 
 /** Outcome of one reachability audit, the same on every tier, layer and residency. */
@@ -1452,11 +1470,11 @@ constexpr u64_t vram_admission_wave_end(u64_t wave_first, u64_t end_id, u32_t sh
     return min_of(end_id, wave_first + max_of(wave_first >> share_log2, u64_t {vram_admission_ramp_floor_k}));
 }
 
-/** Slots of the widest register pool on the walks' rung ladder, @c vram_sorted_pool<16,warp_t>:
- *  as many ranks per lane. A walk expanding past that pool's width - this times the warp's lanes,
- *  512 on 32-lane warps - takes the arena frontier instead, so no expansion or count is capped by
- *  it. */
-inline constexpr u32_t vram_widest_pool_slots_k = 16;
+/** Slots of the widest register rung on the walks' rung ladder,
+ *  @c vram_sorted_candidates<16,warp_t>: as many ranks per lane. A walk expanding past that rung's
+ *  width - this times the warp's lanes, 512 on 32-lane warps - takes the arena frontier instead, so
+ *  no expansion or count is capped by it. */
+inline constexpr u32_t vram_widest_candidate_slots_k = 16;
 
 /** Device-resident telemetry counters, one block per driving context, zeroed at each submission
  *  and read after its drain. */

@@ -179,11 +179,11 @@ struct gpu_arena_t {
 
     /** Waits once for every upload queued since the last @ref clear; none is ever queued without a
      *  device. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         return std::visit(
             []<typename arena_type_>(arena_type_& typed) noexcept {
                 if constexpr (std::is_same_v<arena_type_, std::monostate>) return status_t::success_k;
-                else return typed.drain();
+                else return typed.wait();
             },
             arena);
     }
@@ -234,7 +234,7 @@ enum class vram_kernel_t : u32_t {
     rebase_links_k,
 
     /** Marks the reachability audit's landmark rows reached and in the first frontier. */
-    mark_seeds_k,
+    mark_landmarks_k,
 
     /** Expands the reachability frontier by one level. */
     reachability_sweep_k,
@@ -249,7 +249,7 @@ enum class vram_kernel_t : u32_t {
     reconnect_island_k,
 
     /** Places a split's part roots, one row per part, in the first frontier. */
-    partition_seeds_k,
+    partition_roots_k,
 
     /** Proposes every frontier row to the unplaced rows it links to, a growth round's first. */
     partition_propose_k,

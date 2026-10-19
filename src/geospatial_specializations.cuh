@@ -198,9 +198,9 @@ struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
      *  links past it give way. */
     expected<refine_plan_t> plan_refine(std::span<index_t*> donors, std::size_t expansion) noexcept {
         typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        std::size_t const breadth = expansion ? expansion : us::geospatial::surface_keep_octants_t::exact_pool_k;
+        std::size_t const breadth = expansion ? expansion : us::geospatial::surface_keep_octants_t::exact_candidates_k;
         return index.plan_absorb(donors, planning, us::geospatial::surface_keep_octants_t {geometry.connectivity},
-                                 {breadth, divide_round_up(breadth, widest_row())});
+                                 {breadth});
     }
 
     /** Drives @p plan, then draws every node's long links again by the insertion's rule and seeds,
@@ -234,8 +234,8 @@ struct geospatial_ram_variant : geospatial_terrain<cpu_class_> {
     status_t draw_long_links_(iota_view<node_id_t> nodes, thread_scratch<index_t, metric_t>& scratch,
                               executor_t& executor) noexcept;
 
-    /** Judges the pool's quad from @p first of @p context against @p query: the relation, time and
-     *  terrain, then the predicate. */
+    /** Judges the candidates' quad from @p first of @p context against @p query: the relation, time
+     *  and terrain, then the predicate. */
     template <typename context_type_>
     void judge_(relation_t relation, usearch_geospatial_tolerance_t tolerance, value_t const& query,
                 context_type_ const& context, std::size_t first, std::size_t quad, usearch_predicate_t predicate,
@@ -426,7 +426,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::insert(usear
     usearch_geospatial_observation_t const* const observations = arguments.observations;
     std::size_t const count = arguments.count;
     std::size_t const breadth = arguments.expansion_factor ? arguments.expansion_factor
-                                                           : us::geospatial::surface_keep_octants_t::exact_pool_k;
+                                                           : us::geospatial::surface_keep_octants_t::exact_candidates_k;
     std::size_t const row_width = widest_row();
     thread_scratch<index_t, metric_t> scratch;
     if (status_t const prepared = scratch.prepare(executor, row_width, breadth, index.size(), this->metric_factory_());
@@ -453,7 +453,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::insert(usear
     auto [plan, plan_status] = index.plan_insert(count);
     if (failed(plan_status)) return {{}, plan_status};
     us::geospatial::surface_keep_octants_t const selector {geometry.connectivity};
-    typename index_t::insert_config_t const config {breadth, divide_round_up(breadth, row_width)};
+    typename index_t::insert_config_t const config {breadth};
     drain_in_order(executor, count, [&](std::size_t row, std::size_t thread) noexcept {
         plan.insert(row, to_writable_span(values).subspan(row, 1), to_span(identities).subspan(row, 1),
                     scratch.metrics[thread], scratch.contexts[thread], selector, config);
@@ -513,14 +513,14 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::search(usear
     usearch_geospatial_tolerance_t const tolerance = arguments.tolerance;
     usearch_predicate_t const predicate = arguments.predicate;
     std::size_t const wanted = arguments.wanted, expansion = arguments.expansion_factor;
-    // Pools narrower than the row they fill would short every row.
-    std::size_t const breadth = max_of(index.non_zero_expansion_factor({expansion, 0}), wanted);
+    // Candidates fewer than the row they fill would short every row.
+    std::size_t const breadth = max_of(index.non_zero_expansion_factor({expansion}), wanted);
     thread_scratch<index_t, metric_t> scratch;
     if (status_t const prepared = scratch.prepare(executor, widest_row(), breadth, index.size(),
                                                   this->metric_factory_());
         failed(prepared))
         return {{}, prepared};
-    typename index_t::search_config_t const config {breadth, 0};
+    typename index_t::search_config_t const config {breadth};
     status_t searched = status_t::success_k;
     drain_in_order(executor, arguments.count, [&](std::size_t row, std::size_t thread) noexcept {
         if (failed(standard_atomic_ref<status_t>(searched).load(std::memory_order_relaxed))) return;
@@ -532,10 +532,10 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::search(usear
         if (failed(status)) return keep_first_failure(searched, status);
         usearch_key_t* const keys = landing.keys + row * wanted;
         usearch_distance_t* const scores = landing.scores + row * wanted;
-        std::size_t const pooled = context.results.size();
+        std::size_t const listed_count = context.results.size();
         std::size_t landed = 0;
-        for (std::size_t first = 0; first < pooled && landed != wanted; first += 4) {
-            std::size_t const quad = min_of<std::size_t>(4, pooled - first);
+        for (std::size_t first = 0; first < listed_count && landed != wanted; first += 4) {
+            std::size_t const quad = min_of<std::size_t>(4, listed_count - first);
             std::array<us::utilities::uuid_t, 4> identities;
             std::array<admission_t, 4> verdicts;
             judge_(relation, tolerance, query, context, first, quad, predicate, identities, verdicts, allocator);
@@ -718,7 +718,7 @@ expected<traversal_telemetry_t> geospatial_nvme_variant<cpu_class_>::search(
                      thread_allocator_t const& scratch) noexcept {
         this->judge_values_(relation, tolerance, query, entries, verdicts, scratch);
     };
-    // Pools narrower than the row they fill would short every row.
+    // Candidates fewer than the row they fill would short every row.
     typename index_t::search_config_t const config {max_of(index.non_zero_expansion_factor({expansion}), wanted)};
     std::span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys), count * wanted};
     std::span<usearch_distance_t> const scores {landing.scores, count * wanted};
@@ -758,9 +758,9 @@ extern template struct us::geospatial::vram_nvidia_index<u32_t, geospatial_nvidi
                                                          geospatial_nvidia_fatbin_t>;
 
 /** The geospatial alternative on one NVIDIA GPU: the basic VRAM index over observations under the
- *  squared chord with 32-bit node IDs, and the kernel judging each walk's pool under a search's
- *  relation. A batch encodes its observations on the host, as the RAM variants do. It holds no
- *  terrain, so lines of sight stay the RAM variants'. */
+ *  squared chord with 32-bit node IDs, and the kernel judging each walk's candidates under a
+ *  search's relation. A batch encodes its observations on the host, as the RAM variants do. It
+ *  holds no terrain, so lines of sight stay the RAM variants'. */
 struct geospatial_vram_nvidia_variant
     : vram_nvidia_variant<
           us::geospatial::vram_nvidia_index<u32_t, geospatial_nvidia_capabilities_k, geospatial_nvidia_fatbin_t>> {
@@ -776,7 +776,7 @@ struct geospatial_vram_nvidia_variant
     /** The host pages a batch encodes its observations into, rewound per batch. */
     growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
 
-    /** The index's fatbin, loaded once more for the kernel judging the walks' pools, and that
+    /** The index's fatbin, loaded once more for the kernel judging the walks' candidates, and that
      *  kernel. */
     cuda_module_t admit_module;
     cuda_function_handle_t admit = nullptr;
@@ -806,10 +806,10 @@ struct geospatial_vram_nvidia_variant
     expected<traversal_telemetry_t> insert(usearch_geospatial_insert_t const& arguments, progress_ticks_t& ticks,
                                            executor_t& executor) noexcept;
 
-    /** Walks every query to a pool of the call's breadth, then keeps the first wanted entries of
-     *  every pool that the relation and tolerance admit, on the device too. The queries encode into
-     *  @p pages, the call arena's host pages, and the matches land in @p landing there. A device
-     *  walk takes no host predicate. */
+    /** Walks every query to candidates of the call's breadth, then keeps the first wanted entries
+     *  of all of them that the relation and tolerance admit, on the device too. The queries encode
+     *  into @p pages, the call arena's host pages, and the matches land in @p landing there. A
+     *  device walk takes no host predicate. */
     expected<traversal_telemetry_t> search(usearch_geospatial_search_t const& arguments,
                                            growing_arena<forkunion_allocator_t>& pages, matches_landing_t& landing,
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
@@ -869,15 +869,16 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
         return {{}, encoded};
     byte_t const* const bytes = reinterpret_cast<byte_t const*>(values);
     std::span<std::size_t const> const tape {offsets, count + 1};
-    // Pools narrower than the row they fill would short every row.
-    std::size_t const pool = max_of(expansion ? expansion : default_expansion_factor(index.connectivity()), wanted);
-    index_t::search_config_t const config {static_cast<u32_t>(pool), static_cast<u32_t>(pool)};
+    // Candidates fewer than the row they fill would short every row.
+    std::size_t const candidates_count = max_of(expansion ? expansion : default_expansion_factor(index.connectivity()),
+                                                wanted);
+    index_t::search_config_t const config {static_cast<u32_t>(candidates_count), static_cast<u32_t>(candidates_count)};
 
-    // Past the walk's own scratch: the queries, the judged metres and counts, the pools and the
-    // judged IDs, the eight-byte columns first so every column keeps its alignment.
-    std::size_t const pooled = count * pool, judged = count * wanted;
+    // Past the walk's own scratch: the queries, the judged metres and counts, the candidates and
+    // the judged IDs, the eight-byte columns first so every column keeps its alignment.
+    std::size_t const listed_count = count * candidates_count, judged = count * wanted;
     std::size_t const judging_bytes = count * (sizeof(value_t) + sizeof(u64_t)) + judged * sizeof(f64_t) +
-                                      pooled * (sizeof(node_id_t) + sizeof(f32_t)) + judged * sizeof(node_id_t);
+                                      listed_count * (sizeof(node_id_t) + sizeof(f32_t)) + judged * sizeof(node_id_t);
     std::size_t const bytes_per_stream = index.traversal_memory_usage(bytes, tape, config) +
                                          round_up_to_multiple(judging_bytes, default_alignment_k);
     // IDs land narrow at the front of the keys, then widen backward; metres and counts land whole.
@@ -888,26 +889,26 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
         if (!device_queries) return {{}, status_t::bad_alloc_k};
         f64_t* const matched_metres = reinterpret_cast<f64_t*>(device_queries + count);
         u64_t* const matched_counts = reinterpret_cast<u64_t*>(matched_metres + judged);
-        node_id_t* const pool_ids = reinterpret_cast<node_id_t*>(matched_counts + count);
-        f32_t* const pool_distances = reinterpret_cast<f32_t*>(pool_ids + pooled);
-        node_id_t* const matched_ids = reinterpret_cast<node_id_t*>(pool_distances + pooled);
+        node_id_t* const candidate_ids = reinterpret_cast<node_id_t*>(matched_counts + count);
+        f32_t* const candidate_distances = reinterpret_cast<f32_t*>(candidate_ids + listed_count);
+        node_id_t* const matched_ids = reinterpret_cast<node_id_t*>(candidate_distances + listed_count);
         us::geospatial::cuda_admit_arguments<node_id_t> admitting;
         admitting.storage = index.storage();
         admitting.queries = device_queries;
-        admitting.pool_ids = pool_ids;
+        admitting.candidate_ids = candidate_ids;
         admitting.matched_ids = matched_ids;
         admitting.matched_metres = matched_metres;
         admitting.matched_counts = matched_counts;
         admitting.queries_count = static_cast<u32_t>(count);
-        admitting.pool = static_cast<u32_t>(pool);
+        admitting.candidates_count = static_cast<u32_t>(candidates_count);
         admitting.wanted = static_cast<u32_t>(wanted);
         admitting.relation = static_cast<us::geospatial::relation_t>(arguments.relation);
         admitting.radius_metres = arguments.tolerance.metres;
         admitting.slack_milliseconds = arguments.tolerance.seconds * 1000.0;
         if (cuda_copy_async(device_queries, values, count * sizeof(value_t), context.stream()) != cuda_success_k)
             return {{}, status_t::device_error_k};
-        auto const [found, status] = index.search(bytes, tape, {pool_ids, {count, pool}},
-                                                  {pool_distances, {count, pool}}, context, config);
+        auto const [found, status] = index.search(bytes, tape, {candidate_ids, {count, candidates_count}},
+                                                  {candidate_distances, {count, candidates_count}}, context, config);
         if (failed(status)) return {{}, status};
         u32_t const blocks = static_cast<u32_t>(
             min_of<std::size_t>(divide_round_up<std::size_t>(count, vram_warps_per_block_k),
@@ -919,7 +920,7 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
                 cuda_success_k ||
             cuda_copy_async(landing.counts, matched_counts, count * sizeof(u64_t), context.stream()) != cuda_success_k)
             return {{}, status_t::device_error_k};
-        if (status_t const drained = context.drain(); failed(drained)) return {{}, drained};
+        if (status_t const drained = context.wait(); failed(drained)) return {{}, drained};
         return {found, status_t::success_k};
     };
     expected<traversal_telemetry_t> const searched = walk_(executor, bytes_per_stream, count, ticks, judge);

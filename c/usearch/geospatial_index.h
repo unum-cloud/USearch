@@ -503,7 +503,7 @@ typedef struct usearch_geospatial_insert_t {
     /** The observations, @c count of them. */
     usearch_geospatial_observation_t const* observations;
 
-    /** The @b optional candidate-pool breadth the build walk explores - the @c ef of
+    /** The @b optional breadth of the candidates the build walk explores - the @c ef of
      *  the literature; zero derives. */
     size_t expansion_factor;
 
@@ -557,7 +557,7 @@ typedef struct usearch_geospatial_refine_t {
      *  what no reconnection could reach. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with entries re-selected; a cancel stops the re-selection,
@@ -636,7 +636,7 @@ typedef struct usearch_geospatial_search_t {
     /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
     size_t wanted;
 
-    /** The @b optional candidate-pool breadth the walk explores - the @c ef of the
+    /** The @b optional breadth of the candidates the walk explores - the @c ef of the
      *  literature; zero derives. */
     size_t expansion_factor;
 
@@ -656,7 +656,7 @@ typedef struct usearch_geospatial_search_t {
  *  @retval usearch_status_unsupported_k A @c visible relation on a handle without terrain.
  *
  *  Scores are chord metres between the two positions, altitude included. The relation, the time
- *  window and the predicate narrow the walk's pool, so a selective one wants a wider
+ *  window and the predicate narrow the walk's candidates, so a selective one wants a wider
  *  @c expansion_factor, and a row may hold fewer than @c wanted matches.
  *
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
@@ -720,13 +720,13 @@ typedef struct usearch_geospatial_within_t {
  *      radius.
  *  @retval usearch_status_unsupported_k A @c visible relation on a handle without terrain.
  *
- *  Complete on the converged graph: the walk widens its pool by the cone graph's spanner
- *  bound before trusting it, so every candidate inside the tolerance is enumerated, at
- *  about thirty times the cost of the ball it reports. Containment sizes its own pool from that
- *  bound, so it takes no breadth a caller could make the report incomplete with. Only the walks
- *  learn how large the report is, so the keys, scores and Apache Arrow offsets land in @c arena as
- *  one ragged output, as @c usearch_dense_multiply lands its pairs. A @c predicate narrows the
- *  report without stopping the walk from crossing the entries it rejects.
+ *  Complete on the converged graph: the walk widens its candidates by the cone graph's spanner
+ *  bound before trusting it, so every candidate inside the tolerance is enumerated, at about thirty
+ *  times the cost of the ball it reports. Containment sizes its own candidates from that bound, so
+ *  it takes no breadth a caller could make the report incomplete with. Only the walks learn how
+ *  large the report is, so the keys, scores and Apache Arrow offsets land in @c arena as one ragged
+ *  output, as @c usearch_dense_multiply lands its pairs. A @c predicate narrows the report without
+ *  stopping the walk from crossing the entries it rejects.
  *
  *  A cancelled call reports @c usearch_status_cancelled_k and leaves the outputs @c NULL.
  */
@@ -828,7 +828,7 @@ typedef struct usearch_geospatial_absorb_t {
     /** The @b optional output for the audit closing the heal. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth of the closing refine's walks; zero derives. */
+    /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with entries the closing refine re-selected; a cancel stops
@@ -898,7 +898,7 @@ typedef struct usearch_geospatial_split_t {
     /** The @b optional output for the audits closing the heals, across the receivers. */
     usearch_reachability_t* reachability;
 
-    /** The @b optional candidate-pool breadth of the closing refines' walks; zero derives. */
+    /** The @b optional breadth of the candidates of the closing refines' walks; zero derives. */
     size_t expansion_factor;
 
     /** Picks the part roots: equal seeds over an unchanged index split equally. */
@@ -975,7 +975,7 @@ typedef struct usearch_geospatial_refinement_init_t {
     /** Receiver handles in @c receivers, zero or at least two. */
     size_t receivers_count;
 
-    /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
+    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
     /** Picks the part roots when @c receivers are named, as in @c usearch_geospatial_split. */
@@ -1212,7 +1212,7 @@ typedef struct usearch_geospatial_sample_t {
     /** The @b optional radius around the anchors in chord metres; zero bounds nothing. */
     usearch_distance_t radius;
 
-    /** The @b optional candidate-pool breadth of the walks behind the draws; zero derives. */
+    /** The @b optional breadth of the candidates of the walks behind the draws; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with draws written and @c wanted. */

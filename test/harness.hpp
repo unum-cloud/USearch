@@ -301,11 +301,11 @@ template <typename condition_type_>
     return false;
 }
 
-/** The reader-lane invariants over one search's scored results: every ID below
- *  the watermark sampled after the search, distances ascending, the pool bound
- *  honored. Answers the violation count silently - racing lanes add it to their
- *  shared counter, since printing from inside a race would interleave & flood - and
- *  the status verdict stays at the call site: lanes differ in how they record it. */
+/** The reader-lane invariants over one search's scored results: every ID below the watermark
+ *  sampled after the search, distances ascending, the candidate breadth bound honored. Answers the
+ *  violation count silently - racing lanes add it to their shared counter, since printing from
+ *  inside a race would interleave & flood - and the status verdict stays at the call site: lanes
+ *  differ in how they record it. */
 template <typename scored_type_>
 inline std::size_t scored_failures(scored_type_ const* results, std::size_t results_count, std::size_t published_after,
                                    std::size_t results_bound) noexcept {

@@ -237,7 +237,7 @@ public sealed class DenseTraversalStats
 /// </summary>
 /// <remarks>
 /// Every verb is a batch over a <see cref="RowsView"/>, so a single vector is a one-row matrix. The
-/// candidate-pool breadth rides each call rather than the handle, which lets a recall sweep run
+/// breadth of the candidates rides each call rather than the handle, which lets a recall sweep run
 /// against one immutable index with no mutation between points.
 /// <para>
 /// The receiver chooses where a verb runs, and the verb stays the same: called on the index it runs
@@ -642,7 +642,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// </remarks>
     /// <param name="keys">One identity per row.</param>
     /// <param name="vectors">The rows to admit.</param>
-    /// <param name="expansionFactor">The candidate-pool breadth the build walk explores; zero derives
+    /// <param name="expansionFactor">The breadth of the candidates the build walk explores; zero derives
     /// it from the geometry.</param>
     /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
     public void Insert(
@@ -660,7 +660,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// wide expansion factor belongs here rather than in <see cref="Insert"/>. Searches may run
     /// throughout, since edge re-selection publishes one row at a time and never removes a node.
     /// </remarks>
-    /// <param name="expansionFactor">The candidate-pool breadth the re-selection walk explores; zero
+    /// <param name="expansionFactor">The breadth of the candidates the re-selection walk explores; zero
     /// derives it from the geometry.</param>
     /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
     /// <returns>The number of nodes whose edges changed; zero means the graph has settled, so a
@@ -692,7 +692,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="queries">The query rows, one query apiece.</param>
     /// <param name="wanted">The upper bound on matches per query - the "k" in kANN.</param>
     /// <param name="arena">Where the run lands, rewound by the call.</param>
-    /// <param name="expansionFactor">The candidate-pool breadth the walk explores; zero derives it
+    /// <param name="expansionFactor">The breadth of the candidates the walk explores; zero derives it
     /// from the geometry.</param>
     /// <param name="predicate">The per-key admission predicate; null admits every key. A host
     /// predicate cannot narrow a device walk, so a VRAM handle refuses one as
@@ -724,7 +724,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="wanted">The upper bound on documents per query - the "k" over documents rather
     /// than over rows.</param>
     /// <param name="arena">Where the scored keys land, rewound by the call.</param>
-    /// <param name="expansionFactor">The candidate-pool breadth the walk explores; zero derives it
+    /// <param name="expansionFactor">The breadth of the candidates the walk explores; zero derives it
     /// from the geometry.</param>
     /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
     /// <returns>The run, one row per query, each key's summed maxima largest first.</returns>
@@ -748,7 +748,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="arena">Where the pairs and their offsets land, rewound by the call.</param>
     /// <param name="wanted">The bound on pairs kept per row, the first ones its walk scored; zero
     /// keeps every pair.</param>
-    /// <param name="expansionFactor">The candidate-pool breadth, which widens the emitted pattern;
+    /// <param name="expansionFactor">The breadth of the candidates, which widens the emitted pattern;
     /// zero derives it from the geometry.</param>
     /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
     /// <returns>The pairs of every left row, readable until the arena's next call.</returns>
@@ -782,7 +782,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// another over the same queries; empty skips it.</param>
     /// <param name="outputsScalar">The scalar type the attended rows land as; <see cref="Scalar.Unknown"/>
     /// takes the queries' own.</param>
-    /// <param name="expansionFactor">The candidate-pool breadth; zero derives it from the geometry.</param>
+    /// <param name="expansionFactor">The breadth of the candidates; zero derives it from the geometry.</param>
     /// <param name="scoreScale">The logit scale; zero derives the inverse square root of the
     /// dimensionality.</param>
     /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
@@ -838,7 +838,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// stream keeps walk state rather than a thread. Calls <c>usearch_dense_search_stream_init</c>.
     /// </summary>
     /// <param name="query">The single query row, whose row count must be one.</param>
-    /// <param name="expansionFactor">The candidate-pool breadth the walk explores; zero derives it
+    /// <param name="expansionFactor">The breadth of the candidates the walk explores; zero derives it
     /// from the geometry.</param>
     /// <returns>The stream, which keeps the index alive until disposed.</returns>
     public DenseSearchStream SearchStream(RowsView query, ulong expansionFactor = 0) =>
@@ -1058,7 +1058,7 @@ public static class DenseVerbs
     /// receiver's executor. Calls <c>usearch_dense_search_stream_init</c>.</summary>
     /// <param name="on">The receiver whose executor every pull runs on.</param>
     /// <param name="query">The single query row, whose row count must be one.</param>
-    /// <param name="expansionFactor">The candidate-pool breadth the walk explores; zero derives it
+    /// <param name="expansionFactor">The breadth of the candidates the walk explores; zero derives it
     /// from the geometry.</param>
     /// <returns>The stream, which keeps the index alive until disposed.</returns>
     public static DenseSearchStream SearchStream(this DenseIndexOn on, RowsView query, ulong expansionFactor = 0) =>

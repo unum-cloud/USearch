@@ -89,7 +89,7 @@ constexpr dtype_t dtype_of(nk_dtype_t dtype) noexcept {
     }
 }
 
-/** Orders scored nodes nearest-first; the comparator of the sorted results pool. */
+/** Orders scored nodes nearest-first; the comparator of the sorted result candidates. */
 struct closer_scored_node_t {
     inline bool operator()(scored_node_t first, scored_node_t second) const noexcept {
         return first.distance < second.distance;
@@ -136,7 +136,7 @@ struct [[nodiscard]] refine_result_t {
     /** Starvation restarts across the walks - a graph-connectivity health signal. */
     std::size_t restarts = 0;
 
-    /** Walks a scratch refusal ended early; their rows re-selected from a shorter pool. */
+    /** Walks a scratch refusal ended early; their rows re-selected from fewer candidates. */
     std::size_t saturated_walks = 0;
 };
 

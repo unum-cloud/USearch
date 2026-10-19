@@ -144,9 +144,9 @@ Geometry stays fixed once reserved, while the graph's population grows.
 
 ### Search & MaxSim
 
-`search` returns keys & distances from the walk's retained candidate pool.
+`search` returns keys & distances from the walk's retained candidates.
 `search_if` applies a result-admission predicate without severing the routing paths through rejected nodes.
-Expansion controls the candidate pool, & connectivity controls the adjacency width; neither promises an exact nearest neighbor.
+Expansion controls the candidates, & connectivity controls the adjacency width; neither promises an exact nearest neighbor.
 
 `maxsim` ranks multi-vector documents, with token rows sharing one document key.
 For query tokens $q_i$ & document tokens $d_j$, it sums each query token's best similarity: $\sum_i \max_j \langle q_i,d_j\rangle$.
@@ -160,7 +160,7 @@ USearch adds a data-dependent computation mask to an $M \times N \times K$ produ
 The $M$ query rows choose a subset of the $N$ indexed rows through the graph, while each chosen product consumes all $K$ stored coordinates.
 
 `multiply` exposes those products as a graph-selected portion of $A B^{\mathsf{T}}$.
-It returns every pair scored by the traversal, including candidates the nearest-neighbor pool rejected, subject to an optional output bound.
+It returns every pair scored by the traversal, including candidates the nearest-neighbor walk rejected, subject to an optional output bound.
 Products are computed over the stored representation; unvisited entries remain unknown.
 The returned offsets delimit query rows, keys identify the selected indexed rows, & scores contain their dot-products.
 
@@ -175,7 +175,7 @@ Sparsity along $K$ needs a compatible custom metric & representation through the
 ### Subquadratic Attention
 
 `attend` folds values into an online Softmax as the graph scores keys.
-Every scored key contributes, including keys outside the retained nearest-neighbor pool.
+Every scored key contributes, including keys outside the retained nearest-neighbor candidates.
 The fold maintains a running maximum, partition, & weighted value sum, so it materializes neither a full score matrix nor an intermediate top-k selection.
 Several query heads share one traversal & one value lookup, with separate accumulators per head.
 

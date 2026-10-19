@@ -153,11 +153,11 @@ constexpr std::size_t dense_rows_bytes(matrix_view_type_ view, std::size_t rows_
     return rows_count * static_cast<std::size_t>(view.stride_bytes(0));
 }
 
-/** Sampled self-recall over the whole result pool: each sampled stored row must
- *  surface some pool entry inside the self-match band. Pool-scan by distance is the
- *  one criterion: duplicate ties - binary vectors above all - make the top-1 slot
- *  and ID-matching unfair judges of a healthy graph, and a distance criterion needs
- *  no assigned-IDs plumbing, so it survives reloads & thread-sliced builds unchanged.
+/** Sampled self-recall over all result candidates: each sampled stored row must surface some
+ *  candidate inside the self-match band. Candidate scan by distance is the one criterion: duplicate
+ *  ties - binary vectors above all - make the top-1 slot and ID-matching unfair judges of a healthy
+ *  graph, and a distance criterion needs no assigned-IDs plumbing, so it survives reloads &
+ *  thread-sliced builds unchanged.
  *  Sampling is evenly spaced; callers keep the dot-kernel gate, where "distance" is a
  *  similarity and self-matching is undefined. Requires @p rows_count ≥ @p samples_count.
  *  The searches walk a fresh context for the index @p make_index builds. */
@@ -189,7 +189,7 @@ std::size_t dense_expect_self_recall(index_type_& index, make_index_type_ const&
     return expect(hits * 100 >= samples_count * dense_minimal_recall_percent_k);
 }
 
-/** The ranking in @p context ascends by distance - the pool's invariant after any walk. */
+/** The ranking in @p context ascends by distance - the candidates' invariant after any walk. */
 template <typename context_type_>
 std::size_t dense_expect_ascending(context_type_ const& context) noexcept {
     std::size_t failures = 0;
@@ -665,9 +665,9 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
             auto const [sampled_result, sampled_status] = index.search_if(vectors.view().row(sampled_row).as_vector(),
                                                                           matches, sampled_context);
             bool const self_matches = sampled_row % modulus == 0;
-            // The sparsest decade may legally drain empty on excluded-row queries: until
-            // the admitted pool fills, the navigation radius bounds the walk, and no match
-            // needs to fall inside it. A matching self is always near enough to admit.
+            // The sparsest decade may legally drain empty on excluded-row queries: until the
+            // admitted candidates fill, the navigation radius bounds the walk, and no match needs
+            // to fall inside it. A matching self is always near enough to admit.
             failures += expect(sampled_status == status_t::success_k);
             failures += expect(sampled_result.count > 0 || (modulus == 64 && !self_matches));
             scored_node_t const* results = sampled_context.results.data();
@@ -1603,8 +1603,8 @@ auto dense_audit_health(index_type_& index, typename index_type_::traversal_cont
 }
 
 /**
- *  @brief The settling contract: a graph built under a narrow pool has work for the first sweep,
- *      the second finds far less, and recall never falls for the trouble.
+ *  @brief The settling contract: a graph built under narrow candidates has work for the first
+ *      sweep, the second finds far less, and recall never falls for the trouble.
  *
  *  The bound on the second sweep is a ratio rather than zero, since the walks re-seed from random
  *  landmarks and a later back-link can still disturb a row a earlier step already settled.
@@ -2548,8 +2548,8 @@ std::size_t test_dense_concurrent_build(make_index_type_ const& make_index, u64_
  *  @brief A reader thread races three writer threads, asserting only interleaving-independent
  *      invariants.
  *
- *  Every search succeeds, respects the candidate-pool bound, returns distances in ascending order,
- *  and never surfaces an ID at or above the watermark it could have observed - the
+ *  Every search succeeds, respects the candidate breadth bound, returns distances in ascending
+ *  order, and never surfaces an ID at or above the watermark it could have observed - the
  *  translation-frontier invariant, audited live.
  *
  *  The query vectors are never inserted: a search does not require its query to be stored, so
@@ -2759,8 +2759,9 @@ std::size_t test_dense_indexes_growth(u64_t seed) {
     return failures;
 }
 
-/** A sharded pass under a narrow build pool: the first re-wires nodes, the second fewer, each heals what it strands
- *  without losing reach, and the audit after them counts what the last pass ended on. */
+/** A sharded pass under narrow build candidates: the first re-wires nodes, the second fewer, each
+ *  heals what it strands without losing reach, and the audit after them counts what the last pass
+ *  ended on. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_refine(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
@@ -2823,7 +2824,7 @@ std::size_t test_dense_indexes_refine(u64_t seed, placement_types_&... placement
 
 /** Executor arenas seeded at exactly the first-size estimate serve every walk: a re-table
  *  past the seed chunk lands in a chunk the arena opens beside it, so no walk saturates and
- *  every query ranks. A pool as wide as the whole reservation makes every walk exhaustive by
+ *  every query ranks. Candidates as wide as the whole reservation make every walk exhaustive by
  *  construction - approximate search promises nothing narrower - so every thread's visited set
  *  outgrows its first size, and every key a sparse predicate admits surfaces. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
@@ -2853,8 +2854,9 @@ std::size_t test_dense_indexes_arena_growth(u64_t seed) {
     failures += expect(succeeded(insert_status));
     failures += expect_eq(insert_result.saturated_walks, 0u);
 
-    // Sixteen keys match; with the pool as wide as the reservation every walk visits its whole shard,
-    // so all eight surface - a narrower pool could promise only that what surfaces is admitted and ranked.
+    // Sixteen keys match; with candidates as wide as the reservation every walk visits its whole
+    // shard, so all eight surface - narrower candidates could promise only that what surfaces is
+    // admitted and ranked.
     typename index_t::search_config_t const exhaustive {static_cast<typename index_t::small_size_t>(rows)};
     auto sparse = [](key_t key) noexcept { return key % 128 == 0 ? admission_t::admit_k : admission_t::reject_k; };
     auto found_keys = nk::matrix<key_t>::zeros({queries, wanted}).value;
@@ -4396,7 +4398,7 @@ std::size_t test_dense_allocation_budget(make_index_type_ const& make_index, u64
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
-/** Shedding the frontier past a full pool's radius is lossless: a walk whose frontier
+/** Shedding the frontier past the radius of full candidates is lossless: a walk whose frontier
  *  never fills ranks the same nodes, and the shedding frontier never outgrows its reservation. */
 template <typename index_type_, typename make_index_type_>
 std::size_t dense_expect_frontier_shedding(make_index_type_ const& make_index, allocation_ledger_t& ledger,
@@ -4446,7 +4448,7 @@ std::size_t test_dense_frontier_shedding(make_index_type_ const& make_index, u64
 
 /** A refused re-table saturates the walk, it never fails it: under a frozen budget a
  *  search answers @c success_k with a short ascending ranking and one saturated walk, and
- *  an insertion still publishes its row, wired thinner. The one-wide pool makes the first
+ *  an insertion still publishes its row, wired thinner. One-wide candidates make the first
  *  expansion's quad the re-table that is refused. */
 template <typename index_type_, typename make_index_type_>
 std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {

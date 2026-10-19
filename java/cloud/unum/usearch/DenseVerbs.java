@@ -343,7 +343,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     }
 
     /**
-     * Opens a resumable search for one query row, with the candidate-pool breadth derived.
+     * Opens a resumable search for one query row, with the breadth of the candidates derived.
      *
      * @throws USearchException the statuses {@link #searchStream(RowsView, long)} names.
      */

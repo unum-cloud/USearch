@@ -117,7 +117,7 @@ inline constexpr amd_rung_t amd_rungs[] = {
     {vram_kernel_t::scatter_back_links_k, 0},
     {vram_kernel_t::derive_norms_k, 0},
     {vram_kernel_t::rebase_links_k, 0},
-    {vram_kernel_t::mark_seeds_k, 0},
+    {vram_kernel_t::mark_landmarks_k, 0},
     {vram_kernel_t::reachability_sweep_k, 0},
     {vram_kernel_t::reachability_islands_k, 0},
     {vram_kernel_t::reached_in_links_k, 0},
@@ -214,18 +214,18 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
         auto aligned = [](std::size_t bytes) noexcept {
             return divide_round_up<std::size_t>(bytes, default_alignment_k) * default_alignment_k;
         };
-        // Search widens the pool to cover its count while multiply walks the bare factor, so the
-        // wider one sizes.
+        // Search widens the candidates to cover its count while multiply walks the bare factor, so
+        // the wider one sizes.
         u32_t const expansion = max_of<u32_t>(gpu_walk_breadth(config.expansion_factor, config.count),
                                               non_zero_expansion_factor(config));
-        bool const wide = expansion > vram_widest_pool_slots_k * wave_lanes();
+        bool const wide = expansion > vram_widest_candidate_slots_k * wave_lanes();
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
-        u32_t const pool_slots = pool_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
+        u32_t const candidate_slots = candidate_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
         gpu_arena_shape_t const arena_shape = arena_shape_for(
-            walk_selection_rows_(expansion, pool_slots),
+            walk_selection_rows_(expansion, candidate_slots),
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
         // The walks seat as many blocks as a search on the same rung, an attend no more.
-        u32_t const resident_blocks = resident_blocks_(vram_kernel_t::search_k, wide ? 0 : pool_slots);
+        u32_t const resident_blocks = resident_blocks_(vram_kernel_t::search_k, wide ? 0 : candidate_slots);
         std::size_t const arena_warps = std::size_t {walk_blocks_(rows, resident_blocks)} * vram_warps_per_block_k;
         std::size_t const staging_bytes = rows * row_bytes() + import_bytes_(rows, nk_f64_k) +
                                           rows * config.count * (sizeof(node_id_t) + sizeof(distance_t)) +
@@ -246,6 +246,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
 
     using base_t::build_arena_shape_;
     using base_t::builder_scratch_bytes_per_warp_;
+    using base_t::candidate_slots_for_;
     using base_t::device_;
     using base_t::fail_;
     using base_t::import_bytes_;
@@ -254,7 +255,6 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
     using base_t::land_counters_;
     using base_t::neighbor_rows_;
     using base_t::neighbors_matrix_;
-    using base_t::pool_slots_for_;
     using base_t::reselection_rows_;
     using base_t::rows_refusal_;
     using base_t::vectors_matrix_;
@@ -274,7 +274,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
         vram_search_t view;
 
         /** The register ladder's width, when the ladder serves. */
-        u32_t pool_slots;
+        u32_t candidate_slots;
 
         /** Which frontier the walks keep. */
         frontier_kind_t frontier;
@@ -314,15 +314,20 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
         }
         hip_stream_handle_t const stream = context.stream();
 
-        // Past the register ladder's widest pool the arena-backed walk serves.
-        frontier_kind_t const frontier = expansion > vram_widest_pool_slots_k * wave_lanes()
+        // Past the register ladder's widest rung the arena-backed walk serves.
+        frontier_kind_t const frontier = expansion > vram_widest_candidate_slots_k * wave_lanes()
                                              ? frontier_kind_t::wide_arena_k
                                              : frontier_kind_t::register_ladder_k;
-        u32_t const pool_slots = pool_slots_for_(expansion, minimum_slots);
-        gpu_arena_shape_t const arena_shape = arena_shape_for(walk_selection_rows_(expansion, pool_slots), frontier);
+        u32_t const candidate_slots = candidate_slots_for_(expansion, minimum_slots);
+        gpu_arena_shape_t const arena_shape = arena_shape_for(walk_selection_rows_(expansion, candidate_slots),
+                                                              frontier);
         // A search, an indexed search and a multiply seat as many blocks on one rung.
         u32_t const resident_blocks = resident_blocks_(attend_k ? vram_kernel_t::attend_k : vram_kernel_t::search_k,
-                                                       frontier == frontier_kind_t::wide_arena_k ? 0 : pool_slots);
+                                                       frontier == frontier_kind_t::wide_arena_k ? 0 : candidate_slots);
+        // Every warp the device seats on this rung, and the rows whose neighbors fill a walk's
+        // candidates.
+        u32_t const seats = device_.multiprocessor_count * resident_blocks * vram_warps_per_block_k;
+        u32_t const filling = filling_rows<u32_t>(expansion, static_cast<u32_t>(connectivity()));
         std::size_t const arena_warps = std::size_t {walk_blocks_(queries_count, resident_blocks)} *
                                         vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
@@ -348,7 +353,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
             return {{}, imported};
         if (hip_api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) !=
                 hip_success_k ||
-            hip_api().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != hip_success_k)
+            hip_api().fill_async(context.assigned_rows_.get(), 0, 2 * sizeof(u32_t), stream) != hip_success_k)
             return {{}, status_t::device_error_k};
 
         vram_rescoring_t rescoring {};
@@ -381,8 +386,11 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
                                   arena_shape,
                                   epoch_base,
                                   context.telemetry_.get(),
-                                  context.assigned_rows_.get()};
-        return {{view, pool_slots, frontier, staging + rows_bytes + import_bytes + weights_bytes, rescoring},
+                                  context.assigned_rows_.get(),
+                                  context.assigned_rows_.get() + 1,
+                                  seats,
+                                  filling};
+        return {{view, candidate_slots, frontier, staging + rows_bytes + import_bytes + weights_bytes, rescoring},
                 status_t::success_k};
     }
 
@@ -408,10 +416,10 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
              result_distances.stride_bytes(0) < static_cast<std::ptrdiff_t>(config.count * sizeof(distance_t))))
             return {{}, status_t::unsupported_layout_k};
 
-        // The expansion covers the count, so the ladder's pool holds every rank, and past it the
-        // arena frontier ranks everything it saw.
+        // The expansion covers the count, so the ladder's candidates hold every rank, and past it
+        // the arena frontier ranks everything it saw.
         u32_t const expansion = gpu_walk_breadth(config.expansion_factor, config.count);
-        // The pool must cover the requested count, whatever the expansion asked for.
+        // The candidates must cover the requested count, whatever the expansion asked for.
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         std::size_t const results_count = queries_count * config.count;
         std::size_t const ids_bytes = results_count * sizeof(node_id_t);
@@ -540,22 +548,23 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
             hip_success_k)
             return status_t::device_error_k;
 
-        // Twice the connectivity by default, like every CPU walk, rounded up to the pool sizes the
-        // kernel carries, or walked exactly past them.
+        // Twice the connectivity by default, like every CPU walk, rounded up to the candidate sizes
+        // the kernel carries, or walked exactly past them.
         u32_t const expansion = non_zero_expansion_factor(config);
-        u32_t const pool_slots = pool_slots_for_(expansion, 4);
+        u32_t const candidate_slots = candidate_slots_for_(expansion, 4);
         // Walking across makes two walks into one visited set, so the slice is shaped for both.
         u32_t const walks = parts > 1 ? 2 : 1;
-        gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, pool_slots, walks);
+        gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, candidate_slots, walks);
         std::size_t const arena_warps = device_.multiprocessor_count *
-                                        resident_blocks_(vram_kernel_t::refine_k, pool_slots) * vram_warps_per_block_k;
+                                        resident_blocks_(vram_kernel_t::refine_k, candidate_slots) *
+                                        vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>());
         if (!arena) return status_t::bad_alloc_k;
         auto const [epoch_base, epochs_status] = context.take_epochs(walk_count, arena_bytes_before);
         if (failed(epochs_status)) return epochs_status;
 
-        u32_t const selection_rows = walk_selection_rows_(expansion, pool_slots);
+        u32_t const selection_rows = walk_selection_rows_(expansion, candidate_slots);
         vram_refine_t view {storage(), //
                             scratch.shadow_neighbors,
                             nodes.bound,
@@ -582,7 +591,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
                                      nodes_count * connectivity() * sizeof(u32_t), hip_copy_device_to_device_k,
                                      stream) != hip_success_k)
                 return status_t::device_error_k;
-        if (status_t const launched = launch_refine_(view, pool_slots, stream); failed(launched)) return launched;
+        if (status_t const launched = launch_refine_(view, candidate_slots, stream); failed(launched)) return launched;
 
         // Scatter the walked rows' shadow neighbors in reverse, then merge each touched node's
         // forward & reverse candidates into its final live row. A heal round over island IDs
@@ -612,7 +621,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
         seeds.graph.seed_count = static_cast<u32_t>(seed_count);
         seeds.graph.reached = scratch.reached;
         seeds.graph.frontier = scratch.frontier;
-        if (status_t const launched = launch_(vram_kernel_t::mark_seeds_k, 0,
+        if (status_t const launched = launch_(vram_kernel_t::mark_landmarks_k, 0,
                                               divide_round_up<u32_t>(static_cast<u32_t>(seed_count), block_threads()),
                                               0, stream, seeds);
             failed(launched))
@@ -730,13 +739,13 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
      *  walks rows already published, and each followed by the back-link launch that links its
      *  newcomers from the nodes they picked. A wave failing after an earlier one launched keeps
      *  the failure, since those rows can no longer be un-claimed. */
-    status_t launch_insert_(vram_build_t const& build, u32_t pool_slots, traversal_context_t& context) noexcept {
+    status_t launch_insert_(vram_build_t const& build, u32_t candidate_slots, traversal_context_t& context) noexcept {
         hip_stream_handle_t const stream = context.stream();
         vram_arguments_t arguments {};
         // Both launches carve their warps' slices from the one arena, sized for the insert's grid,
         // which the back-link's resident count matches.
         static_assert(resident_blocks_(vram_kernel_t::back_link_k, 0) == resident_blocks_(vram_kernel_t::insert_k, 0));
-        u32_t const blocks = device_.multiprocessor_count * resident_blocks_(vram_kernel_t::insert_k, pool_slots);
+        u32_t const blocks = device_.multiprocessor_count * resident_blocks_(vram_kernel_t::insert_k, candidate_slots);
         u32_t const back_link_rows = reselection_rows_();
         u32_t const back_link_scratch = build.arena_shape.scratch_bytes ? 0u
                                                                         : build_scratch_bytes_per_warp(back_link_rows);
@@ -755,7 +764,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
             status_t launched = zeroed(build.assigned_rows) && zeroed(build.touched_count) ? status_t::success_k
                                                                                            : status_t::device_error_k;
             if (succeeded(launched))
-                launched = launch_(vram_kernel_t::insert_k, pool_slots, blocks,
+                launched = launch_(vram_kernel_t::insert_k, candidate_slots, blocks,
                                    vram_warps_per_block_k * build.scratch_bytes_per_warp, stream, arguments);
             if (failed(launched)) return offset ? fail_(launched) : launched;
             // The wave's rows are queued now, so a failure past here can no longer be un-claimed.
@@ -770,11 +779,11 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
         }
         return status_t::success_k;
     }
-    status_t launch_refine_(vram_refine_t const& view, u32_t pool_slots, hip_stream_handle_t stream) noexcept {
+    status_t launch_refine_(vram_refine_t const& view, u32_t candidate_slots, hip_stream_handle_t stream) noexcept {
         vram_arguments_t arguments {};
         arguments.refine = view;
-        return launch_(vram_kernel_t::refine_k, pool_slots,
-                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, pool_slots),
+        return launch_(vram_kernel_t::refine_k, candidate_slots,
+                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, candidate_slots),
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
 
@@ -945,7 +954,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
             arguments.search_sink = sink;
             if (launch.rescoring.heads) kernel = vram_kernel_t::search_indexer_k;
         }
-        u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.pool_slots;
+        u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.candidate_slots;
         u32_t const blocks = walk_blocks_(launch.view.queries_count, resident_blocks_(kernel, slots));
         return launch_(kernel, slots, blocks, vram_warps_per_block_k * launch.view.scratch_bytes_per_warp, stream,
                        arguments);
@@ -973,7 +982,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
         attend.heads_count = launch.rescoring.heads_count;
         attend.columns = static_cast<u32_t>(dimensions());
         std::memcpy(attend.value_lookup, &value_lookup, sizeof(value_lookup));
-        u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.pool_slots;
+        u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.candidate_slots;
         vram_kernel_symbol_t symbol;
         vram_kernel_symbol(symbol, "dense", "amd_kernel", "vram_arguments_t", vram_kernel_t::attend_k, capability_,
                            vector_dtype_, slots, u32_t {value_lookup_type_::device_lookup_k});

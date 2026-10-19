@@ -85,8 +85,8 @@ struct f16_ampere_shapes_kit_t {
 
     /** The gap between the two clouds' largest radii, from their headers alone, bounds Hausdorff;
      *  nothing bounds Chamfer. */
-    static __device__ __forceinline__ distance_t bound(nk_kernel_kind_t kernel, query_t const& query,
-                                                       basic::vram_row_t row) noexcept {
+    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t kernel, query_t const& query,
+                                                             basic::vram_row_t row) noexcept {
         return kernel == nk_kernel_hausdorffs_packed_k ? nk_hausdorff_bound_packed_f16_simt_(query.pack, row.data) : 0;
     }
 
@@ -116,8 +116,8 @@ struct f32_ampere_shapes_kit_t {
     static __device__ __forceinline__ query_t prepare(basic::vram_row_t row, byte_t* span, u32_t lane) noexcept {
         return vram_prepare_pack(row, span, lane);
     }
-    static __device__ __forceinline__ distance_t bound(nk_kernel_kind_t kernel, query_t const& query,
-                                                       basic::vram_row_t row) noexcept {
+    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t kernel, query_t const& query,
+                                                             basic::vram_row_t row) noexcept {
         return kernel == nk_kernel_hausdorffs_packed_k
                    ? static_cast<distance_t>(nk_hausdorff_bound_packed_f32_simt_(query.pack, row.data))
                    : 0;

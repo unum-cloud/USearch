@@ -245,7 +245,7 @@ for query in 0 ..< matches.count {
 print(stats.visitedMembers, stats.computedDistances, stats.restarts)
 ```
 
-`expansionFactor` is the candidate-pool breadth the walk explores, and zero derives it from the geometry.
+`expansionFactor` is the breadth of the candidates the walk explores, and zero derives it from the geometry.
 The `insert`, `refine`, `search`, `maxsim`, `multiply` and `attend` configs take a `DenseTraversalStats`, and every call overwrites the stats it is handed rather than accumulating, so a sweep sums them itself.
 Insertions and searches overlap freely on one handle: searches read only entries published behind the visibility watermark, while insertions publish in order.
 

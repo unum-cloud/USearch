@@ -109,7 +109,7 @@ inline std::array<flag_t, 8> nvme_flags(settings_t& settings, nvme_settings_t& n
         {"--transport", "name", "auto, blocking, linux-aio, linux-uring or linux-spdk; auto by default",
          &nvme.transport_name},
         {"--queue-depth", "reads", "reads every thread's engine keeps outstanding; 512 by default", &nvme.queue_depth},
-        {"--expansion-search", "breadth", "search candidate pool; 96 by default", &settings.expansion_search},
+        {"--expansion-search", "breadth", "search candidates; 96 by default", &settings.expansion_search},
         {"--top-k", "count", "matches per query to judge; 10 by default", &settings.top_k},
         {"--threads", "count", "threads; 7/8 of the logical cores by default", &settings.threads},
         {"--max-compute", "name", "compute ceiling by microarchitecture, like `icelake`, or `serial`",

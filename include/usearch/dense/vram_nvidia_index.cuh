@@ -574,8 +574,8 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     else if constexpr (kernel_ == vram_kernel_t::rebase_links_k)
         vram_rebase_links<cuda_warp_t>(graph.neighbors, graph.first_id, graph.rows_count, graph.connectivity,
                                        graph.source_first, graph.source_bound, graph.shift);
-    else if constexpr (kernel_ == vram_kernel_t::mark_seeds_k)
-        vram_mark_seeds<cuda_warp_t>(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
+    else if constexpr (kernel_ == vram_kernel_t::mark_landmarks_k)
+        vram_mark_landmarks<cuda_warp_t>(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
     else if constexpr (kernel_ == vram_kernel_t::reachability_sweep_k)
         vram_reachability_sweep<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached,
                                              graph.frontier, graph.next_frontier, graph.counter, graph.previous_counter,

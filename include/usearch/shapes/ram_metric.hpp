@@ -561,8 +561,8 @@ class shapes_metric {
     /**
      *  @brief Sizes the staging and the kernel's distances.
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at
-     *      least the index's round capacity, @c max(fan_out × connectivity, connectivity + 1), or
-     *      rounds saturate rather than fail.
+     *      least the index's round capacity, @c max(⌈expansion / connectivity⌉ × connectivity,
+     *      connectivity + 1), or rounds saturate rather than fail.
      *  @return @c unknown_kind_k for a kernel kind other than the four shape kinds.
      */
     status_t init(std::size_t staging_limit) noexcept {
@@ -640,7 +640,7 @@ class shapes_metric {
      *
      *  Distances up to and including @p radius are exact; above it a bounded kind may report a
      *  candidate's lower bound instead. A failed round reports the largest finite distance, so a
-     *  full pool rejects it and an unfilled pool admits it last; @ref status is the only signal.
+     *  full candidates reject it and unfilled ones admit it last; @ref status is the only signal.
      *
      *  @param[out] distances One slot per staged candidate, in push order.
      *  @param[in] radius The furthest distance the caller still tells apart.

@@ -193,7 +193,7 @@ brute_force_cone_winners(std::vector<earth_observation_t> const& values, std::si
     return winners;
 }
 
-/** The selector over a full pool keeps exactly the brute-force cone winners, then the
+/** The selector over all candidates keeps exactly the brute-force cone winners, then the
  *  longest of the rest up to its budget, and emits them ascending. */
 static std::size_t check_positions_selector(u64_t seed) {
     constexpr std::size_t nodes_k = 96;
@@ -219,8 +219,8 @@ static std::size_t check_positions_selector(u64_t seed) {
         surface_keep_octants_t const selector;
         for (std::size_t probe = 0; probe != probes_k; ++probe) {
             std::size_t const base = probe * (nodes_k / probes_k);
-            // The pool is every other node, ascending by chord - what a wide enough walk would
-            // gather.
+            // The candidates are every other node, ascending by chord - what a wide enough walk
+            // would gather.
             failures += expect(succeeded(context.results.reserve(nodes_k)));
             failures += expect(succeeded(context.selected_neighbors.reserve(selector.connectivity)));
             context.results.clear();
@@ -243,8 +243,8 @@ static std::size_t check_positions_selector(u64_t seed) {
                     kept = context.selected_neighbors[slot].node_id == assigned_ids[winners[cone]];
                 failures += expect(kept);
             }
-            // The retained slots hold the pool's longest non-winners, so the last one is the pool's
-            // farthest.
+            // The retained slots hold the longest non-winners among the candidates, so the last one
+            // is the farthest.
             scored_node_t const farthest = context.results[context.results.size() - 1];
             scored_node_t const last_kept = context.selected_neighbors[context.selected_neighbors.size() - 1];
             failures += expect_eq(last_kept.node_id, farthest.node_id);
@@ -351,7 +351,7 @@ static std::size_t check_positions_radius(u64_t seed) {
                                                         metric, context);
                 failures += expect(bool(complete));
                 failures += expect_eq(complete.count, expected);
-                failures += expect(complete.pool >= complete.count);
+                failures += expect(complete.candidates_count >= complete.count);
                 for (std::size_t position = 0; position != complete.count; ++position)
                     failures += expect(context.results[position].distance <= radius * radius);
                 radius_result_t const plain = within(index, query, radius, radius_margin_t::none_k, widest_row, metric,

@@ -36,8 +36,8 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32, cuda_resident_blo
     if constexpr (kernel_ == vram_kernel_t::rebase_links_k)
         dense::vram_rebase_links<cuda_warp_t>(graph.neighbors, graph.first_id, graph.rows_count, graph.connectivity,
                                               graph.source_first, graph.source_bound, graph.shift);
-    else if constexpr (kernel_ == vram_kernel_t::mark_seeds_k)
-        dense::vram_mark_seeds<cuda_warp_t>(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
+    else if constexpr (kernel_ == vram_kernel_t::mark_landmarks_k)
+        dense::vram_mark_landmarks<cuda_warp_t>(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
     else if constexpr (kernel_ == vram_kernel_t::reachability_sweep_k)
         dense::vram_reachability_sweep<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity,
                                                     graph.reached, graph.frontier, graph.next_frontier, graph.counter,
@@ -51,8 +51,8 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32, cuda_resident_blo
         dense::vram_reconnect_island<cuda_warp_t>(graph.neighbors, graph.connectivity, graph.island_ids,
                                                   graph.islands_count, graph.reached, graph.rows_count,
                                                   graph.seed_count, graph.in_links, graph.reconnected);
-    else if constexpr (kernel_ == vram_kernel_t::partition_seeds_k)
-        dense::vram_partition_seeds<cuda_warp_t>(graph.roots, graph.seed_count, graph.labels, graph.frontier,
+    else if constexpr (kernel_ == vram_kernel_t::partition_roots_k)
+        dense::vram_partition_roots<cuda_warp_t>(graph.roots, graph.seed_count, graph.labels, graph.frontier,
                                                  graph.part_sizes);
     else if constexpr (kernel_ == vram_kernel_t::partition_propose_k)
         dense::vram_partition_propose<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.labels,

@@ -102,7 +102,7 @@ struct cuda_block_schedule {
             // A row's lanes share its ID, so every group takes one side of each branch whole.
             if (node_id != std::numeric_limits<node_id_type_>::max()) {
                 vram_row_t const row = storage.row(node_id);
-                distance = kit_::bound(storage.kernel, round.query, row);
+                distance = kit_::lower_bound(storage.kernel, round.query, row);
                 if (!(distance > round.radius))
                     distance = vram_score<kit_, rung_>(storage.kernel, round.query, row, round.radius, lane);
             }
@@ -152,27 +152,27 @@ __device__ __forceinline__ void cuda_for_each_assigned(schedule_& schedule,
  *  already merged, and re-selects behind its own, so its rows reach one another. Rows keep the
  *  neighbors the kit's @c selector_t picks.
  */
-template <vram_basic_kit kit_, u32_t rung_, u32_t pool_slots_, vram_kernel_t kernel_, typename node_id_type_>
+template <vram_basic_kit kit_, u32_t rung_, u32_t candidate_slots_, vram_kernel_t kernel_, typename node_id_type_>
 __device__ __forceinline__ void cuda_insert(vram_build_view<node_id_type_> const& view) {
     using selector_t = typename kit_::selector_t;
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
     // The scratch slice hosts the query span, the pivot span and the selection spans over the
-    // walk's whole pool; the visited set is in the arena.
+    // walk's candidates; the visited set is in the arena.
     extern __shared__ byte_t dynamic_scratch[];
-    __shared__ node_id_type_ gathered_ids[vram_warps_per_block_k][cuda_warp_t::width_k];
+    __shared__ node_id_type_ gathered_ids[vram_warps_per_block_k][2 * cuda_warp_t::width_k];
     __shared__ typename schedule_t::shared_t schedule_state;
 
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t, node_id_type_>(view, dynamic_scratch);
     u32_t const warp = slice.warp, lane = slice.lane;
     vram_selection_scratch<node_id_type_> const selection = vram_selection_scratch<node_id_type_>::carve(
         slice.scratch + 2 * view.span_bytes, view.selection_rows);
-    using frontier_t = std::conditional_t<pool_slots_ == 0, vram_arena_frontier<cuda_warp_t, node_id_type_>,
-                                          vram_register_frontier<pool_slots_, cuda_warp_t, node_id_type_>>;
+    using frontier_t = std::conditional_t<candidate_slots_ == 0, vram_arena_frontier<cuda_warp_t, node_id_type_>,
+                                          vram_register_frontier<candidate_slots_, cuda_warp_t, node_id_type_>>;
     schedule_t schedule {schedule_state};
     cuda_for_each_assigned( //
         schedule, view.storage, view.assigned_rows, view.first_id, view.end_id, slice, [&](node_id_type_ node_id) {
             vram_warp_context<frontier_t> context;
-            if constexpr (pool_slots_ == 0) {
+            if constexpr (candidate_slots_ == 0) {
                 context.frontier.tail_.entries_ = view.arena_shape.template tail_span<node_id_type_>(view.arena,
                                                                                                      slice.warp_index);
                 context.frontier.tail_.capacity_ = view.arena_shape.tail_entries;
@@ -227,7 +227,7 @@ template <vram_basic_kit kit_, u32_t rung_, u32_t slots_, typename node_id_type_
 __device__ __forceinline__ void cuda_walk(vram_search_view<node_id_type_> const& view) {
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
     extern __shared__ byte_t dynamic_scratch[];
-    __shared__ node_id_type_ gathered_ids[vram_warps_per_block_k][cuda_warp_t::width_k];
+    __shared__ node_id_type_ gathered_ids[vram_warps_per_block_k][2 * cuda_warp_t::width_k];
     __shared__ typename schedule_t::shared_t schedule_state;
 
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t, node_id_type_>(view, dynamic_scratch);
@@ -295,6 +295,9 @@ __device__ __forceinline__ vram_search_view<node_id_type_> vram_view(
             search.epoch_base,
             search.telemetry,
             search.assigned_queries,
+            search.live_walks,
+            search.seats,
+            search.filling_rows,
             search.result_ids,
             search.result_distances,
             search.count};

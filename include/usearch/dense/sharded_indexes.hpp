@@ -397,7 +397,7 @@ struct sharded_indexes {
          *  back every claim that launched none, spending the plan. */
         status_t abandon_(status_t failure) noexcept {
             for (traversal_context_t& traversal : traversals_) [[maybe_unused]]
-                status_t const drained = traversal.drain();
+                status_t const drained = traversal.wait();
             for (std::size_t shard = 0; shard != shares_.size(); ++shard)
                 if (shares_[shard].launched) [[maybe_unused]]
                     status_t const kept = owner_->shards_[shard].index->fail_(failure);
@@ -1151,8 +1151,8 @@ struct sharded_indexes {
             return {{}, refusal};
         if (!groups_count) return {{}, status_t::success_k};
 
-        // Every token row keeps its whole ranked pool, its keys resolved and merged across the
-        // shards; a window holds whole queries, so none splits across two.
+        // Every token row keeps all of its ranked candidates, its keys resolved and merged across
+        // the shards; a window holds whole queries, so none splits across two.
         std::size_t const width = shards_[0].index->non_zero_expansion_factor(config);
         std::size_t const window_rows = max_of<std::size_t>(derived_::window_rows_k / rows_per_query, 1) *
                                         rows_per_query;
@@ -1737,7 +1737,7 @@ struct sharded_indexes {
     std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted, executor_t& executor) const noexcept {
         std::size_t const total = queue_rows_(key, vectors, wanted, executor);
         if (total) [[maybe_unused]]
-            status_t const drained = executor.drain();
+            status_t const drained = executor.wait();
         return total;
     }
 
@@ -1792,7 +1792,7 @@ struct sharded_indexes {
             entries[position] = queue_rows_(keys[position], vectors(nk::range(first, first + wanted), nk::slice),
                                             wanted, executor);
         }
-        return executor.drain();
+        return executor.wait();
     }
 
 #pragma endregion Lookups
@@ -1857,7 +1857,7 @@ struct sharded_indexes {
     static status_t settle_insert_(growing_buffer<traversal_context_t, forkunion_allocator_t>& traversals,
                                    status_t status, insert_result_t& result) noexcept {
         for (traversal_context_t& traversal : traversals)
-            if (status_t const drained = traversal.drain(); failed(drained) && succeeded(status)) status = drained;
+            if (status_t const drained = traversal.wait(); failed(drained) && succeeded(status)) status = drained;
         // Every context was born zeroed for this plan alone, so its sink holds every launch on
         // its shard.
         for (traversal_context_t const& traversal : traversals) {
@@ -2224,7 +2224,7 @@ struct sharded_indexes {
                 base += part_rows;
             }
         }
-        if (status_t const drained = executor.drain(); failed(queued) || failed(drained))
+        if (status_t const drained = executor.wait(); failed(queued) || failed(drained))
             return failed(queued) ? queued : drained;
         for (typename index_t::load_plan_t& plan : plans)
             if (status_t const published = plan.finish(); failed(published)) return published;

@@ -80,7 +80,7 @@ export class DenseTraversalStats {
 
 /** Optional per-call settings of an insertion. Mirrors `usearch_dense_insert_t`. */
 export interface DenseInsertConfig {
-  /** Candidate-pool breadth the build walk explores; absent lets the engine derive it. */
+  /** Breadth of the candidates the build walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
   /** The reading this call overwrites with its own telemetry; absent skips reporting. */
   stats?: DenseTraversalStats;
@@ -88,7 +88,7 @@ export interface DenseInsertConfig {
 
 /** Optional per-call settings of the refinement pass that follows an insertion. Mirrors `usearch_dense_refine_t`. */
 export interface DenseRefineConfig {
-  /** Candidate-pool breadth the re-selection walk explores; absent lets the engine derive it. */
+  /** Breadth of the candidates the re-selection walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
   /** The reading this call overwrites with its own telemetry; absent skips reporting. */
   stats?: DenseTraversalStats;
@@ -96,7 +96,7 @@ export interface DenseRefineConfig {
 
 /** Optional per-call settings of a search. Mirrors `usearch_dense_search_t`. */
 export interface DenseSearchConfig {
-  /** Candidate-pool breadth the walk explores; absent lets the engine derive it, and a scan ignores it. */
+  /** Breadth of the candidates the walk explores; absent lets the engine derive it, and a scan ignores it. */
   expansionFactor?: number;
   /** Walks the graph when absent; `Traversal.Scan` scores every row exactly, on RAM and NVMe handles. */
   traversal?: Traversal;
@@ -106,7 +106,7 @@ export interface DenseSearchConfig {
 
 /** Optional per-call settings of late-interaction scoring. Mirrors `usearch_dense_maxsim_t`. */
 export interface DenseMaxsimConfig {
-  /** Candidate-pool breadth the walk explores; absent lets the engine derive it. */
+  /** Breadth of the candidates the walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
   /** The reading this call overwrites with its own telemetry; absent skips reporting. */
   stats?: DenseTraversalStats;
@@ -122,7 +122,7 @@ export interface DenseGetConfig {
 export interface DenseMultiplyConfig {
   /** Pairs kept per row, the first ones its walk scored; absent keeps every pair. */
   wanted?: number;
-  /** Candidate-pool breadth, which widens the emitted pattern; absent lets the engine derive it. */
+  /** Breadth of the candidates, which widens the emitted pattern; absent lets the engine derive it. */
   expansionFactor?: number;
   /** The reading this call overwrites with its own telemetry; absent skips reporting. */
   stats?: DenseTraversalStats;
@@ -140,7 +140,7 @@ export interface DenseAttendConfig {
   headCount?: number;
   /** The scalar kind the attended rows land as; absent takes the queries' own. */
   scalar?: Scalar;
-  /** Candidate-pool breadth the walk explores; absent lets the engine derive it. A wider pool folds more of the tail. */
+  /** Breadth of the candidates the walk explores; absent lets the engine derive it. Wider candidates fold more of the tail. */
   expansionFactor?: number;
   /** The logit scale, conventionally the inverse square root of the head dimensionality; absent derives it. */
   scoreScale?: number;
@@ -158,7 +158,7 @@ export interface DenseAttendConfig {
 
 /** Optional settings of a resumable search stream. Mirrors `usearch_dense_search_stream_init_t`. */
 export interface DenseSearchStreamInitConfig {
-  /** Candidate-pool breadth the walk explores; absent lets the engine derive it. */
+  /** Breadth of the candidates the walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
 }
 

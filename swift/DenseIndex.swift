@@ -5,8 +5,8 @@
 //  Vector Search over equidimensional dense embeddings.
 //
 //  Every verb is a batch over strided rows, so a memory-mapped dataset reaches the index
-//  with no reshape and no copy, and a single vector is a one-row matrix. The candidate-pool
-//  breadth rides each call rather than the handle, which lets a recall sweep run against one
+//  with no reshape and no copy, and a single vector is a one-row matrix. The breadth of the
+//  candidates rides each call rather than the handle, which lets a recall sweep run against one
 //  immutable index with no mutation between points.
 //
 
@@ -216,7 +216,7 @@ public struct ValueLookup: Sendable {
 
 /// The knobs of `insert`. Every zeroed field derives, which is what almost every caller wants.
 public struct DenseInsertConfig {
-    /// The candidate-pool breadth the insertion walk searches for neighbors with; zero derives it
+    /// The breadth of the candidates the insertion walk searches for neighbors with; zero derives it
     /// from the geometry.
     public var expansionFactor: Int
     /// Called with rows admitted; it reports and cannot cancel.
@@ -241,7 +241,7 @@ public struct DenseInsertConfig {
 
 /// The knobs of `refine`. Every zeroed field derives.
 public struct DenseRefineConfig {
-    /// The candidate-pool breadth the re-selection walk explores; zero derives it from the geometry.
+    /// The breadth of the candidates the re-selection walk explores; zero derives it from the geometry.
     public var expansionFactor: Int
     /// Called with nodes swept; a stop leaves the graph correct and merely less improved.
     public var progress: Progress?
@@ -265,7 +265,7 @@ public struct DenseRefineConfig {
 
 /// The knobs of `search`. Every zeroed field derives.
 public struct DenseSearchConfig {
-    /// The candidate-pool breadth the walk explores; zero derives it from the geometry, and a
+    /// The breadth of the candidates the walk explores; zero derives it from the geometry, and a
     /// scan ignores it.
     public var expansionFactor: Int
     /// Walks the graph by default; `.scan` scores every row exactly, on RAM and NVMe handles, and
@@ -303,7 +303,7 @@ public struct DenseSearchConfig {
 
 /// The knobs of `maxsim`. Every zeroed field derives.
 public struct DenseMaxsimConfig {
-    /// The candidate-pool breadth; zero derives it from the geometry.
+    /// The breadth of the candidates; zero derives it from the geometry.
     public var expansionFactor: Int
     /// Called with queries resolved.
     public var progress: Progress?
@@ -329,7 +329,7 @@ public struct DenseMaxsimConfig {
 public struct DenseMultiplyConfig {
     /// The bound on pairs kept per row, the first ones its walk scored; zero keeps every pair.
     public var wanted: Int
-    /// The candidate-pool breadth, which widens the emitted pattern; zero derives.
+    /// The breadth of the candidates, which widens the emitted pattern; zero derives.
     public var expansionFactor: Int
     /// Called with rows resolved.
     public var progress: Progress?
@@ -360,7 +360,7 @@ public struct DenseAttendConfig {
     public var headCount: Int
     /// The softmax state to write, one per query row, which must outlive the call; nil skips it.
     public var carry: UnsafeMutableBufferPointer<DenseSoftmaxState>?
-    /// The candidate-pool breadth; zero derives it from the geometry. A wider pool walks further,
+    /// The breadth of the candidates; zero derives it from the geometry. Wider candidates walk further,
     /// folding more of the tail.
     public var expansionFactor: Int
     /// The logit scale, conventionally the inverse square root of the head dimensionality; zero
@@ -433,7 +433,7 @@ public struct DenseSaveBufferConfig {
 
 /// The knobs of `searchStream`.
 public struct DenseSearchStreamInitConfig {
-    /// The candidate-pool breadth the walk explores; zero derives it from the geometry.
+    /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     public var expansionFactor: Int
 
     public init(expansionFactor: Int = 0) { self.expansionFactor = expansionFactor }

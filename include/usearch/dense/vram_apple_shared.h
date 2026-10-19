@@ -22,11 +22,11 @@ enum metal_fragment_t : unsigned int {
 };
 
 /** Bytes of the batch spans a walk carves first in its scratch, the CUDA walk's shared
- *  @c vram_gathered: one batch's scored nodes, IDs and dots, a simdgroup's width each, and their
- *  sum. */
+ *  @c vram_gathered: one batch's scored nodes and dots, a simdgroup's width each, its IDs, two
+ *  simdgroup widths for a scored batch and the next one's carry, and their sum. */
 enum metal_span_bytes_t : unsigned int {
     metal_scored_span_bytes_k = metal_simdgroup_width_k * 8,
-    metal_ids_span_bytes_k = metal_simdgroup_width_k * 4,
+    metal_ids_span_bytes_k = metal_simdgroup_width_k * 4 * 2,
     metal_dots_span_bytes_k = metal_simdgroup_width_k * 4,
     metal_batch_spans_bytes_k = metal_scored_span_bytes_k + metal_ids_span_bytes_k + metal_dots_span_bytes_k,
 };
@@ -77,7 +77,8 @@ struct metal_arguments_t {
     unsigned int sampling_bound, queries_count, count, epoch_base;
     unsigned int visited_slots, hash_shift, selection_rows, slice_bytes;
     unsigned int heads_count, row_fragments_magic, use_node_ids, expansion;
-    unsigned int tail_entries, parts, round;
+    unsigned int tail_entries, parts, round, seats;
+    unsigned int filling_rows;
 };
 
 } // namespace unum::usearch::dense

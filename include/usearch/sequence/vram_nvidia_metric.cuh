@@ -213,8 +213,8 @@ struct u8_ampere_levenshtein_kit_t {
     static __device__ __forceinline__ query_t prepare(basic::vram_row_t row, byte_t* span, u32_t lane) noexcept {
         return cuda_levenshtein_prepare_ampere<sz_levenshtein_bytes_k>(row, span, lane);
     }
-    static __device__ __forceinline__ distance_t bound(nk_kernel_kind_t, query_t const& query,
-                                                       basic::vram_row_t row) noexcept {
+    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const& query,
+                                                             basic::vram_row_t row) noexcept {
         return cuda_levenshtein_bound_ampere<sz_levenshtein_bytes_k>(query, row);
     }
     template <u32_t words_>
@@ -246,8 +246,8 @@ struct utf8_ampere_levenshtein_kit_t {
     static __device__ __forceinline__ query_t prepare(basic::vram_row_t row, byte_t* span, u32_t lane) noexcept {
         return cuda_levenshtein_prepare_ampere<sz_levenshtein_runes_k>(row, span, lane);
     }
-    static __device__ __forceinline__ distance_t bound(nk_kernel_kind_t, query_t const& query,
-                                                       basic::vram_row_t row) noexcept {
+    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const& query,
+                                                             basic::vram_row_t row) noexcept {
         return cuda_levenshtein_bound_ampere<sz_levenshtein_runes_k>(query, row);
     }
     template <u32_t words_>
@@ -333,8 +333,8 @@ struct u8_ampere_overlap_kit_t {
     }
 
     /** No candidate matches more windows than the shorter side holds. */
-    static __device__ __forceinline__ distance_t bound(nk_kernel_kind_t, query_t const& query,
-                                                       basic::vram_row_t row) noexcept {
+    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const& query,
+                                                             basic::vram_row_t row) noexcept {
         u64_t const candidate_windows = sz_overlap_windows(row.bytes, query.widths, query.widths_count);
         u64_t const longer = max_of<u64_t>(candidate_windows, query.windows);
         u64_t const shorter = min_of<u64_t>(candidate_windows, query.windows);

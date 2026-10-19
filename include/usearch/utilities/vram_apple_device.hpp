@@ -542,7 +542,7 @@ struct metal_launch_t {
     }
 
     /** Waits for the committed command buffer and answers whether the device finished it. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         if (commands && !encoder) metal_send<void>(commands, "waitUntilCompleted");
         return landed();
     }
@@ -578,7 +578,7 @@ struct metal_device_arena_t {
     }
 
     /** Every upload already landed, so there is nothing to wait for. */
-    status_t drain() noexcept { return status_t::success_k; }
+    status_t wait() noexcept { return status_t::success_k; }
 
     int device() const noexcept { return device_; }
 
@@ -674,7 +674,7 @@ struct metal_executor_t {
 
     /** Waits for every command buffer committed to every stream - the fleet's completion: one empty
      *  command buffer per stream, which completes only after every one committed before it. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         metal_api_t const& api = metal_api();
         constexpr std::size_t completed_k = 4; // `MTLCommandBufferStatusCompleted`
         for (stream_t const& opened : streams_) {
@@ -789,7 +789,7 @@ struct metal_traversal_context {
 
     /** Waits for the last command buffer this context committed - one stream's completion, the
      *  executor's @c drain being the fleet's. */
-    status_t drain() noexcept { return committed_.drain(); }
+    status_t wait() noexcept { return committed_.wait(); }
 
     /** Polls whether the last command buffer this context committed finished - @c success_k once
      *  it has, @c deferred_k while it runs - without blocking, so one host thread awaits whichever

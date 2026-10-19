@@ -656,7 +656,7 @@ def test_distances_agree_with_the_oracle(executor, quantization: Scalar):
 
 
 def test_expansion_rides_the_call(executor):
-    """The candidate pool is a per-call setting, so one immutable index serves a whole sweep."""
+    """The breadth of the candidates is a per-call setting, so one immutable index serves a whole sweep."""
     index, vectors = build_index(512, 64, executor)
     queries = vectors[:32]
     narrow, wide = DenseTraversalStats(), DenseTraversalStats()

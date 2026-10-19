@@ -8,7 +8,7 @@
  *  memory, and global arenas, like:
  *
  *  - Packed scored-node @b candidates ordered by raw distance bits
- *  - Register-resident and arena-backed @b frontiers with append-only tail pools
+ *  - Register-resident and arena-backed @b frontiers with append-only tail candidates
  *  - Exact epoch-tagged @b visited-sets probed warp-cooperatively
  *  - Locked @b neighbor rows, sorted @b buffers, @b telemetry and the @b arena slices every
  *    index's walks carve
@@ -81,7 +81,7 @@ struct vram_scored_node;
  *  The all-ones pattern is the empty slot: its distance prefix is the flipped NaN that
  *  sorts last, it reads as expanded, and its ID is @c node_id_unknown_k - so
  *  traversal loops need no emptiness guards. Dropping the distance LSB costs one ulp of
- *  ordering precision: pools are "sorted by @c distance_bits(), tie order unspecified",
+ *  ordering precision: candidates are "sorted by @c distance_bits(), tie order unspecified",
  *  which is the practical semantic of approximate search either way, and in exchange IDs
  *  keep all 32 bits - the ID ceiling matches the CPU-resident index exactly.
  */
@@ -211,7 +211,7 @@ __device__ __forceinline__ vram_scored_node<node_id_type_> sort_lanes(vram_score
 }
 
 /**
- *  @brief Warp-collective ascending pool of @c width_k x @c slots_ scored entries - the fused
+ *  @brief Warp-collective ascending candidates of @c width_k x @c slots_ scored entries - the fused
  *      results-and-frontier of one traversal, striped as rank @b r at (slot r/width, lane
  *      r%width), always sorted by @c distance_bits() with unspecified tie order.
  *
@@ -219,11 +219,11 @@ __device__ __forceinline__ vram_scored_node<node_id_type_> sort_lanes(vram_score
  *  lives at the last rank) and the frontier heap (the nearest unexpanded entry plays
  *  @c top(), the expanded bit plays lazy deletion). Two register-residency invariants are
  *  part of the contract: every slot index is compile-time after unrolling - a single
- *  runtime-indexed access spills the whole pool to local memory - and batch insertion
+ *  runtime-indexed access spills all of its candidates to local memory - and batch insertion
  *  goes through the fold-merge network below, never a full re-sort.
  */
 template <u32_t slots_, typename warp_type_, typename node_id_type_>
-struct vram_sorted_pool {
+struct vram_sorted_candidates {
     using warp_t = warp_type_;
     using scored_node_t = vram_scored_node<node_id_type_>;
     scored_node_t entries_[slots_];
@@ -237,18 +237,18 @@ struct vram_sorted_pool {
         for (u32_t slot = 0; slot != slots_; ++slot) entries_[slot] = scored_node_t::sentinel();
     }
 
-    /** Merges a lane-wide staged batch into the pool, keeping the @c capacity_k nearest.
-     *  [ascending pool | sentinel pad | descending batch] is one bitonic sequence: a single fold
-     *  absorbs the batch, log2 of @c slots_ in-lane stages plus log2 of @c width_k shuffle stages
-     *  restore ascending order. */
+    /** Merges a lane-wide staged batch into the candidates, keeping the @c capacity_k nearest.
+     *  [ascending candidates | sentinel pad | descending batch] is one bitonic sequence: a single
+     *  fold absorbs the batch, log2 of @c slots_ in-lane stages plus log2 of @c width_k shuffle
+     *  stages restore ascending order. */
     __device__ __forceinline__ void insert_batch(scored_node_t staged, u32_t lane) noexcept {
         (void)insert_batch_spilling(staged, lane);
     }
 
-    /** The same fold-merge, reporting what fell out: at the fold boundary the
-     *  element-wise @b max of the last slot and the descending batch is exactly the
-     *  union's worst lane-width - sentinels while the pool still has room. @return This
-     *  lane's displaced entry, for the caller to spill onward or drop. */
+    /** The same fold-merge, reporting what fell out: at the fold boundary the element-wise @b max
+     *  of the last slot and the descending batch is exactly the union's worst lane-width -
+     *  sentinels while the candidates still have room. @return This lane's displaced entry, for the
+     *  caller to spill onward or drop. */
     __device__ __forceinline__ scored_node_t insert_batch_spilling(scored_node_t staged, u32_t lane) noexcept {
         scored_node_t const descending = shuffle_xor<warp_t>(sort_lanes<warp_t>(staged, lane), width_k - 1);
         scored_node_t const displaced = entries_[slots_ - 1] < descending ? descending : entries_[slots_ - 1];
@@ -336,9 +336,9 @@ struct vram_sorted_pool {
         return !(shuffle_from<warp_t>(entries_[slots_ - 1], width_k - 1) == scored_node_t::sentinel());
     }
 
-    /** Kills every staged entry whose ID already resides in the pool. The exact visited set stages
-     *  every ID once until it saturates; past that, the walk and the arena frontier's final fold
-     *  keep one copy of a re-scored ID. */
+    /** Kills every staged entry whose ID already resides in the candidates. The exact visited set
+     *  stages every ID once until it saturates; past that, the walk and the arena frontier's final
+     *  fold keep one copy of a re-scored ID. */
     __device__ __forceinline__ scored_node_t deduplicate(scored_node_t staged, u32_t lane) const noexcept {
         node_id_type_ const staged_id = staged.id();
         bool resident = false;
@@ -368,7 +368,7 @@ struct vram_sorted_pool {
  *  entries spilled from the register head, consumed by refills on frontier drain.
  *  Sized ahead by the host and never grown; its frontier compacts it before it fills. */
 template <typename warp_type_, typename node_id_type_>
-struct vram_tail_pool {
+struct vram_tail_candidates {
     using warp_t = warp_type_;
     using scored_node_t = vram_scored_node<node_id_type_>;
     scored_node_t* entries_;
@@ -389,18 +389,18 @@ struct vram_tail_pool {
     }
 };
 
-/** The register frontier: the fused results-and-frontier of a bounded walk, a thin
- *  verb layer over one register pool. The CPU keeps its results buffer and frontier
- *  heap separate; registers fuse them - the expanded bit plays frontier deletion, the
- *  last rank plays the results radius - and this wrapper names the traversal verbs so
- *  one walk body serves this and the arena twin below. */
+/** The register frontier: the fused results-and-frontier of a bounded walk, a thin verb layer over
+ *  one set of register candidates. The CPU keeps its results buffer and frontier heap separate;
+ *  registers fuse them - the expanded bit plays frontier deletion, the last rank plays the results
+ *  radius - and this wrapper names the traversal verbs so one walk body serves this and the arena
+ *  twin below. */
 template <u32_t slots_, typename warp_type_, typename node_id_type_>
 struct vram_register_frontier {
     using warp_t = warp_type_;
     using scored_node_t = vram_scored_node<node_id_type_>;
-    vram_sorted_pool<slots_, warp_t, node_id_type_> ranks_;
+    vram_sorted_candidates<slots_, warp_t, node_id_type_> ranks_;
 
-    __device__ __forceinline__ void reset(u32_t) noexcept { ranks_.clear(); }
+    __device__ __forceinline__ void clear(u32_t) noexcept { ranks_.clear(); }
 
     /** A walk over full ranks ends at their radius, so a further walk needs no budget renewed. */
     __device__ __forceinline__ void renew() noexcept {}
@@ -421,7 +421,7 @@ struct vram_register_frontier {
     __device__ __forceinline__ scored_node_t worst() const noexcept {
         return shuffle_from<warp_t>(ranks_.entries_[slots_ - 1], warp_t::width_k - 1);
     }
-    __device__ __forceinline__ void push_batch(scored_node_t staged, u32_t lane) noexcept {
+    __device__ __forceinline__ void insert_batch(scored_node_t staged, u32_t lane) noexcept {
         // Only entries below the worst kept one can enter:
         // a few take their ranks, a crowd takes the fold-merge.
         constexpr u32_t few_k = 3;
@@ -448,12 +448,12 @@ struct vram_register_frontier {
     }
 
     /** Hands @p emit the nearest @p count entries ascending, a warp-width per call, rank
-     *  @b base+lane on each lane; ranks past the pool are sentinels. The ranks are the container
-     *  itself, so nothing is folded. */
+     *  @b base+lane on each lane; ranks past the candidates are sentinels. The ranks are the
+     *  container itself, so nothing is folded. */
     template <typename emit_type_>
     __device__ __forceinline__ void for_each_rank(u32_t count, u32_t lane, emit_type_&& emit) const noexcept {
-        // Slot by slot at compile time keeps every rung's pool in registers, which a rolled loop
-        // over runtime ranks spills to local memory.
+        // Slot by slot at compile time keeps every rung's candidates in registers, which a rolled
+        // loop over runtime ranks spills to local memory.
 #pragma unroll
         for (u32_t slot = 0; slot < slots_; ++slot)
             if (slot * warp_t::width_k < count) emit(slot * warp_t::width_k + lane, ranks_.entries_[slot]);
@@ -472,8 +472,8 @@ template <typename warp_type_, typename node_id_type_>
 struct vram_arena_frontier {
     using warp_t = warp_type_;
     using scored_node_t = vram_scored_node<node_id_type_>;
-    vram_sorted_pool<2, warp_t, node_id_type_> head_;
-    vram_tail_pool<warp_t, node_id_type_> tail_;
+    vram_sorted_candidates<2, warp_t, node_id_type_> head_;
+    vram_tail_candidates<warp_t, node_id_type_> tail_;
     u32_t expansion_target_ = 0;
     u32_t expansions_ = 0;
 
@@ -483,7 +483,7 @@ struct vram_arena_frontier {
     /** Entries tied at that radius a compacted tail still could not seat. */
     u32_t unseated_ = 0;
 
-    __device__ __forceinline__ void reset(u32_t) noexcept {
+    __device__ __forceinline__ void clear(u32_t) noexcept {
         head_.clear();
         tail_.size_ = 0;
         expansions_ = 0;
@@ -500,7 +500,7 @@ struct vram_arena_frontier {
     __device__ __forceinline__ bool holds(node_id_type_ staged_id, u32_t lane) const noexcept {
         return head_.deduplicate(scored_node_t::make(0, staged_id), lane) == scored_node_t::sentinel();
     }
-    __device__ __forceinline__ void push_batch(scored_node_t staged, u32_t lane) noexcept {
+    __device__ __forceinline__ void insert_batch(scored_node_t staged, u32_t lane) noexcept {
         // When every staged entry sits at or past the head's radius the merge displaces
         // nothing - the batch goes straight to the tail, which by construction only holds
         // entries farther than everything head-resident, and staged >= radius keeps that.
@@ -652,14 +652,14 @@ struct vram_arena_frontier {
     /** Hands @p emit the nearest @p count entries of everything the walk has seen - the last head
      *  generation plus every tail entry - ascending, a warp-width per call, rank @b base+lane on
      *  each lane; ranks past what the walk saw are sentinels. Each round folds every entry ranked
-     *  after the previous round's last into a fresh two-slot pool; past one round the tail first
-     *  keeps only the entries that can rank, so the rounds scale with @p count, not the walk.
+     *  after the previous round's last into a fresh two-slot candidates; past one round the tail
+     *  first keeps only the entries that can rank, so the rounds scale with @p count, not the walk.
      *  Promotion tombstones its tail slot, but an ID re-scored past a visited-set saturation can
      *  sit in the tail twice, so each round keeps one copy against itself and the round before.
      *  Call once, after the walk. */
     template <typename emit_type_>
     __device__ __forceinline__ void for_each_rank(u32_t count, u32_t lane, emit_type_&& emit) noexcept {
-        using round_t = vram_sorted_pool<2, warp_t, node_id_type_>;
+        using round_t = vram_sorted_candidates<2, warp_t, node_id_type_>;
         if (count > round_t::capacity_k) keep_nearest(count, lane);
         scored_node_t last = scored_node_t::sentinel();
         round_t previous;
@@ -888,9 +888,9 @@ struct vram_telemetry_t {
 template <typename frontier_>
 concept vram_frontier = requires(frontier_& frontier, frontier_ const& held, typename frontier_::scored_node_t entry,
                                  u32_t lane) {
-    frontier.reset(lane);
+    frontier.clear(lane);
     frontier.renew();
-    frontier.push_batch(entry, lane);
+    frontier.insert_batch(entry, lane);
     { frontier.pop_nearest(lane) } -> std::same_as<typename frontier_::scored_node_t>;
     { held.holds(entry.id(), lane) } -> std::same_as<bool>;
     { held.exhausted() } -> std::same_as<bool>;
@@ -899,15 +899,131 @@ concept vram_frontier = requires(frontier_& frontier, frontier_ const& held, typ
     { held.unseated() } -> std::same_as<u32_t>;
 };
 
-/** One walking warp's state: the candidate pool, the random stream, the running telemetry, and the shared scratch
- *  past its query span, where a rescoring hands its fold what the fold keeps. */
+/** One walking warp's state: the candidates, the random stream, the running telemetry, and the
+ *  shared scratch past its query span, where a rescoring hands its fold what the fold keeps. */
 template <vram_frontier frontier_>
 struct vram_warp_context {
     frontier_ frontier;
     splitmix64_t random_generator;
     vram_telemetry_t telemetry;
     byte_t* scratch = nullptr;
+
+    /** Rows each round expands, from @ref walk_width; one, the plain greedy walk, for inserts and
+     *  refines. */
+    u32_t walk_width = 1;
 };
+
+/**
+ *  @brief Expands @p first, whose lock word @p first_value the walk already read, with up to
+ *      @p width - 1 further candidates inside the radius, as one round.
+ *
+ *  Every row's slots load in one window, the rows claim in pop order, and each warp-width of
+ *  fresh IDs reaches @p score through the two-warp @p staged buffer, whose @p pending entries
+ *  carry across rounds.
+ *
+ *  Lane @b r reads row @b r 's lock word once and the warp shuffles it, so no two lanes branch on
+ *  racing reads; a locked further row is held when the walk holds none, else counted dropped.
+ *  The rows' slot loads fit @c vram_max_gathers_in_flight_k per lane, which bounds the round, and a
+ *  row wider than that window loads in several.
+ *
+ *  @return @c sated_k when a scored batch sated the fold.
+ */
+template <typename warp_type_, typename node_id_type_, vram_frontier frontier_, typename storage_,
+          typename score_type_>
+__device__ __forceinline__ walk_demand_t vram_expand_round( //
+    frontier_& frontier, vram_visited_set<warp_type_, node_id_type_>& visited, vram_telemetry_t& telemetry,
+    storage_ const& storage, vram_scored_node<node_id_type_> first, node_id_type_ first_value, u32_t width,
+    node_id_type_ first_invisible_id, vram_scored_node<node_id_type_>& held, u32_t& held_at_hop, node_id_type_* staged,
+    u32_t& pending, u32_t lane, score_type_&& score) noexcept {
+
+    using warp_t = warp_type_;
+    using scored_node_t = vram_scored_node<node_id_type_>;
+    using row_t = vram_neighbors_ref<warp_t, node_id_type_>;
+    constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+    constexpr u32_t window_k = vram_max_gathers_in_flight_k;
+    u32_t const connectivity = storage.connectivity;
+
+    // Lane `r` keeps the round's row `r`; the radius only tightens, so a popped row past it ends
+    // the round.
+    u32_t const rows_cap = max_of(1u, min_of(width, window_k / divide_round_up(connectivity, warp_t::width_k)));
+    scored_node_t row_entry = lane == 0 ? first : scored_node_t::sentinel();
+    u32_t rows = 1;
+    while (rows < rows_cap) {
+        scored_node_t const next = frontier.pop_nearest(lane);
+        if (next == scored_node_t::sentinel() || frontier.beyond_radius(next)) break;
+        if (lane == rows) row_entry = next;
+        ++telemetry.hops, ++rows;
+    }
+    node_id_type_ const row_value = lane == 0 ? first_value
+                                    : lane < rows
+                                        ? row_t {storage.neighbors_for(row_entry.id()), connectivity}.peek_first()
+                                        : unknown_k;
+    // The lane barrier orders every lane's slot loads after the readers' acquires.
+    warp_t::sync();
+    typename warp_t::mask_t const locked = warp_t::ballot(lane < rows && row_value == unknown_k);
+    if (locked) {
+        bool const holding = held == scored_node_t::sentinel();
+        if (holding) held = shuffle_from<warp_t>(row_entry, warp_t::first(locked)), held_at_hop = telemetry.hops;
+        telemetry.locked_drops += warp_t::count(locked) - holding;
+    }
+
+    // Live rows after the first, walked lowest lane first; every bound and step is warp-uniform.
+    typename warp_t::mask_t rows_left = warp_t::ballot(lane < rows && row_value != unknown_k) &
+                                        ~typename warp_t::mask_t {1};
+    u32_t row = 0, slot_base = 0;
+    bool more = true;
+    while (more) {
+        node_id_type_ neighbor_ids[window_k], owner_ids[window_k];
+        u32_t loads = 0;
+#pragma unroll
+        for (u32_t load = 0; load != window_k; ++load) {
+            if (!more) break;
+            node_id_type_ const owner = warp_t::shuffle(row_entry.id(), row);
+            node_id_type_ const word = warp_t::shuffle(row_value, row);
+            u32_t const slot = slot_base + lane;
+            neighbor_ids[load] = slot == 0 ? word
+                                 : slot < connectivity
+                                     ? row_t {storage.neighbors_for(owner), connectivity}.load_slot(slot)
+                                     : unknown_k;
+            owner_ids[load] = owner;
+            ++loads;
+            slot_base += warp_t::width_k;
+            if (slot_base < connectivity) continue;
+            more = rows_left != 0;
+            if (more) row = warp_t::first(rows_left), rows_left &= rows_left - 1;
+            slot_base = 0;
+        }
+        // Rolled, so the claim and the scoring it may call inline once per walk, not once per load.
+#pragma unroll 1
+        for (u32_t load = 0; load != window_k; ++load) {
+            if (load == loads) break;
+            node_id_type_ const neighbor_id = neighbor_ids[load];
+            // The bound never exceeds the ID space, so it rejects the sentinel too.
+            bool const usable = neighbor_id < first_invisible_id && neighbor_id != owner_ids[load];
+            bool const claimed = visited.test_and_set(usable ? neighbor_id : unknown_k, lane);
+            // Past a saturation a claim re-scores, so an ID the frontier or this staging already
+            // holds stages no second copy; every lane takes part in the frontier's collective scan.
+            bool repeated = visited.saturations_ && frontier.holds(neighbor_id, lane);
+            for (u32_t index = 0; visited.saturations_ && index != pending; ++index)
+                repeated |= staged[index] == neighbor_id;
+            bool const fresh = claimed && !repeated;
+            typename warp_t::mask_t const fresh_mask = warp_t::ballot(fresh);
+            if (fresh) staged[pending + warp_t::count(fresh_mask & warp_t::below(lane))] = neighbor_id;
+            warp_t::sync();
+            pending += warp_t::count(fresh_mask);
+            if (pending < warp_t::width_k) continue;
+            if (score(warp_t::width_k) == walk_demand_t::sated_k) return walk_demand_t::sated_k;
+            // Every lane read the scored IDs before the carry moves down over them.
+            warp_t::sync();
+            pending -= warp_t::width_k;
+            node_id_type_ const carried = lane < pending ? staged[warp_t::width_k + lane] : unknown_k;
+            warp_t::sync();
+            if (lane < pending) staged[lane] = carried;
+            warp_t::sync();
+        }
+    }
+    return walk_demand_t::continue_k;
+}
 
 /** Runtime-strided view over the warp's vector cache - rows of @c row_fragments_ fragments each,
  *  aliasing the scratch slice, in shared memory or the warp's arena slice. In the arena the cache
@@ -996,7 +1112,7 @@ struct vram_selection_scratch {
     u32_t* kept_positions;
 
     /** Each cached candidate's distance to the query, by cache row, staged once so the selection
-     *  loop reads memory, not a register pool it would unroll to index. */
+     *  loop reads memory, not register candidates it would unroll to index. */
     f32_t* candidate_distances;
 
     /** The node ID each cache row holds, by cache row, which a by-reference cache resolves its rows

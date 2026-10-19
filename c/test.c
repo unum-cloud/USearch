@@ -614,7 +614,7 @@ void test_sequence_absorb(void) {
                                                                   .metric = usearch_sequence_metric_levenshtein_bytes_k,
                                                                   .connectivity = 8});
         expect(!outcome.message, outcome.message);
-        // A pool of eight wires a deliberately weak graph, which the refinement then improves.
+        // Eight candidates wire a deliberately weak graph, which the refinement then improves.
         usearch_sequence_insert(
             &(usearch_sequence_insert_t) {.index = indexes[which],
                                           .executor = executor,

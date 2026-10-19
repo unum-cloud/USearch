@@ -141,7 +141,8 @@ std::size_t test_dense_indexes_planned_insert(u64_t seed, typename indexes_type_
 }
 
 /** The VRAM reading of the sharded indexer search, keys equal to their rows: every shard walks the same queries
- *  under the same heads with a pool as wide as the index, so the merged top of every query is the oracle's. */
+ *  under the same heads with candidates as wide as the index, so the merged top of every query is
+ *  the oracle's. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_vram_indexes_indexer_search(u64_t seed, typename indexes_type_::executor_t& placement) {
     using scalar_t = typename indexes_type_::scalar_t;

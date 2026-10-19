@@ -6,7 +6,7 @@
  *      @c vram_index.cuh and the kernels of @c vram_nvidia_index.cuh.
  *
  *  One 32-wide simdgroup walks one query or inserts one node, with the same packed scored nodes,
- *  register pools, exact visited sets, slot-0 lock words and admission waves as the CUDA design, over
+ *  register candidates, exact visited sets, slot-0 lock words and admission waves as the CUDA design, over
  *  @ref metal_warp_t, whose atomics and value matching Metal spells its own way. Every
  *  per-simdgroup scratch span - the query, the candidate cache, the visited set and the staged batch
  *  - lives in one device slice rather than threadgroup memory, which caps at 32 KB and would bound
@@ -58,19 +58,19 @@ inline ulong metal_sort_lanes(ulong value, uint lane) {
     return value;
 }
 
-/** The register pool of @c 32 x @p slots_ nodes: rank r at (slot r/32, lane r%32), always ascending. */
+/** The register candidates of @c 32 x @p slots_ nodes: rank r at (slot r/32, lane r%32), always ascending. */
 template <uint slots_>
-struct metal_pool {
+struct metal_sorted_candidates {
     ulong entries[slots_];
 
     void clear() {
         for (uint slot = 0; slot != slots_; ++slot) entries[slot] = metal_sentinel_k;
     }
 
-    /** Folds a staged 32-lane batch in, keeping the nearest; the batch descends against the ascending pool. */
+    /** Folds a staged 32-lane batch in, keeping the nearest; the batch descends against the ascending candidates. */
     void insert_batch(ulong staged, uint lane) { insert_batch_spilling(staged, lane); }
 
-    /** The same fold, answering this lane's entry the fold displaced - sentinels while the pool has room. */
+    /** The same fold, answering this lane's entry the fold displaced - sentinels while the candidates have room. */
     ulong insert_batch_spilling(ulong staged, uint lane) {
         ulong const descending = warp_t::shuffle_xor(metal_sort_lanes(staged, lane), warp_t::width_k - 1);
         ulong const last = entries[slots_ - 1];
@@ -114,7 +114,7 @@ struct metal_pool {
     }
 
     /** The frontier verbs of the CUDA register frontier. */
-    void reset(thread metal_walk_t& walk);
+    void clear(thread metal_walk_t& walk);
 
     /** A walk over full ranks ends at their radius, so a further walk needs no budget renewed. */
     void renew() {}
@@ -123,8 +123,8 @@ struct metal_pool {
     uint compactions() { return 0; }
     uint unseated() { return 0; }
 
-    /** Kills every staged entry whose ID already resides in the pool, as the CUDA pool's @c deduplicate does: a
-     *  re-scored ID past a visited-set saturation keeps one copy. */
+    /** Kills every staged entry whose ID already resides in the candidates, as the CUDA candidates' @c deduplicate
+     * does: a re-scored ID past a visited-set saturation keeps one copy. */
     ulong deduplicate(ulong staged, uint lane) {
         uint const staged_id = metal_id_of(staged);
         bool resident = false;
@@ -138,10 +138,10 @@ struct metal_pool {
         return resident ? metal_sentinel_k : staged;
     }
 
-    /** Whether the pool already holds the ID @p staged_id names on this lane, every lane taking part. */
+    /** Whether the candidates already hold the ID @p staged_id names on this lane, every lane taking part. */
     bool holds(uint staged_id, uint lane) { return deduplicate(metal_make(0, staged_id), lane) == metal_sentinel_k; }
 
-    /** The fold's result for a batch of which only the @p admitted lanes can enter, as the CUDA pool's
+    /** The fold's result for a batch of which only the @p admitted lanes can enter, as the CUDA candidates'
      *  @c insert_each lands it: each takes its rank, ranks at and past it move up one, and the last rank drops. */
     void insert_each(ulong staged, uint admitted, uint lane) {
         while (admitted) {
@@ -188,7 +188,7 @@ struct metal_pool {
  *  slice, refilled from the tail when the head drains, retiring after @c expansion_target expansions, and ranking
  *  everything it kept at the end, a head's width per round. */
 struct metal_arena_frontier {
-    metal_pool<2> head;
+    metal_sorted_candidates<2> head;
     device ulong* tail;
     uint tail_size, tail_capacity;
 
@@ -197,7 +197,7 @@ struct metal_arena_frontier {
     uint tail_compactions, tail_unseated;
     uint expansion_target, expansions;
 
-    void reset(thread metal_walk_t& walk);
+    void clear(thread metal_walk_t& walk);
 
     /** Grants a further walk over what this frontier holds its own expansion budget. */
     void renew() { expansions = 0; }
@@ -330,17 +330,17 @@ struct metal_arena_frontier {
     }
 
     /** Hands @p emit the nearest @p count entries of the head and the tail ascending, as the CUDA arena frontier
-     *  does: each round folds every entry ranked after the previous round's last into a fresh two-slot pool, and
+     *  does: each round folds every entry ranked after the previous round's last into a fresh two-slot candidates, and
      *  past one round the tail first keeps only the entries that can rank. */
     template <typename emit_type_>
     void for_each_rank(uint count, uint lane, thread emit_type_& emit) {
         constexpr uint round_ranks_k = 2 * warp_t::width_k;
         if (count > round_ranks_k) keep_nearest(count, lane);
         ulong last = metal_sentinel_k;
-        metal_pool<2> previous;
+        metal_sorted_candidates<2> previous;
         previous.clear();
         for (uint base = 0; base < count; base += round_ranks_k) {
-            metal_pool<2> round;
+            metal_sorted_candidates<2> round;
             round.clear();
             // An ID re-scored past a visited-set saturation can sit in the tail twice, so a round keeps one copy.
             auto const fold = [&](ulong entry) {
@@ -364,10 +364,10 @@ struct metal_arena_frontier {
     }
 };
 
-/** The frontier of a walk on the pool ladder's rung of @p slots_ slots; slot zero is the arena frontier. */
+/** The frontier of a walk on the candidate ladder's rung of @p slots_ slots; slot zero is the arena frontier. */
 template <uint slots_>
 struct metal_frontier_of {
-    using type = metal_pool<slots_>;
+    using type = metal_sorted_candidates<slots_>;
 };
 template <>
 struct metal_frontier_of<0> {
@@ -417,12 +417,12 @@ struct metal_walk_t {
     device uint* candidate_ids;
     device uint* kept_positions;
 
-    /** Each cached candidate's distance to the query, staged once so the selection reads memory, not the pool. */
+    /** Each cached candidate's distance to the query, staged once so the selection reads memory, not the candidates. */
     device float* candidate_distances;
     device norms_t* candidate_norms;
 
     uint row_fragments, lanes_per_row, steps_per_row, connectivity, metric, row_fragments_magic;
-    uint tail_entries, expansion, selection_rows;
+    uint tail_entries, expansion, selection_rows, walk_width;
     bool has_norms;
     uint lane;
 
@@ -568,7 +568,7 @@ struct metal_walk_t {
     }
 };
 
-/** What a walk does with every scored batch beside folding it into the pool. */
+/** What a walk does with every scored batch beside folding it into the candidates. */
 struct metal_fold_t {
     device uint* ids;
     device dot_t* products;
@@ -590,8 +590,8 @@ struct metal_fold_t {
     }
 };
 
-/** Scores one gathered batch, rescores it under indexer heads when the fold names any, folds it into the pool, and
- *  hands it to the fold. */
+/** Scores one gathered batch, rescores it under indexer heads when the fold names any, folds it into the candidates,
+ * and hands it to the fold. */
 template <typename frontier_>
 inline void metal_score_into_frontier(thread metal_walk_t& walk, thread frontier_& frontier, norms_t query_norms,
                                       uint count, thread metal_fold_t& fold) {
@@ -614,14 +614,94 @@ inline void metal_score_into_frontier(thread metal_walk_t& walk, thread frontier
     fold.absorb(walk, count);
 }
 
-/** Continues a greedy best-first walk over whatever @p pool holds, seeding from landmarks in @b [first,bound) and
+/** Expands @p first, whose lock word @p first_value the walk already read, with up to @c walk_width - 1 further
+ *  candidates inside the radius as one round, as the CUDA and HIP @c vram_expand_round does: every row's slots load
+ *  in one window, the rows claim in pop order, and each simdgroup-width of fresh IDs scores through the two-width
+ *  @c ids span, whose @p pending entries carry to the caller. A locked further row is held when the walk holds none,
+ *  else counted dropped. */
+template <typename frontier_>
+inline void metal_expand_round(thread metal_walk_t& walk, thread frontier_& frontier, norms_t query_norms, ulong first,
+                               uint first_value, uint first_invisible, thread ulong& held, thread uint& held_at_hop,
+                               thread uint& pending, thread metal_fold_t& fold) {
+    uint const lane = walk.lane;
+    uint const chunks = (walk.connectivity + warp_t::width_k - 1) / warp_t::width_k;
+    uint const rows_cap = max(1u, min(walk.walk_width, uint(metal_max_gathers_in_flight_k) / chunks));
+    ulong row_entry = lane == 0 ? first : metal_sentinel_k;
+    uint rows = 1;
+    while (rows < rows_cap) {
+        ulong const next = frontier.pop_nearest(lane);
+        if (next == metal_sentinel_k || frontier.beyond_radius(next)) break;
+        if (lane == rows) row_entry = next;
+        ++walk.hops, ++rows;
+    }
+    uint const row_value = lane == 0     ? first_value
+                           : lane < rows ? warp_t::load_acquire(walk.neighbors_for(metal_id_of(row_entry)))
+                                         : metal_unknown_k;
+    warp_t::fence();
+    uint const locked = warp_t::ballot(lane < rows && row_value == metal_unknown_k);
+    if (locked) {
+        bool const holding = held == metal_sentinel_k;
+        if (holding) held = warp_t::shuffle(row_entry, ctz(locked)), held_at_hop = walk.hops;
+        walk.locked_drops += popcount(locked) - uint(holding);
+    }
+    uint rows_left = warp_t::ballot(lane < rows && row_value != metal_unknown_k) & ~1u;
+    uint row = 0, slot_base = 0;
+    bool more = true;
+    while (more) {
+        uint neighbor_ids[metal_max_gathers_in_flight_k], owner_ids[metal_max_gathers_in_flight_k];
+        uint loads = 0;
+        for (uint load = 0; load != metal_max_gathers_in_flight_k; ++load) {
+            if (!more) break;
+            uint const owner = metal_id_of(warp_t::shuffle(row_entry, row));
+            uint const word = warp_t::shuffle(row_value, row);
+            uint const slot = slot_base + lane;
+            neighbor_ids[load] = slot == 0                  ? word
+                                 : slot < walk.connectivity ? warp_t::load_acquire(walk.neighbors_for(owner) + slot)
+                                                            : metal_unknown_k;
+            owner_ids[load] = owner;
+            ++loads;
+            slot_base += warp_t::width_k;
+            if (slot_base < walk.connectivity) continue;
+            more = rows_left != 0;
+            if (more) row = ctz(rows_left), rows_left &= rows_left - 1;
+            slot_base = 0;
+        }
+        // Rolled, so the claim and the scoring it may call inline once per walk, not once per load.
+#pragma unroll 1
+        for (uint load = 0; load != metal_max_gathers_in_flight_k; ++load) {
+            if (load == loads) break;
+            uint const neighbor_id = neighbor_ids[load];
+            bool const usable = neighbor_id < first_invisible && neighbor_id != owner_ids[load];
+            bool const claimed = walk.test_and_set(usable ? neighbor_id : metal_unknown_k);
+            // Past a saturation a claim re-scores, so an ID the frontier or this staging holds stages no second copy.
+            bool repeated = walk.saturations && frontier.holds(neighbor_id, lane);
+            for (uint index = 0; walk.saturations && index != pending; ++index)
+                repeated |= walk.ids[index] == neighbor_id;
+            bool const fresh = claimed && !repeated;
+            uint const fresh_mask = warp_t::ballot(fresh);
+            if (fresh) walk.ids[pending + popcount(fresh_mask & warp_t::below(lane))] = neighbor_id;
+            warp_t::sync();
+            pending += popcount(fresh_mask);
+            if (pending < warp_t::width_k) continue;
+            metal_score_into_frontier(walk, frontier, query_norms, warp_t::width_k, fold);
+            warp_t::sync();
+            pending -= warp_t::width_k;
+            uint const carried = lane < pending ? walk.ids[warp_t::width_k + lane] : metal_unknown_k;
+            warp_t::sync();
+            if (lane < pending) walk.ids[lane] = carried;
+            warp_t::sync();
+        }
+    }
+}
+
+/** Continues a greedy best-first walk over whatever @p frontier holds, seeding from landmarks in @b [first,bound) and
  *  never following a neighbor at or past @p first_invisible; pre-staged entries compete with them and must already
  *  be visited, and each call walks to convergence. Read-only on the graph, a transiently locked candidate held
  *  through one other expansion and dropped if still locked then, as the CUDA and HIP walks do. */
 template <typename frontier_>
 inline void metal_search_ahead(thread metal_walk_t& walk, thread frontier_& frontier, norms_t query_norms, uint first,
                                uint bound, uint first_invisible, thread metal_fold_t& fold) {
-    // The one candidate held for its second look, and the hop it was held at; a drained pool moves that hop out of
+    // The one candidate held for its second look, and the hop it was held at; drained candidates move that hop out of
     // reach, so the next iteration looks at once.
     ulong held = metal_sentinel_k;
     uint held_at_hop = 0;
@@ -662,20 +742,16 @@ inline void metal_search_ahead(thread metal_walk_t& walk, thread frontier_& fron
             else held = candidate, held_at_hop = walk.hops;
             continue;
         }
-        for (uint slot_base = 0; slot_base < walk.connectivity; slot_base += warp_t::width_k) {
-            uint const slot = slot_base + walk.lane;
-            uint const neighbor_id = slot == 0                  ? first_value
-                                     : slot < walk.connectivity ? warp_t::load_acquire(row + slot)
-                                                                : metal_unknown_k;
-            bool const usable = neighbor_id < first_invisible && neighbor_id != candidate_id;
-            uint const count = walk.stage_fresh(usable ? neighbor_id : metal_unknown_k, frontier);
-            if (count) metal_score_into_frontier(walk, frontier, query_norms, count, fold);
-        }
+        uint pending = 0;
+        metal_expand_round(walk, frontier, query_norms, candidate, first_value, first_invisible, held, held_at_hop,
+                           pending, fold);
+        // A dense kit pays per score call, not per idle lane, so the round scores what it staged.
+        if (pending) metal_score_into_frontier(walk, frontier, query_norms, pending, fold);
     }
     walk.locked_drops += held != metal_sentinel_k;
 }
 
-/** Greedy diversity selection over the walk's whole pool of @c selection_rows ranks, ascending, into @c selected_ids,
+/** Greedy diversity selection over all of the walk's @c selection_rows candidates, ascending, into @c selected_ids,
  *  backfilled with the nearest rejected candidates as the CUDA selection does; answers the kept count. */
 template <typename frontier_>
 inline uint metal_select_diverse(thread metal_walk_t& walk, thread frontier_& frontier) {
@@ -954,7 +1030,7 @@ inline metal_walk_t metal_open(constant metal_arguments_t& arguments, device uin
     walk.candidate_distances = (device float*)carve(selection_rows * 4);
     walk.candidate_norms = (device norms_t*)carve(selection_rows * 8);
     walk.tail_entries = arguments.tail_entries, walk.expansion = arguments.expansion;
-    walk.selection_rows = selection_rows;
+    walk.selection_rows = selection_rows, walk.walk_width = 1;
     walk.row_fragments = arguments.row_fragments, walk.lanes_per_row = arguments.lanes_per_row;
     walk.steps_per_row = arguments.steps_per_row, walk.connectivity = arguments.connectivity;
     walk.metric = arguments.metric, walk.row_fragments_magic = arguments.row_fragments_magic;
@@ -966,11 +1042,11 @@ inline metal_walk_t metal_open(constant metal_arguments_t& arguments, device uin
 }
 
 template <uint slots_>
-void metal_pool<slots_>::reset(thread metal_walk_t&) {
+void metal_sorted_candidates<slots_>::clear(thread metal_walk_t&) {
     clear();
 }
 
-void metal_arena_frontier::reset(thread metal_walk_t& walk) {
+void metal_arena_frontier::clear(thread metal_walk_t& walk) {
     head.clear();
     tail = walk.tail, tail_size = 0, tail_capacity = walk.tail_entries, tail_compactions = 0, tail_unseated = 0;
     expansion_target = walk.expansion, expansions = 0;
@@ -1026,7 +1102,7 @@ inline void metal_insert(constant metal_arguments_t& arguments, device uint4* ve
         warp_t::sync();
 
         typename metal_frontier_of<slots_>::type frontier;
-        frontier.reset(walk);
+        frontier.clear(walk);
         metal_fold_t fold {};
         if (new_node_id != 0) metal_search_ahead(walk, frontier, new_norms, 0, new_node_id, arguments.end_id, fold);
         walk.tail_compactions += frontier.compactions();
@@ -1090,7 +1166,7 @@ inline void metal_refine(constant metal_arguments_t& arguments, device uint4* ve
         norms_t const query_norms = walk.norm_for(node_id);
 
         typename metal_frontier_of<slots_>::type frontier;
-        frontier.reset(walk);
+        frontier.clear(walk);
         metal_fold_t fold {};
         walk.test_and_set(node_id);
         // The walk across runs first, from the landmarks of the round's neighboring group of parts alone, the
@@ -1152,11 +1228,15 @@ inline void metal_search(constant metal_arguments_t& arguments, device uint4* ve
         uint query = lane == 0 ? atomic_fetch_add_explicit(counters + metal_assigned_k, 1u, memory_order_relaxed) : 0;
         query = warp_t::shuffle(query, 0);
         if (query >= arguments.queries_count) break;
+        // Simdgroups no other walk holds widen this one, never past the rows that fill its candidates.
+        uint live = lane == 0 ? atomic_fetch_add_explicit(counters + metal_live_k, 1u, memory_order_relaxed) + 1 : 0;
+        live = warp_t::shuffle(live, 0);
+        walk.walk_width = walk_width(arguments.seats, live, arguments.queries_count - query, arguments.filling_rows);
         walk.epoch = arguments.epoch_base + query + 1;
         walk.random = metal_lane_generator(query, lane);
         norms_t const query_norms = metal_stage_query(walk, metal_row(queries, query, walk.row_fragments));
         typename metal_frontier_of<slots_>::type frontier;
-        frontier.reset(walk);
+        frontier.clear(walk);
         metal_fold_t fold {};
         if (keeps) {
             fold.keeps = true;
@@ -1170,6 +1250,7 @@ inline void metal_search(constant metal_arguments_t& arguments, device uint4* ve
             fold.heads_count = arguments.heads_count;
         }
         metal_search_ahead(walk, frontier, query_norms, 0, arguments.sampling_bound, arguments.sampling_bound, fold);
+        if (lane == 0) atomic_fetch_sub_explicit(counters + metal_live_k, 1u, memory_order_relaxed);
         walk.tail_compactions += frontier.compactions();
         walk.tail_unseated += frontier.unseated();
         if (keeps) {
@@ -1210,7 +1291,7 @@ inline void metal_search(constant metal_arguments_t& arguments, device uint4* ve
 }
 
 /*  The entry points, one instantiation per rung the host's ladder names: 2, 4, 8 and 16 slots of 32 lanes, and
- *  slot zero's arena frontier past the widest pool, each under the name the host looks it up by. */
+ *  slot zero's arena frontier past the widest rung, each under the name the host looks it up by. */
 
 template <uint slots_>
 kernel void metal_insert_kernel(constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
@@ -1298,7 +1379,7 @@ template [[host_name("metal_refine_kernel_16")]] kernel void metal_refine_kernel
     device atomic_uint*, device uint*, device uint const*, uint, uint, uint);
 
 /*  Searches and graph products share one entry point per width, plus slot zero's arena frontier past the widest
- *  pool: the word at `metal_keeps_buffer_k` says which the launch lands. */
+ *  rung: the word at `metal_keeps_buffer_k` says which the launch lands. */
 
 template <uint slots_>
 kernel void metal_search_kernel(

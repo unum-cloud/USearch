@@ -234,7 +234,7 @@ for (int query = 0; query < found.Queries; query++)
 }
 ```
 
-The candidate-pool breadth rides each call rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
+The breadth of the candidates rides each call rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
 `traversal: Traversal.Scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle refuses a scan with `Status.Unsupported`.
 `DenseTraversalStats` is a pure output, overwritten by every call it is passed to, and `Accumulate` folds one call's counters into another's to total a run of batches.
 

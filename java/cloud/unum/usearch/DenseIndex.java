@@ -35,7 +35,7 @@ import cloud.unum.usearch.Types.Verb;
  *
  * <p>
  * Every verb is a batch over strided matrices, so a memory-mapped dataset reaches the index with no
- * reshape and no copy, and a single vector is a one-row matrix. The candidate-pool breadth rides
+ * reshape and no copy, and a single vector is a one-row matrix. The breadth of the candidates rides
  * each call rather than the handle, which lets a recall sweep run against one immutable index with
  * no mutation between points.
  *
@@ -504,9 +504,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         public DenseInsertConfig() {}
 
         /**
-         * The candidate-pool breadth the build walk explores; zero derives.
+         * The breadth of the candidates the build walk explores; zero derives.
          *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no pool may have.
+         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
          */
         public DenseInsertConfig expansionFactor(long expansionFactor) {
             this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
@@ -535,9 +535,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         public DenseRefineConfig() {}
 
         /**
-         * The candidate-pool breadth the re-selection walk explores; zero derives.
+         * The breadth of the candidates the re-selection walk explores; zero derives.
          *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no pool may have.
+         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
          */
         public DenseRefineConfig expansionFactor(long expansionFactor) {
             this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
@@ -574,9 +574,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /**
-         * The candidate-pool breadth the walk explores; zero derives.
+         * The breadth of the candidates the walk explores; zero derives.
          *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no pool may have.
+         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
          */
         public DenseSearchConfig expansionFactor(long expansionFactor) {
             this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
@@ -621,9 +621,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /**
-         * The candidate-pool breadth the walk explores; zero derives.
+         * The breadth of the candidates the walk explores; zero derives.
          *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no pool may have.
+         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
          */
         public DenseMaxsimConfig expansionFactor(long expansionFactor) {
             this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
@@ -663,9 +663,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /**
-         * The candidate-pool breadth, which widens the emitted pattern; zero derives.
+         * The breadth of the candidates, which widens the emitted pattern; zero derives.
          *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no pool may have.
+         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
          */
         public DenseMultiplyConfig expansionFactor(long expansionFactor) {
             this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
@@ -722,9 +722,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /**
-         * The candidate-pool breadth; zero derives. A wider pool walks further, folding more of the tail.
+         * The breadth of the candidates; zero derives. Wider candidates walk further, folding more of the tail.
          *
-         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no pool may have.
+         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
          */
         public DenseAttendConfig expansionFactor(long expansionFactor) {
             this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);

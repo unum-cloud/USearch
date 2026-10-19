@@ -380,7 +380,7 @@ The dense metric kinds are:
 
 A search writes a `usearch_matches_view_t` into its arena: `count` rows of `columns` packed columns, row `i` holding `counts[i]` matches from `keys[i * columns]` and `scores[i * columns]` on, nearest first.
 `wanted` bounds the columns, the "k" in "kANN".
-The graph's `connectivity` is frozen when the index is created, while the `expansion_factor`, the breadth of the candidate pool a walk explores, is chosen per call.
+The graph's `connectivity` is frozen when the index is created, while the `expansion_factor`, the breadth of the candidates a walk explores, is chosen per call.
 Higher expansion values buy recall at the cost of latency; zero derives a default from the connectivity.
 
 ```c

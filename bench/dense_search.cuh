@@ -105,7 +105,7 @@ struct refinement_report_t {
     /** Published nodes one pass sweeps. */
     std::size_t nodes = 0;
 
-    /** The candidate pool every pass re-selects under. */
+    /** How many candidates every pass re-selects under. */
     std::size_t expansion = 0;
 
     /** Nodes each pass re-wired; its length is the passes that actually ran. */

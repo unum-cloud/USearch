@@ -208,7 +208,7 @@ struct thread_scratch {
         std::size_t const threads = executor.size();
         if (failed(contexts.reserve_exactly(threads)) || failed(metrics.reserve_exactly(threads)))
             return status_t::bad_alloc_k;
-        typename index_type_::insert_config_t const walk {expansion, 0};
+        typename index_type_::insert_config_t const walk {expansion};
         std::size_t const staging = index_type_::round_capacity(connectivity, walk);
         for (std::size_t thread = 0; thread != threads; ++thread) {
             thread_allocator_t const allocator {executor.arena(thread)};
@@ -277,7 +277,7 @@ expected<traversal_telemetry_t> insert_entries(index_type_& index, usearch_keys_
     auto [plan, plan_status] = index.plan_insert(count);
     if (failed(plan_status)) return {{}, plan_status};
     basic::keep_diverse_t const selector {connectivity};
-    typename index_type_::insert_config_t const config {expansion, 0};
+    typename index_type_::insert_config_t const config {expansion};
     drain_in_order(executor, count, [&](std::size_t row, std::size_t thread) noexcept {
         plan.insert(row, to_writable_span(values).subspan(row, 1), to_span(identities).subspan(row, 1),
                     scratch.metrics[thread], scratch.contexts[thread], selector, config);
@@ -406,7 +406,7 @@ expected<traversal_telemetry_t> search_entries(index_type_& index, std::size_t c
     if (status_t const prepared = scratch.prepare(executor, connectivity, breadth, index.size(), make_metric);
         failed(prepared))
         return {{}, prepared};
-    typename index_type_::search_config_t const config {breadth, 0};
+    typename index_type_::search_config_t const config {breadth};
     status_t searched = status_t::success_k;
     drain_in_order(executor, count, [&](std::size_t row, std::size_t thread) noexcept {
         if (failed(standard_atomic_ref<status_t>(searched).load(std::memory_order_relaxed))) return;

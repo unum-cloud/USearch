@@ -236,7 +236,7 @@ static bool usearch_js_static_arguments(napi_env env, napi_callback_info info, s
  *  @brief @c initRam(dimensions, metric, quantization, connectivity, valuesPerKey, memoryDomains)
  *      and @c initVram(..., devices) → an empty, mutable index.
  *
- *  The candidate-pool breadth is not here: it rides every call, which lets a recall sweep run
+ *  The breadth of the candidates is not here: it rides every call, which lets a recall sweep run
  *  against one immutable index with no mutation between points.
  */
 static napi_value usearch_js_index_init(napi_env env, napi_callback_info info, usearch_residency_t residency) {

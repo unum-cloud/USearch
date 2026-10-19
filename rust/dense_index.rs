@@ -838,7 +838,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseV
 pub struct DenseInsertConfig<'config, Rows> {
     /// One row per key, borrowed or owned.
     pub vectors: Rows,
-    /// The candidate-pool breadth the walk explores; zero derives it from the geometry.
+    /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     pub expansion_factor: usize,
     /// Reports the rows inserted; every row is claimed before the first report, so a `Break` is
     /// ignored.
@@ -866,7 +866,7 @@ impl<Rows: RowsView> From<Rows> for DenseInsertConfig<'_, Rows> {
 /// Mirrors `usearch_dense_refine_t`.
 #[derive(Default)]
 pub struct DenseRefineConfig<'config> {
-    /// The candidate-pool breadth the walk explores; zero derives it from the geometry.
+    /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     pub expansion_factor: usize,
     /// Reports the nodes swept and stops wherever it says to.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
@@ -882,7 +882,7 @@ pub struct DenseRefineConfig<'config> {
 pub struct DenseSearchConfig<'config> {
     /// Matches kept per query, the "k" in "kANN".
     pub wanted: usize,
-    /// The candidate-pool breadth the walk explores; zero derives it from the geometry.
+    /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     pub expansion_factor: usize,
     /// Walks the graph by default; [`Traversal::Scan`] scores every row exactly, on RAM and NVMe
     /// handles, and a VRAM handle refuses it with [`Status::Unsupported`].
@@ -920,7 +920,7 @@ impl From<usize> for DenseSearchConfig<'_> {
 pub struct DenseMaxsimConfig<'config> {
     /// Documents kept per query, counted over keys rather than rows.
     pub wanted: usize,
-    /// The candidate-pool breadth the walk explores; zero derives it from the geometry.
+    /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     pub expansion_factor: usize,
     /// Reports the queries resolved and stops wherever it says to.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
@@ -948,7 +948,7 @@ impl From<usize> for DenseMaxsimConfig<'_> {
 pub struct DenseMultiplyConfig<'config> {
     /// Keeps the first `wanted` pairs each row's walk scored; zero keeps every pair.
     pub wanted: usize,
-    /// The candidate-pool breadth, which widens the emitted pattern; zero derives it.
+    /// The breadth of the candidates, which widens the emitted pattern; zero derives it.
     pub expansion_factor: usize,
     /// Reports the rows resolved and stops wherever it says to.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
@@ -980,7 +980,7 @@ pub struct DenseAttendConfig<'config> {
     /// Where the online-softmax state lands, one entry per query row, which folds this call into
     /// another over the same queries by partial-softmax rescaling.
     pub carry: Option<&'config mut [DenseSoftmaxState]>,
-    /// The candidate-pool breadth; zero derives it. A wider pool walks further, folding more of the
+    /// The breadth of the candidates; zero derives it. Wider candidates walk further, folding more of the
     /// tail.
     pub expansion_factor: usize,
     /// The logit scale, conventionally the inverse square root of the head dimensionality; zero
@@ -1081,7 +1081,7 @@ impl<'arena> From<&'arena mut Arena> for DenseSaveBufferConfig<'_, 'arena> {
 pub struct DenseSearchStreamInitConfig<Query> {
     /// Exactly one query row.
     pub query: Query,
-    /// The candidate-pool breadth the walk explores; zero derives it from the geometry.
+    /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     pub expansion_factor: usize,
 }
 

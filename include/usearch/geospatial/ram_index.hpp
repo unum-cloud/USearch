@@ -530,20 +530,21 @@ struct terrain_t {
  *      links outlive the reverse pass that re-selects a full row.
  *
  *  Never evaluates the metric between candidates: each candidate costs two integer dot
- *  products against the base's frame. Because the pool arrives ascending, the first
+ *  products against the base's frame. Because the candidates arrive ascending, the first
  *  candidate seen in a cone is its nearest. The base is read from the metric's open round.
  *
- *  The pool decides exactness. A cone facing an ocean or a desert has its nearest neighbor far
+ *  The candidates decide exactness. A cone facing an ocean or a desert has its nearest neighbor far
  *  beyond the nearest few dozen candidates, so insert with an expansion of at least 128; the
  *  searcher's default of twice the budget leaves a quarter of the cone edges inexact on skewed
- *  data. And any pool that re-selects a published node's row must contain that row: selecting from
- *  fresh search results alone keeps their far tail as the long links and drops the real ones, and
- *  never converges.
+ *  data. And any candidates that re-select a published node's row must contain that row: selecting
+ *  from fresh search results alone keeps their far tail as the long links and drops the real ones,
+ *  and never converges.
  */
 struct surface_keep_octants_t {
 
-    /** The pool an insertion needs for exact cone winners on skewed data, as the type documents. */
-    inline static constexpr std::size_t exact_pool_k = 128;
+    /** The candidates an insertion needs for exact cone winners on skewed data, as the type
+     *  documents. */
+    inline static constexpr std::size_t exact_candidates_k = 128;
 
     /** The row budget: eight cone winners and four long links. */
     std::size_t connectivity = 12;
@@ -554,11 +555,11 @@ struct surface_keep_octants_t {
     template <typename index_type_, typename metric_type_, typename context_type_>
     void operator()(index_type_ const& index, metric_type_& metric, context_type_& context) const noexcept {
         constexpr std::size_t missing_k = std::numeric_limits<std::size_t>::max();
-        auto const& pool = context.results;
+        auto const& candidates = context.results;
         auto& selected = context.selected_neighbors;
         selected.clear();
-        std::size_t const pool_size = pool.size();
-        std::size_t const budget = connectivity < pool_size ? connectivity : pool_size;
+        std::size_t const candidates_count = candidates.size();
+        std::size_t const budget = connectivity < candidates_count ? connectivity : candidates_count;
         if (!budget) return;
 
         earth_fixed_t const base = metric.query();
@@ -566,8 +567,9 @@ struct surface_keep_octants_t {
         std::array<std::size_t, cones_k> first_in_cone;
         first_in_cone.fill(missing_k);
         std::size_t winners = 0;
-        for (std::size_t position = 0; position != pool_size && winners != cones_k; ++position) {
-            unsigned const cone = octant_of(frame, base, index.published_value_of(pool[position].node_id).position);
+        for (std::size_t position = 0; position != candidates_count && winners != cones_k; ++position) {
+            unsigned const cone = octant_of(frame, base,
+                                            index.published_value_of(candidates[position].node_id).position);
             if (first_in_cone[cone] != missing_k) continue;
             first_in_cone[cone] = position;
             ++winners;
@@ -579,16 +581,16 @@ struct surface_keep_octants_t {
         };
 
         // The longest non-winners fill the rest of the budget; `cut` is where they begin in the
-        // ascending pool.
+        // ascending candidates.
         std::size_t const retained = budget > winners ? budget - winners : 0;
-        std::size_t cut = pool_size;
+        std::size_t cut = candidates_count;
         for (std::size_t seen = 0; seen != retained && cut != 0;) {
             --cut;
             if (!is_winner(cut)) ++seen;
         }
 
-        for (std::size_t position = 0; position != pool_size; ++position)
-            if (is_winner(position) || position >= cut) selected.push_back_reserved(pool[position]);
+        for (std::size_t position = 0; position != candidates_count; ++position)
+            if (is_winner(position) || position >= cut) selected.push_back_reserved(candidates[position]);
     }
 };
 
@@ -673,7 +675,7 @@ status_t draw_long_links(index_type_& index, typename index_type_::node_id_t nod
     earth_fixed_t const origin = index.published_value_of(node).position;
 
     // The spacing is the chord to the nearest other node; a lone node draws nothing.
-    auto const around = index.search(origin, metric, context, search_config_t {4, 0});
+    auto const around = index.search(origin, metric, context, search_config_t {4});
     if (failed(around.status)) return around.status;
     f64_t spacing = 0;
     for (std::size_t position = 0; position != around.value.count && spacing == 0; ++position)
@@ -700,13 +702,14 @@ status_t draw_long_links(index_type_& index, typename index_type_::node_id_t nod
     return status_t::success_k;
 }
 
-/** How far a radius walk widens its pool before trusting it complete. */
+/** How far a radius walk widens its candidates before trusting them complete. */
 enum class radius_margin_t : u32_t {
 
     /** The spanner bound: complete on the exact cone graph, at about thirty times the ball. */
     spanner_k = 0,
 
-    /** No widening: the pool stops at the radius, complete only where the beam happened to look. */
+    /** No widening: the candidates stop at the radius, complete only where the beam happened to
+     *  look. */
     none_k = 1,
 };
 
@@ -722,22 +725,22 @@ struct [[nodiscard]] radius_result_t {
     /** Leading entries of @c context.results within the radius. */
     std::size_t count = 0;
 
-    /** Entries the widened pool holds in total, the cost of the margin. */
-    std::size_t pool = 0;
+    /** Entries the widened candidates hold in total, the cost of the margin. */
+    std::size_t candidates_count = 0;
 
     explicit operator bool() const noexcept { return succeeded(status); }
 };
 
 /**
  *  @brief Finds every published node within @p radius_centimetres of @p query by doubling the
- *      pool until a full pool's tail passes the widened radius, then counting the leading
- *      matches.
+ *      candidates until the full candidates' tail passes the widened radius, then counting the
+ *      leading matches.
  *
- *  Under @c spanner_k the pool is widened to the radius times one plus twice the stretch, which the
- *  cone graph's spanner property makes complete; under @c none_k the pool stops at the radius
- *  itself. The pool doubles from the searcher's default breadth to the index size, and a doubling
- *  that finds nothing new ends it. Each round scores as many rows as the metric's staging holds at
- *  @p widest_row neighbors each, so no round is ever refused, and a staging under one row reports
+ *  Under @c spanner_k the candidates widen to the radius times one plus twice the stretch, which
+ *  the cone graph's spanner property makes complete; under @c none_k they stop at the radius
+ *  itself. The candidates double from the searcher's default breadth to the index size, and a
+ *  doubling that finds nothing new ends it. Each round scores the rows whose neighbors fill a
+ *  walk's candidates, and a staging that fills ends a round early; a staging under one row reports
  *  @c config_mismatch_k.
  *
  *  @param[in] widest_row The most neighbors any row holds: the selector's budget plus the long
@@ -747,31 +750,30 @@ template <typename index_type_, typename metric_type_, typename query_type_, typ
 radius_result_t within(index_type_& index, query_type_ const& query, i64_t radius_centimetres, radius_margin_t margin,
                        std::size_t widest_row, metric_type_& metric, context_type_& context) noexcept {
     using search_config_t = typename index_type_::search_config_t;
-    std::size_t const rows_per_round = metric.staging_limit() / widest_row;
-    if (!rows_per_round) return {status_t::config_mismatch_k, 0, 0};
+    if (metric.staging_limit() < widest_row) return {status_t::config_mismatch_k, 0, 0};
     f64_t const radius = static_cast<f64_t>(radius_centimetres);
     f64_t const widened = margin == radius_margin_t::spanner_k ? radius * (1.0 + 2.0 * cone_graph_stretch_k) : radius;
     f64_t const widened_squared = widened * widened;
     i64_t const radius_squared = radius_centimetres * radius_centimetres;
     std::size_t const published = index.size();
 
-    std::size_t expansion = index.non_zero_expansion_factor(search_config_t {0, rows_per_round});
-    std::size_t pool = 0;
-    std::size_t previous_pool = 0;
+    std::size_t expansion = index.non_zero_expansion_factor(search_config_t {});
+    std::size_t candidates_count = 0;
+    std::size_t previous_candidates_count = 0;
     for (;;) {
-        auto const searched = index.search(query, metric, context, search_config_t {expansion, rows_per_round});
+        auto const searched = index.search(query, metric, context, search_config_t {expansion});
         if (failed(searched.status)) return {searched.status, 0, 0};
-        pool = searched.value.count;
-        bool const covered = pool == expansion &&
-                             static_cast<f64_t>(context.results[pool - 1].distance) > widened_squared;
-        bool const exhausted = expansion >= published || pool == previous_pool;
+        candidates_count = searched.value.count;
+        bool const covered = candidates_count == expansion &&
+                             static_cast<f64_t>(context.results[candidates_count - 1].distance) > widened_squared;
+        bool const exhausted = expansion >= published || candidates_count == previous_candidates_count;
         if (covered || exhausted) break;
-        previous_pool = pool;
+        previous_candidates_count = candidates_count;
         expansion *= 2;
     }
     std::size_t count = 0;
-    while (count != pool && context.results[count].distance <= radius_squared) ++count;
-    return {status_t::success_k, count, pool};
+    while (count != candidates_count && context.results[count].distance <= radius_squared) ++count;
+    return {status_t::success_k, count, candidates_count};
 }
 
 #pragma endregion Walks

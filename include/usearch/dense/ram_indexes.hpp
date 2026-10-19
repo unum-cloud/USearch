@@ -1152,7 +1152,8 @@ struct ram_indexes
             return {{}, refusal};
         if (!groups_count) return {{}, status_t::success_k};
 
-        // Every token row keeps its whole ranked pool, its keys resolved and merged across the shards.
+        // Every token row keeps all of its ranked candidates, its keys resolved and merged across
+        // the shards.
         std::size_t const width = shards_[0].index->non_zero_expansion_factor(config);
         growing_buffer<key_t, forkunion_allocator_t> row_keys {allocator_};
         growing_buffer<distance_t, forkunion_allocator_t> row_distances {allocator_};
@@ -1790,11 +1791,17 @@ struct ram_indexes
             if (failed(traversal.reserve_queries(staged_bytes))) return {{}, status_t::bad_alloc_k};
 
         status_t first_refusal = status_t::success_k;
+        alignas(default_alignment_k) std::size_t live_rows = 0;
+        std::size_t const filling = filling_rows<std::size_t>(shards_[0].index->non_zero_expansion_factor(config),
+                                                              shards_[0].index->connectivity());
         auto each_row = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
             traversal_context_t& traversal = traversals[thread];
+            std::size_t const live = atomic_ref<std::size_t>(live_rows).fetch_add(1, std::memory_order_relaxed) + 1;
+            traversal.walk_width = walk_width(executor.size(), live, rows_count - row, filling);
             std::span<node_id_t const> const watermarks = snapshot_(traversal);
             status_t const refusal = watermarks.size() == shards_.size() ? per_row(row, thread, traversal, watermarks)
                                                                          : status_t::bad_alloc_k;
+            atomic_ref<std::size_t>(live_rows).fetch_sub(1, std::memory_order_relaxed);
             if (succeeded(refusal)) return;
             status_t expected_status = status_t::success_k;
             atomic_ref<status_t>(first_refusal)

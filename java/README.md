@@ -304,7 +304,7 @@ Every ranked verb answers its `Matches`, read in place out of the arena: a queri
 The wanted count is the "k" in kANN and bounds `columns`, the row width of both matrices the call wrote, and a recall sweep reuses one arena across every point, so it allocates once.
 `count`, `key` and `score` all address one query's row by its position, so no call site multiplies out an offset of its own, and slots past a query's count hold memory the engine never wrote and are refused.
 
-The candidate-pool breadth rides each call rather than the handle, which lets a recall sweep run against one immutable index with no mutation between points.
+The breadth of the candidates rides each call rather than the handle, which lets a recall sweep run against one immutable index with no mutation between points.
 Every verb with knobs beyond its inputs has a bare form and one taking its `Dense*Config`, named after the C structure it fills.
 `Traversal.WALK`, the default, walks the graph, and `Traversal.SCAN` scores every row published when the query's scan starts, exactly, on RAM and NVMe handles.
 A `DenseTraversalStats` lent to a config is overwritten with what the walk reported, so one reading always belongs to one call.

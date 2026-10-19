@@ -5,7 +5,7 @@
  *  @brief CPython vector search over equidimensional dense embeddings.
  *
  *  Every verb is a batch: a one-dimensional input is one row, so a memory-mapped dataset
- *  reaches the index with no reshape and no copy. The candidate-pool breadth rides the call
+ *  reaches the index with no reshape and no copy. The breadth of the candidates rides the call
  *  rather than the handle, which lets a recall sweep run against one immutable index with no
  *  mutation between points.
  *
@@ -808,7 +808,7 @@ static char const doc_DenseIndex_insert[] =                                     
     "Args:\n"                                                                                //
     "  keys (Sequence[Key | int] | buffer): One key per row, or an (N, 16) buffer.\n"        //
     "  vectors (buffer): An (N, dimensions) matrix; only the row stride may vary.\n"         //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"            //
+    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it.\n"         //
     "  dtype (Scalar, optional): Names the input scalar type when the buffer cannot; it\n"   //
     "    must be as wide as the buffer's items.\n"                                           //
     "  progress (callable, optional): Called with (completed, total) rows. It reports and\n" //
@@ -919,7 +919,7 @@ static char const doc_DenseIndex_refine[] =                                     
     "Calls `usearch_dense_refine`.\n"                                                        //
     "\n"                                                                                     //
     "Args:\n"                                                                                //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"            //
+    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it.\n"         //
     "  progress (callable, optional): Called with (completed, total) nodes; returning\n"     //
     "    False ends the sweep, None carries on.\n"                                           //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"  //
@@ -1020,7 +1020,7 @@ static char const doc_DenseIndex_search[] =                                     
     "  queries (buffer): A (Q, dimensions) matrix of query rows.\n"                            //
     "  wanted (int): Upper bound on matches per query - the 'k' in 'kANN'.\n"                  //
     "  arena (Arena): Where the matches land, rewound by the call.\n"                          //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"              //
+    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it.\n"           //
     "  traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;\n"     //
     "    `Traversal.SCAN` scores every row exactly, on RAM and NVMe handles.\n"                //
     "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"        //
@@ -1296,7 +1296,7 @@ static char const doc_DenseIndex_multiply[] =                                   
     "  wanted (int): Upper bound on pairs kept per row, the first ones its walk scored;\n"    //
     "    0 keeps every pair.\n"                                                               //
     "  arena (Arena): Where the pairs and their offsets land, rewound by the call.\n"         //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it. A wider\n"     //
+    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it. A wider\n"  //
     "    factor widens the emitted pattern, being what the walk's breadth decides.\n"         //
     "  dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.\n"   //
     "  progress (callable, optional): Called with (completed, total) rows; returning False\n" //
@@ -1425,8 +1425,8 @@ static char const doc_DenseIndex_attend[] =                                     
     "  arena (Arena): Where the attended rows land, rewound by the call.\n"                      //
     "  head_count (int, optional): The query heads sharing the index's key-value head, and\n"    //
     "    with it one walk per token; it must divide Q.\n"                                        //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it. A wider\n"        //
-    "    pool walks further, folding more of the tail.\n"                                        //
+    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Wider\n"       //
+    "    candidates walk further, folding more of the tail.\n"                                   //
     "  score_scale (float, optional): The logit scale, conventionally the inverse square\n"      //
     "    root of the head dimensionality; 0.0 derives it from the frozen geometry.\n"            //
     "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"          //
@@ -1615,35 +1615,35 @@ static PyObject* DenseIndex_attend(PyObject* self, PyObject* const* args, Py_ssi
     return usearch_py_call_run(&receiver, &attend_verb, call);
 }
 
-static char const doc_DenseIndex_maxsim[] =                                                    //
-    "maxsim(queries, rows_per_query, wanted, arena, /, *, expansion_factor=0, dtype=None,\n"   //
-    "    progress=None, progress_steps=0, stats=None) -> Matches\n"                            //
-    "\n"                                                                                       //
-    "Late-interaction scoring of multi-row queries against multi-row entries: every query\n"   //
-    "row takes its best match within a key, and those maxima sum to that key's score.\n"       //
-    "\n"                                                                                       //
-    "A document is one key holding its token rows, which is what `values_per_key` above one\n" //
-    "exists for, and the walk stays over individual tokens under a plain inner product - so\n" //
-    "an entry's rows need no ordering and two documents need not share a row count. The\n"     //
-    "result is sized over documents rather than over rows.\n"                                  //
-    "Calls `usearch_dense_maxsim`.\n"                                                          //
-    "\n"                                                                                       //
-    "Args:\n"                                                                                  //
-    "  queries (buffer): The token rows of every query laid end to end, an (Q * R,\n"          //
-    "    dimensions) matrix.\n"                                                                //
-    "  rows_per_query (int): Rows every query occupies; uniform, so ColBERT's padding\n"       //
-    "    applies as is. The query row count must be a whole multiple of it.\n"                 //
-    "  wanted (int): Upper bound on matches per query - the 'k' over documents, not rows.\n"   //
-    "  arena (Arena): Where the scored documents land, rewound by the call.\n"                 //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it. Widening it\n"  //
-    "    narrows the gap to the exact score, which a walk can only under-report.\n"            //
-    "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"        //
-    "  progress (callable, optional): Called with (completed, total) queries; returning\n"     //
-    "    False stops the batch and raises `CancelledError`, None carries on.\n"                //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"    //
-    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"       //
-    "\n"                                                                                       //
-    "Returns:\n"                                                                               //
+static char const doc_DenseIndex_maxsim[] =                                                      //
+    "maxsim(queries, rows_per_query, wanted, arena, /, *, expansion_factor=0, dtype=None,\n"     //
+    "    progress=None, progress_steps=0, stats=None) -> Matches\n"                              //
+    "\n"                                                                                         //
+    "Late-interaction scoring of multi-row queries against multi-row entries: every query\n"     //
+    "row takes its best match within a key, and those maxima sum to that key's score.\n"         //
+    "\n"                                                                                         //
+    "A document is one key holding its token rows, which is what `values_per_key` above one\n"   //
+    "exists for, and the walk stays over individual tokens under a plain inner product - so\n"   //
+    "an entry's rows need no ordering and two documents need not share a row count. The\n"       //
+    "result is sized over documents rather than over rows.\n"                                    //
+    "Calls `usearch_dense_maxsim`.\n"                                                            //
+    "\n"                                                                                         //
+    "Args:\n"                                                                                    //
+    "  queries (buffer): The token rows of every query laid end to end, an (Q * R,\n"            //
+    "    dimensions) matrix.\n"                                                                  //
+    "  rows_per_query (int): Rows every query occupies; uniform, so ColBERT's padding\n"         //
+    "    applies as is. The query row count must be a whole multiple of it.\n"                   //
+    "  wanted (int): Upper bound on matches per query - the 'k' over documents, not rows.\n"     //
+    "  arena (Arena): Where the scored documents land, rewound by the call.\n"                   //
+    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Widening it\n" //
+    "    narrows the gap to the exact score, which a walk can only under-report.\n"              //
+    "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"          //
+    "  progress (callable, optional): Called with (completed, total) queries; returning\n"       //
+    "    False stops the batch and raises `CancelledError`, None carries on.\n"                  //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
+    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"         //
+    "\n"                                                                                         //
+    "Returns:\n"                                                                                 //
     "  Matches: Document identities and their summed maxima, largest first, in the arena.";
 
 /** A @c usearch_dense_maxsim call, the queries it borrows, and the matches it lands in the
@@ -2318,7 +2318,7 @@ static char const doc_DenseIndex_search_stream[] =                              
     "\n"                                                                                     //
     "Args:\n"                                                                                //
     "  query (buffer): One vector of `dimensions` scalars.\n"                                //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"            //
+    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it.\n"         //
     "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"      //
     "\n"                                                                                     //
     "Example:\n"                                                                             //

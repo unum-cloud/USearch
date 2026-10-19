@@ -137,9 +137,9 @@ static i64_t overlap_oracle(std::string_view query, std::string_view stored) noe
         for (std::size_t start = 0; start + width <= stored.size(); ++start, ++stored_windows)
             hits += query.find(stored.substr(start, width)) != std::string_view::npos;
     }
-    if (query_windows == 0) return overlap_metric_t::resolution_k;
+    if (query_windows == 0) return overlap_resolution_k;
     u64_t const longer = std::max<u64_t>(query_windows, stored_windows);
-    return static_cast<i64_t>((longer - hits) * static_cast<u64_t>(overlap_metric_t::resolution_k) / longer);
+    return static_cast<i64_t>((longer - hits) * static_cast<u64_t>(overlap_resolution_k) / longer);
 }
 
 /** Three stored strings and their pairwise distances, stated by hand. */
@@ -208,8 +208,8 @@ struct overlap_fixture_t {
 
     /** "abcd" and "abce" share three of their five windows, "xyzw" none of either's. */
     static sequence_handmade_t make_handmade(allocator_t const& allocator) {
-        constexpr i64_t shared_k = overlap_metric_t::resolution_k * 2 / 5;
-        constexpr i64_t disjoint_k = overlap_metric_t::resolution_k;
+        constexpr i64_t shared_k = overlap_resolution_k * 2 / 5;
+        constexpr i64_t disjoint_k = overlap_resolution_k;
         return {{make_value("abcd", allocator), make_value("abce", allocator), make_value("xyzw", allocator)},
                 {{{0, shared_k, disjoint_k}, {shared_k, 0, disjoint_k}, {disjoint_k, disjoint_k, 0}}}};
     }
@@ -270,8 +270,10 @@ std::size_t check_levenshtein_kit(u64_t seed) {
     return failures;
 }
 
-/** One overlap kit against the brute-force window count, exact at any radius: generated strings, a
- *  string shorter than every width, and the empty one, opening a round that shares no window. */
+/** One overlap kit against the brute-force window count: exact within the radius and above it
+ *  otherwise, at an unbounded radius and at half the full scale, past which each pair drops by its
+ *  own budget. Generated strings, a string shorter than every width, and the empty one, opening a
+ *  round that shares no window. */
 template <sz_capability_t capability_>
 std::size_t check_overlap_kit(u64_t seed) {
     constexpr std::size_t generated_k = 24, candidates_k = generated_k + 2;
@@ -286,15 +288,20 @@ std::size_t check_overlap_kit(u64_t seed) {
 
         overlap_metric<capability_> metric;
         failures += expect_eq(metric.init(candidates_k, sequence_window_widths_k), status_t::success_k);
-        for (std::size_t const query : {std::size_t {0}, candidates_k - 1}) {
-            metric.reset(candidates[query]);
-            for (sequence_value_t const& candidate : candidates)
-                failures += expect(metric.push(candidate) == metric_staging_t::staged_k);
-            std::array<i64_t, candidates_k> distances;
-            metric.drain(distances, i64_t {0});
-            failures += expect_eq(metric.status(), status_t::success_k);
-            for (std::size_t candidate = 0; candidate != candidates_k; ++candidate)
-                failures += expect_eq(distances[candidate], overlap_oracle(candidates[query], candidates[candidate]));
+        for (i64_t const radius : {unbounded_radius<i64_t>(), overlap_resolution_k / 2}) {
+            for (std::size_t const query : {std::size_t {0}, candidates_k - 1}) {
+                metric.reset(candidates[query]);
+                for (sequence_value_t const& candidate : candidates)
+                    failures += expect(metric.push(candidate) == metric_staging_t::staged_k);
+                std::array<i64_t, candidates_k> distances;
+                metric.drain(distances, radius);
+                failures += expect_eq(metric.status(), status_t::success_k);
+                for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
+                    i64_t const truth = overlap_oracle(candidates[query], candidates[candidate]);
+                    failures += truth <= radius ? expect_eq(distances[candidate], truth)
+                                                : expect(distances[candidate] > radius);
+                }
+            }
         }
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);

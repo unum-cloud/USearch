@@ -207,7 +207,7 @@ No `NumericArray` holds zero keys, so `DenseInsert[receiver, {}, {}]` answers `N
 A query that finds fewer than `wanted` matches is not an error, and its lists are just shorter.
 No tensor holds zero rows either, so a search with no queries answers `<|"Keys"->{}, "Scores"->{}|>` in the package.
 
-The candidate-pool breadth rides each call in the C interface rather than the handle, so it is an `"ExpansionFactor"` option on every verb that walks the graph, zero deriving it.
+The breadth of the candidates rides each call in the C interface rather than the handle, so it is an `"ExpansionFactor"` option on every verb that walks the graph, zero deriving it.
 `"Traversal"->"scan"` skips the walk and scores every row exactly, on RAM and NVMe handles:
 
 ```wolfram
@@ -266,7 +266,7 @@ Values have the same width as the indexed keys, with one value row per unique ke
 Native worker threads look up those immutable rows directly, without entering the evaluator.
 This cache serves RAM & NVMe attention; device value lookup is not exposed here.
 
-`DenseAttend` folds every scored key-value pair into online softmax, including candidates rejected by the nearest-neighbor pool.
+`DenseAttend` folds every scored key-value pair into online softmax, including candidates rejected by the nearest-neighbor candidates.
 It requires the `inner` metric, as `DenseMultiply` does.
 `"HeadCount"` consecutive query rows share one key-value head & graph walk; it must divide the number of query rows.
 Zero means one head.

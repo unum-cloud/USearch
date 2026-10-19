@@ -377,7 +377,7 @@ for query := range matches.Queries() {
 }
 ```
 
-The candidate-pool breadth rides each call as `ExpansionFactor` rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
+The breadth of the candidates rides each call as `ExpansionFactor` rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
 `Traversal: usearch.TraversalScan` skips the walk and scores every row exactly, on RAM and NVMe handles, which gives such a sweep its ground truth.
 
 Insertion, refinement and every walk report traversal telemetry when asked.

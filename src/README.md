@@ -140,7 +140,7 @@ Their ladders are shorter than dense's, over the classes where StringZilla's Lev
 Every basic class unit lists the same modalities, sequence, shapes and geospatial, each RAM then NVMe, and a modality whose kits do not advance at a class falls back through its kit chain to the next lower generation.
 
 - `insert` builds the batch's values on every thread from the index's allocator, sizes every thread's context and metric, and only then plans the batch, so nothing fails after the dispense.
-- `search` lands each query's nearest from the walk's pool, filtered by the predicate a quad of keys at a time.
+- `search` lands each query's nearest from the walk's candidates, filtered by the predicate a quad of keys at a time.
 - Overlap distances land as the share of missed windows, from zero to one, rather than the kernels' fixed point.
 - Checkpoints are one SafeGraphs monolith whose metric token is `levenshtein`, `levenshtein-utf8`, `overlap`, `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`, with `connectivity`, `window_widths` and `points` in the provenance.
 

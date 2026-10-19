@@ -301,7 +301,7 @@ pub const DenseMetadataReadBufferConfig = struct {
 
 /// Optional settings of `DenseIndex.insert`.
 pub const DenseInsertConfig = struct {
-    /// The candidate-pool breadth the build walk explores; zero derives.
+    /// The breadth of the candidates the build walk explores; zero derives.
     expansion_factor: usize = 0,
     /// Called with rows admitted; it reports and cannot cancel, since every row is claimed first.
     progress: ProgressCallback = .{},
@@ -312,7 +312,7 @@ pub const DenseInsertConfig = struct {
 
 /// Optional settings of `DenseIndex.refine`.
 pub const DenseRefineConfig = struct {
-    /// The candidate-pool breadth the re-selection walk explores; zero derives.
+    /// The breadth of the candidates the re-selection walk explores; zero derives.
     expansion_factor: usize = 0,
     /// Called with nodes swept; a stop is a time budget rather than a failure.
     progress: ProgressCallback = .{},
@@ -323,7 +323,7 @@ pub const DenseRefineConfig = struct {
 
 /// Optional settings of `DenseIndex.search`.
 pub const DenseSearchConfig = struct {
-    /// The candidate-pool breadth the walk explores; zero derives.
+    /// The breadth of the candidates the walk explores; zero derives.
     expansion_factor: usize = 0,
     /// A walk, or an exact scan of every row on RAM and NVMe handles; VRAM answers `Error.Unsupported`.
     traversal: Traversal = .walk,
@@ -348,7 +348,7 @@ pub const DenseAbsorbConfig = struct {
 pub const DenseMultiplyConfig = struct {
     /// Bound on pairs kept per row, the first ones its walk scored; zero keeps every pair.
     wanted: usize = 0,
-    /// The candidate-pool breadth, which widens the emitted pattern; zero derives.
+    /// The breadth of the candidates, which widens the emitted pattern; zero derives.
     expansion_factor: usize = 0,
     progress: ProgressCallback = .{},
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -365,7 +365,7 @@ pub const DenseAttendConfig = struct {
     carry: ?[]DenseSoftmaxState = null,
     /// The scalar type the attended rows land as; `.unknown` takes the queries' own.
     outputs_scalar: Scalar = .unknown,
-    /// The candidate-pool breadth; zero derives. A wider pool walks further, folding more of the tail.
+    /// The breadth of the candidates; zero derives. Wider candidates walk further, folding more of the tail.
     expansion_factor: usize = 0,
     /// The logit scale, conventionally the inverse square root of the head dimensionality; zero
     /// derives it from the index's frozen geometry.
@@ -378,7 +378,7 @@ pub const DenseAttendConfig = struct {
 
 /// Optional settings of `DenseIndex.maxsim`.
 pub const DenseMaxsimConfig = struct {
-    /// The candidate-pool breadth; zero derives.
+    /// The breadth of the candidates; zero derives.
     expansion_factor: usize = 0,
     progress: ProgressCallback = .{},
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -404,7 +404,7 @@ pub const DenseSaveBufferConfig = struct {
 
 /// Optional settings of `DenseSearchStream.init`.
 pub const DenseSearchStreamInitConfig = struct {
-    /// The candidate-pool breadth the walk explores; zero derives.
+    /// The breadth of the candidates the walk explores; zero derives.
     expansion_factor: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,

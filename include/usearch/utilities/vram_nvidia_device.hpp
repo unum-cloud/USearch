@@ -942,7 +942,7 @@ struct cuda_event_t {
     }
 
     /** Sleeps until the recorded work finishes and answers whether the device finished it. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         return handle_ && cuda_api().event_synchronize(handle_) == cuda_success_k ? status_t::success_k
                                                                                   : status_t::device_error_k;
     }
@@ -988,10 +988,10 @@ struct cuda_device_arena_t {
 
     /** Waits once for every upload queued so far - the end of the call holding the arena -
      *  sleeping on the stream's event. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         if (cuda_set_device(device_) != cuda_success_k) return status_t::device_error_k;
         if (status_t const recorded = event_->record(stream_); failed(recorded)) return recorded;
-        return event_->drain();
+        return event_->wait();
     }
 
     int device() const noexcept { return device_; }
@@ -1106,12 +1106,12 @@ struct cuda_executor_t {
 
     /** Waits for every transfer and launch queued on every stream - the fleet's completion -
      *  marking each stream with its device bound, then sleeping on each mark in turn. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         for (stream_t& opened : streams_)
             if (cuda_set_device(opened.device) != cuda_success_k || failed(opened.event.record(opened.handle)))
                 return status_t::device_error_k;
         for (stream_t& opened : streams_)
-            if (status_t const drained = opened.event.drain(); failed(drained)) return drained;
+            if (status_t const drained = opened.event.wait(); failed(drained)) return drained;
         return status_t::success_k;
     }
 
@@ -1340,10 +1340,10 @@ struct cuda_traversal_context {
      *  completion, the executor's @c drain being the fleet's - sleeping on the context's event
      *  instead of spinning a core. Selects the context's device first, since an event records only
      *  in its own device's context. */
-    status_t drain() noexcept {
+    status_t wait() noexcept {
         if (cuda_set_device(device()) != cuda_success_k) return status_t::device_error_k;
         if (status_t const recorded = record(); failed(recorded)) return recorded;
-        return event_.drain();
+        return event_.wait();
     }
 
     /** Marks everything queued on this context's stream so far as the submission @ref landed
