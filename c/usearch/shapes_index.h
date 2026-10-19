@@ -599,8 +599,13 @@ typedef struct usearch_shapes_search_t {
     /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
     size_t wanted;
 
-    /** The @b optional breadth of the candidates the walk explores; zero derives. */
+    /** The @b optional breadth of the candidates a walk explores; zero derives, a scan ignores
+     *  it. */
     size_t expansion_factor;
+
+    /** How rows are reached: a walk, the default, or an exact scan of every row, on RAM and
+     *  NVMe. */
+    usearch_traversal_t traversal;
 
     /** The @b optional admission filter, asked about a batch of candidates at a time. */
     usearch_predicate_t predicate;
@@ -613,11 +618,14 @@ typedef struct usearch_shapes_search_t {
 } usearch_shapes_search_t;
 
 /**
- *  @brief Performs k-Approximate Nearest Neighbors Search for a tape of query shapes - the native
- *      batch operation, parallelized internally; one query is a tape of one. Query point counts
- *      are unconstrained and need not match any indexed entry.
+ *  @brief Performs k-Nearest Neighbors Search for a tape of query shapes, approximate by walking
+ *      the graph or exact by scanning every row; one query is a tape of one.
+ *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
+ *  @retval usearch_status_unsupported_k A scan of a VRAM handle, or a @c predicate on one.
  *
- *  Never writes to the graph, so any number may overlap with concurrent insertions.
+ *  The native batch operation, parallelized internally. Query point counts are unconstrained and
+ *  need not match any indexed entry. Never writes to the graph, so any number may overlap with
+ *  concurrent insertions.
  *  @ref shapes_index_concurrency
  *
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route

@@ -108,7 +108,7 @@ static bool reject_relation(usearch_geospatial_relation_t relation, usearch_outc
         return true;
     return reject_if(relation != usearch_geospatial_relation_near_k && relation != usearch_geospatial_relation_sees_k &&
                          relation != usearch_geospatial_relation_seen_k,
-                     usearch_status_invalid_argument_k, "The relation is not one this ABI names", outcome);
+                     usearch_status_unknown_kind_k, "The relation is not one this ABI names", outcome);
 }
 
 #pragma endregion Storage
@@ -491,6 +491,7 @@ void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;
     if (reject_relation(arguments->relation, outcome)) return;
+    if (reject_traversal(arguments->traversal, outcome)) return;
     if (reject_observations(arguments->queries, count, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {arguments->queries},
                                                       outcome);
@@ -531,6 +532,7 @@ void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
     std::size_t const count = arguments->count;
     usearch_geospatial_tolerance_t const& tolerance = arguments->tolerance;
     if (reject_relation(arguments->relation, outcome)) return;
+    if (reject_traversal(arguments->traversal, outcome)) return;
     if (reject_observations(arguments->queries, count, outcome)) return;
     // Containment is measured from a radius, so a zero-metre tolerance names no ball to report -
     // the one place this verb parts with its ranked sibling.

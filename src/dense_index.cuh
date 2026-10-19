@@ -3199,14 +3199,10 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
     if (rejects_columns(*arguments->index, count, arguments->queries.columns, outcome)) return;
-    if (arguments->traversal != usearch_traversal_walk_k && arguments->traversal != usearch_traversal_scan_k)
-        return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown traversal"), void();
     key_predicate_t keyed {arguments->predicate};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if (device_of(variant) != host_device_k && keyed.predicate.callback)
-                propagate_error(usearch_status_device_k, outcome, "A host predicate cannot narrow a device walk");
-            else {
+            if (accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) {
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
                                                                   arguments->executor, device_of(variant),
                                                                   {arguments->queries.data}, outcome);

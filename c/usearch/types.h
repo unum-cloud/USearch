@@ -207,7 +207,7 @@ typedef enum usearch_status_t {
     /** A stride or packing the engine cannot traverse. */
     usearch_status_unsupported_layout_k = 4,
 
-    /** A scalar, metric, or residency tag this build does not know. */
+    /** A scalar, metric, residency, traversal or relation tag this build does not know. */
     usearch_status_unknown_kind_k = 5,
 
     /** A mutating verb on a handle that serves its checkpoint in place. */
@@ -245,8 +245,8 @@ typedef enum usearch_status_t {
      *  published nothing, so the handle carries whatever it did before the call. */
     usearch_status_cancelled_k = 15,
 
-    /** The verb is declared for every residency but this one does not implement it, nor the
-     *  requested traversal, or the build left the requested quantization out; no retry, option, or
+    /** The verb is declared for every residency but this one does not implement it, its traversal
+     *  or its predicate, or the build left the requested quantization out; no retry, option, or
      *  smaller request can help, so a caller picks another residency, traversal or build. */
     usearch_status_unsupported_k = 16,
 

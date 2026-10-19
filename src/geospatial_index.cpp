@@ -138,7 +138,7 @@ static bool accepts_relation(variant_type_ const& variant, usearch_geospatial_re
                              usearch_outcome_t* outcome) noexcept {
     if (relation != usearch_geospatial_relation_near_k && relation != usearch_geospatial_relation_visible_k &&
         relation != usearch_geospatial_relation_sees_k && relation != usearch_geospatial_relation_seen_k)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "Unknown geospatial relation");
+        return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown geospatial relation");
     if (relation != usearch_geospatial_relation_visible_k || variant.has_terrain()) return true;
     return propagate_error(usearch_status_unsupported_k, outcome, "Lines of sight need a handle with terrain");
 }
@@ -338,6 +338,9 @@ USEARCH_EXPORT void usearch_geospatial_within(usearch_geospatial_within_t* argum
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if (!accepts_relation(variant, arguments->relation, outcome)) return;
+            if (!accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) return;
+            if (arguments->traversal == usearch_traversal_scan_k)
+                return propagate_error(usearch_status_unsupported_k, outcome, "No scan serves containment yet"), void();
             usearch_executor_handle_t call_executor;
             typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
                                                                              call_executor, outcome);

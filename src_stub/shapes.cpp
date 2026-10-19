@@ -557,6 +557,7 @@ void usearch_shapes_search(usearch_shapes_search_t* arguments) {
     if (reject_scalar(queries.scalar, outcome)) return;
     if (reject_metric(index, outcome)) return;
     if (reject_tape(queries, count, outcome)) return;
+    if (reject_traversal(arguments->traversal, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
                                                       {queries.data, queries.offsets}, outcome);
     ranked_landing_t landing {};

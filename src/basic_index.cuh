@@ -667,9 +667,9 @@ void basic_search(arguments_type_* arguments) noexcept {
     *arguments->matches = {};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if (device_of(variant) != host_device_k && arguments->predicate.callback)
-                return propagate_error(usearch_status_device_k, outcome,
-                                       "A host predicate cannot narrow a device walk"),
+            if (!accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) return;
+            if (arguments->traversal == usearch_traversal_scan_k)
+                return propagate_error(usearch_status_unsupported_k, outcome, "No scan serves this modality yet"),
                        void();
             // Matches land on host pages, which a device arena takes over and a host one keeps.
             bool const host_landing = arguments->arena && arguments->arena->device == host_device_k;

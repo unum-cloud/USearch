@@ -615,9 +615,7 @@ void usearch_dense_search(usearch_dense_search_t* arguments) {
     std::size_t const count = arguments->count;
     if (reject_view(arguments->queries, count, index, outcome)) return;
     usearch_traversal_t const traversal = arguments->traversal;
-    if (reject_if(traversal != usearch_traversal_walk_k && traversal != usearch_traversal_scan_k,
-                  usearch_status_unknown_kind_k, "Unknown traversal", outcome))
-        return;
+    if (reject_traversal(traversal, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {arguments->queries.data},
                                                       outcome);
     ranked_landing_t landing {};

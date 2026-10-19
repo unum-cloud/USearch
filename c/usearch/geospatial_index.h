@@ -636,9 +636,13 @@ typedef struct usearch_geospatial_search_t {
     /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
     size_t wanted;
 
-    /** The @b optional breadth of the candidates the walk explores - the @c ef of the
-     *  literature; zero derives. */
+    /** The @b optional breadth of the candidates a walk explores - the @c ef of the literature;
+     *  zero derives, a scan ignores it. */
     size_t expansion_factor;
+
+    /** How rows are reached: a walk, the default, or an exact scan of every row, on RAM and
+     *  NVMe. */
+    usearch_traversal_t traversal;
 
     /** The @b optional admission filter, asked about a batch of candidates at a time. */
     usearch_predicate_t predicate;
@@ -651,9 +655,12 @@ typedef struct usearch_geospatial_search_t {
 } usearch_geospatial_search_t;
 
 /**
- *  @brief Finds the nearest entries of each query observation that the relation admits - the
- *      native batch operation, parallelized internally; one query is a batch of one.
- *  @retval usearch_status_unsupported_k A @c visible relation on a handle without terrain.
+ *  @brief Finds the nearest entries of each query observation that the relation admits, approximate
+ *      by walking the graph or exact by scanning every row - the native batch operation,
+ *      parallelized internally; one query is a batch of one.
+ *  @retval usearch_status_unknown_kind_k A @c relation or @c traversal this build does not know.
+ *  @retval usearch_status_unsupported_k A @c visible relation on a handle without terrain, or a
+ *      scan of a VRAM handle, or a @c predicate on one.
  *
  *  Scores are chord metres between the two positions, altitude included. The relation, the time
  *  window and the predicate narrow the walk's candidates, so a selective one wants a wider
@@ -703,6 +710,10 @@ typedef struct usearch_geospatial_within_t {
     /** Memory for @c matches, rewound by the call. */
     usearch_arena_t arena;
 
+    /** How rows are reached: a complete walk, the default, or an exact scan of every row, on RAM
+     *  and NVMe. */
+    usearch_traversal_t traversal;
+
     /** The @b optional admission filter, asked about a batch of candidates at a time. */
     usearch_predicate_t predicate;
 
@@ -718,7 +729,9 @@ typedef struct usearch_geospatial_within_t {
  *      admits - the containment counterpart of the ranked search, unbounded in result count.
  *  @retval usearch_status_invalid_argument_k A tolerance of zero metres, since containment needs a
  *      radius.
- *  @retval usearch_status_unsupported_k A @c visible relation on a handle without terrain.
+ *  @retval usearch_status_unknown_kind_k A @c relation or @c traversal this build does not know.
+ *  @retval usearch_status_unsupported_k A @c visible relation on a handle without terrain, or a
+ *      scan of a VRAM handle, or a @c predicate on one.
  *
  *  Complete on the converged graph: the walk widens its candidates by the cone graph's spanner
  *  bound before trusting it, so every candidate inside the tolerance is enumerated, at about thirty

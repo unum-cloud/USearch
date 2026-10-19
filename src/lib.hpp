@@ -855,6 +855,17 @@ inline typename multi_type_::executor_t* executor_of(multi_type_& variant, usear
 /** The device an arena of host pages names, which no GPU ordinal does. */
 inline constexpr int host_device_k = -1;
 
+/** Whether @p traversal names a walk or a scan, and @p predicate leaves @p device 's walks alone,
+ *  since a host callback cannot narrow a device walk; false once @p outcome records why not. */
+inline bool accepts_traversal(int device, usearch_traversal_t traversal, usearch_predicate_t predicate,
+                              usearch_outcome_t* outcome) noexcept {
+    if (traversal != usearch_traversal_walk_k && traversal != usearch_traversal_scan_k)
+        return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown traversal");
+    if (predicate.callback && device != host_device_k)
+        return propagate_error(usearch_status_unsupported_k, outcome, "A host predicate cannot narrow a device walk");
+    return true;
+}
+
 /** What @c usearch_arena_t owns: memory that one call at a time rewinds and refills, as host pages
  *  or on one device, and the call holding it. */
 struct usearch_arena_handle_t {

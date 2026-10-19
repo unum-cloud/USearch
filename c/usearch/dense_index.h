@@ -773,9 +773,9 @@ typedef struct usearch_dense_search_t {
 /**
  *  @brief Performs k-Nearest Neighbors Search for a run of queries, approximate by walking the
  *      graph or exact by scanning every row - the native batch operation, parallelized internally.
- *  @retval usearch_status_device_k A @c predicate on a VRAM handle.
- *  @retval usearch_status_unsupported_k A @c usearch_traversal_scan_k scan of an AMD or Apple VRAM
- *      handle.
+ *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
+ *  @retval usearch_status_unsupported_k A scan of an AMD or Apple VRAM handle, or a @c predicate on
+ *      any VRAM handle.
  *
  *  One query is a count of one. Never writes to the index, so any number may overlap with
  *  insertions. @ref dense_index_concurrency

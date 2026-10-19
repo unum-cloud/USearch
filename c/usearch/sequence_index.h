@@ -658,9 +658,13 @@ typedef struct usearch_sequence_search_t {
     /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
     size_t wanted;
 
-    /** The @b optional breadth of the candidates the walk explores - the @c ef of the
-     *  literature; zero derives. */
+    /** The @b optional breadth of the candidates a walk explores - the @c ef of the literature;
+     *  zero derives, a scan ignores it. */
     size_t expansion_factor;
+
+    /** How rows are reached: a walk, the default, or an exact scan of every row, on RAM and
+     *  NVMe. */
+    usearch_traversal_t traversal;
 
     /** The @b optional admission filter, asked about a batch of candidates at a time. */
     usearch_predicate_t predicate;
@@ -673,9 +677,13 @@ typedef struct usearch_sequence_search_t {
 } usearch_sequence_search_t;
 
 /**
- *  @brief Performs k-Approximate Nearest Neighbors Search for a tape of queries - the native batch
- *      operation, parallelized internally; one query is a tape of one. Never writes to the graph,
- *      so any number may overlap with concurrent insertions. @ref sequence_index_concurrency
+ *  @brief Performs k-Nearest Neighbors Search for a tape of queries, approximate by walking the
+ *      graph or exact by scanning every row; one query is a tape of one.
+ *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
+ *  @retval usearch_status_unsupported_k A scan of a VRAM handle, or a @c predicate on one.
+ *
+ *  The native batch operation, parallelized internally. Never writes to the graph, so any number
+ *  may overlap with concurrent insertions. @ref sequence_index_concurrency
  *
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the

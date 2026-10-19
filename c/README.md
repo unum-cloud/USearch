@@ -429,7 +429,7 @@ The predicate judges a batch of candidates per call, a quad of them at a time du
 
 Rejected entries still route the walk, so recall holds at low selectivity, and the predicate judges every scored candidate, concurrently on the executor's threads, so it must be fast and tolerate that.
 An exact scan asks it only about rows closer than the worst match a query already holds, which makes the scan the fallback for filters too selective for a walk to cross.
-A host predicate cannot narrow a device walk, so a VRAM search with one reports `usearch_status_device_k`.
+A host predicate cannot narrow a device walk, so a VRAM search with one reports `usearch_status_unsupported_k`.
 
 Long calls take a `usearch_progress_t`: a handler, which is also the only way to stop one, its state, and how many reports it hears:
 

@@ -152,6 +152,12 @@ inline bool reject_if(bool wrong, usearch_status_t status, char const* message, 
     return true;
 }
 
+/** Refuses a traversal other than a walk or a scan; this stand-in answers both exactly. */
+inline bool reject_traversal(usearch_traversal_t traversal, usearch_outcome_t* outcome) {
+    return reject_if(traversal != usearch_traversal_walk_k && traversal != usearch_traversal_scan_k,
+                     usearch_status_unknown_kind_k, "Unknown traversal", outcome);
+}
+
 /** Zeroes the telemetry, which every header calls a pure output fully overwritten. */
 template <typename stats_>
 void reset(stats_* stats) {

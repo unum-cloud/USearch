@@ -750,6 +750,7 @@ void usearch_sequence_search(usearch_sequence_search_t* arguments) {
     usearch_tape_view_t const& queries = arguments->queries;
     if (reject_tape(queries, count, outcome)) return;
     if (reject_bytes(queries, outcome)) return;
+    if (reject_traversal(arguments->traversal, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
                                                       {queries.data, queries.offsets}, outcome);
     ranked_landing_t landing {};
