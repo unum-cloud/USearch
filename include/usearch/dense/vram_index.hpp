@@ -94,7 +94,7 @@ struct vram_search_t {
     vram_telemetry_block_t* telemetry = nullptr;
     u32_t* assigned_queries = nullptr;
     u32_t* live_walks = nullptr;
-    u32_t seats = 0;
+    u32_t concurrent_walks = 0;
     u32_t filling_rows = 0;
 };
 
@@ -568,8 +568,8 @@ struct vram_index {
             auto const [specs, status] = device_specs_t::query(device_.ordinal);
             if (failed(status)) return {0, status};
             device_ = specs;
-            // Geometry no walk can seat is refused here; a builder whose scratch shared memory
-            // cannot seat keeps it in its arena slice.
+            // Geometry no walk can fit is refused here; a builder whose scratch shared memory
+            // cannot fit keeps it in its arena slice.
             if (!derived().walk_scratch_fits()) return {0, status_t::config_mismatch_k};
             if (status_t const loaded = derived().load_kernels_(); failed(loaded)) return {0, loaded};
             // Virtual address space is free, so the ceiling is generous and independent of the
@@ -651,9 +651,9 @@ struct vram_index {
         /** Frontier tails compacted to what can still rank - GPU-only telemetry. */
         std::size_t tail_compactions = 0;
 
-        /** Entries tied at that radius a compacted tail still could not seat - GPU-only
+        /** Entries tied at that radius a compacted tail still could not fit - GPU-only
          *  telemetry. */
-        std::size_t tail_unseated = 0;
+        std::size_t tail_dropped = 0;
 
         /** Visited-set claims that ran out of probes and re-scored - GPU-only telemetry. */
         std::size_t visited_saturations = 0;
@@ -696,7 +696,7 @@ struct vram_index {
         inserted.value.restarts = spent.restarts;
         inserted.value.unlinked_neighbors = spent.lock_skips;
         inserted.value.tail_compactions = spent.tail_compactions;
-        inserted.value.tail_unseated = spent.tail_unseated;
+        inserted.value.tail_dropped = spent.tail_dropped;
         inserted.value.visited_saturations = spent.visited_saturations;
         return inserted;
     }
@@ -733,7 +733,7 @@ struct vram_index {
         std::size_t computed_distances = 0;
         std::size_t restarts = 0;
         std::size_t tail_compactions = 0;
-        std::size_t tail_unseated = 0;
+        std::size_t tail_dropped = 0;
         std::size_t visited_saturations = 0;
     };
 
@@ -859,7 +859,7 @@ struct vram_index {
      *  @param[in] queries The query heads, in any scalar NumKong casts as in @c search; row t ·
      *      @p head_count + h is head h of token t.
      *  @param[in] head_count The query heads sharing this key-value head; it must divide the rows,
-     *      and their per-warp softmax states and accumulator rows must seat in shared memory beside
+     *      and their per-warp softmax states and accumulator rows must fit in shared memory beside
      *      the query span.
      *  @param[in] value_lookup Device-callable: `value_lookup(node_id)` points at the node's value
      *      row on a 16-byte boundary, as wide as the keys and stored like them, in memory this
@@ -2187,7 +2187,7 @@ struct vram_index {
         submitted.value.computed_distances = spent.scored;
         submitted.value.restarts = spent.restarts;
         submitted.value.tail_compactions = spent.tail_compactions;
-        submitted.value.tail_unseated = spent.tail_unseated;
+        submitted.value.tail_dropped = spent.tail_dropped;
         submitted.value.visited_saturations = spent.visited_saturations;
         return submitted;
     }
@@ -2307,8 +2307,8 @@ struct vram_index {
 #pragma region Launches
 
     /** Blocks a walk over @p queries launches at @p resident_blocks blocks per multiprocessor: a
-     *  warp per query up to the grid the device seats, so the arena carves a slice only for a warp
-     *  that can take a query. */
+     *  warp per query up to the grid the device runs at once, so the arena carves a slice only for
+     *  a warp that can take a query. */
     u32_t walk_blocks_(std::size_t queries, u32_t resident_blocks) const noexcept {
         return static_cast<u32_t>(min_of<std::size_t>(divide_round_up<std::size_t>(queries, vram_warps_per_block_k),
                                                       std::size_t {device_.multiprocessor_count} * resident_blocks));
@@ -2432,7 +2432,7 @@ struct vram_index {
 
     /** One building warp's arena slice for @p walks walks on the rung of @p candidate_slots, the
      *  arena frontier's over @p expansion at zero, then the builders' scratch when shared memory
-     *  cannot seat it. */
+     *  cannot fit it. */
     gpu_arena_shape_t build_arena_shape_(u32_t expansion, u32_t candidate_slots, u32_t walks) const noexcept {
         u32_t const scratch_bytes = builder_scratch_bytes_per_warp_(expansion, candidate_slots);
         gpu_arena_shape_t shape = arena_shape_for(

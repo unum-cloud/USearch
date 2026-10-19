@@ -119,9 +119,9 @@ struct metal_sorted_candidates {
     /** A walk over full ranks ends at their radius, so a further walk needs no budget renewed. */
     void renew() {}
 
-    /** Nothing to compact or leave unseated: the ranks keep the nearest of every union by construction. */
+    /** Nothing to compact or drop: the ranks keep the nearest of every union by construction. */
     uint compactions() { return 0; }
-    uint unseated() { return 0; }
+    uint dropped() { return 0; }
 
     /** Kills every staged entry whose ID already resides in the candidates, as the CUDA candidates' @c deduplicate
      * does: a re-scored ID past a visited-set saturation keeps one copy. */
@@ -193,8 +193,8 @@ struct metal_arena_frontier {
     uint tail_size, tail_capacity;
 
     /** Times a full tail kept only what can still rank among the expansion target, and the entries tied at that
-     *  radius a compacted tail still could not seat. */
-    uint tail_compactions, tail_unseated;
+     *  radius a compacted tail still could not fit. */
+    uint tail_compactions, tail_dropped;
     uint expansion_target, expansions;
 
     void clear(thread metal_walk_t& walk);
@@ -202,11 +202,11 @@ struct metal_arena_frontier {
     /** Grants a further walk over what this frontier holds its own expansion budget. */
     void renew() { expansions = 0; }
     uint compactions() { return tail_compactions; }
-    uint unseated() { return tail_unseated; }
+    uint dropped() { return tail_dropped; }
     bool holds(uint staged_id, uint lane) { return head.holds(staged_id, lane); }
 
     /** Appends a lane-wide batch to the tail; a full tail first keeps what can still rank among the walk's expansion
-     *  target, as the CUDA arena frontier does, counted, as are the entries it still cannot seat. */
+     *  target, as the CUDA arena frontier does, counted, as are the entries it still cannot fit. */
     void spill(ulong value, uint lane) {
         bool const full = tail_size + warp_t::width_k > tail_capacity;
         if (full) keep_nearest(expansion_target, lane);
@@ -216,7 +216,7 @@ struct metal_arena_frontier {
         uint const ordinal = popcount(live_mask & warp_t::below(lane));
         if (live && tail_size + ordinal < tail_capacity) tail[tail_size + ordinal] = value;
         uint const grown = min(tail_size + popcount(live_mask), tail_capacity);
-        tail_unseated += tail_size + popcount(live_mask) - grown;
+        tail_dropped += tail_size + popcount(live_mask) - grown;
         tail_size = grown;
         warp_t::sync();
     }
@@ -429,7 +429,7 @@ struct metal_walk_t {
     uint hash_shift, epoch, saturations;
     ulong random;
     uint hops, scored_count, restarts, lock_attempts, lock_skips, reselections, locked_drops, tail_compactions;
-    uint tail_unseated;
+    uint tail_dropped;
 
     norms_t norm_for(uint node_id) { return has_norms ? norms[node_id] : norms_t(0); }
     device uint* neighbors_for(uint node_id) { return metal_row(neighbors, node_id, connectivity); }
@@ -994,7 +994,7 @@ inline void metal_flush(thread metal_walk_t& walk) {
     add(metal_locked_drops_k, walk.locked_drops);
     add(metal_saturations_k, walk.saturations);
     add(metal_tail_compactions_k, walk.tail_compactions);
-    add(metal_tail_unseated_k, walk.tail_unseated);
+    add(metal_tail_dropped_k, walk.tail_dropped);
 }
 
 /** Opens the walk of the simdgroup at @p slice over its scratch, with fresh telemetry. */
@@ -1037,7 +1037,7 @@ inline metal_walk_t metal_open(constant metal_arguments_t& arguments, device uin
     walk.has_norms = arguments.has_norms != 0, walk.lane = lane;
     walk.hash_shift = arguments.hash_shift, walk.epoch = 0, walk.saturations = 0, walk.random = 0;
     walk.hops = 0, walk.scored_count = 0, walk.restarts = 0, walk.lock_attempts = 0, walk.lock_skips = 0;
-    walk.reselections = 0, walk.locked_drops = 0, walk.tail_compactions = 0, walk.tail_unseated = 0;
+    walk.reselections = 0, walk.locked_drops = 0, walk.tail_compactions = 0, walk.tail_dropped = 0;
     return walk;
 }
 
@@ -1048,7 +1048,7 @@ void metal_sorted_candidates<slots_>::clear(thread metal_walk_t&) {
 
 void metal_arena_frontier::clear(thread metal_walk_t& walk) {
     head.clear();
-    tail = walk.tail, tail_size = 0, tail_capacity = walk.tail_entries, tail_compactions = 0, tail_unseated = 0;
+    tail = walk.tail, tail_size = 0, tail_capacity = walk.tail_entries, tail_compactions = 0, tail_dropped = 0;
     expansion_target = walk.expansion, expansions = 0;
 }
 
@@ -1106,7 +1106,7 @@ inline void metal_insert(constant metal_arguments_t& arguments, device uint4* ve
         metal_fold_t fold {};
         if (new_node_id != 0) metal_search_ahead(walk, frontier, new_norms, 0, new_node_id, arguments.end_id, fold);
         walk.tail_compactions += frontier.compactions();
-        walk.tail_unseated += frontier.unseated();
+        walk.tail_dropped += frontier.dropped();
         uint const selected = metal_select_diverse(walk, frontier);
         device uint* const own = walk.neighbors_for(new_node_id);
         for (uint slot = lane; slot < selected; slot += warp_t::width_k)
@@ -1204,7 +1204,7 @@ inline void metal_refine(constant metal_arguments_t& arguments, device uint4* ve
                                fold);
         }
         walk.tail_compactions += frontier.compactions();
-        walk.tail_unseated += frontier.unseated();
+        walk.tail_dropped += frontier.dropped();
         uint const selected = metal_select_diverse(walk, frontier);
         device uint* const shadow_row = metal_row(shadow, node_id, walk.connectivity);
         for (uint slot = lane; slot < walk.connectivity; slot += warp_t::width_k)
@@ -1231,7 +1231,8 @@ inline void metal_search(constant metal_arguments_t& arguments, device uint4* ve
         // Simdgroups no other walk holds widen this one, never past the rows that fill its candidates.
         uint live = lane == 0 ? atomic_fetch_add_explicit(counters + metal_live_k, 1u, memory_order_relaxed) + 1 : 0;
         live = warp_t::shuffle(live, 0);
-        walk.walk_width = walk_width(arguments.seats, live, arguments.queries_count - query, arguments.filling_rows);
+        walk.walk_width = walk_width(arguments.concurrent_walks, live, arguments.queries_count - query,
+                                     arguments.filling_rows);
         walk.epoch = arguments.epoch_base + query + 1;
         walk.random = metal_lane_generator(query, lane);
         norms_t const query_norms = metal_stage_query(walk, metal_row(queries, query, walk.row_fragments));
@@ -1252,7 +1253,7 @@ inline void metal_search(constant metal_arguments_t& arguments, device uint4* ve
         metal_search_ahead(walk, frontier, query_norms, 0, arguments.sampling_bound, arguments.sampling_bound, fold);
         if (lane == 0) atomic_fetch_sub_explicit(counters + metal_live_k, 1u, memory_order_relaxed);
         walk.tail_compactions += frontier.compactions();
-        walk.tail_unseated += frontier.unseated();
+        walk.tail_dropped += frontier.dropped();
         if (keeps) {
             for (uint slot = fold.written + lane; slot < arguments.count; slot += warp_t::width_k)
                 fold.ids[slot] = metal_unknown_k;

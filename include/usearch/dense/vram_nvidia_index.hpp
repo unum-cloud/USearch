@@ -53,9 +53,9 @@ inline constexpr u32_t cuda_scan_staged_bytes_k = 2 * cuda_scan_tile_k * cuda_sc
 
 /** Row ranges a scan of @p blocks blocks of queries over @p visible rows splits into on a
  *  persistent grid of @p grid blocks, @p resident_blocks of them per multiprocessor: enough work
- *  items for every block to claim one per block its multiprocessor seats, none narrower than a tile
- *  of rows, and no more than the merge's heads and their taken counts fit in the staged candidates'
- *  shared memory. */
+ *  items for every block to claim one per block its multiprocessor keeps resident, none narrower
+ *  than a tile of rows, and no more than the merge's heads and their taken counts fit in the staged
+ *  candidates' shared memory. */
 constexpr u32_t cuda_scan_ranges(u32_t grid, u32_t resident_blocks, u32_t blocks, u32_t visible) noexcept {
     u32_t const claimed = divide_round_up(grid * resident_blocks, blocks);
     u32_t const tiles = max_of(divide_round_up(visible, cuda_scan_tile_k), 1u);
@@ -249,12 +249,12 @@ struct vram_nvidia_index
         return min_of(std::bit_ceil(row_fragments()), vram_max_gathers_in_flight_k);
     }
 
-    /** Whether a search, multiply or attend launch seats on this device: per warp, the query span
+    /** Whether a search, multiply or attend launch fits on this device: per warp, the query span
      *  and the @p fold_bytes an attend keeps past it, beside the static batch buffers. Defined in
      *  @c vram_nvidia_index.cuh, where the kits are visible. */
     bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept;
 
-    /** Whether a builder launch seats @p scratch_bytes_per_warp of per-warp scratch in shared
+    /** Whether a builder launch fits @p scratch_bytes_per_warp of per-warp scratch in shared
      *  memory beside the batch buffers and schedule state, on every block a multiprocessor keeps
      *  resident; when it cannot, the warp's arena slice keeps it, as Apple's always does. Defined
      *  in @c vram_nvidia_index.cuh. */
@@ -280,7 +280,7 @@ struct vram_nvidia_index
             walk_selection_rows_(expansion, candidate_slots),
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
         // A scan walks no arena, and keeps its matches past the outputs on a fragment boundary; the
-        // walks seat as many blocks as a search on the same rung, an attend no more.
+        // walks keep as many blocks resident as a search on the same rung, an attend no more.
         bool const scans = config.traversal == traversal_t::scan_k;
         u32_t const resident_blocks = resident_blocks_(vram_kernel_t::search_k, wide ? 0 : candidate_slots);
         std::size_t const arena_warps =
@@ -356,9 +356,9 @@ struct vram_nvidia_index
         /** The register ladder's width, when the ladder serves. */
         u32_t candidate_slots = 0;
 
-        /** Warps the device seats on the walk's rung, and the rows whose neighbors fill a
+        /** Walks the device runs at once on the walk's rung, and the rows whose neighbors fill a
          *  walk's candidates: the two shares @ref walk_width splits. */
-        u32_t seats = 0;
+        u32_t concurrent_walks = 0;
         u32_t filling_rows = 0;
 
         /** Which frontier the walks keep. */
@@ -411,13 +411,11 @@ struct vram_nvidia_index
         gpu_arena_shape_t const arena_shape = arena_shape_for(walk_selection_rows_(expansion, candidate_slots),
                                                               frontier);
         // A scan walks nothing, so it neither sizes nor zeroes an arena; a search, an indexed
-        // search and a multiply seat as many blocks on one rung.
+        // search and a multiply keep as many blocks resident on one rung.
         bool const walks = traversal == traversal_t::walk_k;
         u32_t const resident_blocks = resident_blocks_(attend_k ? vram_kernel_t::attend_k : vram_kernel_t::search_k,
                                                        frontier == frontier_kind_t::wide_arena_k ? 0 : candidate_slots);
-        // Every warp the device seats on this rung, and the rows whose neighbors fill a walk's
-        // candidates.
-        u32_t const seats = device_.multiprocessor_count * resident_blocks * vram_warps_per_block_k;
+        u32_t const concurrent_walks = device_.multiprocessor_count * resident_blocks * vram_warps_per_block_k;
         u32_t const filling = filling_rows<u32_t>(expansion, static_cast<u32_t>(connectivity()));
         std::size_t const arena_warps = std::size_t {walk_blocks_(queries_count, resident_blocks)} *
                                         vram_warps_per_block_k;
@@ -463,7 +461,7 @@ struct vram_nvidia_index
         walk.arena_shape = arena_shape;
         walk.epoch_base = epoch_base;
         walk.candidate_slots = candidate_slots;
-        walk.seats = seats;
+        walk.concurrent_walks = concurrent_walks;
         walk.filling_rows = filling;
         walk.frontier = frontier;
         walk.outputs = staging + rows_bytes + import_bytes + weights_bytes;
@@ -1045,7 +1043,7 @@ struct vram_nvidia_index
                 context.telemetry_.get(),
                 context.assigned_rows_.get(),
                 context.assigned_rows_.get() + 1,
-                walk.seats,
+                walk.concurrent_walks,
                 walk.filling_rows};
     }
 
@@ -1081,9 +1079,9 @@ struct vram_nvidia_index
     }
 
     /** Scans every query of @p walk against every visible row on a persistent grid of every block
-     *  the device seats, claiming the work items @ref cuda_scan_ranges splits it into and keeping
-     *  their matches in @p scratch, and lands each query's nearest @p count IDs and, unless null,
-     *  their distances. */
+     *  the device keeps resident, claiming the work items @ref cuda_scan_ranges splits it into and
+     *  keeping their matches in @p scratch, and lands each query's nearest @p count IDs and, unless
+     *  null, their distances. */
     status_t launch_scan_(walk_launch_t const& walk, byte_t* scratch, node_id_t* ids, distance_t* distances,
                           u32_t count, traversal_context_t& context) noexcept {
         u32_t const blocks = divide_round_up<u32_t>(walk.queries_count, cuda_scan_tile_k);

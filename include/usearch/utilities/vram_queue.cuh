@@ -382,10 +382,10 @@ struct vram_tail_candidates {
         u32_t const ordinal = warp_t::count(live_mask & warp_t::below(lane));
         if (live && size_ + ordinal < capacity_) entries_[size_ + ordinal] = value;
         u32_t const grown = min_of(size_ + warp_t::count(live_mask), capacity_);
-        u32_t const unseated = size_ + warp_t::count(live_mask) - grown;
+        u32_t const dropped = size_ + warp_t::count(live_mask) - grown;
         size_ = grown;
         warp_t::sync();
-        return unseated;
+        return dropped;
     }
 };
 
@@ -405,10 +405,10 @@ struct vram_register_frontier {
     /** A walk over full ranks ends at their radius, so a further walk needs no budget renewed. */
     __device__ __forceinline__ void renew() noexcept {}
 
-    /** Nothing to compact or leave unseated: the ranks keep the nearest of every union by
+    /** Nothing to compact or drop: the ranks keep the nearest of every union by
      *  construction. */
     __device__ __forceinline__ u32_t compactions() const noexcept { return 0; }
-    __device__ __forceinline__ u32_t unseated() const noexcept { return 0; }
+    __device__ __forceinline__ u32_t dropped() const noexcept { return 0; }
 
     /** Whether the ranks already hold the ID @p staged_id names on this lane, every lane taking
      *  part. */
@@ -480,8 +480,8 @@ struct vram_arena_frontier {
     /** Times a full tail kept only what can still rank among the expansion target. */
     u32_t compactions_ = 0;
 
-    /** Entries tied at that radius a compacted tail still could not seat. */
-    u32_t unseated_ = 0;
+    /** Entries tied at that radius a compacted tail still could not fit. */
+    u32_t dropped_ = 0;
 
     __device__ __forceinline__ void clear(u32_t) noexcept {
         head_.clear();
@@ -493,7 +493,7 @@ struct vram_arena_frontier {
     __device__ __forceinline__ void renew() noexcept { expansions_ = 0; }
 
     __device__ __forceinline__ u32_t compactions() const noexcept { return compactions_; }
-    __device__ __forceinline__ u32_t unseated() const noexcept { return unseated_; }
+    __device__ __forceinline__ u32_t dropped() const noexcept { return dropped_; }
 
     /** Whether the head already holds the ID @p staged_id names on this lane, every lane taking
      *  part. */
@@ -512,12 +512,12 @@ struct vram_arena_frontier {
 
     /** Appends a lane-width to the tail; a full tail first keeps what can still rank among the
      *  walk's expansion target - every result and every entry its remaining expansions can take -
-     *  counted, as are the entries it still cannot seat. */
+     *  counted, as are the entries it still cannot fit. */
     __device__ __forceinline__ void spill(scored_node_t value, u32_t lane) noexcept {
         bool const full = tail_.size_ + warp_t::width_k > tail_.capacity_;
         if (full) keep_nearest(expansion_target_, lane);
         compactions_ += full;
-        unseated_ += tail_.append(value, lane);
+        dropped_ += tail_.append(value, lane);
     }
     __device__ __forceinline__ scored_node_t pop_nearest(u32_t lane) noexcept {
         // A consumed expansion budget IS the frontier's edge: reporting starvation here
@@ -849,7 +849,7 @@ enum class vram_traversal_t : bool { searching_k, inserting_k };
 struct vram_telemetry_t {
     u32_t hops = 0, scored = 0, lock_attempts = 0, lock_skips = 0, reselections = 0, restarts = 0, locked_drops = 0;
     u32_t local_scored = 0, remote_scored = 0;
-    u32_t tail_compactions = 0, tail_unseated = 0, visited_saturations = 0;
+    u32_t tail_compactions = 0, tail_dropped = 0, visited_saturations = 0;
     u32_t changed_nodes = 0;
 
     /** Folds the live counters into the device block; the search instantiation skips the lock and
@@ -870,9 +870,9 @@ struct vram_telemetry_t {
             add(counters->local_scored, local_scored);
             add(counters->remote_scored, remote_scored);
         }
-        if (tail_compactions | tail_unseated | visited_saturations) {
+        if (tail_compactions | tail_dropped | visited_saturations) {
             add(counters->tail_compactions, tail_compactions);
-            add(counters->tail_unseated, tail_unseated);
+            add(counters->tail_dropped, tail_dropped);
             add(counters->visited_saturations, visited_saturations);
         }
         if constexpr (traversal_ == vram_traversal_t::searching_k) return;
@@ -884,7 +884,7 @@ struct vram_telemetry_t {
 
 /** What a walk asks of its frontier, the register ladder's or the arena's: start and renew a walk,
  *  take a scored batch, hand back the nearest unexpanded entry, tell a staged ID it already holds,
- *  and count what its tail compacted and left unseated. */
+ *  and count what its tail compacted and dropped. */
 template <typename frontier_>
 concept vram_frontier = requires(frontier_& frontier, frontier_ const& held, typename frontier_::scored_node_t entry,
                                  u32_t lane) {
@@ -896,7 +896,7 @@ concept vram_frontier = requires(frontier_& frontier, frontier_ const& held, typ
     { held.exhausted() } -> std::same_as<bool>;
     { held.beyond_radius(entry) } -> std::same_as<bool>;
     { held.compactions() } -> std::same_as<u32_t>;
-    { held.unseated() } -> std::same_as<u32_t>;
+    { held.dropped() } -> std::same_as<u32_t>;
 };
 
 /** One walking warp's state: the candidates, the random stream, the running telemetry, and the
@@ -917,9 +917,10 @@ struct vram_warp_context {
  *  @brief Expands @p first, whose lock word @p first_value the walk already read, with up to
  *      @p width - 1 further candidates inside the radius, as one round.
  *
- *  Every row's slots load in one window, the rows claim in pop order, and each warp-width of
- *  fresh IDs reaches @p score through the two-warp @p staged buffer, whose @p pending entries
- *  carry across rounds.
+ *  Every row's slots load in one window, the rows claim in pop order, and every @p round_rows of
+ *  fresh IDs, a warp's width or more, reach @p score through the @p staged buffer, which holds
+ *  @p round_rows and a warp's width more, and whose @p pending entries past them carry across
+ *  rounds.
  *
  *  Lane @b r reads row @b r 's lock word once and the warp shuffles it, so no two lanes branch on
  *  racing reads; a locked further row is held when the walk holds none, else counted dropped.
@@ -934,7 +935,7 @@ __device__ __forceinline__ walk_demand_t vram_expand_round( //
     frontier_& frontier, vram_visited_set<warp_type_, node_id_type_>& visited, vram_telemetry_t& telemetry,
     storage_ const& storage, vram_scored_node<node_id_type_> first, node_id_type_ first_value, u32_t width,
     node_id_type_ first_invisible_id, vram_scored_node<node_id_type_>& held, u32_t& held_at_hop, node_id_type_* staged,
-    u32_t& pending, u32_t lane, score_type_&& score) noexcept {
+    u32_t& pending, u32_t round_rows, u32_t lane, score_type_&& score) noexcept {
 
     using warp_t = warp_type_;
     using scored_node_t = vram_scored_node<node_id_type_>;
@@ -1011,12 +1012,12 @@ __device__ __forceinline__ walk_demand_t vram_expand_round( //
             if (fresh) staged[pending + warp_t::count(fresh_mask & warp_t::below(lane))] = neighbor_id;
             warp_t::sync();
             pending += warp_t::count(fresh_mask);
-            if (pending < warp_t::width_k) continue;
-            if (score(warp_t::width_k) == walk_demand_t::sated_k) return walk_demand_t::sated_k;
+            if (pending < round_rows) continue;
+            if (score(round_rows) == walk_demand_t::sated_k) return walk_demand_t::sated_k;
             // Every lane read the scored IDs before the carry moves down over them.
             warp_t::sync();
-            pending -= warp_t::width_k;
-            node_id_type_ const carried = lane < pending ? staged[warp_t::width_k + lane] : unknown_k;
+            pending -= round_rows;
+            node_id_type_ const carried = lane < pending ? staged[round_rows + lane] : unknown_k;
             warp_t::sync();
             if (lane < pending) staged[lane] = carried;
             warp_t::sync();
@@ -1146,14 +1147,14 @@ struct vram_selection_scratch {
 
 /** Layout of one warp's slice of the traversal arena, computed on the host and carried by the
  *  views: the exact visited set, the wide frontier's spill tail when it has one, then a builder's
- *  scratch when shared memory cannot seat its rows. Its spans are as wide as node IDs. */
+ *  scratch when shared memory cannot fit its rows. Its spans are as wide as node IDs. */
 struct vram_arena_shape_t {
     u32_t visited_slots;
     u32_t visited_hash_shift;
     u32_t tail_entries;
 
     /** Bytes of a builder's scratch - query span, candidate cache and re-selection spans - kept
-     *  here instead of dynamic shared memory, or zero when shared memory seats it. */
+     *  here instead of dynamic shared memory, or zero when shared memory fits it. */
     u32_t scratch_bytes;
 
     /** Bytes of one warp's slice, a multiple of 16 so every visited span starts on the boundary its
@@ -1189,7 +1190,7 @@ constexpr vram_arena_shape_t vram_view(gpu_arena_shape_t shape) noexcept {
 }
 
 /** One warp's slice of a launch: its coordinates, its scratch - dynamic shared memory, or its arena
- *  slice's cache span when shared memory cannot seat it - and its arena visited span, the shared
+ *  slice's cache span when shared memory cannot fit it - and its arena visited span, the shared
  *  prologue of every traversal kernel. */
 struct vram_warp_slice_t {
     u32_t lane, warp, warp_index;

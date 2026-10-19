@@ -51,7 +51,7 @@ constexpr std::size_t cuda_gather_bytes_per_warp() noexcept {
 }
 
 /** Bytes of a row one gather under @p schedule_ lands: the narrowest window any walk of
- *  @p capability_ over @p dtype_ seats, so one tensor map serves every walk; zero where the
+ *  @p capability_ over @p dtype_ fits, so one tensor map serves every walk; zero where the
  *  schedule gathers no rows. */
 template <typename schedule_, nk_capability_t capability_, nk_dtype_t dtype_>
 constexpr u32_t cuda_gather_window_bytes() noexcept {
@@ -123,8 +123,9 @@ bool vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vectors_alloca
                                 (sizeof(vram_gathered<kit_t, typename schedule_t::warp_t>) +
                                  sizeof(typename schedule_t::shared_t) + cuda_gather_bytes_per_warp<schedule_t>());
     std::size_t const block_bytes = statics + std::size_t {vram_warps_per_block_k} * scratch_bytes_per_warp;
-    // Every block a builder seats takes its own scratch, so the most any builder seats must fit on
-    // one multiprocessor, or the launch seats fewer blocks than its grid and arena were sized for.
+    // Every resident block of a builder takes its own scratch, so the most any builder keeps
+    // resident must fit on one multiprocessor, or the launch keeps fewer blocks resident than its
+    // grid and arena were sized for.
     std::size_t const resident_blocks = max_of(resident_blocks_(vram_kernel_t::insert_k, 0),
                                                resident_blocks_(vram_kernel_t::refine_k, 0));
     return block_bytes <= device_.shared_memory_per_block_bytes &&
@@ -490,7 +491,7 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
 
 /** Every NVIDIA kernel: @p kernel_ picks the body, @p capability_ and @p dtype_ the kit,
  *  @p capability_ alone the schedule and its warp, @p slots_ the rung, and @p lookup_ an attend's
- *  value lookup through @ref cuda_value_lookup_of. The blocks @ref cuda_resident_blocks seats per
+ *  value lookup through @ref cuda_value_lookup_of. The blocks @ref cuda_resident_blocks keeps per
  *  multiprocessor bound its registers and reach the body, which sizes its load window by them. The
  *  arguments stay in the parameter space, where a walk's schedule may read the tensor map. */
 template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_, u32_t lookup_>
@@ -503,7 +504,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     constexpr u32_t resident_blocks = cuda_resident_blocks<capability_, dtype_>(kernel_, slots_);
     vram_graph_t const& graph = arguments.graph;
     // Launched overlapping its predecessor's drain, so nothing is read before that predecessor
-    // lands; the successor's blocks may then seat as this grid's blocks retire.
+    // lands; the successor's blocks may then start as this grid's blocks retire.
     if constexpr (cuda_overlaps_launches(capability_))
         asm volatile("griddepcontrol.wait;\n\tgriddepcontrol.launch_dependents;" ::: "memory");
     if constexpr (cuda_gathers_rows(kernel_) && requires(cuda_rows_map_t const& rows_map) {

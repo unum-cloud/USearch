@@ -50,8 +50,9 @@ bool vram_amd_index<vector_dtype_, capability_, kernels_type_, vectors_allocator
                                 (sizeof(vram_gathered<kit_t, typename schedule_t::warp_t>) +
                                  sizeof(typename schedule_t::shared_t));
     std::size_t const block_bytes = statics + std::size_t {vram_warps_per_block_k} * scratch_bytes_per_warp;
-    // Every block a builder seats takes its own scratch, so the most any builder seats must fit on
-    // one compute unit, or the launch seats fewer blocks than its grid and arena were sized for.
+    // Every resident block of a builder takes its own scratch, so the most any builder keeps
+    // resident must fit on one compute unit, or the launch keeps fewer blocks resident than its grid
+    // and arena were sized for.
     std::size_t const resident_blocks = max_of(resident_blocks_(vram_kernel_t::insert_k, 0),
                                                resident_blocks_(vram_kernel_t::refine_k, 0));
     return block_bytes <= device_.shared_memory_per_block_bytes &&
@@ -62,7 +63,7 @@ bool vram_amd_index<vector_dtype_, capability_, kernels_type_, vectors_allocator
 
 /** Every AMD kernel: @p kernel_ picks the body, @p capability_ and @p dtype_ the kit,
  *  @p capability_ alone the schedule and its warp, @p slots_ the rung, and @p lookup_ an attend's
- *  value lookup through @ref amd_value_lookup_of. The blocks @ref hip_resident_blocks seats per
+ *  value lookup through @ref amd_value_lookup_of. The blocks @ref hip_resident_blocks keeps per
  *  compute unit bound its registers and reach the body, which sizes its load window by them. */
 template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_, u32_t lookup_>
 __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capability_),

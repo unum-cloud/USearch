@@ -46,8 +46,9 @@ constexpr std::size_t vram_levenshtein_bytes(u32_t words) noexcept {
 inline constexpr std::size_t vram_levenshtein_widest_bytes_k = vram_levenshtein_bytes(
     vram_levenshtein_words_k[std::size(vram_levenshtein_words_k) - 1]);
 
-/** The lone overlap rung: a warp scores every row whatever its length, so nothing splits by it. */
-inline constexpr u32_t vram_overlap_rungs_k[] = {0};
+/** Lanes each overlap rung splits a row's windows among, narrowest first: one lane alone, then
+ *  every power of two from a block's warps up to the kit's warp. */
+inline constexpr u32_t vram_overlap_rungs_k[] = {1, 4, 8, 16, 32};
 
 /** The rungs the kit of @p metric scores on, narrowest first. */
 constexpr std::span<u32_t const> vram_sequence_rungs(usearch_sequence_metric_t metric) noexcept {
@@ -80,9 +81,10 @@ struct vram_nvidia_index
   private:
     friend base_t;
 
-    /** The first rung whose kit serves rows of @p longest bytes, or @c rungs_k past every one.
-     *  Defined in @c vram_nvidia_metric.cuh, as are the members below reading the kit. */
-    static std::size_t rung_serving_(std::size_t longest) noexcept;
+    /** The first rung whose kit serves rows of @p longest bytes, or @c rungs_k past every one;
+     *  for overlap, the widest whose lanes each still roll a widest window of such a row. Defined
+     *  in @c vram_nvidia_metric.cuh, as are the members below reading the kit. */
+    std::size_t rung_serving_(std::size_t longest) const noexcept;
 
     /** Lanes the kit scores a row with on @p rung. */
     static u32_t lanes_per_row_(std::size_t rung) noexcept;

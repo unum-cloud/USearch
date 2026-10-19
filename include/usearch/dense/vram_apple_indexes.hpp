@@ -184,7 +184,7 @@ struct vram_apple_indexes
         return reserve_traversals_(plan.traversals_, executor);
     }
 
-    /** Every shard must seat its build launch before any row is admitted, or a mixed fleet inserts
+    /** Every shard must fit its build launch before any row is admitted, or a mixed fleet inserts
      *  partially. */
     status_t admits_insert_() const noexcept {
         for (auto const& one : shards_)

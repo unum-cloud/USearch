@@ -810,7 +810,7 @@ struct metal_traversal_context {
         block.visited_saturations = metal_tally(words, metal_saturations_k);
         block.changed_nodes = words[metal_changed_k];
         block.tail_compactions = metal_tally(words, metal_tail_compactions_k);
-        block.tail_unseated = metal_tally(words, metal_tail_unseated_k);
+        block.tail_dropped = metal_tally(words, metal_tail_dropped_k);
         return block;
     }
 

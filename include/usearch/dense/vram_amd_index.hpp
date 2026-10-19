@@ -194,12 +194,12 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
     /** Threads per block, four wavefronts. */
     u32_t block_threads() const noexcept { return vram_warps_per_block_k * wave_lanes(); }
 
-    /** Whether a search, multiply or attend launch seats on this device: per warp, the query span
+    /** Whether a search, multiply or attend launch fits on this device: per warp, the query span
      *  and the @p fold_bytes an attend keeps past it, beside the static batch buffers. Defined in
      *  @c vram_amd_index.hip, where the kits are visible. */
     bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept;
 
-    /** Whether a builder launch seats @p scratch_bytes_per_warp of per-warp scratch in shared
+    /** Whether a builder launch fits @p scratch_bytes_per_warp of per-warp scratch in shared
      *  memory beside the batch buffers and schedule state, on every block a multiprocessor keeps
      *  resident; when it cannot, the warp's arena slice keeps it, as Apple's always does. Defined
      *  in @c vram_amd_index.hip. */
@@ -224,7 +224,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
         gpu_arena_shape_t const arena_shape = arena_shape_for(
             walk_selection_rows_(expansion, candidate_slots),
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
-        // The walks seat as many blocks as a search on the same rung, an attend no more.
+        // The walks keep as many blocks resident as a search on the same rung, an attend no more.
         u32_t const resident_blocks = resident_blocks_(vram_kernel_t::search_k, wide ? 0 : candidate_slots);
         std::size_t const arena_warps = std::size_t {walk_blocks_(rows, resident_blocks)} * vram_warps_per_block_k;
         std::size_t const staging_bytes = rows * row_bytes() + import_bytes_(rows, nk_f64_k) +
@@ -321,12 +321,10 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
         u32_t const candidate_slots = candidate_slots_for_(expansion, minimum_slots);
         gpu_arena_shape_t const arena_shape = arena_shape_for(walk_selection_rows_(expansion, candidate_slots),
                                                               frontier);
-        // A search, an indexed search and a multiply seat as many blocks on one rung.
+        // A search, an indexed search and a multiply keep as many blocks resident on one rung.
         u32_t const resident_blocks = resident_blocks_(attend_k ? vram_kernel_t::attend_k : vram_kernel_t::search_k,
                                                        frontier == frontier_kind_t::wide_arena_k ? 0 : candidate_slots);
-        // Every warp the device seats on this rung, and the rows whose neighbors fill a walk's
-        // candidates.
-        u32_t const seats = device_.multiprocessor_count * resident_blocks * vram_warps_per_block_k;
+        u32_t const concurrent_walks = device_.multiprocessor_count * resident_blocks * vram_warps_per_block_k;
         u32_t const filling = filling_rows<u32_t>(expansion, static_cast<u32_t>(connectivity()));
         std::size_t const arena_warps = std::size_t {walk_blocks_(queries_count, resident_blocks)} *
                                         vram_warps_per_block_k;
@@ -388,7 +386,7 @@ struct vram_amd_index : vram_index<vram_amd_index<vector_dtype_, capability_, ke
                                   context.telemetry_.get(),
                                   context.assigned_rows_.get(),
                                   context.assigned_rows_.get() + 1,
-                                  seats,
+                                  concurrent_walks,
                                   filling};
         return {{view, candidate_slots, frontier, staging + rows_bytes + import_bytes + weights_bytes, rescoring},
                 status_t::success_k};

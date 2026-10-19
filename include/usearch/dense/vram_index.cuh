@@ -127,7 +127,7 @@ struct vram_flat_view {
     u32_t resident_begin = 0, resident_end = 0;
 
     /** The row holding flattened @p word, exact for every word under 2^31, so for any cache a slice
-     *  under 4 GB seats. */
+     *  under 4 GB fits. */
     __device__ __forceinline__ u32_t row_of_word(u32_t word) const noexcept {
         u32_t const row = static_cast<u32_t>((static_cast<u64_t>(word) * row_fragments_magic) >> 31);
         return row - (row * row_fragments > word);
@@ -556,7 +556,7 @@ __device__ __forceinline__ void vram_search_ahead( //
             u32_t pending = 0;
             if (vram_expand_round<warp_t>(frontier, visited, telemetry, storage, candidate, first_value,
                                           context.walk_width, first_invisible_id, held, held_at_hop, gathered.ids,
-                                          pending, lane, score) == walk_demand_t::sated_k)
+                                          pending, warp_t::width_k, lane, score) == walk_demand_t::sated_k)
                 return;
             // A dense kit pays per score call, not per idle lane, so the round scores what it
             // staged.
@@ -703,7 +703,7 @@ struct vram_build_view {
     byte_t* arena;
 
     /** Shape of one warp's slice: the exact visited set, the arena frontier's tail on the rung past
-     *  the register ladder, and the builders' scratch when shared memory cannot seat it. */
+     *  the register ladder, and the builders' scratch when shared memory cannot fit it. */
     vram_arena_shape_t arena_shape;
 
     /** The arena frontier's expansion budget on the rung past the register ladder; the ladder's
@@ -770,12 +770,13 @@ struct vram_search_view {
     /** Queries of the batch warps have assigned themselves so far, zeroed per launch. */
     u32_t* assigned_queries;
 
-    /** Walks running now, zeroed with @c assigned_queries: the live count @ref walk_width shares
-     *  the seats by. */
+    /** Walks running now, zeroed with @c assigned_queries, which @ref walk_width divides
+     *  @c concurrent_walks among. */
     u32_t* live_walks;
 
-    /** Warps the device seats on the launch's rung. */
-    u32_t seats;
+    /** Walks the device runs at once on the launch's rung: multiprocessors × resident blocks ×
+     *  warps per block. */
+    u32_t concurrent_walks;
 
     /** Rows whose neighbors fill a walk's candidates, the widest round a walk expands. */
     u32_t filling_rows;
@@ -1303,10 +1304,10 @@ __device__ __forceinline__ void vram_walk_one( //
     context.frontier = frontier;
     context.random_generator = vram_lane_generator<warp_t>(query_index, lane);
     context.scratch = reinterpret_cast<byte_t*>(query_span + view.storage.row_fragments);
-    // Seats no other walk holds widen this one, never past the rows that fill its candidates.
+    // Concurrent walks the batch leaves idle widen this one, never past its filling rows.
     u32_t live = lane == 0 ? warp_t::fetch_add_relaxed(*view.live_walks, 1u) + 1 : 0;
     live = warp_t::shuffle(live, 0);
-    context.walk_width = walk_width(view.seats, live, view.queries_count - query_index, view.filling_rows);
+    context.walk_width = walk_width(view.concurrent_walks, live, view.queries_count - query_index, view.filling_rows);
     typename sink_::fold_t fold = sink.open(query_index, context, lane);
     rescoring_ const rescoring = rescorings.for_query(query_index, context);
     vram_search_around<kit_, schedule_, resident_blocks_>( //
@@ -1315,7 +1316,7 @@ __device__ __forceinline__ void vram_walk_one( //
     if (lane == 0) warp_t::fetch_sub_relaxed(*view.live_walks, 1u);
     sink.close(fold, context, query_index, lane);
     context.telemetry.tail_compactions = context.frontier.compactions();
-    context.telemetry.tail_unseated = context.frontier.unseated();
+    context.telemetry.tail_dropped = context.frontier.dropped();
     context.telemetry.visited_saturations = visited.saturations_;
     context.telemetry.template flush<warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
 }
@@ -1540,7 +1541,7 @@ __device__ __forceinline__ vram_search_view<kit_> vram_view(vram_search_t const&
             search.telemetry,
             search.assigned_queries,
             search.live_walks,
-            search.seats,
+            search.concurrent_walks,
             search.filling_rows};
 }
 template <vram_quads_kit kit_>
@@ -1659,7 +1660,7 @@ __device__ __forceinline__ void vram_insert(vram_build_view<kit_> const& view) {
             view, new_node_id, visited, query_span, cache, schedule, selection, candidate_norms, gathered[warp],
             context, lane);
         context.telemetry.tail_compactions = context.frontier.compactions();
-        context.telemetry.tail_unseated = context.frontier.unseated();
+        context.telemetry.tail_dropped = context.frontier.dropped();
         context.telemetry.visited_saturations = visited.saturations_;
         context.telemetry.template flush<warp_t, vram_traversal_t::inserting_k>(view.telemetry, lane);
     }
@@ -1742,7 +1743,7 @@ __device__ __forceinline__ void vram_refine(vram_refine_view<kit_> const& view) 
             view, node_id, visited, query_span, cache, schedule, selection, candidate_norms, gathered[warp], context,
             lane);
         context.telemetry.tail_compactions = context.frontier.compactions();
-        context.telemetry.tail_unseated = context.frontier.unseated();
+        context.telemetry.tail_dropped = context.frontier.dropped();
         context.telemetry.visited_saturations = visited.saturations_;
         context.telemetry.template flush<warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
     }

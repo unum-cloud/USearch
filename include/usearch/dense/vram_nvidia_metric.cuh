@@ -2002,7 +2002,7 @@ __device__ __forceinline__ void cuda_tma_gather_unit(cuda_gather_stages<window_b
  *  @brief Scores a walk's batch from rows the Tensor Memory Accelerator gathers into @p gather,
  *      each @c tile::gather4 copy landing the same window of four candidates' rows.
  *
- *  A unit is one window of as many quads of candidates as a stage seats and the lanes cover, a
+ *  A unit is one window of as many quads of candidates as a stage fits and the lanes cover, a
  *  single quad once rows outgrow a window; the warp scores one stage while the next unit lands in
  *  the other. A power-of-two group of lanes owns each quad, every lane a 16-byte column of its
  *  window and the quad's four accumulators, so one query fragment serves four rows. Past a quad's
@@ -2203,9 +2203,9 @@ struct blackwell_tma_schedule_t {
     static __device__ __forceinline__ void bind(cuda_rows_map_t const& rows_map, u32_t lane) noexcept {
         gather_stages<resident_blocks_>& gather = gather_stages_<resident_blocks_>();
         if (lane == 0) {
-            bool const seated = 4 * rows_map.window_bytes <= sizeof(gather.stages[0]);
+            bool const fits = 4 * rows_map.window_bytes <= sizeof(gather.stages[0]);
             gather.tensor_map = &rows_map.tensor_map;
-            gather.rows_count = seated ? rows_map.rows_count : 0;
+            gather.rows_count = fits ? rows_map.rows_count : 0;
             gather.window_bytes = rows_map.window_bytes;
             gather.phases = 0;
             if (gather.rows_count)

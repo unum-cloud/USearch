@@ -259,7 +259,7 @@ expected<search_result_type_> for_each_window(std::size_t rows, std::size_t wind
         total.computed_distances += landed.value.computed_distances;
         total.restarts += landed.value.restarts;
         total.tail_compactions += landed.value.tail_compactions;
-        total.tail_unseated += landed.value.tail_unseated;
+        total.tail_dropped += landed.value.tail_dropped;
         total.visited_saturations += landed.value.visited_saturations;
         if (!landed) return {total, landed.status};
     }

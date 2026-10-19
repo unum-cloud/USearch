@@ -29,7 +29,7 @@ inline constexpr std::size_t gpu_visited_slot_bytes = sizeof(node_id_type_) == s
 
 /** Layout of one warp's slice of the traversal arena, computed on the host: the exact visited set,
  *  the wide frontier's spill tail when it has one, then a builder's scratch when shared memory
- *  cannot seat it. The kernels carry it as their own @c vram_arena_shape_t. */
+ *  cannot fit it. The kernels carry it as their own @c vram_arena_shape_t. */
 struct gpu_arena_shape_t {
     u32_t visited_slots;
     u32_t visited_hash_shift;

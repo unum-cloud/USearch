@@ -801,15 +801,14 @@ constexpr count_type_ filling_rows(count_type_ expansion, count_type_ connectivi
     return connectivity ? divide_round_up(expansion, connectivity) : count_type_ {0};
 }
 
-/** Rows a walk keeps popped ahead of its merges: the share of @p seats no other walk holds, when
- *  @p live walks run and @p left are still to start counting this one, never past @p filling_rows,
- *  the rows whose neighbors fill a walk's candidates. One at full occupancy, and one while a launch
- *  is still filling, since the larger of @p live and @p left counts the walks. */
+/** Rows a walk expands per hop: @p concurrent_walks, the walks the hardware runs at once, divided
+ *  among the walks that need them, at least one and at most @p filling_rows. While a batch has more
+ *  walks waiting than the hardware runs, every walk expands one row per hop. */
 template <typename count_type_>
-constexpr count_type_ walk_width(count_type_ seats, count_type_ live, count_type_ left,
+constexpr count_type_ walk_width(count_type_ concurrent_walks, count_type_ live_walks, count_type_ unstarted_walks,
                                  count_type_ filling_rows) noexcept {
-    count_type_ const walks = max_of(live, min_of(left, seats));
-    return min_of(filling_rows, max_of<count_type_>(seats / walks, 1));
+    count_type_ const walks = max_of(live_walks, min_of(unstarted_walks, concurrent_walks));
+    return min_of(filling_rows, max_of<count_type_>(concurrent_walks / walks, 1));
 }
 
 /** Outcome of one reachability audit, the same on every tier, layer and residency. */
@@ -1486,8 +1485,8 @@ struct vram_telemetry_block_t {
     u64_t local_scored, remote_scored;
 
     /** Frontier tails compacted to what can still rank, entries tied at that radius a compacted
-     *  tail still could not seat, and visited-set claims out of probes, which re-scored. */
-    u64_t tail_compactions, tail_unseated, visited_saturations;
+     *  tail still could not fit, and visited-set claims out of probes, which re-scored. */
+    u64_t tail_compactions, tail_dropped, visited_saturations;
 
     /** Nodes whose neighbors a refinement merge landed in a different sequence than they held. */
     u64_t changed_nodes;

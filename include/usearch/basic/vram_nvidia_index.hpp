@@ -89,7 +89,7 @@ struct vram_search {
     vram_telemetry_block_t* telemetry = nullptr;
     u32_t* assigned_queries = nullptr;
     u32_t* live_walks = nullptr;
-    u32_t seats = 0;
+    u32_t concurrent_walks = 0;
     u32_t filling_rows = 0;
     node_id_type_* result_ids = nullptr;
     distance_t* result_distances = nullptr;
@@ -387,7 +387,7 @@ struct vram_index {
         std::size_t computed_distances = 0;
         std::size_t restarts = 0;
         std::size_t tail_compactions = 0;
-        std::size_t tail_unseated = 0;
+        std::size_t tail_dropped = 0;
         std::size_t visited_saturations = 0;
     };
 
@@ -400,7 +400,7 @@ struct vram_index {
         std::size_t const rows = offsets.size() - 1;
         std::size_t longest = longest_row_;
         u32_t const span_bytes = static_cast<u32_t>(max_of(span_bytes_, span_bytes_of_(values, offsets, longest)));
-        std::size_t const rung = derived_::rung_serving_(longest);
+        std::size_t const rung = derived().rung_serving_(longest);
         std::size_t const slices = std::size_t {device_.multiprocessor_count} *
                                    cuda_resident_blocks(vram_kernel_t::insert_k, 0) * vram_warps_per_block_k;
         return aligned_(sizeof(vram_telemetry_block_t)) + 2 * aligned_(sizeof(u32_t)) +
@@ -425,7 +425,7 @@ struct vram_index {
         // Walks prepare stored rows as much as the batch's, so the rung and spans cover both.
         std::size_t longest = longest_row_;
         u32_t const span_bytes = static_cast<u32_t>(max_of(span_bytes_, span_bytes_of_(values, offsets, longest)));
-        std::size_t const rung = derived_::rung_serving_(longest);
+        std::size_t const rung = derived().rung_serving_(longest);
         if (rung == derived_::rungs_k) return {{}, status_t::unsupported_k};
         std::size_t const batch_bytes = offsets[rows] - offsets[0];
 
@@ -493,7 +493,7 @@ struct vram_index {
         result.computed_distances = spent.scored;
         result.restarts = spent.restarts;
         result.tail_compactions = spent.tail_compactions;
-        result.tail_unseated = spent.tail_unseated;
+        result.tail_dropped = spent.tail_dropped;
         result.visited_saturations = spent.visited_saturations;
         return {result, status_t::success_k};
     }
@@ -520,7 +520,7 @@ struct vram_index {
         std::size_t computed_distances = 0;
         std::size_t restarts = 0;
         std::size_t tail_compactions = 0;
-        std::size_t tail_unseated = 0;
+        std::size_t tail_dropped = 0;
         std::size_t visited_saturations = 0;
     };
 
@@ -532,7 +532,7 @@ struct vram_index {
         std::size_t const queries_count = offsets.size() - 1;
         std::size_t longest = 0;
         u32_t const span_bytes = static_cast<u32_t>(span_bytes_of_(queries, offsets, longest));
-        std::size_t const rung = derived_::rung_serving_(longest);
+        std::size_t const rung = derived().rung_serving_(longest);
         gpu_arena_shape_t const arena_shape = walk_arena_shape_(config, span_bytes, rung);
         u32_t const slots = arena_shape.tail_entries ? 0u : walk_slots_(config);
         std::size_t const slices = std::size_t {walk_blocks_(queries_count, rung, slots)} * vram_warps_per_block_k;
@@ -565,7 +565,7 @@ struct vram_index {
         std::size_t const visible = size();
         std::size_t longest = 0;
         u32_t const span_bytes = static_cast<u32_t>(span_bytes_of_(queries, offsets, longest));
-        std::size_t const rung = derived_::rung_serving_(longest);
+        std::size_t const rung = derived().rung_serving_(longest);
         if (rung == derived_::rungs_k) return {{}, status_t::unsupported_k};
         cuda_stream_handle_t const stream = context.stream();
 
@@ -608,9 +608,8 @@ struct vram_index {
         search.telemetry = context.telemetry_.get();
         search.assigned_queries = context.assigned_rows_.get();
         search.live_walks = context.assigned_rows_.get() + 1;
-        // Walkers the device seats on the rung, and rows whose neighbors fill a walk's candidates.
-        search.seats = device_.multiprocessor_count * cuda_resident_blocks(vram_kernel_t::search_k, slots) *
-                       walkers_per_block_(rung);
+        search.concurrent_walks = device_.multiprocessor_count * cuda_resident_blocks(vram_kernel_t::search_k, slots) *
+                                  walkers_per_block_(rung);
         search.filling_rows = filling_rows<u32_t>(search.expansion, static_cast<u32_t>(connectivity()));
         search.result_ids = device_ids;
         search.result_distances = device_distances;
@@ -636,7 +635,7 @@ struct vram_index {
         result.computed_distances = spent.scored;
         result.restarts = spent.restarts;
         result.tail_compactions = spent.tail_compactions;
-        result.tail_unseated = spent.tail_unseated;
+        result.tail_dropped = spent.tail_dropped;
         result.visited_saturations = spent.visited_saturations;
         return {result, status_t::success_k};
     }
@@ -1316,7 +1315,7 @@ struct vram_index {
      *  context's counters, the re-selection's arena and staging, and the audit's scratch. */
     std::size_t traversal_memory_usage(refine_config_t config, std::size_t rows) const noexcept {
         if (!connectivity() || !device_.multiprocessor_count) return 0;
-        std::size_t const rung = derived_::rung_serving_(longest_row_);
+        std::size_t const rung = derived().rung_serving_(longest_row_);
         gpu_arena_shape_t const arena_shape =
             build_shape_(config.expansion_factor, static_cast<u32_t>(span_bytes_), rung).arena_shape;
         std::size_t const slices = std::size_t {device_.multiprocessor_count} *
@@ -1772,7 +1771,7 @@ struct vram_index {
             plan.stored_offsets_[row + 1] = plan.stored_offsets_[row] + stored_bytes;
             plan.longest_ = max_of<std::size_t>(plan.longest_, stored_bytes);
         }
-        if (rows && derived_::rung_serving_(max_of(plan.longest_, longest_row_)) == derived_::rungs_k)
+        if (rows && derived().rung_serving_(max_of(plan.longest_, longest_row_)) == derived_::rungs_k)
             return {std::move(plan), status_t::unsupported_k};
 
         auto const [base, claim_status] = claim_(rows);
@@ -1828,9 +1827,9 @@ struct vram_index {
     /** Threads per block, one warp's worth per resident warp. */
     inline static constexpr u32_t block_threads_k = vram_warps_per_block_k * 32;
 
-    /** Shared bytes a kernel keeps beside its scratch: four warps' batches of two lane-widths of
-     *  IDs, the scored batch and its carry, two per thread. */
-    inline static constexpr std::size_t static_shared_bytes_k = 2 * block_threads_k * sizeof(node_id_t);
+    /** Shared bytes a kernel keeps beside its scratch: four warps' batches of three lane-widths of
+     *  IDs, a round of two scored together and its carry, three per thread. */
+    inline static constexpr std::size_t static_shared_bytes_k = 3 * block_threads_k * sizeof(node_id_t);
 
     /** Lanes per warp, the width every kernel's collectives span. */
     static constexpr u32_t wave_lanes() noexcept { return 32; }
@@ -1862,7 +1861,7 @@ struct vram_index {
     }
 
     /** Blocks a walk over @p queries launches on the kit rung @p rung and the register rung
-     *  @p slots: a walker per query up to the grid the device seats. */
+     *  @p slots: a walker per query up to the grid the device runs at once. */
     u32_t walk_blocks_(std::size_t queries, std::size_t rung, u32_t slots) const noexcept {
         return static_cast<u32_t>(min_of<std::size_t>(
             divide_round_up<std::size_t>(queries, walkers_per_block_(rung)),
@@ -1921,27 +1920,27 @@ struct vram_index {
         shape.reselection_rows = reselection_rows_();
         u32_t const walk_bytes = build_scratch_bytes_(span_bytes, shape.walk_selection_rows);
         u32_t const back_link_bytes = build_scratch_bytes_(span_bytes, shape.reselection_rows);
-        // Every block a builder seats takes its own scratch, so the most any builder seats must
-        // fit on one multiprocessor, or the launch seats fewer blocks than its grid and arena were
-        // sized for.
+        // Every resident block of a builder takes its own scratch, so the most any builder keeps
+        // resident must fit on one multiprocessor, or the launch keeps fewer blocks resident than
+        // its grid and arena were sized for.
         std::size_t const block_bytes = walkers_per_block_(rung) * max_of(walk_bytes, back_link_bytes) +
                                         static_shared_bytes_k;
-        bool const seated = block_bytes <= device_.shared_memory_per_block_bytes &&
-                            cuda_resident_blocks(vram_kernel_t::insert_k, 0) *
-                                    (block_bytes + device_.reserved_shared_memory_per_block_bytes) <=
-                                device_.shared_memory_per_multiprocessor_bytes;
-        shape.walk_scratch_bytes = seated ? walk_bytes : 0;
-        shape.back_link_scratch_bytes = seated ? back_link_bytes : 0;
+        bool const fits = block_bytes <= device_.shared_memory_per_block_bytes &&
+                          cuda_resident_blocks(vram_kernel_t::insert_k, 0) *
+                                  (block_bytes + device_.reserved_shared_memory_per_block_bytes) <=
+                              device_.shared_memory_per_multiprocessor_bytes;
+        shape.walk_scratch_bytes = fits ? walk_bytes : 0;
+        shape.back_link_scratch_bytes = fits ? back_link_bytes : 0;
         shape.arena_shape = arena_shape_for_(
             shape.walk_selection_rows,
             shape.candidate_slots ? frontier_kind_t::register_ladder_k : frontier_kind_t::wide_arena_k,
-            seated ? 0 : max_of(walk_bytes, back_link_bytes));
+            fits ? 0 : max_of(walk_bytes, back_link_bytes));
         return shape;
     }
 
     /** One warp's arena slice for a walk keeping @p candidate_rows candidates: the exact visited
      *  set over every ID it claims, plus the spill tail of a wide frontier, what its expansions
-     *  stage, then any scratch shared memory cannot seat. */
+     *  stage, then any scratch shared memory cannot fit. */
     gpu_arena_shape_t arena_shape_for_(u32_t candidate_rows, frontier_kind_t frontier_kind,
                                        u32_t scratch_bytes) const noexcept {
         u32_t const connectivity = static_cast<u32_t>(this->connectivity());
@@ -1965,12 +1964,12 @@ struct vram_index {
     }
 
     /** One walker's slice: the register rung's visited set, or the arena frontier's with its tail
-     *  past the ladder, then the query span when shared memory cannot seat it. */
+     *  past the ladder, then the query span when shared memory cannot fit it. */
     gpu_arena_shape_t walk_arena_shape_(search_config_t config, u32_t span_bytes, std::size_t rung) const noexcept {
         u32_t const expansion = walk_expansion_(config);
-        bool const seated = walkers_per_block_(rung) * span_bytes + static_shared_bytes_k <=
-                            device_.shared_memory_per_block_bytes;
-        u32_t const scratch_bytes = seated ? 0 : span_bytes;
+        bool const fits = walkers_per_block_(rung) * span_bytes + static_shared_bytes_k <=
+                          device_.shared_memory_per_block_bytes;
+        u32_t const scratch_bytes = fits ? 0 : span_bytes;
         u32_t const slots = walk_slots_(config);
         return arena_shape_for_(walk_selection_rows_(expansion, slots),
                                 slots ? frontier_kind_t::register_ladder_k : frontier_kind_t::wide_arena_k,
@@ -2292,7 +2291,7 @@ struct vram_index {
         plan.landing_ = take_landing_(context);
         if (!plan.landing_) return status_t::bad_alloc_k;
         gpu_arena_shape_t const arena_shape = build_shape_(config.expansion_factor, static_cast<u32_t>(span_bytes),
-                                                           derived_::rung_serving_(longest))
+                                                           derived().rung_serving_(longest))
                                                   .arena_shape;
         std::size_t const slices = std::size_t {device_.multiprocessor_count} *
                                    cuda_resident_blocks(vram_kernel_t::refine_k, 0) * vram_warps_per_block_k;
@@ -2316,7 +2315,7 @@ struct vram_index {
     status_t reselect_(traversal_context_t& context, refine_config_t config, iota_view<node_id_t> nodes,
                        std::size_t rows) noexcept {
         cuda_stream_handle_t const stream = context.stream();
-        std::size_t const walked = nodes.size(), rung = derived_::rung_serving_(longest_row_);
+        std::size_t const walked = nodes.size(), rung = derived().rung_serving_(longest_row_);
         u32_t const span_bytes = static_cast<u32_t>(span_bytes_);
         build_shape_t const shape = build_shape_(config.expansion_factor, span_bytes, rung);
         std::size_t const slices = std::size_t {device_.multiprocessor_count} *

@@ -160,7 +160,7 @@ std::size_t test_dense_vram_scan_refused(make_index_type_ const& make_index, u64
  *  output and carry match the @c f64 oracle over every key, with one head per token and with four
  *  sharing its walk, while a narrow walk stays within the oracle's bounds; a node without a value
  *  row, mismatched outputs, and a head count that does not divide the rows or whose softmax states
- *  and accumulators no warp seats refuse. */
+ *  and accumulators no warp fits refuse. */
 template <typename index_type_, typename value_table_type_, typename make_index_type_>
 std::size_t dense_expect_vram_attend(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -221,7 +221,7 @@ std::size_t dense_expect_vram_attend(make_index_type_ const& make_index, allocat
                                    outputs(nk::range(std::size_t {0}, std::size_t {1}), nk::slice),
                                    std::span {carry}.first(queries.extent(0)), context, exhaustive)
                            .status == status_t::config_mismatch_k);
-    // A thousand heads' softmax states and accumulator rows seat in no warp's shared memory.
+    // A thousand heads' softmax states and accumulator rows fit in no warp's shared memory.
     auto const crowded = make_vectors<scalar_t>(crowded_heads, dimensions, stream_key(seed, "attend", 3));
     failures += expect(attend(crowded.view(), crowded_heads, table.lookup(nodes_count), 1, exhaustive) ==
                        status_t::config_mismatch_k);
@@ -288,7 +288,7 @@ std::size_t test_dense_vram_indexer_search(make_index_type_ const& make_index, u
 
 #pragma endregion Algebra
 
-/** Builds and refines rows of 2 KB whatever the dtype, too wide for shared memory to seat a
+/** Builds and refines rows of 2 KB whatever the dtype, too wide for shared memory to fit a
  *  builder's candidate cache, so every insert, refine and merge keeps its scratch in the warp's
  *  arena slice; the refine must reach every row and the walks must find them, then the ledger must
  *  balance. The rows are sign sketches, since independent values this wide leave every pair of
@@ -344,7 +344,7 @@ std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_
         broad_insert.expansion_factor = 1024;
         auto const [inserted, inserted_status] = index.insert(vectors.view(), {}, context, broad_insert);
         failures += expect(inserted_status == status_t::success_k && inserted.tail_compactions == 0 &&
-                           inserted.tail_unseated == 0);
+                           inserted.tail_dropped == 0);
         if constexpr (kernel_ != nk_kernel_dot_k)
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
         typename index_type_::refine_config_t broad_refine;

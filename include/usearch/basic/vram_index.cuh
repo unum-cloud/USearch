@@ -222,12 +222,13 @@ struct vram_search_view {
     /** Queries of the batch warps have assigned themselves so far, zeroed per launch. */
     u32_t* assigned_queries;
 
-    /** Walks running now, zeroed with @c assigned_queries: the live count @ref walk_width shares
-     *  the seats by. */
+    /** Walks running now, zeroed with @c assigned_queries, which @ref walk_width divides
+     *  @c concurrent_walks among. */
     u32_t* live_walks;
 
-    /** Warps the device seats on the launch's rung. */
-    u32_t seats;
+    /** Walks the device runs at once on the launch's rung: multiprocessors × resident blocks ×
+     *  warps per block. */
+    u32_t concurrent_walks;
 
     /** Rows whose neighbors fill a walk's candidates, the widest round a walk expands. */
     u32_t filling_rows;
@@ -237,6 +238,33 @@ struct vram_search_view {
     distance_t* result_distances;
     u32_t count;
 };
+
+/** Splits a round of @p count rows of @p ids, past a warp's width and up to two, by row bytes
+ *  through @ref sort_lanes and one bitonic half-cleaner: @p split [0] takes the warp's width of
+ *  longest rows, longest at lane 0, and @p split [1] the rest, shortest at lane 0 and sentinels
+ *  past them, so lane @c l pairs the @c l -th longest row with the @c l -th shortest. */
+template <typename warp_type_, typename node_id_type_>
+__device__ __forceinline__ void vram_split_by_bytes(vram_ragged_view<node_id_type_> const& storage,
+                                                    node_id_type_ const* ids, u32_t count, u32_t lane,
+                                                    vram_scored_node<node_id_type_> (&split)[2]) noexcept {
+    using warp_t = warp_type_;
+    using scored_node_t = vram_scored_node<node_id_type_>;
+    constexpr u32_t width_k = warp_t::width_k;
+    // Rows key by their bytes plus one, so the empty slots, keyed zero, sort below every row.
+    auto const keyed = [&](u32_t slot) noexcept {
+        return slot < count ? scored_node_t::make(static_cast<distance_t>(storage.row(ids[slot]).bytes) + 1, ids[slot])
+                            : scored_node_t::make(0, std::numeric_limits<node_id_type_>::max());
+    };
+    scored_node_t const descending = shuffle_xor<warp_t>(sort_lanes<warp_t>(keyed(lane), lane), width_k - 1);
+    scored_node_t const ascending = sort_lanes<warp_t>(keyed(width_k + lane), lane);
+    scored_node_t const longer = ascending < descending ? descending : ascending;
+    scored_node_t const shorter = ascending < descending ? ascending : descending;
+    split[0] = shuffle_xor<warp_t>(sort_lanes<warp_t>(longer, lane), width_k - 1);
+    // The empty slots lead the ascending short rows, so the rows rotate down past them.
+    u32_t const empty = 2 * width_k - count;
+    scored_node_t const rotated = shuffle_from<warp_t>(sort_lanes<warp_t>(shorter, lane), (lane + empty) % width_k);
+    split[1] = lane + empty < width_k ? rotated : scored_node_t::sentinel();
+}
 
 /** Scores each lane's row in place on @p rung_ of @p kit_, the schedule of every kit whose lane
  *  scores a row alone, so a warp walks one query by itself. */
@@ -258,6 +286,21 @@ struct vram_lane_schedule {
         vram_row_t const row = storage.row(node_id);
         distance_t const lower_bound = kit_::lower_bound(storage.kernel, query, row);
         return lower_bound > radius ? lower_bound : vram_score<kit_, rung_>(storage.kernel, query, row, radius, lane);
+    }
+
+    /** Scores into @p scored a round of @p count rows of @p ids, past a warp's width and up to two:
+     *  lane @c l scores the @c l -th longest row and then the @c l -th shortest, so the warp's two
+     *  passes cost its longest row and the longest of the short ones. */
+    __device__ __forceinline__ void score_round(vram_ragged_view<node_id_type_> const& storage,
+                                                typename kit_::query_t const& query, node_id_type_ const* ids,
+                                                u32_t count, distance_t radius, u32_t lane,
+                                                vram_scored_node<node_id_type_> (&scored)[2]) const noexcept {
+        vram_split_by_bytes<typename kit_::warp_t>(storage, ids, count, lane, scored);
+        for (vram_scored_node<node_id_type_>& entry : scored) {
+            distance_t const distance = score(storage, query, entry.id(), radius, lane);
+            if (!(entry == vram_scored_node<node_id_type_>::sentinel()))
+                entry = vram_scored_node<node_id_type_>::make(distance, entry.id());
+        }
     }
 };
 
@@ -310,7 +353,8 @@ __device__ __forceinline__ u32_t vram_sample_landmarks( //
     return warp_t::count(fresh_mask);
 }
 
-/** Scores one gathered batch against @p query through @p schedule and folds it into the candidates.
+/** Scores one gathered batch against @p query through @p schedule and folds it into the candidates:
+ *  a warp's width of rows a row per lane, and a round past it, up to two, longest rows first.
  *  Past the full candidates' worst rank nothing enters, so each row is scored within it; unfilled
  *  candidates bound nothing. No dedup: the exact visited set upstream stages every ID once. */
 template <vram_basic_kit kit_, typename schedule_, vram_frontier frontier_, typename node_id_type_>
@@ -323,6 +367,13 @@ __device__ __forceinline__ void vram_score_into_frontier( //
     scored_node_t const worst = context.frontier.worst();
     distance_t const radius = worst == scored_node_t::sentinel() ? std::numeric_limits<distance_t>::infinity()
                                                                  : worst.distance();
+    if (gathered_count > kit_::warp_t::width_k) {
+        scored_node_t scored[2];
+        schedule.score_round(storage, query, gathered_ids, gathered_count, radius, lane, scored);
+        context.frontier.insert_batch(scored[0], lane);
+        context.frontier.insert_batch(scored[1], lane);
+        return;
+    }
     node_id_type_ const node_id = lane < gathered_count ? gathered_ids[lane]
                                                         : std::numeric_limits<node_id_type_>::max();
     distance_t const distance = schedule.score(storage, query, node_id, radius, lane);
@@ -401,7 +452,8 @@ __device__ __forceinline__ void vram_search_ahead( //
             continue;
         }
         vram_expand_round<warp_t>(frontier, visited, telemetry, storage, candidate, first_value, context.walk_width,
-                                  first_invisible_id, held, held_at_hop, gathered_ids, pending, lane, score);
+                                  first_invisible_id, held, held_at_hop, gathered_ids, pending, warp_t::width_k, lane,
+                                  score);
     }
     telemetry.locked_drops += !(held == scored_node_t::sentinel());
 }
@@ -762,10 +814,10 @@ __device__ __forceinline__ void vram_walk_one( //
     vram_warp_context<frontier_> context;
     context.frontier = frontier;
     context.random_generator = vram_lane_generator<warp_t>(query_index, lane);
-    // Seats no other walk holds widen this one, never past the rows that fill its candidates.
+    // Concurrent walks the batch leaves idle widen this one, never past its filling rows.
     u32_t live = lane == 0 ? warp_t::fetch_add_relaxed(*view.live_walks, 1u) + 1 : 0;
     live = warp_t::shuffle(live, 0);
-    context.walk_width = walk_width(view.seats, live, view.queries_count - query_index, view.filling_rows);
+    context.walk_width = walk_width(view.concurrent_walks, live, view.queries_count - query_index, view.filling_rows);
     vram_search_around<kit_>(view.storage, schedule, query, view.sampling_bound, view.sampling_bound, visited,
                              gathered_ids, context, lane);
     if (lane == 0) warp_t::fetch_sub_relaxed(*view.live_walks, 1u);
@@ -779,7 +831,7 @@ __device__ __forceinline__ void vram_walk_one( //
         distances_row[rank] = entry.distance();
     });
     context.telemetry.tail_compactions = context.frontier.compactions();
-    context.telemetry.tail_unseated = context.frontier.unseated();
+    context.telemetry.tail_dropped = context.frontier.dropped();
     context.telemetry.visited_saturations = visited.saturations_;
     context.telemetry.template flush<warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
 }

@@ -1236,7 +1236,7 @@ struct hip_traversal_context {
     hip_event_t event_;
 
     /** Grow-only traversal arena for @p bytes: the exact visited sets and spill tails of every
-     *  resident warp, and a builder's scratch when shared memory cannot seat it, kept across
+     *  resident warp, and a builder's scratch when shared memory cannot fit it, kept across
      *  calls. @return The base, or null on exhaustion. */
     byte_t* ensure_arena(std::size_t bytes) noexcept { return ensure_(arena_, arena_bytes_, bytes); }
 

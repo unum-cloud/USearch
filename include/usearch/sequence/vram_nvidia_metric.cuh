@@ -57,7 +57,8 @@ constexpr sz_levenshtein_group_lanes_t cuda_levenshtein_lanes_per_row_ampere(u32
 
 /** Bytes the @p bytes long row at @p data takes once prepared over @p symbol_, a multiple of 16: a
  *  class map over every byte value, or a page table with a class row per page its runes touch, then
- *  a mask row per class the row's own words long, one class per distinct symbol and one more. */
+ *  a mask row per class at the walk stride of the row's own words, one class per distinct symbol
+ *  and one more. */
 template <sz_levenshtein_symbol_t symbol_>
 std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t bytes) noexcept {
     if constexpr (symbol_ == sz_levenshtein_runes_k) {
@@ -85,7 +86,8 @@ std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t b
         }
         return round_up_to_multiple<std::size_t>(
             sz_levenshtein_utf8_span_header_k + sz_levenshtein_utf8_pages_k * sizeof(u16_t) +
-                rows * 256 * sizeof(u32_t) + classes * sz_levenshtein_query_words(runes) * sizeof(u64_t),
+                rows * 256 * sizeof(u32_t) +
+                classes * sz_levenshtein_walk_stride(sz_levenshtein_query_words(runes)) * sizeof(u64_t),
             16);
     }
     u64_t present[4] = {};
@@ -97,7 +99,9 @@ std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t b
                                  std::popcount(present[3]);
     std::size_t const classes = min_of<std::size_t>(distinct + 1, sz_levenshtein_byte_classes_k);
     return round_up_to_multiple<std::size_t>(
-        sz_levenshtein_byte_classes_k + classes * sz_levenshtein_query_words(bytes) * sizeof(u64_t), 16);
+        sz_levenshtein_byte_classes_k +
+            classes * sz_levenshtein_walk_stride(sz_levenshtein_query_words(bytes)) * sizeof(u64_t),
+        16);
 }
 
 /** Lays @p row out as a query over @p symbol_ in @p span, every lane of the warp taking part. */
@@ -110,8 +114,8 @@ __device__ __forceinline__ sz_levenshtein_query_t cuda_levenshtein_prepare_amper
                                                 reinterpret_cast<sz_ptr_t>(span), &query, lane);
     else
         sz_levenshtein_query_prepare_simt_(reinterpret_cast<sz_cptr_t>(row.data), row.bytes,
-                                           sz_levenshtein_query_words(row.bytes), reinterpret_cast<sz_ptr_t>(span),
-                                           &query, lane);
+                                           sz_levenshtein_walk_stride(sz_levenshtein_query_words(row.bytes)),
+                                           reinterpret_cast<sz_ptr_t>(span), &query, lane);
     return query;
 }
 
@@ -272,15 +276,15 @@ struct levenshtein_ladder<sz_levenshtein_runes_k, caps_> {
 };
 
 /**
- *  @brief The overlap distance from @p query to @p row, every lane of the warp taking part: the
- *      share of the longer side's windows the candidate misses, at @c overlap_resolution_k,
- *      exact within @p radius and above it past.
+ *  @brief The overlap distance from @p query to @p row, the aligned group of @p lanes lanes holding
+ *      @p lane taking part: the share of the longer side's windows the candidate misses, at
+ *      @c overlap_resolution_k, exact within @p radius and above it past.
  *
  *  A float radius rounds, so the misses StringZilla may stop past are those of the integer radius a
  *  float spacing above it, @c 2^7 at this scale. Out of line, so the body compiles once per unit.
  */
 __device__ __noinline__ inline u64_t cuda_overlap_score_ampere(sz_overlap_query_t query, basic::vram_row_t row,
-                                                               distance_t radius, u32_t lane) noexcept {
+                                                               distance_t radius, u32_t lane, u32_t lanes) noexcept {
     u64_t const candidate_windows = sz_overlap_windows(row.bytes, query.widths, query.widths_count);
     u64_t const longer = max_of<u64_t>(candidate_windows, query.windows);
     if (!longer) return overlap_distance(longer, 0);
@@ -290,24 +294,28 @@ __device__ __noinline__ inline u64_t cuda_overlap_score_ampere(sz_overlap_query_
         misses_limit = ((admitted + 1) * longer - 1) / static_cast<u64_t>(overlap_resolution_k);
     }
     u64_t const matches = sz_overlap_candidate_matches_simt_(&query, reinterpret_cast<sz_cptr_t>(row.data), row.bytes,
-                                                             misses_limit, lane % 32u, sz_shuffle_index_cuda_);
+                                                             misses_limit, lane % lanes, lanes,
+                                                             sz_group_shuffle_index_cuda_);
     return overlap_distance(longer, matches);
 }
 
 /** Window overlap on the Ampere floor: a warp lays the query's window hashes at every width out as
- *  a tree in its span, and a warp counts each candidate's windows the tree holds, through
- *  StringZilla's rolling hashes, whose residues are the CPU kits'. The widths are the parameters
- *  the face uploads, their count first. */
+ *  a tree in its span, and a group of a rung's lanes counts each candidate's windows the tree
+ *  holds, through StringZilla's rolling hashes, whose residues are the CPU kits'. The widths are
+ *  the parameters the face uploads, their count first. */
 struct u8_ampere_overlap_kit_t {
     inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
     inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
-    inline static constexpr u32_t lanes_per_row_k = cuda_warp_t::width_k;
 
     using warp_t = cuda_warp_t;
     using query_t = sz_overlap_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
-    /** A warp scores a row of any length its byte count can state. */
+    /** A rung is its lanes per row. */
+    static constexpr u32_t lanes_per_row(u32_t lanes) noexcept { return lanes; }
+    static_assert(vram_overlap_rungs_k[std::size(vram_overlap_rungs_k) - 1] <= warp_t::width_k);
+
+    /** Every rung scores a row of any length its byte count can state. */
     static constexpr bool serves(u32_t, std::size_t bytes) noexcept {
         return bytes <= std::numeric_limits<u32_t>::max();
     }
@@ -340,9 +348,10 @@ struct u8_ampere_overlap_kit_t {
         u64_t const shorter = min_of<u64_t>(candidate_windows, query.windows);
         return static_cast<distance_t>(overlap_distance(longer, shorter));
     }
+    template <u32_t lanes_>
     static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query, basic::vram_row_t row,
                                                        distance_t radius, u32_t lane) noexcept {
-        return static_cast<distance_t>(cuda_overlap_score_ampere(query, row, radius, lane));
+        return static_cast<distance_t>(cuda_overlap_score_ampere(query, row, radius, lane, lanes_));
     }
 };
 
@@ -387,11 +396,18 @@ status_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
           typename kernels_type_>
 std::size_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::rung_serving_(
-    std::size_t longest) noexcept {
+    std::size_t longest) const noexcept {
     using kit_t = vram_sequence_kit_t<metric_, capability_>;
     constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
     std::size_t rung = 0;
     while (rung != rungs_k && !kit_t::serves(rungs[rung], longest)) ++rung;
+    if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
+        // Lanes past the longest row's widest windows would roll none of their own.
+        u32_t widest = 0;
+        for (std::size_t index = 1; index < window_widths_.size(); ++index)
+            widest = max_of(widest, window_widths_[index]);
+        while (rung + 1 < rungs_k && std::size_t {rungs[rung + 1]} * widest <= longest) ++rung;
+    }
     return rung;
 }
 
@@ -399,11 +415,8 @@ template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capabili
           typename kernels_type_>
 u32_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::lanes_per_row_(std::size_t rung) noexcept {
     using kit_t = vram_sequence_kit_t<metric_, capability_>;
-    if constexpr (metric_ == usearch_sequence_metric_overlap_k) return kit_t::lanes_per_row_k;
-    else {
-        constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
-        return kit_t::lanes_per_row(rungs[rung]);
-    }
+    constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
+    return kit_t::lanes_per_row(rungs[rung]);
 }
 
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
@@ -448,20 +461,20 @@ status_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::
 #pragma region Kernels
 
 /** Every NVIDIA sequence kernel: @p kernel_ picks the walk, @p capability_ and @p metric_ the kit
- *  through its ladder, @p words_ its rung, @p node_id_type_ the IDs of the records, and @p slots_
- *  the register rung. */
-template <vram_kernel_t kernel_, sz_capability_t capability_, usearch_sequence_metric_t metric_, u32_t words_,
+ *  through its ladder, @p rung_ its rung, Myers words or lanes per row, @p node_id_type_ the IDs of
+ *  the records, and @p slots_ the register rung. */
+template <vram_kernel_t kernel_, sz_capability_t capability_, usearch_sequence_metric_t metric_, u32_t rung_,
           typename node_id_type_, u32_t slots_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32, basic::cuda_resident_blocks(kernel_, slots_))
     cuda_kernel(basic::vram_arguments<node_id_type_> arguments) {
     using kit_t = vram_sequence_kit_t<metric_, capability_>;
-    basic::cuda_kernel_body<kernel_, kit_t, words_, slots_>(arguments);
+    basic::cuda_kernel_body<kernel_, kit_t, rung_, slots_>(arguments);
 }
 
-template <sz_capability_t capability_, usearch_sequence_metric_t metric_, u32_t words_, typename node_id_type_,
+template <sz_capability_t capability_, usearch_sequence_metric_t metric_, u32_t rung_, typename node_id_type_,
           std::size_t... rungs_>
 __device__ void cuda_instantiate_rungs(std::index_sequence<rungs_...>) noexcept {
-    (static_cast<void>(&cuda_kernel<basic::cuda_rungs[rungs_].kernel, capability_, metric_, words_, node_id_type_,
+    (static_cast<void>(&cuda_kernel<basic::cuda_rungs[rungs_].kernel, capability_, metric_, rung_, node_id_type_,
                                     basic::cuda_rungs[rungs_].slots>),
      ...);
 }

@@ -77,7 +77,7 @@ struct metal_arguments_t {
     unsigned int sampling_bound, queries_count, count, epoch_base;
     unsigned int visited_slots, hash_shift, selection_rows, slice_bytes;
     unsigned int heads_count, row_fragments_magic, use_node_ids, expansion;
-    unsigned int tail_entries, parts, round, seats;
+    unsigned int tail_entries, parts, round, concurrent_walks;
     unsigned int filling_rows;
 };
 

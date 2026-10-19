@@ -296,7 +296,7 @@ struct vram_apple_index {
         return gpu_arena_shape(visits, tail, 0);
     }
 
-    /** Whether a search or multiply launch seats on this device: every simdgroup the widest
+    /** Whether a search or multiply launch fits on this device: every simdgroup the widest
      *  register rung's grid keeps in flight takes that rung's slice and the @p fold_bytes an
      *  attend keeps past it, within one buffer; a wider walk sizes its arena tail per call. */
     bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept {
@@ -308,7 +308,7 @@ struct vram_apple_index {
                device_.max_buffer_bytes;
     }
 
-    /** Whether an insert or refine launch seats on this device: every simdgroup the widest
+    /** Whether an insert or refine launch fits on this device: every simdgroup the widest
      *  register rung's grid keeps in flight takes that rung's slice beside its builder scratch,
      *  within one buffer, since threadgroup memory would bound the row width. */
     bool build_scratch_fits() const noexcept {
@@ -435,7 +435,7 @@ struct vram_apple_index {
         std::size_t restarts = 0;
         std::size_t unlinked_neighbors = 0;
         std::size_t tail_compactions = 0;
-        std::size_t tail_unseated = 0;
+        std::size_t tail_dropped = 0;
         std::size_t visited_saturations = 0;
         std::size_t computed_distances_in_refines = 0;
         std::size_t computed_distances_in_reverse_refines = 0;
@@ -480,7 +480,7 @@ struct vram_apple_index {
         std::size_t computed_distances = 0;
         std::size_t restarts = 0;
         std::size_t tail_compactions = 0;
-        std::size_t tail_unseated = 0;
+        std::size_t tail_dropped = 0;
         std::size_t visited_saturations = 0;
     };
 
@@ -1185,7 +1185,7 @@ struct vram_apple_index {
         result.unlinked_neighbors = metal_tally(counters, metal_lock_skips_k);
         result.visited_saturations = metal_tally(counters, metal_saturations_k);
         result.tail_compactions = metal_tally(counters, metal_tail_compactions_k);
-        result.tail_unseated = metal_tally(counters, metal_tail_unseated_k);
+        result.tail_dropped = metal_tally(counters, metal_tail_dropped_k);
         for (std::size_t row = 0; row != assigned_ids.size(); ++row)
             assigned_ids[row] = static_cast<node_id_t>(first_id + row);
         return {result, status_t::success_k};
@@ -1233,8 +1233,8 @@ struct vram_apple_index {
     }
 
     /** Blocks a walk over @p queries launches at @p resident_blocks threadgroups per GPU core: a
-     *  simdgroup per query up to the grid the device seats, so the arena carves a slice only for a
-     *  simdgroup that can take a query. */
+     *  simdgroup per query up to the grid the device runs at once, so the arena carves a slice only
+     *  for a simdgroup that can take a query. */
     u32_t walk_blocks_(std::size_t queries, u32_t resident_blocks) const noexcept {
         return static_cast<u32_t>(min_of<std::size_t>(divide_round_up<std::size_t>(queries, metal_simdgroups_k),
                                                       std::size_t {device_.multiprocessor_count} * resident_blocks));
@@ -1681,10 +1681,8 @@ struct vram_apple_index {
             failed(sized))
             return {{}, sized};
         arguments.expansion = expansion;
-        // Every simdgroup the device seats on this rung, and the rows whose neighbors fill a walk's
-        // candidates.
-        arguments.seats = device_.multiprocessor_count * resident_blocks_(vram_kernel_t::search_k, candidate_slots) *
-                          metal_simdgroups_k;
+        arguments.concurrent_walks = device_.multiprocessor_count *
+                                     resident_blocks_(vram_kernel_t::search_k, candidate_slots) * metal_simdgroups_k;
         arguments.filling_rows = filling_rows<u32_t>(expansion, static_cast<u32_t>(connectivity()));
         bool fresh = false;
         if (status_t const staged = context.ensure_(context.staging_, staging_bytes + widened_bytes_(), fresh);
@@ -1740,7 +1738,7 @@ struct vram_apple_index {
         result.computed_distances = spent.scored;
         result.restarts = spent.restarts;
         result.tail_compactions = spent.tail_compactions;
-        result.tail_unseated = spent.tail_unseated;
+        result.tail_dropped = spent.tail_dropped;
         result.visited_saturations = spent.visited_saturations;
         return result;
     }

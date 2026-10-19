@@ -30,13 +30,14 @@ enum metal_extent_t : unsigned int {
 
 };
 
-/** Rows a walk keeps popped ahead of its merges, the twin of the host's @c walk_width: the share of
- *  @p seats no other walk holds, when @p live walks run and @p left are still to start counting
- *  this one, never past @p filling_rows, the rows whose neighbors fill a walk's candidates. */
-constexpr unsigned int walk_width(unsigned int seats, unsigned int live, unsigned int left, unsigned int filling_rows) {
-    unsigned int const started = left < seats ? left : seats;
-    unsigned int const walks = live < started ? started : live;
-    unsigned int const share = seats / walks ? seats / walks : 1;
+/** Rows a walk expands per hop, the twin of the host's @c walk_width: @p concurrent_walks, the
+ *  walks the hardware runs at once, divided among the walks that need them, at least one and at
+ *  most @p filling_rows. */
+constexpr unsigned int walk_width(unsigned int concurrent_walks, unsigned int live_walks, unsigned int unstarted_walks,
+                                  unsigned int filling_rows) {
+    unsigned int const started = unstarted_walks < concurrent_walks ? unstarted_walks : concurrent_walks;
+    unsigned int const walks = live_walks < started ? started : live_walks;
+    unsigned int const share = concurrent_walks / walks ? concurrent_walks / walks : 1;
     return share < filling_rows ? share : filling_rows;
 }
 
@@ -59,7 +60,7 @@ enum metal_counter_t : unsigned int {
     metal_locked_drops_k = 17,
     metal_saturations_k = 19,
     metal_tail_compactions_k = 21,
-    metal_tail_unseated_k = 23,
+    metal_tail_dropped_k = 23,
 
     /** The word count, padded to an even one so whatever follows a block in staging stays 8-byte
      *  aligned. */

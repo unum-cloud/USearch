@@ -388,7 +388,7 @@ struct sharded_indexes {
             result_.restarts += inserted.value.restarts;
             result_.unlinked_neighbors += inserted.value.unlinked_neighbors;
             result_.tail_compactions += inserted.value.tail_compactions;
-            result_.tail_unseated += inserted.value.tail_unseated;
+            result_.tail_dropped += inserted.value.tail_dropped;
             result_.visited_saturations += inserted.value.visited_saturations;
             return status_t::success_k;
         }
@@ -1867,7 +1867,7 @@ struct sharded_indexes {
             result.restarts += spent.restarts;
             result.unlinked_neighbors += spent.lock_skips;
             result.tail_compactions += spent.tail_compactions;
-            result.tail_unseated += spent.tail_unseated;
+            result.tail_dropped += spent.tail_dropped;
             result.visited_saturations += spent.visited_saturations;
         }
         return status;
@@ -2422,7 +2422,7 @@ struct sharded_indexes {
                 merged.computed_distances += spent.scored;
                 merged.restarts += spent.restarts;
                 merged.tail_compactions += spent.tail_compactions;
-                merged.tail_unseated += spent.tail_unseated;
+                merged.tail_dropped += spent.tail_dropped;
                 merged.visited_saturations += spent.visited_saturations;
                 if (shard != queued) merge(shard, traversals[shard]); // The refuser landed nothing to merge.
             }
