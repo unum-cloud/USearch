@@ -904,16 +904,17 @@ check_template_type_suffixes() {
     [ -z "$suffixed" ] || fail "$suffixed" \
         "$file names a class template with the _t suffix - name the template bare, as in" \
         "            \`template <typename value_type_> struct humanized\`, and keep _t for its aliases:"
-    variables=$(printf '%s\n' "$added" | awk '
-        # A `static` member of a class template is not a variable template, though an unchanged `struct` line between
-        # them leaves only the `template` line and the member among the added lines.
+    variables=$(awk '
+        # A `static` member of a class template is not a variable template, so it never counts.
         function suffixed(line) {
-            return line ~ /constexpr[[:space:]][^=(]*[[:space:]][A-Za-z0-9_]*_[kt][[:space:]]*=/ && line !~ /[[:space:]]static[[:space:]]/
+            return line ~ /constexpr[[:space:]][^=(]*[[:space:]][A-Za-z0-9_]*_[kt][[:space:]]*(<.*>)?[[:space:]]*=/ &&
+                   line !~ /[[:space:]]static[[:space:]]/
         }
-        /^\+[[:space:]]*template[[:space:]]*</ { if (suffixed($0)) print; else pending = 1; next }
-        pending && /^\+[[:space:]]*requires/ { next }
-        pending && suffixed($0) { print }
-        { pending = 0 }' || true)
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        /^[[:space:]]*template[[:space:]]*</ { if ((FNR in added) && suffixed($0)) print FNR ": " $0; else pending = 1; next }
+        pending && /^[[:space:]]*requires/ { next }
+        pending && (FNR in added) && suffixed($0) { print FNR ": " $0 }
+        { pending = 0 }' "$staged_lines_path" "$staged_blob" || true)
     [ -z "$variables" ] || fail "$variables" \
         "$file names a variable template with the _k or _t suffix - name the template bare, as in" \
         "            \`template <typename index_type_> constexpr bool device_resident\`:"

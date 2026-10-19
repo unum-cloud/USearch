@@ -37,18 +37,17 @@
  */
 #pragma once
 
+#include <cmath>   // `std::nextafter` - the share a radius rounds up to
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::int64_t`
 #include <cstring> // `std::memcpy` - the bytes a prepared engine holds
-#include <cmath>   // `std::llround` - a width's matches off its share
 
-#include <limits>  // `std::numeric_limits` - the distance a failed round reports
-#include <memory>  // `std::allocator`
-#include <span>    // `std::span`
-#include <utility> // `std::swap`
+#include <limits> // `std::numeric_limits` - the distance a failed round reports
+#include <memory> // `std::allocator`
+#include <span>   // `std::span`
 
 #include <stringzilla/levenshtein.h>   // `sz_levenshtein_engine_*` & the per-backend distances
-#include <stringzilla/overlap.h>       // `sz_overlap_engine_*` & the per-backend scores
+#include <stringzilla/overlap.h>       // `sz_overlap_engine_*` & the per-backend match counts
 #include <stringzilla/stringzilla.hpp> // `sz::string_view_t` - every operand a metric takes
 
 #include "usearch/utilities/types.hpp"
@@ -511,11 +510,11 @@ constexpr u64_t overlap_distance(u64_t longer, u64_t matches) noexcept {
  *
  *  Nothing is stored per node, so the window widths may be chosen per corpus without invalidating
  *  anything. One instance belongs to one thread and owns its engine, the arena the engine lives in,
- *  the staging and the shares. The staging and the shares are sized once by @c init, and the
+ *  the staging and the match counts. The staging and the counts are sized once by @c init, and the
  *  engine's tree and chains bump in the arena, so a round allocates nothing once a query and a
  *  round as long have been scored. A distance is the windows the shorter side misses of the longer,
- *  in fixed point over @ref resolution_k: zero where the windows coincide at every width, and
- *  @ref resolution_k where they share none.
+ *  in fixed point over @ref overlap_resolution_k: zero where the windows coincide at every width,
+ *  and @ref overlap_resolution_k where they share none.
  *
  *  @tparam capability_ The admitted ISA backends as a capability mask; the widest kit this build compiled in
  *      among them is picked.
@@ -528,17 +527,14 @@ class overlap_metric {
     using allocator_t = allocator_type_;
     using is_transparent = void;
 
-    /** The full scale of a distance, @ref overlap_resolution_k, which callers scaling distances
-     *  read off the metric type. */
-    static constexpr i64_t resolution_k = overlap_resolution_k;
-
   private:
 
-    /** The query's engine, one query's tree over its windows at every width; empty for a query
-     *  without windows. Its blocks live in @c arena_, its chains grow there to the longest seen. */
+    /** The query's engine, one query's tree over its windows at every width, a query without
+     *  windows as a tree of none, and nothing before the first @ref reset. Its blocks live in
+     *  @c arena_, its chains grow there to the longest seen. */
     sz_overlap_engine_t engine_ {};
 
-    /** Where the engine's blocks bump, rewound by every @ref reset. */
+    /** Where the engine's blocks bump, rewound whenever @ref reset prepares a new query. */
     growing_arena<allocator_t> arena_;
 
     /** The round's candidates in push order. */
@@ -551,25 +547,24 @@ class overlap_metric {
     /** The widths windows are taken at, all sharing one B-tree. */
     growing_buffer<sz_size_t, allocator_t> window_widths_;
 
-    /** The round's @b [candidates, widths] shares, a staged candidate's row by its push slot. */
-    growing_buffer<sz_f32_t, allocator_t> scores_;
-
-    /** The query's windows summed over every width: the denominator's query side. */
-    std::size_t query_windows_ = 0;
+    /** The round's @b [candidates, widths] match counts, a staged candidate's row by its push
+     *  slot. */
+    growing_buffer<sz_u32_t, allocator_t> matches_;
 
     /** How the last @ref init, @ref reset or @ref drain fared. */
     status_t last_status_ = status_t::uninitialized_k;
 
   public:
     overlap_metric(allocator_t const& allocator = {}) noexcept
-        : arena_(allocator), staged_(allocator), prepared_(allocator), window_widths_(allocator), scores_(allocator) {}
+        : arena_(allocator), staged_(allocator), prepared_(allocator), window_widths_(allocator), matches_(allocator) {}
     overlap_metric(overlap_metric const&) = delete;
     overlap_metric& operator=(overlap_metric const&) = delete;
     overlap_metric(overlap_metric&&) noexcept = default;
     overlap_metric& operator=(overlap_metric&&) noexcept = default;
 
     /**
-     *  @brief Sizes the staging and the shares, and records the window widths a round scores over.
+     *  @brief Sizes the staging and the match counts, and records the window widths a round scores
+     *      over.
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at least the
      *      index's round capacity, @c max(fan_out × connectivity, connectivity + 1), or rounds saturate rather
      *      than fail.
@@ -583,7 +578,7 @@ class overlap_metric {
         if (status_t const staged = staged_.reserve_exactly(staging_limit); failed(staged)) return staged;
         if (status_t const sized = window_widths_.resize_uninitialized(window_widths.size()); failed(sized))
             return sized;
-        if (status_t const sized = scores_.resize_uninitialized(staged_.capacity() * window_widths.size());
+        if (status_t const sized = matches_.resize_uninitialized(staged_.capacity() * window_widths.size());
             failed(sized))
             return sized;
         for (std::size_t index = 0; index != window_widths.size(); ++index)
@@ -600,8 +595,7 @@ class overlap_metric {
      *  discarding whatever the previous round staged. */
     void reset(sz::string_view_t query) noexcept {
         staged_.clear();
-        if (succeeded(last_status_) && to_string_view(prepared_) == to_string_view(query)) return;
-        query_windows_ = 0;
+        if (engine_.count && succeeded(last_status_) && to_string_view(prepared_) == to_string_view(query)) return;
         engine_ = sz_overlap_engine_t {};
         arena_.clear();
         // Grow-only, so a thread's arena keeps one block per doubling rather than one per query.
@@ -610,9 +604,6 @@ class overlap_metric {
         if (failed(last_status_)) return;
         prepared_.extend_uninitialized(query.size());
         if (!query.empty()) std::memcpy(prepared_.data(), query.data(), query.size());
-        for (std::size_t const width : window_widths_)
-            if (width <= query.size()) query_windows_ += query.size() - width + 1;
-        if (query_windows_ == 0) return;
         sz_string_view_t const view = as_string_view(query);
         sz_strings_view_t queries;
         sz_strings_from_string_views(&view, 1, &queries);
@@ -636,73 +627,56 @@ class overlap_metric {
      *  @brief Scores everything staged in one sweep and closes the round.
      *
      *  Distances up to and including @p radius are exact; above it the value is some value above
-     *  the radius. A failed round reports the furthest distance, so a full pool rejects it and an
-     *  unfilled pool admits it last; @ref status is the only signal.
-     *
-     *  A pair within @p radius misses at most @c floor(((radius+1) × longer - 1) / resolution_k) of
-     *  the longer side's windows, so the sweep is bounded by that of the round's longest pair, past
-     *  which a pair's shares read zero - a full-scale distance, past the radius as it must be.
+     *  the radius. Each pair may miss only as many windows as keep its own distance within
+     *  @p radius, so a long candidate never loosens a short one's budget, and a pair past its
+     *  budget counts no matches, a full-scale distance. A failed round reports the furthest
+     *  distance, so a full pool rejects it and an unfilled pool admits it last; @ref status is the
+     *  only signal.
      *
      *  @param[out] distances One slot per staged candidate, in push order.
      *  @param[in] radius The furthest distance the caller still tells apart.
      */
     void drain(std::span<i64_t> distances, i64_t radius) noexcept {
-        std::size_t const count = staged_.size();
-        if (failed(last_status_) || query_windows_ == 0) {
-            for (std::size_t slot = 0; slot != count; ++slot)
-                distances[slot] = failed(last_status_) ? (std::numeric_limits<i64_t>::max)() : resolution_k;
-            staged_.clear();
-            return;
-        }
-        sz_size_t bound = STRINGZILLA_SIZE_MAX;
-        if (radius < resolution_k) {
-            u64_t longest = query_windows_;
-            for (std::size_t slot = 0; slot != count; ++slot)
-                longest = max_of<u64_t>(longest, windows_(staged_[slot].length));
-            bound = static_cast<sz_size_t>(((static_cast<u64_t>(max_of<i64_t>(radius, 0)) + 1) * longest - 1) /
-                                           static_cast<u64_t>(resolution_k));
-        }
-        std::size_t const widths = window_widths_.size();
+        std::size_t const count = staged_.size(), widths = window_widths_.size();
+        sz_f32_t const share = share_of_(radius);
         sz_strings_view_t candidates;
         sz_strings_from_string_views(staged_.data(), count, &candidates);
         // A moved metric keeps its engine, whose growth must bump the arena it moved with.
         engine_.allocator.handle = &arena_;
-        sz_status_t const scored = kit_t::scores(&engine_, &candidates, bound, scores_.data(), count * widths, widths,
-                                                 nullptr);
-        if (scored != sz_success_k) last_status_ = status_t::bad_alloc_k;
+        bool const scored = succeeded(last_status_) && kit_t::scores(&engine_, &candidates, share, matches_.data(),
+                                                                     count * widths, widths, nullptr) == sz_success_k;
+        if (!scored && succeeded(last_status_)) last_status_ = status_t::bad_alloc_k;
         for (std::size_t slot = 0; slot != count; ++slot)
-            distances[slot] = scored == sz_success_k ? distance_(staged_[slot].length, scores_.data() + slot * widths)
-                                                     : (std::numeric_limits<i64_t>::max)();
+            distances[slot] = scored ? distance_(staged_[slot].length, matches_.data() + slot * widths)
+                                     : (std::numeric_limits<i64_t>::max)();
         staged_.clear();
     }
 
   private:
 
-    /** Windows a text of @p length bytes holds, summed over every width. */
-    u64_t windows_(std::size_t length) const noexcept {
-        u64_t windows = 0;
-        for (std::size_t const width : window_widths_)
-            if (width <= length) windows += length - width + 1;
-        return windows;
+    /** The share of its longer side's windows a pair within @p radius may miss: every pair within
+     *  the radius must count exactly, so the share rounds up past @c (radius + 1) / scale. */
+    static sz_f32_t share_of_(i64_t radius) noexcept {
+        if (radius >= overlap_resolution_k - 1) return 1.0f;
+        f64_t const share = static_cast<f64_t>(max_of<i64_t>(radius, 0) + 1) / static_cast<f64_t>(overlap_resolution_k);
+        return std::nextafter(static_cast<sz_f32_t>(share), 1.0f);
     }
 
-    /** One candidate's distance off its @p shares: every width's matches recovered over that
-     *  width's longer side, the misses over whichever side has more windows in all, scaled to
-     *  @ref resolution_k. */
-    i64_t distance_(std::size_t length, sz_f32_t const* shares) const noexcept {
-        std::size_t const query_length = engine_.lengths[0];
-        u64_t longer = 0, matches = 0;
+    /** One candidate's distance off its @p matches: the misses over whichever side has more windows
+     *  at every width, summed, scaled to @ref overlap_resolution_k. */
+    i64_t distance_(std::size_t length, sz_u32_t const* matches) const noexcept {
+        std::size_t const query_length = prepared_.size();
+        u64_t longer = 0, matched = 0;
         for (std::size_t index = 0; index != window_widths_.size(); ++index) {
             std::size_t const width = window_widths_[index];
             u64_t const windows = width <= length ? length - width + 1 : 0;
             u64_t const query_windows = width <= query_length ? query_length - width + 1 : 0;
-            u64_t const width_longer = max_of(windows, query_windows);
-            matches += static_cast<u64_t>(std::llround(static_cast<f64_t>(shares[index]) * width_longer));
-            longer += width_longer;
+            longer += max_of(windows, query_windows);
+            matched += matches[index];
         }
         // The longer text has more windows at every width, so the widths' longer sides sum to the
         // longer side in all, and a union denominator would let repeats score below zero.
-        return static_cast<i64_t>(overlap_distance(longer, matches));
+        return static_cast<i64_t>(overlap_distance(longer, matched));
     }
 };
 

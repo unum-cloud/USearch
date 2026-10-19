@@ -1,5 +1,5 @@
 # StringZilla: the string kits behind the sequence modality, from the Levenshtein steps to the overlaps.
 usearch_sibling(
     stringzilla stringzilla::header https://github.com/ashvardanian/StringZilla
-    606319fd147eaf636646c349ed47a929a3bcf86e
+    6920adefc8fefdf9ee3c40167c86a75deef299cf
 )

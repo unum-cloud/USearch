@@ -348,13 +348,10 @@ status_t drive_refinement(typename index_type_::refine_plan_t& plan, refine_curs
     }
 }
 
-/** What one unit of @p metric_type_'s distance is worth on the C scale: a fixed-point metric's full
- *  scale lands as one. */
+/** What one unit of @p metric_type_'s distance is worth on the C scale: one, unless a modality's
+ *  fixed-point metric specializes it so that its full scale lands as one. */
 template <typename metric_type_>
-constexpr usearch_distance_t distance_unit_of() noexcept {
-    if constexpr (requires { metric_type_::resolution_k; }) return 1.0 / metric_type_::resolution_k;
-    else return 1;
-}
+inline constexpr usearch_distance_t distance_unit = 1;
 
 /** Lands one query's matches in row @p row of @p landing: the pool's nearest @p wanted, or with a
  *  @p predicate the nearest of those it admits, judged a quad at a time. */
@@ -378,7 +375,7 @@ void land_matches(index_type_ const& index, context_type_ const& context, std::s
             if (verdicts[lane] != admission_t::admit_k) continue;
             keys[landed] = std::bit_cast<usearch_key_t>(identities[lane]);
             scores[landed] = static_cast<usearch_distance_t>(context.results[first + lane].distance) *
-                             distance_unit_of<metric_type_>();
+                             distance_unit<metric_type_>;
             ++landed;
         }
     }
@@ -484,7 +481,7 @@ expected<traversal_telemetry_t> search_entries(index_type_& index, std::size_t c
     if (failed(status)) return {{}, status};
     for (std::size_t row = 0; row != count; ++row)
         for (std::size_t match = 0; match != counts[row]; ++match)
-            scores[row * wanted + match] *= distance_unit_of<metric_t>();
+            scores[row * wanted + match] *= distance_unit<metric_t>;
     [[maybe_unused]] continuation_t const heard = ticks(count - 1);
     return {{found.computed_distances, found.visited_members, found.restarts, found.saturated_walks},
             status_t::success_k};

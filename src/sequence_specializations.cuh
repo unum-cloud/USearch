@@ -25,6 +25,11 @@
 
 #pragma region Sequence Variants
 
+/** An overlap distance is fixed point over the shared @c overlap_resolution_k. */
+template <sz_capability_t capability_, typename allocator_type_>
+inline constexpr usearch_distance_t distance_unit<us::sequence::overlap_metric<capability_, allocator_type_>> =
+    1.0 / us::sequence::overlap_resolution_k;
+
 /** Lowers one CPU class onto StringZilla's capability bits, which name backends rather than
  *  accumulate, so each class spells every backend its kits may pick, and a class adding none
  *  spells its parent's. */
@@ -131,7 +136,7 @@ struct sequence_ram_variant {
      *  connectivity, as an insertion's. */
     expected<refine_plan_t> plan_refine(std::span<index_t*> donors, std::size_t expansion) noexcept {
         typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion, 0});
+        return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion});
     }
     status_t refine(refine_plan_t& plan, refine_cursor_t& cursor, progress_ticks_t& ticks,
                     executor_t& executor) noexcept;

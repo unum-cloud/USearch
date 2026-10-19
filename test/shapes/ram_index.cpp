@@ -353,8 +353,8 @@ std::size_t check_shapes_codec(u64_t seed) {
     return failures;
 }
 
-/** What the index relies on, as inserts, queries and loads all pack through @c make with no
- *  capabilities: one cloud packs into the same bytes every time, and a stored shape scores zero
+/** What the index relies on, as inserts, queries and loads all pack through the kit's own
+ *  kernels: one cloud packs into the same bytes every time, and a stored shape scores zero
  *  against a query packed from the same coordinates, exactly under every kind but
  *  Gromov-Wasserstein, whose loss reaches zero only to the fast-math tolerance. */
 template <typename fixture_type_>
@@ -378,7 +378,8 @@ std::size_t check_shapes_packing(u64_t seed) {
 
             // The query comes from another allocator, as a call builds one in its arena.
             std::array<std::span<scalar_t const>, 1> const clouds {cloud};
-            query_t const query = query_t::make(clouds, {}, 0).value;
+            query_t const query =
+                query_t::make(clouds, {}, fixture_type_::kit_t::pack_size, fixture_type_::kit_t::pack).value;
             for (nk_kernel_kind_t const kernel : shapes_kernels_k) {
                 metric_t metric(kernel, forkunion_allocator_t {});
                 failures += expect_eq(metric.init(1), status_t::success_k);
