@@ -193,6 +193,12 @@ When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up 
 
 ## User-Defined Metrics
 
+Built-in metrics return distances, so a smaller `Match.distance` means closer.
+
+- `cos`, the Python default, returns $1 - \frac{a \cdot b}{\lVert a \rVert \lVert b \rVert}$ for vectors of any length.
+- `ip` returns $1 - a \cdot b$, matching `cos` only for unit-length vectors and turning negative once $a \cdot b > 1$.
+- `l2sq` returns the squared Euclidean distance $\sum_i (a_i - b_i)^2$, without the square root.
+
 While most vector search packages concentrate on just two metrics, "Inner Product distance" and "Euclidean distance", USearch allows arbitrary user-defined metrics.
 This flexibility allows you to customize your search for various applications, from computing geospatial coordinates with the rare [Haversine][haversine] distance to creating custom metrics for composite embeddings from multiple AI models, like joint image-text embeddings.
 You can use [Numba][numba], [Cppyy][cppyy], or [PeachPy][peachpy] to define your [custom metric even in Python](https://unum-cloud.github.io/USearch/python#user-defined-metrics-and-jit-in-python):
