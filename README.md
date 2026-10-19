@@ -191,6 +191,20 @@ When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up 
 - `faiss.IndexFlatL2`: __55.3 ms__.
 - `usearch.index.search`: __2.54 ms__.
 
+## Metrics
+
+`Match.distance` is always a distance: smaller means closer. The built-in dense metrics compute:
+
+| `metric` | What to pass in                          | Internal handling                  | `Match.distance`                                              |
+| :------- | :--------------------------------------- | :--------------------------------- | :------------------------------------------------------------ |
+| `ip`     | Vectors normalized to unit length        | None, just a dot product           | $$1 - a \cdot b$$                                              |
+| `cos`    | Vectors of any length                    | Divides by the vector norms        | $$1 - \frac{a \cdot b}{\lVert a \rVert \, \lVert b \rVert}$$   |
+| `l2sq`   | Vectors of any length                    | None                               | $$\sum_i (a_i - b_i)^2$$                                       |
+
+- `ip` is `1 - dot`, not the raw dot product, so it goes negative for vectors longer than unit length.
+- `l2sq` is squared Euclidean distance. Take the square root yourself if you need the true L2 distance.
+- For unit-length vectors, `ip` and `cos` return the same distances.
+
 ## User-Defined Metrics
 
 While most vector search packages concentrate on just two metrics, "Inner Product distance" and "Euclidean distance", USearch allows arbitrary user-defined metrics.
