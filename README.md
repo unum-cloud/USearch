@@ -198,7 +198,7 @@ When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up 
 | `metric` | What to pass in                          | Internal handling                  | `Match.distance`                                              |
 | :------- | :--------------------------------------- | :--------------------------------- | :------------------------------------------------------------ |
 | `ip`     | Vectors normalized to unit length        | None, just a dot product           | $$1 - a \cdot b$$                                              |
-| `cos`    | Vectors of any length                    | Divides by the vector norms        | $$1 - \frac{a \cdot b}{\lVert a \rVert \, \lVert b \rVert}$$   |
+| `cos`    | Vectors of any length                    | Divides by the vector norms        | $$1 - \frac{a \cdot b}{\lVert a \rVert  \lVert b \rVert}$$   |
 | `l2sq`   | Vectors of any length                    | None                               | $$\sum_i (a_i - b_i)^2$$                                       |
 
 - `ip` is `1 - dot`, not the raw dot product, so it goes negative for vectors longer than unit length.
