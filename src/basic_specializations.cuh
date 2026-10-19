@@ -231,6 +231,8 @@ struct thread_scratch {
             total.visited_members += context.telemetry.visited_members;
             total.restarts += context.telemetry.restarts;
             total.saturated_walks += context.telemetry.saturated_walks;
+            total.computed_distances_in_rankings += context.telemetry.computed_distances_in_rankings;
+            total.computed_distances_in_selections += context.telemetry.computed_distances_in_selections;
         }
         return total;
     }
@@ -483,7 +485,10 @@ expected<traversal_telemetry_t> search_entries(index_type_& index, std::size_t c
         for (std::size_t match = 0; match != counts[row]; ++match)
             scores[row * wanted + match] *= distance_unit<metric_t>;
     [[maybe_unused]] continuation_t const heard = ticks(count - 1);
-    return {{found.computed_distances, found.visited_members, found.restarts, found.saturated_walks},
+    return {{.computed_distances = found.computed_distances,
+             .visited_members = found.visited_members,
+             .restarts = found.restarts,
+             .saturated_walks = found.saturated_walks},
             status_t::success_k};
 }
 
@@ -799,7 +804,10 @@ struct vram_nvidia_variant {
         auto const [walked, status] = walk(context, allocator);
         if (failed(status)) return {{}, status};
         [[maybe_unused]] continuation_t const heard = ticks(count - 1);
-        return {{walked.computed_distances, walked.visited_members, walked.restarts, 0}, status_t::success_k};
+        return {{.computed_distances = walked.computed_distances,
+                 .visited_members = walked.visited_members,
+                 .restarts = walked.restarts},
+                status_t::success_k};
     }
 
     /** Lands the keys of the rows from @p first, then inserts the tape @p values and @p offsets

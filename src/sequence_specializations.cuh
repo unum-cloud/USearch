@@ -26,9 +26,10 @@
 #pragma region Sequence Variants
 
 /** An overlap distance is fixed point over the shared @c overlap_resolution_k. */
-template <sz_capability_t capability_, typename allocator_type_>
-inline constexpr usearch_distance_t distance_unit<us::sequence::overlap_metric<capability_, allocator_type_>> =
-    1.0 / us::sequence::overlap_resolution_k;
+template <sz_capability_t capability_, typename allocator_type_, typename cache_hints_type_>
+inline constexpr usearch_distance_t
+    distance_unit<us::sequence::overlap_metric<capability_, allocator_type_, cache_hints_type_>> =
+        1.0 / us::sequence::overlap_resolution_k;
 
 /** Lowers one CPU class onto StringZilla's capability bits, which name backends rather than
  *  accumulate, so each class spells every backend its kits may pick, and a class adding none
@@ -77,14 +78,16 @@ struct sequence_geometry_t {
 };
 
 /** Calls @p callback with a factory of the metric @p metric names over a thread's arena, sized for
- *  a round of candidates and scoring with the kits @p capability_ picks; @p window_widths are the
- *  overlap kind's alone. */
-template <sz_capability_t capability_, typename callback_type_>
+ *  a round of candidates, scoring with the kits @p capability_ picks and prefetching through
+ *  @p cache_hints_type_; @p window_widths are the overlap kind's alone. */
+template <sz_capability_t capability_, typename cache_hints_type_, typename callback_type_>
 decltype(auto) with_sequence_metric(usearch_sequence_metric_t metric, std::span<std::size_t const> window_widths,
                                     callback_type_&& callback) noexcept {
-    using bytes_t = us::sequence::levenshtein_metric<capability_, sz_levenshtein_bytes_k, thread_allocator_t>;
-    using runes_t = us::sequence::levenshtein_metric<capability_, sz_levenshtein_runes_k, thread_allocator_t>;
-    using overlap_t = us::sequence::overlap_metric<capability_, thread_allocator_t>;
+    using bytes_t =
+        us::sequence::levenshtein_metric<capability_, sz_levenshtein_bytes_k, thread_allocator_t, cache_hints_type_>;
+    using runes_t =
+        us::sequence::levenshtein_metric<capability_, sz_levenshtein_runes_k, thread_allocator_t, cache_hints_type_>;
+    using overlap_t = us::sequence::overlap_metric<capability_, thread_allocator_t, cache_hints_type_>;
     auto levenshtein = [&]<typename metric_type_>(std::type_identity<metric_type_>) noexcept {
         return callback([](thread_allocator_t const& allocator, std::size_t staging) noexcept {
             metric_type_ made {allocator};
@@ -111,6 +114,7 @@ decltype(auto) with_sequence_metric(usearch_sequence_metric_t metric, std::span<
 template <cpu_class_t cpu_class_>
 struct sequence_ram_variant {
     using executor_t = forkunion_executor_t;
+    using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
     using index_t = us::sequence::ram_index<us::utilities::uuid_t, u32_t, dummy_waiter_t, standard_atomic_ref,
                                             forkunion_allocator_t>;
     using value_t = typename index_t::value_t;
@@ -161,7 +165,8 @@ expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::insert(usearch
         return insert_entries(index, arguments.keys, arguments.count, connectivity,
                               expansion ? expansion : connectivity * 2, make_metric, build, ticks, executor);
     };
-    return with_sequence_metric<capability_k>(geometry.metric, to_span(geometry.window_widths), with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
+                                                             with_metric);
 }
 
 template <cpu_class_t cpu_class_>
@@ -177,7 +182,8 @@ expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::search(usearch
                               arguments.expansion_factor, arguments.predicate, make_metric, query_of, landing, ticks,
                               executor);
     };
-    return with_sequence_metric<capability_k>(geometry.metric, to_span(geometry.window_widths), with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
+                                                             with_metric);
 }
 
 template <cpu_class_t cpu_class_>
@@ -187,7 +193,8 @@ status_t sequence_ram_variant<cpu_class_>::refine(refine_plan_t& plan, refine_cu
         return drive_refinement<index_t>(plan, cursor, make_metric, basic::keep_diverse_t {geometry.connectivity},
                                          geometry.connectivity, ticks, executor);
     };
-    return with_sequence_metric<capability_k>(geometry.metric, to_span(geometry.window_widths), with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
+                                                             with_metric);
 }
 
 template <cpu_class_t cpu_class_>
@@ -226,6 +233,7 @@ struct sequence_nvme_variant {
     using executor_t = nvme_executor_t;
     using index_t = basic::nvme_index<us::sequence::codec_t, us::utilities::uuid_t, u32_t, i64_t, default_io_engine_t,
                                       row_kit_of<cpu_class_>>;
+    using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr sz_capability_t capability_k = stringzilla_capabilities_of(cpu_class_);
 
@@ -260,7 +268,8 @@ expected<traversal_telemetry_t> sequence_nvme_variant<cpu_class_>::search(usearc
         return search_entries(index, arguments.count, arguments.wanted, arguments.expansion_factor, arguments.predicate,
                               make_metric, query_of, landing, ticks, executor);
     };
-    return with_sequence_metric<capability_k>(geometry.metric, to_span(geometry.window_widths), with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
+                                                             with_metric);
 }
 
 #if USEARCH_ARCH_CUDA_

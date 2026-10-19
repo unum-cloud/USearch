@@ -927,7 +927,10 @@ struct vram_index {
             refine_result_t result = tally_;
             vram_telemetry_block_t const spent = context_->spent();
             result.changed_nodes = min_of<std::size_t>(spent.changed_nodes, result.visited_nodes);
-            result.telemetry = {spent.scored, spent.hops, spent.restarts, spent.visited_saturations};
+            result.telemetry = {.computed_distances = spent.scored,
+                                .visited_members = spent.hops,
+                                .restarts = spent.restarts,
+                                .saturated_walks = spent.visited_saturations};
             if (failed(status_)) return {result, status_};
             return {result, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
         }

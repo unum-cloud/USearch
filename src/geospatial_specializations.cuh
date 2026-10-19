@@ -737,7 +737,10 @@ expected<traversal_telemetry_t> geospatial_nvme_variant<cpu_class_>::search(
             scores[row * wanted + match] = std::sqrt(scores[row * wanted + match]) /
                                            us::geospatial::centimetres_per_metre_k;
     [[maybe_unused]] continuation_t const heard = ticks(count - 1);
-    return {{found.computed_distances, found.visited_members, found.restarts, found.saturated_walks},
+    return {{.computed_distances = found.computed_distances,
+             .visited_members = found.visited_members,
+             .restarts = found.restarts,
+             .saturated_walks = found.saturated_walks},
             status_t::success_k};
 }
 

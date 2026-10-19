@@ -142,11 +142,12 @@ concept value_codec = requires(codec_type_ const& codec, value_type_ const& immu
     { codec.load(input, mutable_value) } noexcept -> std::same_as<status_t>;
 };
 
-/** The four per-walk counters every traversal accumulates; results report one
- *  call's share as the difference of two snapshots. */
+/** The per-walk counters every traversal accumulates; results report one call's share as the
+ *  difference of two snapshots. */
 struct traversal_telemetry_t {
 
-    /** Metric invocations, batched rounds counted once per scored candidate. */
+    /** Metric invocations, batched rounds counted once per scored candidate: the walks' and the two
+     *  subsets below. */
     std::size_t computed_distances = 0;
 
     /** Frontier candidates whose neighbor lists were expanded. */
@@ -158,9 +159,21 @@ struct traversal_telemetry_t {
     /** Walks a scratch refusal ended early - ranked short, and on insertion wired thinner. */
     std::size_t saturated_walks = 0;
 
+    /** Subset of @c computed_distances ranking a full row and the newcomer against the row's owner
+     *  while back-linking. */
+    std::size_t computed_distances_in_rankings = 0;
+
+    /** Subset of @c computed_distances a selector spent pruning candidates to a row: an inserted
+     *  or refined node's own, and every full row a back-link re-selects. */
+    std::size_t computed_distances_in_selections = 0;
+
     traversal_telemetry_t operator-(traversal_telemetry_t const& before) const noexcept {
-        return {computed_distances - before.computed_distances, visited_members - before.visited_members,
-                restarts - before.restarts, saturated_walks - before.saturated_walks};
+        return {computed_distances - before.computed_distances,
+                visited_members - before.visited_members,
+                restarts - before.restarts,
+                saturated_walks - before.saturated_walks,
+                computed_distances_in_rankings - before.computed_distances_in_rankings,
+                computed_distances_in_selections - before.computed_distances_in_selections};
     }
 };
 
@@ -215,8 +228,9 @@ struct keep_closest_t {
 
 /** Relative-neighborhood pruning: a candidate survives only if closer to the query than to every
  *  already-kept neighbor, measured from the kept side so asymmetric metrics compare like with like:
- *  one round per kept neighbor scores every later candidate. The slots the rule leaves empty take
- *  the nearest rejected candidates, after the diverse picks. */
+ *  one round per kept neighbor scores every later candidate no kept neighbor rejected yet, within
+ *  the farthest one's distance from the query. The slots the rule leaves empty take the nearest
+ *  rejected candidates, after the diverse picks. */
 struct keep_diverse_t {
 
     /** The neighbors-per-node budget this selector prunes to. */
@@ -224,6 +238,7 @@ struct keep_diverse_t {
 
     template <typename index_type_, typename metric_type_, typename context_type_>
     void operator()(index_type_ const& index, metric_type_& metric, context_type_& context) const noexcept {
+        using distance_t = typename index_type_::distance_t;
         auto& selected = context.selected_neighbors;
         selected.clear();
         // First half: each candidate's distance from its nearest kept neighbor; second: the round.
@@ -243,22 +258,32 @@ struct keep_diverse_t {
             selected.push_back_reserved(candidate);
             if (selected.size() == connectivity) break;
             // The kept neighbor queries the later candidates, as the node queried them all: an
-            // asymmetric distance compares only like with like. A full staging drains and the rest
-            // stage in the next round, so every later candidate meets every kept neighbor.
-            for (std::size_t first = position + 1; first != candidates_count;) {
+            // asymmetric distance compares only like with like. A rejected candidate stays
+            // rejected, so it never stages again, and only a pair's own distance from the node
+            // decides whether the kept neighbor rejects it, so the farthest one staged bounds the
+            // round. A full staging drains and the rest stage in the next round.
+            std::span<distance_t> const round {nearest_kept.data() + candidates_count, candidates_count};
+            for (std::size_t first = position + 1;;) {
+                while (first != candidates_count && nearest_kept[first] < context.results[first].distance) ++first;
+                if (first == candidates_count) break;
                 metric.reset(index.published_value_of(candidate.node_id));
-                std::size_t staged_count = 0;
-                while (first + staged_count != candidates_count &&
-                       metric.push(index.published_value_of(context.results[first + staged_count].node_id)) ==
-                           metric_staging_t::staged_k)
-                    ++staged_count;
+                std::size_t staged_count = 0, round_end = first, farthest = first;
+                for (; round_end != candidates_count; ++round_end) {
+                    if (nearest_kept[round_end] < context.results[round_end].distance) continue;
+                    if (metric.push(index.published_value_of(context.results[round_end].node_id)) ==
+                        metric_staging_t::refused_k)
+                        break;
+                    ++staged_count, farthest = round_end;
+                }
                 if (!staged_count) break;
-                metric.drain({nearest_kept.data() + candidates_count, staged_count}, context.results.top().distance);
+                // Candidates ascend, so the last one staged is the farthest from the node.
+                metric.drain(round.first(staged_count), context.results[farthest].distance);
                 context.telemetry.computed_distances += staged_count;
-                for (std::size_t later = 0; later != staged_count; ++later)
-                    nearest_kept[first + later] = min_of(nearest_kept[first + later],
-                                                         nearest_kept[candidates_count + later]);
-                first += staged_count;
+                context.telemetry.computed_distances_in_selections += staged_count;
+                for (std::size_t later = first, slot = 0; later != round_end; ++later)
+                    if (!(nearest_kept[later] < context.results[later].distance))
+                        nearest_kept[later] = min_of(nearest_kept[later], round[slot++]);
+                first = round_end;
             }
         }
 
@@ -1724,6 +1749,8 @@ struct ram_index {
             add_(tally_.telemetry.visited_members, spent.visited_members);
             add_(tally_.telemetry.restarts, spent.restarts);
             add_(tally_.telemetry.saturated_walks, spent.saturated_walks);
+            add_(tally_.telemetry.computed_distances_in_rankings, spent.computed_distances_in_rankings);
+            add_(tally_.telemetry.computed_distances_in_selections, spent.computed_distances_in_selections);
         }
 
         /** Reconnects every island in @p step to its nearest reached neighbor - a free slot when
@@ -3361,6 +3388,7 @@ struct ram_index {
             metric.drain({context.staged_distances.data() + scored_count, staged_count},
                          unbounded_radius<distance_t>());
             context.telemetry.computed_distances += staged_count;
+            context.telemetry.computed_distances_in_rankings += staged_count;
             scored_count += staged_count;
         }
         if (scored_count != degree + 1) {

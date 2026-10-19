@@ -46,6 +46,8 @@
 #include <memory> // `std::allocator`
 #include <span>   // `std::span`
 
+#include <forkunion/types.hpp> // `fu::standard_cache_hints_t`, `fu::prefetch_line_k` - the candidates' prefetches
+
 #include <stringzilla/levenshtein.h>   // `sz_levenshtein_engine_*` & the per-backend distances
 #include <stringzilla/overlap.h>       // `sz_overlap_engine_*` & the per-backend match counts
 #include <stringzilla/stringzilla.hpp> // `sz::string_view_t` - every operand a metric takes
@@ -370,9 +372,11 @@ struct overlap_ladder<caps_> {
  *      among them is picked.
  *  @tparam symbol_ What one edit replaces: a byte, or a UTF-8 rune.
  *  @tparam allocator_type_ places every buffer, one set per metric.
+ *  @tparam cache_hints_type_ prefetches a staged candidate's bytes; ForkUnion's no-op policy by
+ *      default.
  */
 template <sz_capability_t capability_ = sz_cap_any_k, sz_levenshtein_symbol_t symbol_ = sz_levenshtein_bytes_k,
-          typename allocator_type_ = std::allocator<byte_t>>
+          typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = fu::standard_cache_hints_t>
 class levenshtein_metric {
   public:
     using kit_t = typename levenshtein_ladder<symbol_, capability_>::kit_t;
@@ -453,6 +457,7 @@ class levenshtein_metric {
     /** @brief Stages one candidate, or refuses once the round is full. */
     basic::metric_staging_t push(sz::string_view_t value) noexcept {
         if (staged_.size() == staged_.capacity()) return basic::metric_staging_t::refused_k;
+        prefetch_(value);
         staged_.push_back_reserved(as_string_view(value));
         return basic::metric_staging_t::staged_k;
     }
@@ -483,6 +488,14 @@ class levenshtein_metric {
         for (std::size_t slot = 0; slot != count; ++slot)
             distances[slot] = scored ? static_cast<i64_t>(swept_[slot]) : (std::numeric_limits<i64_t>::max)();
         staged_.clear();
+    }
+
+  private:
+
+    /** Starts the misses on every line of @p value, which the drain reads. */
+    static void prefetch_(sz::string_view_t value) noexcept {
+        for (std::size_t offset = 0; offset < value.size(); offset += fu::default_alignment_k)
+            cache_hints_type_ {}(value.data() + offset, fu::prefetch_line_k);
     }
 };
 
@@ -519,8 +532,11 @@ constexpr u64_t overlap_distance(u64_t longer, u64_t matches) noexcept {
  *  @tparam capability_ The admitted ISA backends as a capability mask; the widest kit this build compiled in
  *      among them is picked.
  *  @tparam allocator_type_ places every buffer, one set per metric.
+ *  @tparam cache_hints_type_ prefetches a staged candidate's bytes; ForkUnion's no-op policy by
+ *      default.
  */
-template <sz_capability_t capability_ = sz_cap_any_k, typename allocator_type_ = std::allocator<byte_t>>
+template <sz_capability_t capability_ = sz_cap_any_k, typename allocator_type_ = std::allocator<byte_t>,
+          typename cache_hints_type_ = fu::standard_cache_hints_t>
 class overlap_metric {
   public:
     using kit_t = typename overlap_ladder<capability_>::kit_t;
@@ -619,6 +635,7 @@ class overlap_metric {
     /** Stages one candidate, or refuses once the round is full. */
     basic::metric_staging_t push(sz::string_view_t value) noexcept {
         if (staged_.size() == staged_.capacity()) return basic::metric_staging_t::refused_k;
+        prefetch_(value);
         staged_.push_back_reserved(as_string_view(value));
         return basic::metric_staging_t::staged_k;
     }
@@ -653,6 +670,12 @@ class overlap_metric {
     }
 
   private:
+
+    /** Starts the misses on every line of @p value, which the drain reads. */
+    static void prefetch_(sz::string_view_t value) noexcept {
+        for (std::size_t offset = 0; offset < value.size(); offset += fu::default_alignment_k)
+            cache_hints_type_ {}(value.data() + offset, fu::prefetch_line_k);
+    }
 
     /** The share of its longer side's windows a pair within @p radius may miss: every pair within
      *  the radius must count exactly, so the share rounds up past @c (radius + 1) / scale. */
