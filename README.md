@@ -191,6 +191,21 @@ When compared to FAISS's `IndexFlatL2` in Google Colab, __[USearch may offer up 
 - `faiss.IndexFlatL2`: __55.3 ms__.
 - `usearch.index.search`: __2.54 ms__.
 
+## Metrics
+
+`Match.distance` is always a distance: smaller means closer. In Python, the default metric is `cos`. The common spatial metrics compute:
+
+| `metric` | What to pass in                                | Internal handling           | `Match.distance`                                           |
+| :------- | :--------------------------------------------- | :-------------------------- | :--------------------------------------------------------- |
+| `ip`     | Any vectors; unit length to match `cos`        | None, just a dot product    | $$1 - a \cdot b$$                                          |
+| `cos`    | Vectors of any length                          | Divides by the vector norms | $$1 - \frac{a \cdot b}{\lVert a \rVert \lVert b \rVert}$$  |
+| `l2sq`   | Vectors of any length                          | None                        | $$\sum_i (a_i - b_i)^2$$                                   |
+
+- `ip` is `1 - dot`, not the raw dot product, so it goes negative whenever `a · b > 1`, e.g. for non-normalized vectors. Ranking is still by inner product.
+- `l2sq` is squared Euclidean distance. Take the square root yourself if you need the true L2 distance.
+- For unit-length vectors, `ip` and `cos` return the same distances, up to floating-point error.
+- When USearch quantizes to `i8` internally, vectors are normalized to unit length and scaled to the [-127, 127] range, so it is only valid for cosine-like metrics.
+
 ## User-Defined Metrics
 
 While most vector search packages concentrate on just two metrics, "Inner Product distance" and "Euclidean distance", USearch allows arbitrary user-defined metrics.
