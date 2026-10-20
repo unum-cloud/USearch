@@ -273,8 +273,7 @@ struct usearch_geospatial_index_handle_t : basic_handle<geospatial_variant_t, ge
     using basic_handle::basic_handle;
 };
 
-struct usearch_geospatial_cursor_handle_t
-    : basic_cursor<usearch_geospatial_index_handle_t, ram_cursor_of<geospatial_ram_variant<cpu_class_t::serial_k>>> {};
+struct usearch_geospatial_cursor_handle_t : basic_cursor<usearch_geospatial_index_handle_t> {};
 
 struct usearch_geospatial_refinement_handle_t : basic_refinement<usearch_geospatial_index_handle_t> {};
 
@@ -339,8 +338,6 @@ USEARCH_EXPORT void usearch_geospatial_within(usearch_geospatial_within_t* argum
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if (!accepts_relation(variant, arguments->relation, outcome)) return;
             if (!accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) return;
-            if (arguments->traversal == usearch_traversal_scan_k)
-                return propagate_error(usearch_status_unsupported_k, outcome, "No scan serves containment yet"), void();
             usearch_executor_handle_t call_executor;
             typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
                                                                              call_executor, outcome);
@@ -348,11 +345,11 @@ USEARCH_EXPORT void usearch_geospatial_within(usearch_geospatial_within_t* argum
             progress_ticks_t ticks {arguments->progress, count};
             usearch_matches_tape_view_t matches {};
             std::size_t written = 0;
-            if (!crossed(
-                    variant.within(arguments->queries, count,
-                                   static_cast<us::geospatial::relation_t>(arguments->relation), arguments->tolerance,
-                                   arguments->predicate, arena->memory, matches, written, ticks, *executor),
-                    arguments->stats, outcome))
+            if (!crossed(variant.within(arguments->queries, count,
+                                        static_cast<us::geospatial::relation_t>(arguments->relation),
+                                        arguments->tolerance, arguments->traversal, arguments->predicate, arena->memory,
+                                        matches, written, ticks, *executor),
+                         arguments->stats, outcome))
                 return;
             *arguments->matches = matches;
             if (arguments->written) *arguments->written = written;

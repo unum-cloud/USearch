@@ -90,8 +90,10 @@ struct shapes_ram_variant {
     using executor_t = forkunion_executor_t;
     using scalar_t = scalar_type_;
     using kit_t = typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_class_)>::kit_t;
-    using index_t =
-        us::shapes::ram_index<kit_t, us::utilities::uuid_t, dummy_waiter_t, standard_atomic_ref, forkunion_allocator_t>;
+    using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
+    using index_t = us::shapes::ram_index<kit_t, us::utilities::uuid_t, waiter_of<cpu_class_>,
+                                          atomic_ref_for_cpu_class<cpu_class_>::template type, forkunion_allocator_t,
+                                          cache_hints_t>;
     using value_t = typename index_t::value_t;
     using codec_t = us::shapes::codec<kit_t>;
     using metric_t = us::shapes::shapes_metric<kit_t, thread_allocator_t>;
@@ -105,7 +107,8 @@ struct shapes_ram_variant {
     /** Points across every stored entry, added to by insertions and loads through @c atomic_ref. */
     std::size_t total_points = 0;
 
-    explicit shapes_ram_variant(forkunion_allocator_t const& allocator) noexcept : index(allocator) {}
+    explicit shapes_ram_variant(forkunion_allocator_t const& allocator) noexcept
+        : index(allocator, machine_cache_line_bytes()) {}
 
     /** Reserves the entries @p arguments name. */
     status_t reserve(usearch_shapes_reserve_t const& arguments) noexcept {
@@ -130,8 +133,7 @@ struct shapes_ram_variant {
         typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
         return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion});
     }
-    status_t refine(refine_plan_t& plan, refine_cursor_t& cursor, progress_ticks_t& ticks,
-                    executor_t& executor) noexcept;
+    status_t refine(refine_plan_t& plan, progress_ticks_t& ticks, executor_t& executor) noexcept;
 
     /** Adds the points of a landed @p donor, whose rows this index now holds. */
     void absorbed(shapes_ram_variant const& donor) noexcept {
@@ -220,16 +222,17 @@ expected<traversal_telemetry_t> shapes_ram_variant<scalar_type_, cpu_class_>::se
         return answer(query);
     };
     return search_entries(index, arguments.count, arguments.wanted, geometry.connectivity, arguments.expansion_factor,
-                          arguments.predicate, shapes_metric_factory<metric_t>(geometry.metric), query_of, landing,
-                          ticks, executor);
+                          arguments.traversal, arguments.predicate, shapes_metric_factory<metric_t>(geometry.metric),
+                          query_of, landing, ticks, executor);
 }
 
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
-status_t shapes_ram_variant<scalar_type_, cpu_class_>::refine(refine_plan_t& plan, refine_cursor_t& cursor,
-                                                              progress_ticks_t& ticks, executor_t& executor) noexcept {
-    return drive_refinement<index_t>(plan, cursor, shapes_metric_factory<metric_t>(geometry.metric),
-                                     basic::keep_diverse_t {geometry.connectivity}, geometry.connectivity, ticks,
-                                     executor);
+status_t shapes_ram_variant<scalar_type_, cpu_class_>::refine(refine_plan_t& plan, progress_ticks_t& ticks,
+                                                              executor_t& executor) noexcept {
+    auto [scratch, prepare_status] = prepare_refinement<index_t>(
+        plan, geometry.connectivity, shapes_metric_factory<metric_t>(geometry.metric), executor);
+    if (failed(prepare_status)) return prepare_status;
+    return drive_refinement(plan, scratch, basic::keep_diverse_t {geometry.connectivity}, ticks, executor);
 }
 
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
@@ -342,8 +345,9 @@ expected<traversal_telemetry_t> shapes_nvme_variant<scalar_type_, cpu_class_>::s
                                                                 scratch);
         return expected<query_t> {std::move(query), packed};
     };
-    return search_entries(index, arguments.count, arguments.wanted, arguments.expansion_factor, arguments.predicate,
-                          shapes_metric_factory<metric_t>(geometry.metric), query_of, landing, ticks, executor);
+    return search_entries(index, arguments.count, arguments.wanted, arguments.expansion_factor, arguments.traversal,
+                          arguments.predicate, shapes_metric_factory<metric_t>(geometry.metric), query_of, landing,
+                          ticks, executor);
 }
 
 #if USEARCH_ARCH_CUDA_

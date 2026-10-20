@@ -15,10 +15,12 @@
  *    neighbors row, and @c key_dtype;
  *  - @c row_offset_ and @c row_length_, which locate any row of a part's key, value or neighbors
  *    column;
- *  - @c walk_t, one walk's candidates, and @c walk_shape_t, the call's sizes;
+ *  - @c walk_t, one walk's candidates and admitted set, and @c walk_shape_t, the call's sizes;
+ *  - @c walk_payload_t, what an aggregating predicate carries beside each key it gathers;
  *  - @c prime_scoring_, which prepares a row's query once the row primes;
  *  - @c score_staged_, which scores a walk's staged flights, folds and releases them, and ranks the
- *    rest through the walker's @c rank_.
+ *    rest through the walker's @c rank_;
+ *  - @c ask_relation_, which asks a row's relation about the landed rows of contending flights.
  *
  *  Nothing here reads a value row, so the file needs no kernel library, and every tier compiles the
  *  same walk.
@@ -32,9 +34,11 @@
 #include <atomic>      // `std::atomic_ref`
 #include <bit>         // `std::bit_cast`
 #include <chrono>      // `std::chrono::steady_clock`, for per-row latencies
+#include <concepts>    // `std::same_as`
 #include <new>         // placement `new`
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
+#include <type_traits> // `std::remove_cv_t`
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/nvme_device.hpp"       // `io_request_t`, `io_completion_t`, `block_bytes_of`
@@ -309,6 +313,21 @@ struct nvme_flight {
 
 static_assert(sizeof(nvme_flight<u32_t>) == 16, "A flight is 16 bytes, so none straddles a cache line");
 
+/** A node one walk scored, which an aggregating predicate carries beside its key until the walker
+ *  settles the batch it landed in; flat, so a 32-bit node and a 64-bit distance fit 16 bytes. */
+template <typename node_id_type_, typename distance_type_>
+struct nvme_walk_payload {
+
+    /** The walk that scored it, positional among its thread's walks. */
+    u32_t walk = 0;
+
+    /** The node scored. */
+    node_id_type_ node_id {};
+
+    /** Its distance. */
+    distance_type_ distance {};
+};
+
 /** Where a row slot stands. */
 enum class nvme_row_stage_t : u8_t {
 
@@ -386,8 +405,10 @@ expected<nvme_call<executor_type_>> nvme_begin_call(executor_type_& executor,
  *  @tparam tier_type_ The index whose vocabulary the walk speaks and whose @c score_staged_ scores
  *      its landed value rows; it befriends the walker, as the walker befriends it.
  *  @tparam row_type_ One row of the batch: its query, its fold, its bound and its outputs.
+ *  @tparam cache_hints_type_ The line hints streaming a landed row toward the core while its quad
+ *      fills.
  */
-template <typename tier_type_, typename row_type_>
+template <typename tier_type_, typename row_type_, typename cache_hints_type_ = dummy_cache_hints_t>
 class row_walker {
     friend tier_type_;
 
@@ -404,14 +425,19 @@ class row_walker {
     using scratch_allocator_t = typename tier_t::scratch_allocator_t;
     using results_array_t = typename tier_t::results_array_t;
     using scored_node_t = typename results_array_t::value_type;
+    using walk_payload_t = typename tier_t::walk_payload_t;
 
   public:
     using row_t = row_type_;
     using key_t = typename row_t::key_t;
+    using inputs_t = typename row_t::inputs_t;
 
+    /** The walker of executor thread @p thread, whose rows are built from @p inputs, and which asks
+     *  that thread's predicate among them. */
     row_walker(engine_t& engine, arena_t& arena, std::span<medium_t const> media, std::span<part_t const> parts,
-               walk_shape_t const& shape) noexcept
-        : engine_(engine), arena_(arena), media_(media), parts_(parts), shape_(shape) {}
+               walk_shape_t const& shape, inputs_t const& inputs, std::size_t thread, std::size_t line_bytes) noexcept
+        : engine_(engine), arena_(arena), media_(media), parts_(parts), shape_(shape), inputs_(inputs), thread_(thread),
+          prefetcher_ {line_bytes} {}
 
     row_walker(row_walker const&) = delete;
     row_walker& operator=(row_walker const&) = delete;
@@ -421,8 +447,9 @@ class row_walker {
         for (row_t& row : rows_) row.~row_t();
     }
 
-    /** Carves every walk, row and flight of the thread, each row built from @p inputs. */
-    status_t reserve(typename row_t::inputs_t const& inputs) noexcept {
+    /** Carves every walk, row and flight of the thread, and reserves an aggregating predicate for
+     *  the widest batch it can gather: every flight of the thread landing at once. */
+    status_t reserve() noexcept {
         std::size_t const parts = parts_.size(), rows = shape_.rows_per_thread;
         std::size_t const walks = rows * parts, flights = walks * shape_.walk_flights;
         walk_t* const walk_slots = carve_<walk_t>(walks);
@@ -444,11 +471,12 @@ class row_walker {
             walks_ = {walk_slots, walk + 1};
             if (failed(constructed.results.reserve(queue_sizes.results)) ||
                 failed(constructed.frontier.reserve(queue_sizes.frontier)) ||
-                failed(constructed.visited.reserve(queue_sizes.visited)))
+                failed(constructed.visited.reserve(queue_sizes.visited)) ||
+                (row_t::admitting_k && failed(constructed.admitted.reserve(queue_sizes.results))))
                 return status_t::bad_alloc_k;
         }
         for (std::size_t row = 0; row != rows; ++row) {
-            row_t& constructed = *new (row_slots + row) row_t {inputs, allocator};
+            row_t& constructed = *new (row_slots + row) row_t {inputs_, allocator};
             rows_ = {row_slots, row + 1};
             if (status_t const reserved = constructed.reserve(parts, nvme_widest_row(parts_)); failed(reserved))
                 return reserved;
@@ -463,6 +491,8 @@ class row_walker {
         free_count_ = flights;
         backlog_ = {backlog, shape_.buffers};
         completions_ = {completions, shape_.buffers};
+        if constexpr (row_t::admitting_k)
+            return reserve_predicate(thread_predicate(*inputs_.predicate, thread_), flights);
         return status_t::success_k;
     }
 
@@ -470,7 +500,7 @@ class row_walker {
      *  engine before it returns, whatever happened; a failure on any thread stops this one too.
      *  Answers the first row that refused, since a failure is published to every thread
      *  instead. */
-    status_t run() noexcept {
+    status_t drive_walks() noexcept {
         while (true) {
             if (succeeded(failure_)) {
                 if (status_t const shared = shared_failure_(); failed(shared)) failure_ = shared;
@@ -498,12 +528,13 @@ class row_walker {
                 // other rows by the end of the batch.
                 std::size_t advancing = 0;
                 for (io_completion_t const& completion : completions_.first(polled))
-                    if (land_(completion)) completions_[advancing++] = completion;
-                // Walks advance once the whole batch landed, so their next hops weigh every row
-                // that did.
+                    if (route_completion_(completion)) completions_[advancing++] = completion;
+                // Walks advance once the whole batch landed and its admissions settled, so their
+                // next hops weigh every row that did.
+                settle_admissions_();
                 if (succeeded(failure_))
                     for (io_completion_t const& completion : completions_.first(advancing))
-                        advance_(static_cast<u32_t>(completion.context));
+                        advance_walk_(static_cast<u32_t>(completion.context));
             }
         }
         return refusal_;
@@ -527,14 +558,15 @@ class row_walker {
      *
      *  Runs inside a call @ref nvme_begin_call began at @p shape 's sizes, and sums the threads'
      *  telemetry; @p counts are the rows' own, summed into the result's @c count. @p latencies
-     *  takes one duration per row, or is empty.
+     *  takes one duration per row, or is empty. Every thread streams its landed rows through
+     *  @p prefetcher.
      */
     template <typename executor_type_>
     static expected<search_result_t> run_walks(std::span<medium_t const> media, std::span<part_t const> parts,
                                                executor_type_& executor, walk_shape_t shape,
                                                typename row_t::inputs_t const& inputs,
-                                               std::span<std::size_t const> counts,
-                                               std::span<u64_t> latencies) noexcept {
+                                               std::span<std::size_t const> counts, std::span<u64_t> latencies,
+                                               std::size_t line_bytes = default_alignment_k) noexcept {
         search_result_t merged;
         if (!latencies.empty() && latencies.size() != shape.rows_count) return {merged, status_t::config_mismatch_k};
         alignas(default_alignment_k) std::size_t cursor = 0;
@@ -550,10 +582,11 @@ class row_walker {
             add(into.count, reads.count), add(into.bytes, reads.bytes);
         };
         auto walk_thread = [&](std::size_t thread, std::size_t) noexcept {
-            row_walker walker {executor.engine(thread), executor.arena(thread), media, parts, shape};
-            status_t const reserved = walker.reserve(inputs);
+            row_walker walker {
+                executor.engine(thread), executor.arena(thread), media, parts, shape, inputs, thread, line_bytes};
+            status_t const reserved = walker.reserve();
             if (failed(reserved)) walker.fail(reserved);
-            status_t const refused = walker.run();
+            status_t const refused = walker.drive_walks();
             search_result_t const& telemetry = walker.telemetry();
             add(merged.visited_members, telemetry.visited_members);
             add(merged.computed_distances, telemetry.computed_distances);
@@ -628,7 +661,7 @@ class row_walker {
 
     /** The shard @p flight reads: its walk's, or the shard of the output a resolution fills. */
     u32_t shard_of_(flight_t const& flight) const noexcept {
-        return flight.purpose == nvme_purpose_t::key_k ? rows_[flight.issuer].locator(flight.position).shard
+        return flight.purpose == nvme_purpose_t::key_k ? rows_[flight.issuer].output_locator(flight.position).shard
                                                        : walks_[flight.issuer].shard;
     }
 
@@ -651,7 +684,7 @@ class row_walker {
 
     /** Stages the covering read of @p flight_index 's row in the column @p purpose reads, into
      *  @p buffer, its context naming the flight's issuer. */
-    void issue_(u32_t flight_index, nvme_purpose_t purpose, io_buffer_id_t buffer) noexcept {
+    void issue_row_read_(u32_t flight_index, nvme_purpose_t purpose, io_buffer_id_t buffer) noexcept {
         flight_t const& flight = flights_[flight_index];
         u32_t const shard = shard_of_(flight);
         io_request_t const request = nvme_covering_read(row_begin_(flight, purpose), row_bytes_(flight, purpose),
@@ -690,12 +723,13 @@ class row_walker {
             if (!shape_.latencies.empty()) slot.primed = std::chrono::steady_clock::now();
             ++rows_in_flight_;
             row_t& primed = rows_[slot_index];
-            primed.prime(row);
+            primed.prime_row(row);
             tier_t::prime_scoring_(shape_, primed);
             for (u32_t shard = 0; shard != parts; ++shard) {
                 u32_t const walk_index = slot_index * static_cast<u32_t>(parts) + shard;
                 walk_t& walk = walks_[walk_index];
                 walk.results.clear();
+                walk.admitted.clear();
                 walk.frontier.clear();
                 walk.visited.clear();
                 walk.staged.clear();
@@ -706,14 +740,14 @@ class row_walker {
                 std::span<u32_t> const hop_flights = hop_flights_of_(walk_index);
                 std::memset(hop_flights.data(), 0, hop_flights.size_bytes());
                 std::size_t const landmarks = round_up_to_multiple<std::size_t>(parts_[shard].connectivity, 4);
-                if (!seed_(walk_index, landmarks)) finish_walk_(walk_index);
+                if (!seed_landmarks_(walk_index, landmarks)) finish_walk_(walk_index);
             }
         }
     }
 
     /** Issues up to @p count fresh landmarks of walk @p walk_index as one hop, answering how
      *  many. A walk seeds only with nothing in flight, so the hop takes slot zero. */
-    std::size_t seed_(u32_t walk_index, std::size_t count) noexcept {
+    std::size_t seed_landmarks_(u32_t walk_index, std::size_t count) noexcept {
         walk_t& walk = walks_[walk_index];
         node_id_t const nodes = parts_[walk.shard].nodes;
         if (failed(walk.visited.reserve(walk.visited.size() + count))) return saturate_(walk), 0;
@@ -733,14 +767,14 @@ class row_walker {
         u32_t const flight = take_flight_();
         flights_[flight] = flight_t {walk_index, node, hop, static_cast<u8_t>(shape_.buffers_per_flight),
                                      nvme_purpose_t::score_k};
-        issue_(flight, nvme_purpose_t::score_k, flight);
+        issue_row_read_(flight, nvme_purpose_t::score_k, flight);
         if constexpr (row_t::key_reads_k == nvme_key_reads_t::scored_k)
-            issue_(flight, nvme_purpose_t::key_k, key_buffer_(flight));
+            issue_row_read_(flight, nvme_purpose_t::key_k, key_buffer_(flight));
     }
 
     /** Routes one completion to its flight, answering whether its issuer is a walk the batch's
      *  end advances; a read short of its row fails the thread. */
-    bool land_(io_completion_t const& completion) noexcept {
+    bool route_completion_(io_completion_t const& completion) noexcept {
         --outstanding_;
         if (failed(failure_)) return false;
         u32_t const flight_index = static_cast<u32_t>(completion.buffer % flights_.size());
@@ -752,24 +786,26 @@ class row_walker {
         if (--flight.reads_left) return false;
         switch (flight.purpose) {
         case nvme_purpose_t::score_k: {
+            prefetcher_.prefetch(landed_row_(flight_index, nvme_purpose_t::score_k, flight_index),
+                                 row_bytes_(flight, nvme_purpose_t::score_k));
             walk_t& walk = walks_[flight.issuer];
             std::span<u32_t> const hop_flights = hop_flights_of_(flight.issuer);
             [[maybe_unused]] fu::status_t const queued = walk.staged.push_back(flight_index);
             // A quad scores once full or once a hop's last row lands, whichever hops its lanes
             // came from.
             if (--hop_flights[flight.position] && !walk.staged.full()) return true;
-            flush_(walk);
+            score_staged_flights_(walk);
             // Landmarks take hop slot zero, so seeding ends once that slot drains.
             if (walk.stage == nvme_walk_stage_t::seeding_k && !hop_flights[0])
                 walk.stage = nvme_walk_stage_t::expanding_k;
             return true;
         }
-        case nvme_purpose_t::expand_k: expand_(flight.issuer, flight_index); return true;
+        case nvme_purpose_t::expand_k: expand_landed_row_(flight.issuer, flight_index); return true;
         case nvme_purpose_t::key_k: {
             u32_t const slot_index = flight.issuer;
             byte_t const* const stored = landed_row_(flight_index, nvme_purpose_t::key_k, flight_index);
             dtype_t const stored_dtype = parts_[shard_of_(flight)].key_dtype;
-            rows_[slot_index].resolve(flight.position, safegraphs_widened_key<key_t>(stored, stored_dtype));
+            rows_[slot_index].resolve_output_key(flight.position, safegraphs_widened_key<key_t>(stored, stored_dtype));
             release_flight_(flight_index);
             --slots_[slot_index].resolving;
             resolve_row_(slot_index);
@@ -782,7 +818,7 @@ class row_walker {
     /** Releases the staged flights of a draining @p walk unscored, or hands them to the tier, which
      *  scores them as one quad, folds them through the walk's row, releases them and ranks the rest
      *  through @ref rank_. */
-    void flush_(walk_t& walk) noexcept {
+    void score_staged_flights_(walk_t& walk) noexcept {
         if (!walk.staged.size()) return;
         if (walk.stage == nvme_walk_stage_t::draining_k) {
             for (u32_t const flight : walk.staged) release_flight_(flight);
@@ -801,10 +837,105 @@ class row_walker {
             if (failed(walk.frontier.insert(scored_node_t(scored[lane])))) return saturate_(walk);
     }
 
+    /** Admits the nodes of @p scored, scored from the staged flights of @p walk in lane order, that
+     *  could still enter its admitted set and that the row's relation and the thread's predicate
+     *  both admit: at once under an immediate predicate, at the batch's settle under an aggregating
+     *  one. */
+    void admit_scored_(walk_t& walk, std::span<scored_node_t const> scored) noexcept {
+        with_static_extent<quad_lanes_k>(scored.size(), [&]<std::size_t extent_>() noexcept {
+            admit_contenders_(walk, std::span<scored_node_t const, extent_>(scored.data(), extent_));
+        });
+    }
+
+    /** Asks about the lanes of @p scored that could still enter the admitted set of @p walk: all
+     *  while it is short, and once full only those closer than its furthest member. */
+    template <std::size_t extent_>
+    void admit_contenders_(walk_t& walk, std::span<scored_node_t const, extent_> scored) noexcept {
+        results_array_t const& admitted = walk.admitted;
+        bool const admitted_full = admitted.size() == shape_.expansion_factor;
+        std::array<u32_t, extent_> flights;
+        std::array<scored_node_t, extent_> contenders;
+        std::size_t contending = 0;
+        for (std::size_t lane = 0; lane != extent_; ++lane) {
+            if (admitted_full && !(scored[lane].distance < admitted.top().distance)) continue;
+            flights[contending] = walk.staged[lane];
+            contenders[contending] = scored[lane];
+            ++contending;
+        }
+        with_static_extent<extent_>(contending, [&]<std::size_t contending_extent_>() noexcept {
+            relate_contenders_(
+                walk, std::span<u32_t const, contending_extent_>(flights.data(), contending_extent_),
+                std::span<scored_node_t const, contending_extent_>(contenders.data(), contending_extent_));
+        });
+    }
+
+    /** Asks the row's relation about the landed rows of the contending @p flights, then the
+     *  thread's predicate about the keys of those it kept. */
+    template <std::size_t extent_>
+    void relate_contenders_(walk_t& walk, std::span<u32_t const, extent_> flights,
+                            std::span<scored_node_t const, extent_> contenders) noexcept {
+        std::array<admission_t, extent_> related;
+        tier_t::ask_relation_(*this, walk, flights, std::span<admission_t, extent_>(related));
+        u32_t const walk_index = static_cast<u32_t>(&walk - walks_.data());
+        std::array<u32_t, extent_> kept_flights;
+        std::array<walk_payload_t, extent_> payloads;
+        std::size_t kept = 0;
+        for (std::size_t lane = 0; lane != extent_; ++lane) {
+            if (related[lane] != admission_t::admit_k) continue;
+            kept_flights[kept] = flights[lane];
+            payloads[kept] = walk_payload_t {walk_index, contenders[lane].node_id, contenders[lane].distance};
+            ++kept;
+        }
+        with_static_extent<extent_>(kept, [&]<std::size_t kept_extent_>() noexcept {
+            ask_predicate_(thread_predicate(*inputs_.predicate, thread_),
+                           std::span<u32_t const, kept_extent_>(kept_flights.data(), kept_extent_),
+                           std::span<walk_payload_t const, kept_extent_>(payloads.data(), kept_extent_));
+        });
+    }
+
+    /** Without a predicate every related node is admitted, and no key landed to ask about. */
+    template <typename predicate_type_, std::size_t extent_>
+        requires std::same_as<std::remove_cv_t<predicate_type_>, dummy_predicate_t>
+    void ask_predicate_(predicate_type_&, std::span<u32_t const, extent_>,
+                        std::span<walk_payload_t const, extent_> payloads) noexcept {
+        for (walk_payload_t const& payload : payloads) admit_payload_(payload);
+    }
+
+    /** Asks @p predicate about the keys landed beside @p flights, each carrying its payload. */
+    template <typename predicate_type_, std::size_t extent_>
+    void ask_predicate_(predicate_type_& predicate, std::span<u32_t const, extent_> flights,
+                        std::span<walk_payload_t const, extent_> payloads) noexcept {
+        std::array<key_t, extent_> keys;
+        for (std::size_t lane = 0; lane != extent_; ++lane) keys[lane] = landed_key_(flights[lane]);
+        ask_quad(predicate, std::span<key_t const, extent_>(keys), payloads,
+                 [this](walk_payload_t const& payload) noexcept { admit_payload_(payload); });
+    }
+
+    /** Answers what the thread's predicate gathered over a completion batch, so every walk advances
+     *  on its whole admitted set. */
+    void settle_admissions_() noexcept {
+        if constexpr (row_t::admitting_k)
+            settle_predicate(thread_predicate(*inputs_.predicate, thread_),
+                             [this](walk_payload_t const& payload) noexcept { admit_payload_(payload); });
+    }
+
+    /** Inserts an admitted node into the admitted set of the walk that scored it. */
+    void admit_payload_(walk_payload_t const& payload) noexcept {
+        [[maybe_unused]] bool const inserted = walks_[payload.walk].admitted.insert(
+            scored_node_t {payload.node_id, payload.distance}, shape_.expansion_factor);
+    }
+
+    /** The key landed beside the value of the keyed score @p flight_index. */
+    key_t landed_key_(u32_t flight_index) noexcept {
+        return safegraphs_widened_key<key_t>(
+            landed_row_(flight_index, nvme_purpose_t::key_k, key_buffer_(flight_index)),
+            parts_[shard_of_(flights_[flight_index])].key_dtype);
+    }
+
     /** Expands the closest frontier nodes into the free hop slots of @p walk_index while each lies
-     *  inside the full candidates' radius; with nothing in flight, re-seeds a frontier drained
-     *  before the bound fills, or finishes. */
-    void advance_(u32_t walk_index) noexcept {
+     *  inside the full stopping candidates' radius; with nothing in flight, re-seeds a frontier
+     *  drained before the bound fills, or finishes. */
+    void advance_walk_(u32_t walk_index) noexcept {
         walk_t& walk = walks_[walk_index];
         if (walk.stage == nvme_walk_stage_t::finished_k) return;
         if (walk.stage == nvme_walk_stage_t::draining_k) {
@@ -814,20 +945,19 @@ class row_walker {
         row_t const& row = rows_[walk.row_slot];
         std::size_t const expansion_factor = shape_.expansion_factor;
         results_array_t const& stopping = row.stopping_candidates(walk);
-        results_array_t const& candidates = stopping.size() == expansion_factor ? stopping : walk.results;
-        bool const candidates_full = candidates.size() == expansion_factor;
+        bool const stopping_full = stopping.size() == expansion_factor;
         std::span<u32_t> const hop_flights = hop_flights_of_(walk_index).first(live_hops_());
         for (u32_t slot = 0; slot != hop_flights.size() && !walk.frontier.empty(); ++slot) {
             if (hop_flights[slot]) continue;
             scored_node_t const candidate = walk.frontier.top();
-            if (candidates_full && candidate.distance > candidates.top().distance) break;
-            if (candidates_full && walk.frontier.capacity() - walk.frontier.size() < parts_[walk.shard].connectivity)
-                walk.frontier.erase_below(candidates.top());
+            if (stopping_full && candidate.distance > stopping.top().distance) break;
+            if (stopping_full && walk.frontier.capacity() - walk.frontier.size() < parts_[walk.shard].connectivity)
+                walk.frontier.erase_below(stopping.top());
             walk.frontier.pop();
             ++telemetry_.visited_members;
             u32_t const flight = take_flight_();
             flights_[flight] = flight_t {walk_index, candidate.node_id, slot, 1, nvme_purpose_t::expand_k};
-            issue_(flight, nvme_purpose_t::expand_k, flight);
+            issue_row_read_(flight, nvme_purpose_t::expand_k, flight);
             hop_flights[slot] = 1;
         }
         if (in_flight_(walk_index)) return;
@@ -835,14 +965,14 @@ class row_walker {
         // stopping candidates fill re-seeds.
         if (walk.frontier.empty() && stopping.size() < expansion_factor) {
             walk.stage = nvme_walk_stage_t::seeding_k;
-            if (seed_(walk_index, 4)) return void(++telemetry_.restarts);
+            if (seed_landmarks_(walk_index, 4)) return void(++telemetry_.restarts);
         }
         finish_walk_(walk_index);
     }
 
     /** Reads the landed neighbors row of @p flight_index and issues a score for every unvisited
      *  neighbor, in the expansion's own hop. */
-    void expand_(u32_t walk_index, u32_t flight_index) noexcept {
+    void expand_landed_row_(u32_t walk_index, u32_t flight_index) noexcept {
         walk_t& walk = walks_[walk_index];
         part_t const& part = parts_[walk.shard];
         u32_t const hop = flights_[flight_index].position;
@@ -878,7 +1008,7 @@ class row_walker {
         rows_[slot_index].finish_walk(walk);
         if (--slot.walks_left) return;
         slot.stage = nvme_row_stage_t::resolving_k;
-        slot.outputs = static_cast<u32_t>(rows_[slot_index].outputs());
+        slot.outputs = static_cast<u32_t>(rows_[slot_index].output_count());
         resolve_row_(slot_index);
     }
 
@@ -890,15 +1020,15 @@ class row_walker {
         row_t& row = rows_[slot_index];
         std::size_t const budget = parts_.size() * shape_.walk_flights;
         while (slot.next_output != slot.outputs && slot.resolving != budget) {
-            auto const locator = row.locator(slot.next_output);
+            auto const locator = row.output_locator(slot.next_output);
             u32_t const flight = take_flight_();
             flights_[flight] = flight_t {slot_index, locator.node, slot.next_output, 1, nvme_purpose_t::key_k};
-            issue_(flight, nvme_purpose_t::key_k, flight);
+            issue_row_read_(flight, nvme_purpose_t::key_k, flight);
             ++slot.next_output;
             ++slot.resolving;
         }
         if (slot.resolving) return;
-        if (status_t const finished = row.finish(); failed(finished) && succeeded(refusal_)) refusal_ = finished;
+        if (status_t const finished = row.finish_row(); failed(finished) && succeeded(refusal_)) refusal_ = finished;
         if (!shape_.latencies.empty())
             shape_.latencies[slot.row] = static_cast<u64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slot.primed)
@@ -912,6 +1042,13 @@ class row_walker {
     std::span<medium_t const> media_;
     std::span<part_t const> parts_;
     walk_shape_t const& shape_;
+    inputs_t const& inputs_;
+
+    /** The executor thread this walker runs on, whose predicate it asks. */
+    std::size_t thread_ = 0;
+
+    /** Streams each landed row toward the core while the rest of its quad is still in flight. */
+    object_prefetcher<cache_hints_type_> prefetcher_;
 
     std::span<walk_t> walks_;
     std::span<row_t> rows_;

@@ -2314,7 +2314,8 @@ class linux_spdk_engine {
         spdk_nvme_io_qpair_opts options;
         spdk_nvme_ctrlr_get_default_io_qpair_opts(controller, &options, sizeof(options));
         options.io_queue_size = max_of<u32_t>(options.io_queue_size, static_cast<u32_t>(queue_depth_ + 1));
-        options.io_queue_requests = max_of<u32_t>(options.io_queue_requests, static_cast<u32_t>(queue_depth_ * 2));
+        // SPDK's floor; a split read past the pool waits as an overflow for earlier reads.
+        options.io_queue_requests = max_of<u32_t>(options.io_queue_requests, options.io_queue_size);
         options.delay_cmd_submit = true;
         spdk_nvme_qpair* const allocated = spdk_nvme_ctrlr_alloc_io_qpair(controller, &options, sizeof(options));
         if (!allocated) return {nullptr, status_t::io_k};

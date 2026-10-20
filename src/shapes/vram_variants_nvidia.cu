@@ -22,6 +22,8 @@ bytes_view_t shapes_nvidia_fatbin_t::bytes() noexcept {
 
 template struct us::shapes::vram_nvidia_index<nk::f16_t, u32_t, shapes_nvidia_capabilities_k, shapes_nvidia_fatbin_t>;
 template struct us::shapes::vram_nvidia_index<nk::f32_t, u32_t, shapes_nvidia_capabilities_k, shapes_nvidia_fatbin_t>;
+template struct us::shapes::vram_nvidia_kits<nk::f16_t, u32_t, shapes_nvidia_capabilities_k, shapes_nvidia_fatbin_t>;
+template struct us::shapes::vram_nvidia_kits<nk::f32_t, u32_t, shapes_nvidia_capabilities_k, shapes_nvidia_fatbin_t>;
 
 template __device__ void us::shapes::cuda_instantiate<shapes_nvidia_capabilities_k, nk_f16_k, u32_t>();
 template __device__ void us::shapes::cuda_instantiate<shapes_nvidia_capabilities_k, nk_f32_k, u32_t>();

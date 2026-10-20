@@ -11,7 +11,6 @@
  */
 #pragma once
 
-#include <cassert> // `assert` - a predicate judges a quad at a time
 #include <cstddef> // `std::size_t`
 
 #include <array>              // `std::array` - the predicate's batch
@@ -155,22 +154,96 @@ inline bool crossed(expected<value_type_> const& result, usearch_traversal_stats
 /** The C key struct and the engine's @c utilities::uuid_t share sixteen bytes - one bit cast in. */
 inline us::utilities::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::utilities::uuid_t>(key); }
 
-/** The C predicate lifted onto the index's key vocabulary, judging every quad the walk scores in
- *  one call through buffers of the C types. */
-struct key_predicate_t {
+/** The predicate lifted onto the index's key vocabulary, asked a quad at a time through arrays of
+ *  its own key and admission types on the stack. */
+struct predicate_t {
     usearch_predicate_t predicate;
 
-    void operator()(std::span<us::utilities::uuid_t const> keys, std::span<admission_t> admissions) const noexcept {
-        if (keys.empty()) return;
-        std::array<usearch_key_t, 4> c_keys;
-        std::array<usearch_admission_t, 4> c_admissions;
-        assert(keys.size() <= c_keys.size() && "Walks judge a quad at a time");
-        for (std::size_t index = 0; index != keys.size(); ++index)
-            c_keys[index] = std::bit_cast<usearch_key_t>(keys[index]);
-        predicate.callback(c_keys.data(), c_admissions.data(), keys.size(), predicate.state);
-        for (std::size_t index = 0; index != keys.size(); ++index)
-            admissions[index] = static_cast<admission_t>(c_admissions[index]);
+    template <std::size_t extent_>
+    void operator()(std::span<us::utilities::uuid_t const, extent_> keys,
+                    std::span<admission_t, extent_> admissions) const noexcept {
+        std::array<usearch_key_t, extent_> c_keys;
+        std::array<usearch_admission_t, extent_> c_admissions;
+        for (std::size_t lane = 0; lane != extent_; ++lane) c_keys[lane] = std::bit_cast<usearch_key_t>(keys[lane]);
+        predicate.callback(c_keys.data(), c_admissions.data(), extent_, predicate.state);
+        for (std::size_t lane = 0; lane != extent_; ++lane)
+            admissions[lane] = static_cast<admission_t>(c_admissions[lane]);
     }
+};
+
+/** The allocator every per-call buffer of one executor thread comes from: its arena, rewound per
+ *  verb. */
+using thread_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
+
+/**
+ *  @brief An expensive predicate: keys gather beside the engine's @p payload_type_ until the engine
+ *      settles a round, then one call answers them all.
+ *
+ *  One per thread, its buffers reserved for the widest round its engine settles, the only buffers a
+ *  predicate ever holds.
+ */
+template <typename payload_type_>
+struct expensive_predicate {
+    usearch_predicate_t predicate;
+    growing_buffer<usearch_key_t, thread_allocator_t> keys;
+    growing_buffer<payload_type_, thread_allocator_t> payloads;
+    growing_buffer<usearch_admission_t, thread_allocator_t> admissions;
+
+    expensive_predicate(usearch_predicate_t handler, thread_allocator_t const& allocator) noexcept
+        : predicate(handler), keys(allocator), payloads(allocator), admissions(allocator) {}
+
+    /** Reserves for rounds of @p round_capacity candidates. */
+    status_t reserve(std::size_t round_capacity) noexcept {
+        if (failed(keys.reserve_exactly(round_capacity)) || failed(payloads.reserve_exactly(round_capacity)) ||
+            failed(admissions.reserve_exactly(round_capacity)))
+            return status_t::bad_alloc_k;
+        return status_t::success_k;
+    }
+
+    template <std::size_t extent_>
+    void push(std::span<us::utilities::uuid_t const, extent_> asked,
+              std::span<payload_type_ const, extent_> carried) noexcept {
+        for (std::size_t lane = 0; lane != extent_; ++lane) {
+            keys.push_back_reserved(std::bit_cast<usearch_key_t>(asked[lane]));
+            payloads.push_back_reserved(carried[lane]);
+        }
+    }
+
+    template <typename on_admitted_type_>
+    void drain(on_admitted_type_&& on_admitted) noexcept {
+        if (keys.empty()) return;
+        admissions.resize_reserved(keys.size());
+        predicate.callback(keys.data(), admissions.data(), keys.size(), predicate.state);
+        for (std::size_t position = 0; position != keys.size(); ++position)
+            if (admissions[position] == usearch_admit_k) on_admitted(payloads[position]);
+        keys.clear();
+        payloads.clear();
+        admissions.clear();
+    }
+};
+
+/** One expensive predicate per executor thread, for engines that drive their own threads: each
+ *  thread gathers into its own buffers on its own arena and calls the handler once per round it
+ *  settles. */
+template <typename payload_type_>
+struct expensive_predicates {
+    using thread_predicate_t = expensive_predicate<payload_type_>;
+
+    growing_buffer<thread_predicate_t, forkunion_allocator_t> threads {forkunion_allocator_t {}};
+
+    /** Builds one predicate per thread of @p executor, each reserved for rounds of
+     *  @p round_capacity candidates. */
+    template <typename executor_type_>
+    status_t prepare(usearch_predicate_t predicate, executor_type_& executor, std::size_t round_capacity) noexcept {
+        if (failed(threads.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
+        for (std::size_t thread = 0; thread != executor.size(); ++thread) {
+            threads.push_back_reserved(thread_predicate_t {predicate, thread_allocator_t {executor.arena(thread)}});
+            if (failed(threads[thread].reserve(round_capacity))) return status_t::bad_alloc_k;
+        }
+        return status_t::success_k;
+    }
+
+    thread_predicate_t& of_thread(std::size_t thread) noexcept { return threads[thread]; }
 };
 
 /** One call's reports: the C handler, serialized for the executor's threads, which the contract
@@ -513,6 +586,13 @@ struct cache_hints_for_cpu_class<cpu_class_t::nvidia_vera_k> {
     using type = fu::arm64_prefetch_cache_hints_t;
 };
 #endif
+
+/** The line every engine's prefetcher steps by: this machine's cache line, or
+ *  @c default_alignment_k where no platform source names one. */
+inline std::size_t machine_cache_line_bytes() noexcept {
+    std::size_t const machine_line_bytes = fu::cache_line_bytes();
+    return machine_line_bytes ? machine_line_bytes : default_alignment_k;
+}
 
 /** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the runtime
  *  confirms nothing about them, and a class differing by one alone earns no rung. */

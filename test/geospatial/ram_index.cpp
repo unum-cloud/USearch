@@ -468,6 +468,100 @@ static std::size_t check_positions_nvme(u64_t seed) {
                                                                    make_metric, query_of, matches);
 }
 
+/** Containment over storage lands what the radius walk finds in RAM: for every probe and radius, a
+ *  scan of the saved corpus hands back exactly the keys the complete walk reports. */
+static std::size_t check_positions_nvme_within(u64_t seed) {
+    using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
+    using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
+    using nvme_index_t =
+        us::basic::nvme_index<earth_observation_codec_t, us::utilities::uuid_t, u32_t, i64_t, blocking_files_engine<>>;
+    using index_t = positions_fixture_t::index_t;
+    using key_t = index_t::key_t;
+    constexpr std::size_t nodes_k = 256, probes_k = 6;
+    std::array<i64_t, 3> const radii_centimetres {200'000, 800'000, 2'500'000};
+    std::size_t const queries_count = probes_k * radii_centimetres.size();
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    char path[64];
+    std::snprintf(path, sizeof(path), "/tmp/usearch-within-%08x.safegraphs",
+                  static_cast<unsigned>(stream_key(seed, "within") ^ reinterpret_cast<std::uintptr_t>(&ledger)));
+    std::vector<earth_observation_t> queries;
+    std::vector<std::vector<key_t>> walked(queries_count);
+    {
+        std::unique_ptr<index_t> const index_ptr = positions_fixture_t::make_index(ledger);
+        index_t& index = *index_ptr;
+        chord_metric_t metric = make_chord_metric();
+        index_t::traversal_context_t context {stream_key(seed, "within"), counting_allocator_t {ledger}};
+        auto values = positions_fixture_t::make_values(nodes_k, stream_key(seed, "within"),
+                                                       counting_allocator_t {ledger});
+        for (std::size_t probe = 0; probe != probes_k; ++probe)
+            for (std::size_t radius = 0; radius != radii_centimetres.size(); ++radius)
+                queries.push_back(values[probe * (nodes_k / probes_k)]);
+        failures += expect(bool(index.reserve(nodes_k)));
+        std::vector<index_t::node_id_t> assigned_ids;
+        failures += basic_build<positions_fixture_t>(index, metric, values, assigned_ids, context,
+                                                     surface_keep_octants_t {});
+        std::size_t const widest_row = surface_keep_octants_t {}.connectivity;
+        for (std::size_t query = 0; query != queries_count; ++query) {
+            i64_t const radius = radii_centimetres[query % radii_centimetres.size()];
+            radius_result_t const complete = within(index, queries[query].position, radius, radius_margin_t::spanner_k,
+                                                    widest_row, metric, context);
+            failures += expect(bool(complete));
+            for (std::size_t position = 0; position != complete.count; ++position)
+                walked[query].push_back(index.key_of(context.results[position].node_id).value);
+        }
+        serial_executor_t serial;
+        failures += expect_eq(safegraphs_write_index(std::string_view {path}, index, positions_fixture_t::make_codec(),
+                                                     serial, save_config_t {}, "chord"),
+                              status_t::success_k);
+    }
+
+    fu_topology_t topology = nullptr;
+    failures += expect(fu_topology_new(&topology) == fu_success_k);
+    {
+        io_engine_config_t config;
+        config.queue_depth = 64;
+        auto [executor, spawn_status] = nvme_index_t::executor_t::spawn(topology, 1, config);
+        failures += expect_eq(spawn_status, status_t::success_k);
+        nvme_index_t viewed {forkunion_allocator_t {}};
+        failures += expect_eq(viewed.view(path, {}, "chord", executor), status_t::success_k);
+        auto make_metric = [](scratch_t const& allocator, std::size_t staging) noexcept {
+            metric_t made {allocator};
+            status_t const ready = made.init(staging);
+            return expected<metric_t> {std::move(made), ready};
+        };
+        auto query_of = [&](std::size_t query, scratch_t const&) noexcept {
+            return expected<earth_observation_t> {queries[query], status_t::success_k};
+        };
+        // Every reach is exclusive, so a row exactly at the radius lands as the walk keeps it.
+        std::vector<i64_t> reaches(queries_count);
+        for (std::size_t query = 0; query != queries_count; ++query) {
+            i64_t const radius = radii_centimetres[query % radii_centimetres.size()];
+            reaches[query] = radius * radius + 1;
+        }
+        std::vector<std::vector<key_t>> scanned(queries_count);
+        auto land = [&]<std::size_t extent_>(std::size_t, std::size_t query, std::span<key_t const, extent_> keys,
+                                             std::span<earth_observation_t const, extent_>,
+                                             std::span<i64_t const, extent_>) noexcept {
+            for (key_t const& key : keys) scanned[query].push_back(key);
+        };
+        auto const [found, status] = viewed.scan_within(std::span<i64_t const> {reaches}, make_metric, query_of,
+                                                        executor, land);
+        failures += expect_eq(status, status_t::success_k);
+        for (std::size_t query = 0; query != queries_count; ++query) {
+            failures += expect_eq(scanned[query].size(), walked[query].size());
+            for (key_t const& key : scanned[query]) {
+                bool listed = false;
+                for (key_t const& walked_key : walked[query]) listed |= walked_key == key;
+                failures += expect(listed);
+            }
+        }
+    }
+    fu_topology_delete(topology);
+    std::remove(path);
+    return failures;
+}
+
 std::size_t check_geospatial(settings_t const& settings) {
     std::size_t failures = 0;
     failures += test_basic_scenarios<positions_fixture_t>(settings.seed);
@@ -481,6 +575,7 @@ std::size_t check_geospatial(settings_t const& settings) {
     failures += check_positions_long_links(settings.seed);
     failures += check_positions_radius(settings.seed);
     failures += check_positions_nvme(settings.seed);
+    failures += check_positions_nvme_within(settings.seed);
     return report("geospatial", failures);
 }
 

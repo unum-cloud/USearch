@@ -166,7 +166,7 @@ inline insert_dispensed(t, id, first_invisible, seen, displaced, watermark) {
 inline insert(t) {
     int id, first_invisible, seen, displaced, watermark;
     // identity, one ID per node, chaining the hosting chunk's growth through the dispenser: the
-    // compare-exchange loop of `dispense_` as the one step its last try is
+    // bounded add of `dispense_`, refused only by a closed dispenser
     atomic {
         read_modify_write_if(t, next_dispensed_id, order_acq_rel, id != closed_id, id, id + 1);
         if

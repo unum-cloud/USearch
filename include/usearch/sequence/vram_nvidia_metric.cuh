@@ -365,7 +365,7 @@ struct overlap_ladder<caps_> {
 /** The kit scoring the sequence kind @p metric_ under @p caps_: the overlap ladder's, or the
  *  Levenshtein ladder's over the kind's symbols. */
 template <usearch_sequence_metric_t metric_, sz_capability_t caps_>
-using vram_sequence_kit_t = std::conditional_t<
+using vram_sequence_kit = std::conditional_t<
     metric_ == usearch_sequence_metric_overlap_k, typename overlap_ladder<caps_>::kit_t,
     typename levenshtein_ladder<metric_ == usearch_sequence_metric_levenshtein_utf8_k ? sz_levenshtein_runes_k
                                                                                       : sz_levenshtein_bytes_k,
@@ -377,10 +377,9 @@ using vram_sequence_kit_t = std::conditional_t<
 
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
           typename kernels_type_>
-status_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::window_widths(
+status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::window_widths(
     std::span<std::size_t const> widths) noexcept {
-    if ((metric_ == usearch_sequence_metric_overlap_k) == widths.empty() || this->connectivity())
-        return status_t::config_mismatch_k;
+    if ((metric_ == usearch_sequence_metric_overlap_k) == widths.empty()) return status_t::config_mismatch_k;
     if (widths.empty()) return status_t::success_k;
     // The count leads, as the kit reads the parameters.
     if (status_t const reserved = window_widths_.reserve_exactly(widths.size() + 1); failed(reserved)) return reserved;
@@ -395,9 +394,9 @@ status_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::
 
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
           typename kernels_type_>
-std::size_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::rung_serving_(
+std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::rung_serving_(
     std::size_t longest) const noexcept {
-    using kit_t = vram_sequence_kit_t<metric_, capability_>;
+    using kit_t = vram_sequence_kit<metric_, capability_>;
     constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
     std::size_t rung = 0;
     while (rung != rungs_k && !kit_t::serves(rungs[rung], longest)) ++rung;
@@ -413,17 +412,17 @@ std::size_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_
 
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
           typename kernels_type_>
-u32_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::lanes_per_row_(std::size_t rung) noexcept {
-    using kit_t = vram_sequence_kit_t<metric_, capability_>;
+u32_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::lanes_per_row_(std::size_t rung) noexcept {
+    using kit_t = vram_sequence_kit<metric_, capability_>;
     constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
     return kit_t::lanes_per_row(rungs[rung]);
 }
 
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
           typename kernels_type_>
-std::size_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::span_bytes_(
+std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::span_bytes_(
     byte_t const* data, std::size_t bytes) const noexcept {
-    using kit_t = vram_sequence_kit_t<metric_, capability_>;
+    using kit_t = vram_sequence_kit<metric_, capability_>;
     if constexpr (metric_ == usearch_sequence_metric_overlap_k)
         return kit_t::span_bytes(to_span(window_widths_).subspan(1), bytes);
     else return kit_t::span_bytes(data, bytes);
@@ -431,7 +430,7 @@ std::size_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_
 
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
           typename kernels_type_>
-status_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::load_kernels_(int device) noexcept {
+status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::load_kernels_(int device) noexcept {
     if (metric_ == usearch_sequence_metric_overlap_k && window_widths_.empty()) return status_t::uninitialized_k;
     auto [module, status] = cuda_module_t::load(device, kernels_type_::bytes());
     if (failed(status)) return status;
@@ -452,7 +451,6 @@ status_t vram_nvidia_index<metric_, node_id_type_, capability_, kernels_type_>::
     if (!device_widths_) return status_t::bad_alloc_k;
     if (cuda_copy(device_widths_.get(), window_widths_.data(), window_widths_.size() * sizeof(u32_t)) != cuda_success_k)
         return status_t::device_error_k;
-    this->parameters_ = reinterpret_cast<byte_t const*>(device_widths_.get());
     return status_t::success_k;
 }
 
@@ -467,7 +465,7 @@ template <vram_kernel_t kernel_, sz_capability_t capability_, usearch_sequence_m
           typename node_id_type_, u32_t slots_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32, basic::cuda_resident_blocks(kernel_, slots_))
     cuda_kernel(basic::vram_arguments<node_id_type_> arguments) {
-    using kit_t = vram_sequence_kit_t<metric_, capability_>;
+    using kit_t = vram_sequence_kit<metric_, capability_>;
     basic::cuda_kernel_body<kernel_, kit_t, rung_, slots_>(arguments);
 }
 

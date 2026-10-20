@@ -621,9 +621,12 @@ struct earth_observation_codec_t {
         return status_t::success_k;
     }
 
+    /** What @ref view hands out for a stored row. */
+    using view_t = earth_observation_t;
+
     /** The observation a stored @p row holds, its 32 bytes loaded straight into the value, since an
      *  I/O buffer promises no alignment to point into. */
-    earth_observation_t view(bytes_view_t row) const noexcept {
+    view_t view(bytes_view_t row) const noexcept {
         earth_observation_t value;
         std::memcpy(&value, row.data(), sizeof(value));
         return value;
@@ -636,9 +639,9 @@ static_assert(basic::value_codec<earth_observation_codec_t, earth_observation_t>
  *  distances, and 32-bit node IDs. */
 template <typename key_type_ = uuid_t, typename wait_type_ = dummy_waiter_t,
           template <typename> class atomic_ref_template_ = standard_atomic_ref,
-          typename allocator_type_ = std::allocator<byte_t>>
-using ram_index =
-    basic::ram_index<earth_observation_t, key_type_, u32_t, i64_t, wait_type_, atomic_ref_template_, allocator_type_>;
+          typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = dummy_cache_hints_t>
+using ram_index = basic::ram_index<earth_observation_t, key_type_, u32_t, i64_t, wait_type_, atomic_ref_template_,
+                                   allocator_type_, cache_hints_type_>;
 
 using ram_index_t = ram_index<>;
 

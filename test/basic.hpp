@@ -543,6 +543,33 @@ std::size_t test_basic_growth_and_recall(u64_t seed) {
             failures += basic_audit_search<fixture_type_>(index, queries[sample], context, found_best);
             failures += expect(found_best); // Whole-graph candidates cannot miss.
         }
+
+        // A scan is exact by construction, and a filter keeps only what it admits, still as deep.
+        auto even = quad_predicate([](typename index_t::node_id_t node_id) noexcept {
+            return node_id % 2 ? admission_t::reject_k : admission_t::admit_k;
+        });
+        dummy_predicate_t unfiltered;
+        for (std::size_t sample = 0; sample != 4; ++sample) {
+            auto const [scanned, status] = index.scan(queries[sample], metric, unfiltered, unfiltered, context, 10);
+            failures += expect_eq(status, status_t::success_k);
+            failures += expect_eq(scanned.count, std::size_t {10});
+            failures += basic_expect_ascending(context);
+            bool found_best = false;
+            failures += basic_audit_search<fixture_type_>(index, queries[sample], context, found_best);
+            failures += expect(found_best);
+            failures += expect_eq(index.scan(queries[sample], metric, unfiltered, even, context, 10).value.count,
+                                  std::size_t {10});
+            for (std::size_t position = 0; position != context.results.size(); ++position)
+                failures += expect_eq(context.results[position].node_id % 2, 0u);
+
+            // A filtered walk routes through every node it scores and keeps only what it admits,
+            // filling its whole breadth.
+            failures += expect_eq(index.search_if(queries[sample], metric, unfiltered, even, context, {32}).status,
+                                  status_t::success_k);
+            failures += expect_eq(context.results.size(), std::size_t {32});
+            for (std::size_t position = 0; position != context.results.size(); ++position)
+                failures += expect_eq(context.results[position].node_id % 2, 0u);
+        }
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
     return failures;
@@ -1649,6 +1676,7 @@ std::size_t test_basic_refine(u64_t seed) {
             failures += expect(refined.changed_nodes <= refined.visited_nodes && refined.changed_nodes > 0);
             failures += expect_eq(refined.health.audited_nodes, basic_growth_nodes_k);
             failures += expect_eq(refined.health.reachable_nodes, basic_growth_nodes_k);
+            failures += expect(refined.health.back_sweeps != 0);
             failures += expect(refined.telemetry.computed_distances > 0);
         }
         std::size_t const refined_recall = basic_recall_count<fixture_type_>(index, metric, queries, probes, ledger,
@@ -1720,6 +1748,7 @@ std::size_t test_basic_absorb(u64_t seed) {
         failures += expect_eq(receiver.size(), parts_k * rows_k);
         failures += expect_eq(absorbed.health.audited_nodes, parts_k * rows_k);
         failures += expect_eq(absorbed.health.reachable_nodes, parts_k * rows_k);
+        failures += expect(absorbed.health.back_sweeps != 0);
         for (std::size_t row = 0; row != parts_k * rows_k; ++row) {
             auto const [node_id, find_status] = receiver.find(fixture_type_::make_key(row));
             failures += expect_eq(find_status, status_t::success_k);
@@ -1808,6 +1837,7 @@ refine_result_t basic_split(index_type_& source, std::vector<index_type_*>& rece
     failures += expect_eq(landed, rows);
     failures += expect_eq(result.health.audited_nodes, rows);
     failures += expect_eq(result.health.reachable_nodes, rows);
+    failures += expect(result.health.back_sweeps != 0);
     for (std::size_t row = 0; row != rows; ++row) {
         std::size_t holders = 0;
         for (index_type_* receiver : receivers) {
@@ -2026,6 +2056,56 @@ std::size_t test_basic_refine_starved(u64_t seed) {
             failures += expect(donor_after.value == donor_before.value);
         }
         failures += expect(planned && refusals > 0);
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
+/** Crafted rows pin what a heal may take. The cycle 0 → 1 → 2 → 1 links node 1 from two reached
+ *  rows, yet only row 0 reached it first, so that in-link stays; node 6, linked from rows 3 and 4
+ *  settled a level before it, gives one up once. Row 2 goes back only through node 0, so it keeps
+ *  that link, while row 7, back through nodes 8 and 9 that went back a level before it, gives one
+ *  up once. */
+template <typename fixture_type_>
+std::size_t test_basic_refine_releases(u64_t seed) {
+    using index_t = typename fixture_type_::index_t;
+    using node_id_t = typename index_t::node_id_t;
+    using context_t = typename index_t::traversal_context_t;
+    constexpr std::size_t nodes_k = 10;
+    std::array<std::initializer_list<node_id_t>, nodes_k> const rows {
+        {{1, 5}, {2}, {1, 0}, {6}, {6}, {3, 4}, {0, 7}, {8, 9}, {0}, {0}}};
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    {
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
+        auto metric = fixture_type_::make_metric();
+        context_t context {stream_key(seed, "refine_releases"), counting_allocator_t {ledger}};
+        auto values = fixture_type_::make_values(nodes_k, stream_key(seed, "refine_releases"),
+                                                 counting_allocator_t {ledger});
+        std::vector<node_id_t> assigned_ids;
+        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
+                                               keep_diverse_t {basic_connectivity_k});
+        for (node_id_t from = 0; from != nodes_k; ++from) {
+            for (node_id_t to = 0; to != nodes_k; ++to) [[maybe_unused]]
+                status_t const unlinked = index.unlink(from, to);
+            for (node_id_t const to : rows[from])
+                failures += expect_eq(index.link(from, to).status, status_t::success_k);
+        }
+
+        auto [audit, audit_status] = index.plan_health(context);
+        failures += expect_eq(audit_status, status_t::success_k);
+        do
+            for (auto const step : audit.steps()) [[maybe_unused]]
+                std::size_t const marked = audit.sweep(step);
+        while (audit.advance_level());
+        auto const [health, health_status] = audit.finish();
+        failures += expect_eq(health_status, status_t::success_k);
+        failures += expect_eq(health.reachable_nodes, nodes_k);
+        failures += expect(!audit.release_link(1));
+        failures += expect(audit.release_link(6) && !audit.release_link(6));
+        failures += expect(!audit.release_out_link(2));
+        failures += expect(audit.release_out_link(7) && !audit.release_out_link(7));
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
     return failures;
@@ -3484,6 +3564,25 @@ std::size_t test_basic_safegraphs_hostile(u64_t seed, std::string_view metric_to
     return failures;
 }
 
+/** @p metric_type_ seen through its single-query @c reset over @p query_type_ alone, so a scan
+ *  reopens every query per round as it does for a metric without a batched form. */
+template <typename metric_type_, typename query_type_>
+struct per_query_metric {
+    metric_type_ metric;
+
+    void reset(query_type_ const& query) noexcept { metric.reset(query); }
+
+    template <typename value_type_>
+    metric_staging_t push(value_type_ const& value) noexcept {
+        return metric.push(value);
+    }
+
+    template <typename distance_type_>
+    void drain(std::span<distance_type_> distances, distance_type_ radius) noexcept {
+        metric.drain(distances, radius);
+    }
+};
+
 /**
  *  @brief A monolith viewed from storage: @p count entries saved by a RAM index, then read through
  *      @p nvme_index_type_ on a one-thread executor of blocking reads.
@@ -3580,6 +3679,88 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
                 for (std::size_t other = 0; other != wanted_k; ++other)
                     listed |= keys[row * wanted_k + other] == ram_keys[match];
                 failures += expect(listed);
+            }
+        }
+
+        // A scan reads every row, so its distances are the whole-graph walk's, rank for rank.
+        auto const [scanned, scan_status] = viewed.scan(count, make_metric, query_of, executor, std::span<key_t> {keys},
+                                                        std::span<distance_t> {distances},
+                                                        std::span<std::size_t> {counts});
+        failures += expect_eq(scan_status, status_t::success_k);
+        failures += expect_eq(scanned.count, count * wanted_k);
+        for (std::size_t match = 0; match != count * wanted_k; ++match)
+            failures += basic_expect_distance<fixture_type_>(distances[match], ram_distances[match]);
+
+        // Scoring one query at a time ranks the very rows a batched metric does, and a predicate
+        // admitting everything hears each row at most once whatever the queries, changing nothing.
+        using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
+        using metric_t = typename std::invoke_result_t<make_metric_type_&, scratch_t const&, std::size_t>::value_t;
+        using query_t = typename std::invoke_result_t<query_of_type_&, std::size_t, scratch_t const&>::value_t;
+        static_assert(batched_metric<metric_t, query_t> &&
+                      !batched_metric<per_query_metric<metric_t, query_t>, query_t>);
+        auto make_per_query_metric = [&](scratch_t const& allocator, std::size_t staging) noexcept {
+            auto [metric, metric_status] = make_metric(allocator, staging);
+            return expected<per_query_metric<metric_t, query_t>> {{std::move(metric)}, metric_status};
+        };
+        std::size_t heard = 0;
+        auto admit_all = quad_predicate([&heard](key_t const&) noexcept {
+            ++heard;
+            return admission_t::admit_k;
+        });
+        for (bool const filtered : {false, true}) {
+            std::vector<key_t> rescanned_keys(count * wanted_k);
+            std::vector<distance_t> rescanned_distances(count * wanted_k);
+            auto const [rescanned, rescan_status] =
+                filtered
+                    ? viewed.scan(count, make_metric, query_of, executor, std::span<key_t> {rescanned_keys},
+                                  std::span<distance_t> {rescanned_distances}, std::span<std::size_t> {counts},
+                                  admit_all)
+                    : viewed.scan(count, make_per_query_metric, query_of, executor, std::span<key_t> {rescanned_keys},
+                                  std::span<distance_t> {rescanned_distances}, std::span<std::size_t> {counts});
+            failures += expect_eq(rescan_status, status_t::success_k);
+            failures += expect_eq(rescanned.count, count * wanted_k);
+            for (std::size_t match = 0; match != count * wanted_k; ++match) {
+                failures += expect(rescanned_keys[match] == keys[match]);
+                failures += basic_expect_distance<fixture_type_>(rescanned_distances[match], distances[match]);
+            }
+        }
+        failures += expect(heard > 0 && heard <= count);
+
+        // A predicate admitting one entry in eight still fills every row at the default breadth, as
+        // each walk stops on what it admitted, and ranks as a scan under the same predicate does,
+        // whether it answers each quad or gathers each completion batch.
+        std::vector<key_t> admitted_keys;
+        for (std::size_t entry = 0; entry < count; entry += 8) admitted_keys.push_back(fixture_type_::make_key(entry));
+        auto const is_admitted = [&](key_t const& key) noexcept {
+            bool listed = false;
+            for (key_t const& admitted : admitted_keys) listed |= admitted == key;
+            return listed ? admission_t::admit_k : admission_t::reject_k;
+        };
+        std::size_t const filled = min_of(wanted_k, admitted_keys.size());
+        std::vector<distance_t> scanned_distances(count * wanted_k);
+        auto const [filtered_scan, filtered_scan_status] = viewed.scan(
+            count, make_metric, query_of, executor, std::span<key_t> {keys}, std::span<distance_t> {scanned_distances},
+            std::span<std::size_t> {counts}, quad_predicate(is_admitted));
+        failures += expect_eq(filtered_scan_status, status_t::success_k);
+        failures += expect_eq(filtered_scan.count, count * filled);
+        auto gathering = gathering_per_thread<key_t, typename nvme_index_type_::walk_payload_t>(is_admitted,
+                                                                                                executor.size());
+        for (bool const gathered : {false, true}) {
+            auto const [filtered, filtered_status] =
+                gathered ? viewed.search(count, make_metric, query_of, executor, {}, std::span<key_t> {keys},
+                                         std::span<distance_t> {distances}, std::span<std::size_t> {counts}, gathering)
+                         : viewed.search(count, make_metric, query_of, executor, {}, std::span<key_t> {keys},
+                                         std::span<distance_t> {distances}, std::span<std::size_t> {counts},
+                                         quad_predicate(is_admitted));
+            failures += expect_eq(filtered_status, status_t::success_k);
+            failures += expect_eq(filtered.count, count * filled);
+            for (std::size_t row = 0; row != count; ++row) {
+                failures += expect_eq(counts[row], filled);
+                for (std::size_t rank = 0; rank != filled; ++rank) {
+                    std::size_t const match = row * wanted_k + rank;
+                    failures += expect(is_admitted(keys[match]) == admission_t::admit_k);
+                    failures += basic_expect_distance<fixture_type_>(distances[match], scanned_distances[match]);
+                }
             }
         }
 
@@ -3730,6 +3911,7 @@ std::size_t test_basic_scenarios(u64_t seed) {
     failures += test_basic_refine<fixture_type_>(seed);
     failures += test_basic_absorb<fixture_type_>(seed);
     failures += test_basic_split<fixture_type_>(seed);
+    failures += test_basic_refine_releases<fixture_type_>(seed);
     failures += test_basic_refine_starved<fixture_type_>(seed);
     failures += test_basic_health<fixture_type_>(seed);
     failures += test_basic_certified<fixture_type_>(seed);

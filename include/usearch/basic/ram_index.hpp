@@ -16,6 +16,7 @@
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::uint64_t`
 
+#include <array>        // `std::array` - a filtered walk's quads
 #include <atomic>       // `std::memory_order`
 #include <bit>          // `std::popcount`, `std::bit_width` - an audit's reached count, a refine's rounds
 #include <limits>       // `std::numeric_limits` - the ID-space ceiling and the unbounded radius
@@ -123,6 +124,68 @@ concept query = (std::same_as<query_type_, value_type_> || transparent_metric<me
                     { metric.reset(query) } noexcept;
                 };
 
+/** A metric that prepares many queries at once: @c reset over a span of them prepares every one for
+ *  all the rounds that follow, and each @c drain writes @b [queries,rows] distances, query @c q to
+ *  staged row @c r at `distances[q * rows + r]`, exact within the one radius they share. */
+template <typename metric_type_, typename query_type_>
+concept batched_metric = requires(metric_type_& metric, std::span<query_type_ const> queries) {
+    { metric.reset(queries) } noexcept;
+};
+
+/** Opens a scan of many queries: a metric scoring one query at a time reopens each one per round in
+ *  @ref score_queries, so nothing is prepared here. */
+template <typename metric_type_, typename query_type_>
+void open_queries(metric_type_&, std::span<query_type_ const>) noexcept {}
+
+/** A @c batched_metric prepares every query once for the whole scan. */
+template <typename metric_type_, typename query_type_>
+    requires batched_metric<metric_type_, query_type_>
+void open_queries(metric_type_& metric, std::span<query_type_ const> queries) noexcept {
+    metric.reset(queries);
+}
+
+/**
+ *  @brief Scores rows @c [first_row,end_row) of @p view_of against every query of @p queries into
+ *      @p distances, @b [queries,rows] over the rows scored, and answers where those rows end:
+ *      @p first_row when the metric refused the first of them.
+ *
+ *  A metric scoring one query at a time reopens each query over every row, in as many rounds as its
+ *  staging takes, each within its own of @p thresholds.
+ */
+template <typename metric_type_, typename query_type_, typename view_of_type_, typename distance_type_>
+std::size_t score_queries(metric_type_& metric, std::span<query_type_ const> queries, view_of_type_&& view_of,
+                          std::size_t first_row, std::size_t end_row, std::span<distance_type_ const> thresholds,
+                          std::span<distance_type_> distances) noexcept {
+    std::size_t const rows = end_row - first_row;
+    for (std::size_t query = 0; query != queries.size(); ++query)
+        for (std::size_t round_first = first_row; round_first != end_row;) {
+            metric.reset(queries[query]);
+            std::size_t round_end = round_first;
+            while (round_end != end_row && metric.push(view_of(round_end)) == metric_staging_t::staged_k) ++round_end;
+            if (round_end == round_first) return first_row;
+            metric.drain(distances.subspan(query * rows + round_first - first_row, round_end - round_first),
+                         thresholds[query]);
+            round_first = round_end;
+        }
+    return end_row;
+}
+
+/** A @c batched_metric opened by @ref open_queries scores every query in one round, within the
+ *  loosest of @p thresholds, so the rows end wherever its staging refused. */
+template <typename metric_type_, typename query_type_, typename view_of_type_, typename distance_type_>
+    requires batched_metric<metric_type_, query_type_>
+std::size_t score_queries(metric_type_& metric, std::span<query_type_ const> queries, view_of_type_&& view_of,
+                          std::size_t first_row, std::size_t end_row, std::span<distance_type_ const> thresholds,
+                          std::span<distance_type_> distances) noexcept {
+    std::size_t round_end = first_row;
+    while (round_end != end_row && metric.push(view_of(round_end)) == metric_staging_t::staged_k) ++round_end;
+    if (round_end == first_row) return first_row;
+    distance_type_ loosest = thresholds.front();
+    for (distance_type_ const threshold : thresholds) loosest = max_of(loosest, threshold);
+    metric.drain(distances.first(queries.size() * (round_end - first_row)), loosest);
+    return round_end;
+}
+
 /** Reads every round a walk scores - the staged node IDs in push order beside their drained
  *  distances, both valid only for the call and exact only within the round's radius - and answers
  *  whether the walk should go on. */
@@ -191,7 +254,7 @@ struct [[nodiscard]] refine_result_t {
     /** Nodes the first audit left unreached, counted once. */
     std::size_t islands_found = 0;
 
-    /** Links actually written from a reached node to an island. */
+    /** Links actually written between an island and a node the audit proved both ways. */
     std::size_t islands_reconnected = 0;
 
     /** The audit closing the heal, as a fresh @c plan_health sweep right after would take it. */
@@ -210,6 +273,79 @@ void drain_round(metric_type_& metric, std::size_t staged_count, context_type_& 
     metric.drain({context.staged_distances.data(), staged_count}, radius);
     context.telemetry.computed_distances += staged_count;
 }
+
+/**
+ *  @brief A filtered walk's fold: a round's contenders, the nodes that could still enter
+ *      @c admitted, are asked of @c relation, then of @c predicate, a quad at a time, and what
+ *      both admit joins @c admitted, at most @c breadth, while the walk routes through all.
+ *
+ *  Both take node IDs: the relation is the engine's own, like a geospatial relation, and the
+ *  predicate the caller's, usually a @c node_predicate over keys. An aggregating predicate only
+ *  gathers the round, answered at @ref settle.
+ */
+template <typename relation_type_, typename predicate_type_, typename ranking_type_>
+struct predicate_fold {
+    using scored_node_t = typename ranking_type_::value_type;
+
+    relation_type_& relation;
+    predicate_type_& predicate;
+    ranking_type_& admitted;
+    std::size_t breadth;
+
+    template <typename node_id_type_, typename distance_type_>
+    walk_demand_t absorb(std::span<node_id_type_ const> node_ids, std::span<distance_type_ const> distances) noexcept {
+        quad<node_id_type_> ids;
+        quad<scored_node_t> scored;
+        std::size_t filled = 0;
+        for (std::size_t position = 0; position != node_ids.size(); ++position) {
+            if (admitted.size() == breadth && !(distances[position] < admitted.top().distance)) continue;
+            ids[filled] = node_ids[position];
+            scored[filled] = scored_node_t {node_ids[position], distances[position]};
+            if (++filled != ids.size()) continue;
+            ask_contenders_(std::span<node_id_type_ const, quad_lanes_k>(ids),
+                            std::span<scored_node_t const, quad_lanes_k>(scored));
+            filled = 0;
+        }
+        // A round's tail goes on at its own static extent, which sizes every buffer past here.
+        with_static_extent<quad_lanes_k>(filled, [&]<std::size_t extent_>() noexcept {
+            ask_contenders_(std::span<node_id_type_ const, extent_>(ids.data(), extent_),
+                            std::span<scored_node_t const, extent_>(scored.data(), extent_));
+        });
+        return walk_demand_t::continue_k;
+    }
+
+    /** Answers what an aggregating predicate gathered this round; an immediate one has nothing
+     *  left. */
+    void settle() noexcept {
+        settle_predicate(predicate, [this](scored_node_t const& match) noexcept { insert_match_(match); });
+    }
+
+  private:
+    template <typename node_id_type_, std::size_t extent_>
+    void ask_contenders_(std::span<node_id_type_ const, extent_> ids,
+                         std::span<scored_node_t const, extent_> scored) noexcept {
+        std::array<admission_t, extent_> related;
+        relation(ids, std::span<admission_t, extent_>(related));
+        std::array<node_id_type_, extent_> kept_ids;
+        std::array<scored_node_t, extent_> kept_scored;
+        std::size_t kept = 0;
+        for (std::size_t lane = 0; lane != extent_; ++lane) {
+            if (related[lane] != admission_t::admit_k) continue;
+            kept_ids[kept] = ids[lane];
+            kept_scored[kept] = scored[lane];
+            ++kept;
+        }
+        auto const insert_match = [this](scored_node_t const& match) noexcept { insert_match_(match); };
+        with_static_extent<extent_>(kept, [&]<std::size_t kept_extent_>() noexcept {
+            ask_quad(predicate, std::span<node_id_type_ const, kept_extent_>(kept_ids.data(), kept_extent_),
+                     std::span<scored_node_t const, kept_extent_>(kept_scored.data(), kept_extent_), insert_match);
+        });
+    }
+
+    void insert_match_(scored_node_t const& match) noexcept {
+        [[maybe_unused]] bool const inserted = admitted.insert(scored_node_t {match}, breadth);
+    }
+};
 
 /** Plain NSW selection: the nearest @c connectivity candidates, no pruning. */
 struct keep_closest_t {
@@ -357,6 +493,21 @@ value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ o
     return observed;
 }
 
+/** Raises the word to @p operand if it is larger; returns the value held before. */
+template <typename reference_type_, typename value_type_>
+    requires plain_atomic_ref<reference_type_, value_type_>
+value_type_ atomic_fetch_max(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    value_type_ observed = reference.load(std::memory_order_relaxed);
+    while (observed < operand &&
+           !reference.compare_exchange_weak(observed, operand, order, std::memory_order_relaxed)) {}
+    return observed;
+}
+template <typename reference_type_, typename value_type_>
+    requires extended_atomic_ref<reference_type_, value_type_>
+value_type_ atomic_fetch_max(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    return reference.fetch_max(operand, order);
+}
+
 /**
  *  @brief Shared among mutators, try-unique for stop-the-world, wait-free to probe - one
  *      @c std::atomic word, so every reading is a consistent joint snapshot.
@@ -404,7 +555,7 @@ struct shared_mutex {
             if (!(observed & unique_bit_k)) break;
             // Joined behind a unique holder: hand the holder back, then wait for the word to move.
             u64_t const backed_off = atomic_ref<u64_t>(word).fetch_sub(1, std::memory_order_release) - 1;
-            wait_type_ {}(&word, backed_off, 0u, wait_capped_t {});
+            wait_type_ {}(&word, backed_off, 0u);
         }
         // Pairs with the acquire fence before a certified probe's exit snapshot: a row read that
         // returned a store made under this hold proves the acquisition to that snapshot, which
@@ -499,6 +650,10 @@ struct traversal_context {
      *  re-selections there reuse @c selected_neighbors, so the pass walks its own copy. */
     scratch_buffer<node_id_type_> reverse_ids;
 
+    /** A filtered walk's matches: the scored nodes its relation and predicate let in, nearest
+     *  first, while @c results keeps routing through every node the walk scored. */
+    results_array_t admitted;
+
     /** Running per-walk counters; calls report their share as snapshot deltas. */
     traversal_telemetry_t telemetry;
 
@@ -511,7 +666,8 @@ struct traversal_context {
     explicit traversal_context(u64_t seed = 0, allocator_t allocator = {}) noexcept
         : results(scored_allocator_t(allocator)), frontier(scored_allocator_t(allocator)),
           visited(visits_allocator_t(allocator)), random_generator {seed}, staged_ids(allocator),
-          staged_distances(allocator), selected_neighbors(allocator), reverse_ids(allocator), allocator(allocator) {}
+          staged_distances(allocator), selected_neighbors(allocator), reverse_ids(allocator),
+          admitted(scored_allocator_t(allocator)), allocator(allocator) {}
 };
 
 /** Row & element counts of the five columns a snapshot needs - what a container sizes. */
@@ -592,6 +748,8 @@ struct ram_cursor;
  *      for the const readers' loads.
  *  @tparam allocator_type_ places the node records, neighbor buffers & key multimap, and builds
  *      every stored value through uses-allocator construction.
+ *  @tparam cache_hints_type_ the line hints streaming the record a walk expands next toward the
+ *      core.
  */
 template <                                                                //
     typename value_type_,                                                 //
@@ -600,7 +758,8 @@ template <                                                                //
     typename distance_type_ = f64_t,                                      //
     typename wait_type_ = dummy_waiter_t,                                 //
     template <typename> class atomic_ref_template_ = standard_atomic_ref, //
-    typename allocator_type_ = std::allocator<byte_t>                     //
+    typename allocator_type_ = std::allocator<byte_t>,                    //
+    typename cache_hints_type_ = dummy_cache_hints_t                      //
     >
     requires value<value_type_> && (std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>)
 struct ram_index {
@@ -611,6 +770,7 @@ struct ram_index {
     using distance_t = distance_type_;
     using wait_t = wait_type_;
     using allocator_t = allocator_type_;
+    using prefetcher_t = object_prefetcher<cache_hints_type_>;
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
 
@@ -671,7 +831,7 @@ struct ram_index {
             while (true) {
                 u32_t observed = word.load(std::memory_order_relaxed);
                 for (; observed & held_k; observed = word.load(std::memory_order_relaxed))
-                    wait_t {}(&state, observed, 0u, wait_capped_t {});
+                    wait_t {}(&state, observed, 0u);
                 if (word.compare_exchange_weak(observed, observed | held_k, std::memory_order_acquire,
                                                std::memory_order_relaxed))
                     break;
@@ -732,9 +892,10 @@ struct ram_index {
     ram_index(ram_index&&) noexcept = delete;
     ram_index& operator=(ram_index&&) noexcept = delete;
 
-    /** Constructs an empty index; allocates nothing until the first @c reserve or insert. */
-    ram_index(allocator_t allocator = {}) noexcept
-        : nodes_(allocator), key_map_(allocator), allocator_(std::move(allocator)) {}
+    /** Constructs an empty index prefetching @p line_bytes at a time; allocates nothing until the
+     *  first @c reserve or insert. */
+    ram_index(allocator_t allocator = {}, std::size_t line_bytes = default_alignment_k) noexcept
+        : nodes_(allocator), key_map_(allocator), allocator_(std::move(allocator)), prefetcher_ {line_bytes} {}
 
     /** Exclusive: the record chunks destroy every value in place, the key multimap
      *  frees its columns wholesale. */
@@ -930,7 +1091,7 @@ struct ram_index {
                 for (node_id_t watermark = atomic_ref<node_id_t>(last_visible_id).load(std::memory_order_acquire);
                      watermark != range.first;
                      watermark = atomic_ref<node_id_t>(last_visible_id).load(std::memory_order_acquire))
-                    wait_t {}(&last_visible_id, watermark, 0u, wait_uncapped_t {});
+                    wait_t {}(&last_visible_id, watermark, 0u);
                 atomic_ref<node_id_t>(last_visible_id).store(range.bound, std::memory_order_release);
 
                 // Post-turn: keys become findable only for published nodes, in seats claimed first.
@@ -1030,6 +1191,7 @@ struct ram_index {
             failed(sized))
             return sized;
         if (status_t const sized = context.selected_neighbors.reserve(connectivity + 1); failed(sized)) return sized;
+        if (status_t const sized = context.admitted.reserve(candidates_capacity); failed(sized)) return sized;
         return context.reverse_ids.reserve(connectivity);
     }
 
@@ -1116,14 +1278,16 @@ struct ram_index {
     using refine_config_t = insert_config_t;
 
     /**
-     *  @brief One reachability audit in flight: a landmark sweep over the published nodes, one
-     *      level per sweep of every step, until a level expands nothing. Read-only on the graph,
-     *      so concurrent insertions merely leave fresh nodes uncounted.
+     *  @brief One reachability audit in flight: a sweep from node zero over the published nodes,
+     *      forward along the rows and back against them, one level per sweep of every step, until
+     *      a level settles nothing.
      *
-     *  Steps are disjoint first-chunk-sized ID ranges, so any number of threads may @ref sweep
-     *  different steps of one level at once; @ref advance_level is the level boundary, one caller.
-     *  Reached bits only turn on and a node expands once, so the sweep converges to the exact
-     *  reachable set.
+     *  Read-only on the graph, so concurrent insertions merely leave fresh nodes uncounted. Steps
+     *  are disjoint first-chunk-sized ID ranges, so any number of threads may @ref sweep different
+     *  steps of one level at once; @ref advance_level is the level boundary, one caller. Reached
+     *  bits only turn on and a node expands once, so the sweep converges to the exact reachable
+     *  set. A node reaches back once a neighbor in its row does, so no reverse adjacency is built;
+     *  every node both reached and reaching back is reached from any other such node.
      */
     struct health_plan_t {
 
@@ -1137,42 +1301,79 @@ struct ram_index {
             iota_view<node_id_t> nodes;
         };
 
-        using bitset_t = growing_buffer<u1x64_t, allocator_t>;
+        /** The audit's bitsets, one run of words each in @c bits_, in this order. */
+        enum bitset_t : std::size_t {
+
+            /** Reached from node zero. */
+            reached_k,
+
+            /** Linked from a row settled before the level that reached it. */
+            linked_once_k,
+
+            /** Linked from two such rows, so one link may go to a reconnection. */
+            linked_twice_k,
+
+            /** Its neighbors already swept. */
+            expanded_k,
+
+            /** Reached before the current level began. */
+            settled_k,
+
+            /** Reaches node zero through some neighbor in its row. */
+            reaches_back_k,
+
+            /** Reached node zero back before the current level began. */
+            back_settled_k,
+
+            /** Linked to two nodes that reached back before it did, so one link may go to a
+             *  reconnection. */
+            back_linked_twice_k,
+
+            /** The bitsets in all. */
+            bitsets_k,
+        };
+
+        using bits_t = growing_buffer<u1x64_t, allocator_t>;
 
         /** Lanes one word carries - what an ID splits on. */
         inline static constexpr std::size_t lanes_k = std::numeric_limits<u64_t>::digits;
 
+        /** The audit's relation for a repair walk: admits the nodes reached from node zero and
+         *  reaching it back. */
+        struct membership_t {
+            health_plan_t const& audit;
+
+            template <std::size_t extent_>
+            void operator()(std::span<node_id_t const, extent_> node_ids,
+                            std::span<admission_t, extent_> admissions) const noexcept {
+                for (std::size_t lane = 0; lane != extent_; ++lane)
+                    admissions[lane] = audit.reached(node_ids[lane]) && audit.reaches_back(node_ids[lane])
+                                           ? admission_t::admit_k
+                                           : admission_t::reject_k;
+            }
+        };
+
         /** The watermark the audit covers; IDs strictly below it are swept. */
         node_id_t visible = 0;
 
-        /** Landmark seeds, stride-spread across the swept IDs. */
-        std::size_t seed_count = 0;
-
         /** An unbound plan - a refused audit's answer; owning bitsets, it names an allocator. */
-        explicit health_plan_t(allocator_t const& allocator) noexcept
-            : reached_(allocator), linked_once_(allocator), linked_twice_(allocator), expanded_(allocator) {}
-        health_plan_t(ram_index& index, node_id_t visible, std::size_t seed_count, bitset_t&& reached,
-                      bitset_t&& linked_once, bitset_t&& linked_twice, bitset_t&& expanded) noexcept
-            : visible(visible), seed_count(seed_count), index_(&index), reached_(std::move(reached)),
-              linked_once_(std::move(linked_once)), linked_twice_(std::move(linked_twice)),
-              expanded_(std::move(expanded)) {
+        explicit health_plan_t(allocator_t const& allocator) noexcept : bits_(allocator) {}
+        health_plan_t(ram_index& index, node_id_t visible, bits_t&& bits) noexcept
+            : visible(visible), index_(&index), bits_(std::move(bits)) {
             restart_sweep();
         }
         health_plan_t(health_plan_t&& other) noexcept
-            : visible(other.visible), seed_count(other.seed_count), index_(std::exchange(other.index_, nullptr)),
-              reached_(std::move(other.reached_)), linked_once_(std::move(other.linked_once_)),
-              linked_twice_(std::move(other.linked_twice_)), expanded_(std::move(other.expanded_)),
-              expanded_in_level_(other.expanded_in_level_), sweeps_(other.sweeps_) {}
+            : visible(other.visible), index_(std::exchange(other.index_, nullptr)), bits_(std::move(other.bits_)),
+              expanded_in_level_(other.expanded_in_level_), reached_back_in_level_(other.reached_back_in_level_),
+              sweeps_(other.sweeps_), back_sweeps_(other.back_sweeps_) {}
         health_plan_t& operator=(health_plan_t&& other) noexcept {
             visible = other.visible;
-            seed_count = other.seed_count;
             index_ = std::exchange(other.index_, nullptr);
-            reached_ = std::move(other.reached_);
-            linked_once_ = std::move(other.linked_once_);
-            linked_twice_ = std::move(other.linked_twice_);
-            expanded_ = std::move(other.expanded_);
+            bits_ = std::move(other.bits_);
             expanded_in_level_ = other.expanded_in_level_;
+            reached_back_in_level_ = other.reached_back_in_level_;
             sweeps_ = other.sweeps_;
+            back_sweeps_ = other.back_sweeps_;
             return *this;
         }
         health_plan_t(health_plan_t const&) = delete;
@@ -1194,127 +1395,175 @@ struct ram_index {
             return {this, index_ ? divide_round_up<std::size_t>(visible, nodes_schedule_t::rows_in(0)) : 0u};
         }
 
-        /** Clears the bitsets and re-marks the seeds: the next @ref sweep starts level one. */
+        /** Clears the bitsets and marks node zero both ways, so the next @ref sweep starts level
+         *  one. */
         void restart_sweep() noexcept {
-            for (u1x64_t& lanes : reached_) lanes = 0;
-            for (u1x64_t& lanes : linked_once_) lanes = 0;
-            for (u1x64_t& lanes : linked_twice_) lanes = 0;
-            for (u1x64_t& lanes : expanded_) lanes = 0;
-            for (std::size_t seed = 0; seed != seed_count; ++seed)
-                insert_(reached_, static_cast<node_id_t>(seed * static_cast<std::size_t>(visible) / seed_count));
+            for (u1x64_t& lanes : bits_) lanes = 0;
             expanded_in_level_ = 0;
+            reached_back_in_level_ = 0;
             sweeps_ = 0;
+            back_sweeps_ = 0;
+            if (!visible) return;
+            insert_(reached_k, node_id_t {0});
+            insert_(reaches_back_k, node_id_t {0});
+            snapshot_levels_();
         }
 
         /**
-         *  @brief Expands every reached, not yet expanded node of @p step: its neighbors below
-         *      the watermark turn reached. Safe on any thread for disjoint steps - the expanded
-         *      bits are the step's own, the reached bits are set through relaxed atomics.
-         *  @return The nodes this call expanded.
+         *  @brief Expands every node of @p step settled before this level and not yet expanded,
+         *      its neighbors below the watermark turning reached, and marks every node of it a
+         *      neighbor of which reached back before this level.
+         *  @return The nodes this call expanded or found reaching back.
+         *
+         *  Safe on any thread for disjoint steps - the expanded bits are the step's own, the
+         *  reached bits are set through relaxed atomics, and the settled bits stay fixed for the
+         *  level.
          */
         std::size_t sweep(step_t const& step) noexcept {
-            std::size_t expanded_count = 0;
+            std::size_t expanded_count = 0, reached_back_count = 0;
             for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
-                if (!contains_(reached_, node_id) || contains_(expanded_, node_id)) continue;
-                insert_exclusive_(expanded_, node_id);
-                ++expanded_count;
+                bool const expanding = contains_(settled_k, node_id) && !contains_(expanded_k, node_id);
+                bool const pulling = !contains_(reaches_back_k, node_id);
+                if (!expanding && !pulling) continue;
                 // Bits only, never a metric verb, so the row lock spans the whole row.
                 node_t& node = index_->nodes_[node_id];
                 node.lock();
-                for (node_id_t const target : node.neighbors) {
-                    if (target >= visible || target == node_id) continue;
-                    // The first reached in-link reaches the target and a second may give one up to
-                    // a reconnection; a seed is reached before anything links to it, so links count
-                    // apart.
-                    if (!insert_(linked_once_, target)) insert_(reached_, target);
-                    else if (!contains_(linked_twice_, target)) insert_(linked_twice_, target);
+                if (expanding) {
+                    insert_exclusive_(expanded_k, node_id);
+                    ++expanded_count;
+                    // Only settled rows expand, so every link to a target the level reaches counts.
+                    for (node_id_t const target : node.neighbors) {
+                        if (target >= visible || target == node_id || contains_(settled_k, target)) continue;
+                        if (!contains_(reached_k, target)) insert_(reached_k, target);
+                        if (insert_(linked_once_k, target) && !contains_(linked_twice_k, target))
+                            insert_(linked_twice_k, target);
+                    }
+                }
+                if (pulling) {
+                    std::size_t settled_neighbors = 0;
+                    for (node_id_t const target : node.neighbors)
+                        settled_neighbors += target < visible && target != node_id && contains_(back_settled_k, target);
+                    if (settled_neighbors) {
+                        insert_(reaches_back_k, node_id);
+                        ++reached_back_count;
+                        if (settled_neighbors > 1) insert_exclusive_(back_linked_twice_k, node_id);
+                    }
                 }
                 node.unlock();
             }
             atomic_add(atomic_ref<std::size_t>(expanded_in_level_), expanded_count, std::memory_order_relaxed);
-            return expanded_count;
+            atomic_add(atomic_ref<std::size_t>(reached_back_in_level_), reached_back_count, std::memory_order_relaxed);
+            return expanded_count + reached_back_count;
         }
 
-        /** The level boundary, one caller after every step swept: counts the level and returns
-         *  what it expanded; zero means the sweep converged. */
+        /** The level boundary, one caller after every step swept: counts the level in each
+         *  direction that moved, settles what it marked, and returns what it marked; zero means
+         *  the sweep converged. */
         std::size_t advance_level() noexcept {
-            ++sweeps_;
-            return std::exchange(expanded_in_level_, 0);
-        }
-
-        /** The landmark whose share of the ID space holds @p node_id - the nearest seed below it
-         *  in ID order, reached by construction since every sweep starts from it. */
-        node_id_t landmark_covering(node_id_t node_id) const noexcept {
-            if (!seed_count || !visible) return missing_k;
-            std::size_t const seed = static_cast<std::size_t>(node_id) * seed_count / visible;
-            return static_cast<node_id_t>(seed * static_cast<std::size_t>(visible) / seed_count);
+            std::size_t const expanded = std::exchange(expanded_in_level_, 0);
+            std::size_t const reached_back = std::exchange(reached_back_in_level_, 0);
+            sweeps_ += expanded != 0;
+            back_sweeps_ += reached_back != 0;
+            if (expanded || reached_back) snapshot_levels_();
+            return expanded + reached_back;
         }
 
         /** Whether @p node_id was reached - readable by any thread between levels. */
-        bool reached(node_id_t node_id) const noexcept { return contains_(reached_, node_id); }
+        bool reached(node_id_t node_id) const noexcept { return contains_(reached_k, node_id); }
 
-        /** Takes one of @p node_id 's reached in-links for a reconnection, answering whether
-         *  another remains; a refusal leaves it untouched, so no row loses the last link it is
-         *  reached by. */
-        bool release_link(node_id_t node_id) noexcept {
-            u1x64_t const lane = u1x64_t {1} << (node_id % lanes_k);
-            return atomic_ref<u1x64_t>(linked_twice_[node_id / lanes_k]).fetch_and(~lane, std::memory_order_relaxed) &
-                   lane;
+        /** Whether @p node_id reaches node zero - readable by any thread between levels. */
+        bool reaches_back(node_id_t node_id) const noexcept { return contains_(reaches_back_k, node_id); }
+
+        /** Takes one of @p node_id 's in-links for a reconnection, answering whether one from a row
+         *  settled a level earlier remains; a refusal leaves it untouched. Sound by induction on
+         *  levels: the kept link's source keeps a link from an earlier level in turn. */
+        bool release_link(node_id_t node_id) noexcept { return release_(linked_twice_k, node_id); }
+
+        /** Takes one of @p node_id 's out-links for a reconnection, answering whether its row still
+         *  reaches back through a node that did a level earlier; a row with no way back has none to
+         *  lose. */
+        bool release_out_link(node_id_t node_id) noexcept {
+            return !contains_(reaches_back_k, node_id) || release_(back_linked_twice_k, node_id);
         }
 
-        /** The report: the reached population and the levels it took. @c internal_k when a level
-         *  is still pending, since the count would then be a lower bound. */
+        /** The report: the nodes reached and reaching back, and the levels each direction took.
+         *  @c internal_k when a level is still pending, since the count would then be a lower
+         *  bound. */
         expected<health_result_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
-            if (expanded_in_level_) return {{}, status_t::internal_k};
+            if (expanded_in_level_ || reached_back_in_level_) return {{}, status_t::internal_k};
             health_result_t result;
             result.audited_nodes = visible;
-            for (u1x64_t const word : reached_) result.reachable_nodes += static_cast<std::size_t>(std::popcount(word));
+            std::size_t const words = words_();
+            for (std::size_t word = 0; word != words; ++word)
+                result.reachable_nodes += static_cast<std::size_t>(
+                    std::popcount(bits_[reached_k * words + word] & bits_[reaches_back_k * words + word]));
             result.sweeps = sweeps_;
+            result.back_sweeps = back_sweeps_;
             return {result, status_t::success_k};
         }
 
       private:
-        static bool contains_(bitset_t const& words, node_id_t node_id) noexcept {
-            u1x64_t const lanes = atomic_ref<u1x64_t const>(words[node_id / lanes_k]).load(std::memory_order_relaxed);
+
+        /** Words per bitset. */
+        std::size_t words_() const noexcept { return bits_.size() / bitsets_k; }
+
+        bool contains_(bitset_t bitset, node_id_t node_id) const noexcept {
+            u1x64_t const lanes =
+                atomic_ref<u1x64_t const>(bits_[bitset * words_() + node_id / lanes_k]).load(std::memory_order_relaxed);
             return (lanes >> (node_id % lanes_k)) & 1u;
         }
 
         /** Sets @p node_id 's bit and answers whether it was already set. */
-        static bool insert_(bitset_t& words, node_id_t node_id) noexcept {
+        bool insert_(bitset_t bitset, node_id_t node_id) noexcept {
             u1x64_t const lane = u1x64_t {1} << (node_id % lanes_k);
-            return atomic_ref<u1x64_t>(words[node_id / lanes_k]).fetch_or(lane, std::memory_order_relaxed) & lane;
+            return atomic_ref<u1x64_t>(bits_[bitset * words_() + node_id / lanes_k])
+                       .fetch_or(lane, std::memory_order_relaxed) &
+                   lane;
         }
-        static void insert_exclusive_(bitset_t& words, node_id_t node_id) noexcept {
-            words[node_id / lanes_k] |= u1x64_t {1} << (node_id % lanes_k);
+        void insert_exclusive_(bitset_t bitset, node_id_t node_id) noexcept {
+            bits_[bitset * words_() + node_id / lanes_k] |= u1x64_t {1} << (node_id % lanes_k);
+        }
+
+        /** Clears @p node_id 's bit and answers whether it was set. */
+        bool release_(bitset_t bitset, node_id_t node_id) noexcept {
+            u1x64_t const lane = u1x64_t {1} << (node_id % lanes_k);
+            return atomic_ref<u1x64_t>(bits_[bitset * words_() + node_id / lanes_k])
+                       .fetch_and(~lane, std::memory_order_relaxed) &
+                   lane;
+        }
+
+        /** What the next level starts from: the nodes settled each way so far. */
+        void snapshot_levels_() noexcept {
+            std::size_t const words = words_();
+            std::memcpy(bits_.data() + settled_k * words, bits_.data() + reached_k * words, words * sizeof(u1x64_t));
+            std::memcpy(bits_.data() + back_settled_k * words, bits_.data() + reaches_back_k * words,
+                        words * sizeof(u1x64_t));
         }
 
         /** The audited index; null on a moved-from plan. */
         ram_index* index_ = nullptr;
 
-        /** One bit per swept node: reached by the sweep. */
-        bitset_t reached_;
-
-        /** One bit per swept node: linked from at least one reached row. */
-        bitset_t linked_once_;
-
-        /** One bit per swept node: linked from at least two reached rows. */
-        bitset_t linked_twice_;
-
-        /** One bit per swept node: its neighbors already swept. */
-        bitset_t expanded_;
+        /** Every bitset, one bit per swept node each, laid out as @ref bitset_t orders them. */
+        bits_t bits_;
 
         /** Nodes the current level expanded so far, summed through @c atomic_ref. */
         std::size_t expanded_in_level_ = 0;
 
-        /** Levels completed since the last @ref restart_sweep. */
+        /** Nodes the current level found reaching back so far, summed through @c atomic_ref. */
+        std::size_t reached_back_in_level_ = 0;
+
+        /** Levels since the last @ref restart_sweep that expanded a node. */
         std::size_t sweeps_ = 0;
+
+        /** Levels since the last @ref restart_sweep that found a node reaching back. */
+        std::size_t back_sweeps_ = 0;
     };
 
-    /** Opens a reachability audit over the published nodes, seeded from as many stride-spread
-     *  landmarks as one search draws, so the reachable set is one search's reachable world. The
-     *  caller sweeps every step per level until a level expands nothing, then reads @c finish().
-     *  The bitsets come from @p context 's allocator. */
+    /** Opens a reachability audit over the published nodes, from node zero both ways, so the
+     *  nodes it reaches both ways are what a walk from any of them reaches. The caller sweeps
+     *  every step per level until a level marks nothing, then reads @c finish(). The bitsets come
+     *  from @p context 's allocator. */
     expected<health_plan_t> plan_health(traversal_context_t& context) noexcept {
         return plan_audit_(static_cast<node_id_t>(size()), context.allocator);
     }
@@ -1352,26 +1601,33 @@ struct ram_index {
         /** The audit the heal phases sweep. */
         health_plan_t audit;
 
+        /** Steps of the current phase a driver already ran, so a cancelled call resumes at the next
+         *  one. */
+        std::size_t taken = 0;
+
+        /** Nodes the planned phases re-selected so far, which a driver's progress reports. */
+        std::size_t ticked = 0;
+
         /** An unbound pass placed by @p allocator - what a refused plan answers with. */
         explicit refine_plan_t(allocator_t const& allocator) noexcept
             : audit(allocator), part_bases_(allocator), donor_holds_(allocator), receiver_holds_(allocator),
               receiver_seats_(allocator), receiver_audits_(allocator), part_slots_(allocator), part_members_(allocator),
-              part_sizes_(allocator), part_seams_(allocator) {}
+              part_extents_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
-            : audit(std::move(other.audit)), index_(std::exchange(other.index_, nullptr)),
-              hold_(std::move(other.hold_)), nodes_(other.nodes_), part_bases_(std::move(other.part_bases_)),
-              donors_(other.donors_), donor_holds_(std::move(other.donor_holds_)), landed_donors_(other.landed_donors_),
-              seats_(other.seats_), source_(std::exchange(other.source_, nullptr)),
-              source_hold_(std::move(other.source_hold_)), receivers_(other.receivers_),
-              receiver_holds_(std::move(other.receiver_holds_)), receiver_seats_(std::move(other.receiver_seats_)),
-              receiver_audits_(std::move(other.receiver_audits_)), part_slots_(std::move(other.part_slots_)),
-              part_members_(std::move(other.part_members_)), part_sizes_(std::move(other.part_sizes_)),
-              part_seams_(std::move(other.part_seams_)), source_rows_(other.source_rows_),
+            : audit(std::move(other.audit)), taken(other.taken), ticked(other.ticked),
+              index_(std::exchange(other.index_, nullptr)), hold_(std::move(other.hold_)), nodes_(other.nodes_),
+              part_bases_(std::move(other.part_bases_)), donors_(other.donors_),
+              donor_holds_(std::move(other.donor_holds_)), landed_donors_(other.landed_donors_), seats_(other.seats_),
+              source_(std::exchange(other.source_, nullptr)), source_hold_(std::move(other.source_hold_)),
+              receivers_(other.receivers_), receiver_holds_(std::move(other.receiver_holds_)),
+              receiver_seats_(std::move(other.receiver_seats_)), receiver_audits_(std::move(other.receiver_audits_)),
+              part_slots_(std::move(other.part_slots_)), part_members_(std::move(other.part_members_)),
+              part_extents_(std::move(other.part_extents_)), source_rows_(other.source_rows_),
               part_capacity_(other.part_capacity_), seed_(other.seed_), refined_receivers_(other.refined_receivers_),
               receivers_health_(other.receivers_health_), receivers_islands_(other.receivers_islands_),
-              rounds_(other.rounds_), round_(other.round_), stopped_(other.stopped_), walk_(other.walk_),
-              connectivity_(other.connectivity_), phase_(other.phase_), swept_after_(other.swept_after_),
-              islands_before_(other.islands_before_), tally_(other.tally_) {}
+              rounds_(other.rounds_), round_(other.round_), walk_(other.walk_), connectivity_(other.connectivity_),
+              phase_(other.phase_), swept_after_(other.swept_after_), islands_before_(other.islands_before_),
+              tally_(other.tally_) {}
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
         ~refine_plan_t() noexcept { release_(); }
@@ -1407,8 +1663,8 @@ struct ram_index {
          *  A landing step moves a donor's rows in, the one partition step grows a split's parts, a
          *  scatter step moves source rows into their receivers, a re-selection step walks from each
          *  node and wires what @p selector picks, a sweep step expands the audit, and a
-         *  reconnection step links islands from reached rows; @p metric and @p context serve the
-         *  walks alone.
+         *  reconnection step links islands to the nodes the audit proved both ways; @p metric and
+         *  @p context serve the walks alone.
          */
         template <typename metric_type_, typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
             requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
@@ -1422,7 +1678,7 @@ struct ram_index {
             case phase_t::reselect_k:
             case phase_t::reselect_islands_k: reselect_(step, metric, context, selector); break;
             case phase_t::sweep_k: audit.sweep(step); break;
-            case phase_t::reconnect_k: reconnect_(step, context); break;
+            case phase_t::reconnect_k: reconnect_(step, metric, context); break;
             default: break;
             }
             return status_t::success_k;
@@ -1451,7 +1707,7 @@ struct ram_index {
                 if (!audit.advance_level()) converge_();
             }
             else if (phase_ != phase_t::done_k) {
-                if (phase_ == phase_t::reselect_k && !stopped_ && ++round_ != rounds_) return true;
+                if (phase_ == phase_t::reselect_k && ++round_ < rounds_) return true;
                 audit.restart_sweep();
                 swept_after_ = phase_;
                 phase_ = phase_t::sweep_k;
@@ -1463,7 +1719,9 @@ struct ram_index {
         /** Stops the re-selection where its steps ran, so the next @ref advance turns to the heal;
          *  a no-op in any other phase, the landings included. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k) stopped_ = true;
+            if (phase_ != phase_t::reselect_k) return;
+            rounds_ = 0;
+            taken = steps().size();
         }
 
         /** The walks' knobs, which every context stepping the plan is reserved for alongside
@@ -1583,7 +1841,7 @@ struct ram_index {
 
         /** Places source row @p row last in @p part, its slot naming the part and the position. */
         void enlist_(node_id_t row, std::size_t part) noexcept {
-            std::size_t const position = part_sizes_[part]++;
+            std::size_t const position = part_extents_[part].rows++;
             part_members_[part * part_capacity_ + position] = row;
             part_slots_[row] = static_cast<node_id_t>(part * part_capacity_ + position);
         }
@@ -1592,20 +1850,27 @@ struct ram_index {
          *  the part has room; answers whether the part could expand at all. */
         bool expand_(std::size_t part) noexcept {
             // Until the seams replace them, these count each part's expanded members.
-            std::size_t& expanded = part_seams_[part];
-            if (expanded == part_sizes_[part] || part_sizes_[part] == part_capacity_) return false;
+            node_id_t& expanded = part_extents_[part].seam;
+            if (expanded == part_extents_[part].rows || part_extents_[part].rows == part_capacity_) return false;
             node_id_t const node_id = part_members_[part * part_capacity_ + expanded++];
             for (node_id_t const target : source_->nodes_[node_id].neighbors)
-                if (target < source_rows_ && part_slots_[target] == missing_k && part_sizes_[part] != part_capacity_)
+                if (target < source_rows_ && part_slots_[target] == missing_k &&
+                    part_extents_[part].rows != part_capacity_)
                     enlist_(target, part);
             return true;
         }
 
-        /** Whether source row @p row links into a part other than its @p part. */
-        bool links_across_(node_id_t row, std::size_t part) const noexcept {
-            for (node_id_t const target : source_->nodes_[row].neighbors)
-                if (target < source_rows_ && part_slots_[target] / part_capacity_ != part) return true;
-            return false;
+        /** Moves source row @p row into its part's seams, the prefix of its members, unless it is
+         *  there already, keeping both swapped rows' slots. */
+        void enlist_seam_(node_id_t row) noexcept {
+            std::size_t const part = part_slots_[row] / part_capacity_, position = part_slots_[row] % part_capacity_;
+            node_id_t& seam = part_extents_[part].seam;
+            if (position < seam) return;
+            node_id_t* const members = part_members_.data() + part * part_capacity_;
+            std::swap(members[position], members[seam]);
+            part_slots_[members[position]] = static_cast<node_id_t>(part * part_capacity_ + position);
+            part_slots_[members[seam]] = static_cast<node_id_t>(part * part_capacity_ + seam);
+            ++seam;
         }
 
         /**
@@ -1613,14 +1878,14 @@ struct ram_index {
          *      source's links and one expansion per part in turn, each capped at the part capacity;
          *      every row left unplaced then seeds a growth of the smallest part.
          *
-         *  Each part's seams, the rows linking into another part, then move ahead of the rest, and
-         *  every row's slot names its part and its row in the receiver. Reads the source without
-         *  locks, since its unique side is held.
+         *  Each part's seams, the rows at either end of a link into another part, then move ahead
+         *  of the rest, and every row's slot names its part and its row in the receiver. Reads the
+         *  source without locks, since its unique side is held.
          */
         void partition_() noexcept {
             std::size_t const parts = receivers_.size();
             for (node_id_t& slot : part_slots_) slot = missing_k;
-            for (std::size_t part = 0; part != parts; ++part) part_sizes_[part] = part_seams_[part] = 0;
+            for (std::size_t part = 0; part != parts; ++part) part_extents_[part] = {};
             for (std::size_t part = 0; part != parts && part != source_rows_; ++part)
                 enlist_(static_cast<node_id_t>(seeded_bijection(part, source_rows_, seed_)), part);
             for (std::size_t expanded = parts; expanded;) {
@@ -1631,20 +1896,19 @@ struct ram_index {
                 if (part_slots_[row] != missing_k) continue;
                 std::size_t smallest = 0;
                 for (std::size_t part = 1; part != parts; ++part)
-                    if (part_sizes_[part] < part_sizes_[smallest]) smallest = part;
+                    if (part_extents_[part].rows < part_extents_[smallest].rows) smallest = part;
                 enlist_(row, smallest);
                 while (expand_(smallest)) {}
             }
-            for (std::size_t part = 0; part != parts; ++part) {
-                node_id_t* const members = part_members_.data() + part * part_capacity_;
-                std::size_t seams = 0, interior = part_sizes_[part];
-                while (seams != interior)
-                    if (links_across_(members[seams], part)) ++seams;
-                    else std::swap(members[seams], members[--interior]);
-                part_seams_[part] = seams;
-                for (std::size_t position = 0; position != part_sizes_[part]; ++position)
-                    part_slots_[members[position]] = static_cast<node_id_t>(part * part_capacity_ + position);
-            }
+            for (std::size_t part = 0; part != parts; ++part) part_extents_[part].seam = 0;
+            for (node_id_t row = 0; row != source_rows_; ++row)
+                for (node_id_t const target : source_->nodes_[row].neighbors) {
+                    if (target >= source_rows_ ||
+                        part_slots_[target] / part_capacity_ == part_slots_[row] / part_capacity_)
+                        continue;
+                    enlist_seam_(row);
+                    enlist_seam_(target);
+                }
         }
 
         /** Moves the source rows of @p step into their receivers' records, the links inside each
@@ -1671,7 +1935,7 @@ struct ram_index {
         void publish_parts_() noexcept {
             for (std::size_t part = 0; part != receivers_.size(); ++part) {
                 ram_index& into = *receivers_[part];
-                node_id_t const rows = static_cast<node_id_t>(part_sizes_[part]);
+                node_id_t const rows = part_extents_[part].rows;
                 if (!rows) continue;
                 atomic_ref<node_id_t>(into.next_dispensed_id_).store(rows, std::memory_order_relaxed);
                 atomic_ref<node_id_t>(into.last_visible_id_).store(rows, std::memory_order_release);
@@ -1689,14 +1953,13 @@ struct ram_index {
             std::size_t const receiver = refined_receivers_;
             index_ = receivers_[receiver];
             audit = std::move(receiver_audits_[receiver]);
-            audit.visible = static_cast<node_id_t>(part_sizes_[receiver]);
-            audit.seed_count = min_of<std::size_t>(index_->connectivity(), part_sizes_[receiver]);
+            audit.visible = part_extents_[receiver].rows;
             audit.restart_sweep();
-            nodes_ = {0, static_cast<node_id_t>(part_seams_[receiver])};
+            nodes_ = {0, part_extents_[receiver].seam};
             round_ = 0;
             swept_after_ = phase_t::reselect_k;
             islands_before_ = 0;
-            phase_ = stopped_ || nodes_.empty() ? phase_t::sweep_k : phase_t::reselect_k;
+            phase_ = !rounds_ || nodes_.empty() ? phase_t::sweep_k : phase_t::reselect_k;
         }
 
         /** Folds a healed receiver's audit and islands into the split's, then binds the next one,
@@ -1735,7 +1998,8 @@ struct ram_index {
             // Only the planned rounds walk across; the heal rounds re-select as a plain pass does.
             bool const across = phase_ == phase_t::reselect_k && part_bases_.size() > 1;
             for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
-                if (phase_ == phase_t::reselect_islands_k && audit.reached(node_id)) continue;
+                if (phase_ == phase_t::reselect_islands_k && audit.reached(node_id) && audit.reaches_back(node_id))
+                    continue;
                 iota_view<node_id_t> const other = across ? part_across(part_bases_.data(), part_bases_.size(), round_,
                                                                         audit.visible, node_id)
                                                           : iota_view<node_id_t> {};
@@ -1753,55 +2017,71 @@ struct ram_index {
             add_(tally_.telemetry.computed_distances_in_selections, spent.computed_distances_in_selections);
         }
 
-        /** Reconnects every island in @p step to its nearest reached neighbor - a free slot when
-         *  there is one, otherwise a landing spread across the tail, so islands sharing one target
-         *  heal in one round. */
-        template <typename context_type_>
-        void reconnect_(step_t const& step, context_type_& context) noexcept {
+        /** Reconnects every island in @p step, a node the audit left unreached or not reaching
+         *  back, to the nearest node it proved both ways, found by a repair walk: that node's row
+         *  links an unreached island, and the island's own row links that node when it has no way
+         *  back. */
+        template <typename metric_type_, typename context_type_>
+        void reconnect_(step_t const& step, metric_type_& metric, context_type_& context) noexcept {
             std::size_t reconnected = 0;
-            std::size_t const spread = heal_spread(connectivity_);
+            typename health_plan_t::membership_t members {audit};
+            dummy_predicate_t unfiltered;
             for (node_id_t island = step.nodes.first; island < step.nodes.bound; ++island) {
-                if (audit.reached(island)) continue;
-                context.staged_ids.clear();
-                auto const [degree, copy_status] = index_->template copy_row_<synchronization_t::concurrent_k>(island,
-                                                                                                               context);
-                node_id_t target = missing_k;
-                for (std::size_t position = 0; succeeded(copy_status) && position != degree && target == missing_k;
-                     ++position) {
-                    node_id_t const pick = context.staged_ids[position];
-                    if (pick < audit.visible && audit.reached(pick)) target = pick;
-                }
-                // When a cluster picks only its own, the last resort is the landmark covering this
-                // ID: a walk starts there by definition, which is what makes it reached.
-                if (target == missing_k) target = audit.landmark_covering(island);
-                if (target == missing_k || target == island) continue;
-
-                // Under the target's lock: already wired, a free slot, or the spread landing -
-                // never a sibling island's landing of this round, nor a resident's last in-link.
-                node_t& node = index_->nodes_[target];
-                node.lock();
-                neighbors_buffer_t& row = node.neighbors;
-                bool present = false;
-                for (node_id_t const resident : row) present = present || resident == island;
-                if (!present && row.size() < connectivity_ && row.size() < row.capacity()) {
-                    row.push_back_reserved(island);
-                    ++reconnected;
-                }
-                else if (!present) {
-                    std::size_t const width = min_of(spread, row.size());
-                    for (std::size_t attempt = 0; attempt != width; ++attempt) {
-                        std::size_t const slot = row.size() - 1 - (island + attempt) % width;
-                        node_id_t const resident = row[slot];
-                        if (resident >= audit.visible || !audit.reached(resident) || !audit.release_link(resident))
-                            continue;
-                        row[slot] = island;
-                        ++reconnected;
-                        break;
-                    }
-                }
-                node.unlock();
+                bool const reached = audit.reached(island), reaches_back = audit.reaches_back(island);
+                if (reached && reaches_back) continue;
+                // The walk routes through every visible node and admits only the proved ones, so a
+                // sparse membership never starves its landmarks.
+                context.results.clear();
+                context.frontier.clear();
+                context.visited.clear();
+                context.admitted.clear();
+                predicate_fold fold {members, unfiltered, context.admitted, walk_.expansion_factor};
+                index_->template search_around_<synchronization_t::concurrent_k>(
+                    index_->published_value_of(island), metric, snapshot_admission_t {audit.visible},
+                    walk_.expansion_factor, connectivity_, context.admitted, context, fold);
+                if (context.admitted.empty()) continue;
+                // An unreached island lands in the nearest proved row that can take it.
+                if (!reached)
+                    for (scored_node_t const& candidate : context.admitted)
+                        if (link_island_(candidate.node_id, island)) {
+                            ++reconnected;
+                            break;
+                        }
+                if (!reaches_back) reconnected += link_island_(island, context.admitted[0].node_id);
             }
             add_(tally_.islands_reconnected, reconnected);
+        }
+
+        /** Links @p island from @p owner 's row under its lock: a free slot when there is one,
+         *  otherwise a landing spread across the tail, so islands sharing one row heal in one
+         *  round; answers whether it wrote. */
+        bool link_island_(node_id_t owner, node_id_t island) noexcept {
+            node_t& node = index_->nodes_[owner];
+            node.lock();
+            neighbors_buffer_t& row = node.neighbors;
+            bool present = false, linked = false;
+            for (node_id_t const resident : row) present = present || resident == island;
+            if (!present && row.size() < connectivity_ && row.size() < row.capacity()) {
+                row.push_back_reserved(island);
+                linked = true;
+            }
+            // Never the owner's last way back, and in a reached row, whose unreached residents are
+            // this round's landings, never one of those nor a resident's last in-link from an
+            // earlier level; an unreached row proves no in-link.
+            else if (!present && audit.release_out_link(owner)) {
+                std::size_t const width = min_of(heal_spread(connectivity_), row.size());
+                for (std::size_t attempt = 0; attempt != width && !linked; ++attempt) {
+                    std::size_t const slot = row.size() - 1 - (island + attempt) % width;
+                    node_id_t const resident = row[slot];
+                    if (resident >= audit.visible ||
+                        (audit.reached(owner) && (!audit.reached(resident) || !audit.release_link(resident))))
+                        continue;
+                    row[slot] = island;
+                    linked = true;
+                }
+            }
+            node.unlock();
+            return linked;
         }
 
         /** The refined index, whose shared side @c hold_ occupies and whose claims stay closed;
@@ -1855,11 +2135,14 @@ struct ram_index {
         /** Per part, a run of the part capacity: its source rows in receiver order. */
         growing_buffer<node_id_t, allocator_t> part_members_;
 
-        /** Rows per part. */
-        growing_buffer<std::size_t, allocator_t> part_sizes_;
+        /** One part's rows, and the seam within them: the rows before it lost a link across. */
+        struct part_extent_t {
+            node_id_t rows = 0;
+            node_id_t seam = 0;
+        };
 
-        /** Per part, the seams leading its rows: the ones that lost a link across. */
-        growing_buffer<std::size_t, allocator_t> part_seams_;
+        /** Per part, its extent. */
+        growing_buffer<part_extent_t, allocator_t> part_extents_;
 
         /** Rows the split's source published at planning. */
         node_id_t source_rows_ = 0;
@@ -1879,14 +2162,11 @@ struct ram_index {
         /** The islands the receivers healed so far found, summed. */
         std::size_t receivers_islands_ = 0;
 
-        /** Rounds of re-selection, one with fewer than three parts. */
+        /** Rounds of re-selection: one with fewer than three parts, none once @ref stop cut it. */
         std::size_t rounds_ = 1;
 
         /** The round the re-selection runs, or, once it left, the rounds it finished. */
         std::size_t round_ = 0;
-
-        /** Whether @ref stop cut the re-selection short. */
-        bool stopped_ = false;
 
         /** Breadth and fan-out of every re-selection walk. */
         insert_config_t walk_ {};
@@ -2086,51 +2366,89 @@ struct ram_index {
     expected<search_result_t> search(query_type_ const& query, metric_type_& metric, fold_type_&& fold, //
                                      traversal_context_over<context_allocator_type_>& context,
                                      search_config_t config = {}) noexcept {
-        std::size_t const widest_row = connectivity();
-        insert_config_t const walk = resolved_config_({config.expansion_factor}, widest_row);
-        if (status_t const sized = reserve_traversal(context, widest_row, walk); failed(sized)) return {{}, sized};
-        std::size_t const expansion_factor = walk.expansion_factor;
+        return fold_walk_<synchronization_>(query, metric, fold, context.results, context, config);
+    }
+
+    /**
+     *  @brief Walks like @c search, keeping only the scored nodes @p relation and @p predicate both
+     *      admit, ascending in @c context.results. The walk routes through every node it scores and
+     *      ends once the admitted ones fill the expansion or the graph runs out.
+     *
+     *  @param[in] query The similarity target, alive for the whole call.
+     *  @param[inout] metric This thread's scoring instance.
+     *  @param[inout] relation The engine's own filter over node IDs, or @c dummy_predicate_t.
+     *  @param[inout] predicate The caller's filter over node IDs, asked only about the contenders
+     *      @p relation kept: a quad at a time, or once per round when it aggregates.
+     *  @param[inout] context The calling thread's scratch & telemetry over any allocator; holds the
+     *      matches.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     */
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k, //
+              typename metric_type_, typename relation_type_, typename predicate_type_,
+              typename context_allocator_type_, typename query_type_ = value_t>
+        requires metric<metric_type_, value_t, distance_t> && query<query_type_, metric_type_, value_t>
+    expected<search_result_t> search_if(query_type_ const& query, metric_type_& metric, relation_type_& relation,
+                                        predicate_type_& predicate,
+                                        traversal_context_over<context_allocator_type_>& context,
+                                        search_config_t config = {}) noexcept {
+        context.admitted.clear();
+        predicate_fold fold {relation, predicate, context.admitted,
+                             resolved_config_({config.expansion_factor}, connectivity()).expansion_factor};
+        expected<search_result_t> found = fold_walk_<synchronization_>(query, metric, fold, context.admitted, context,
+                                                                       config);
+        std::swap(context.results, context.admitted);
+        found.value.count = context.results.size();
+        return found;
+    }
+
+    /**
+     *  @brief The exact sibling of @c search: scores @p query against every row published when the
+     *      scan starts and keeps the nearest @p wanted that @p relation and @p predicate both
+     *      admit, ascending in @c context.results.
+     *
+     *  Once @p wanted are held, every round drains within the worst of them, so a metric may stop
+     *  scoring a row that cannot come under it. Only a row that would enter the matches is asked
+     *  about, which makes the scan the fallback for filters too selective for a walk to cross.
+     *
+     *  @param[in] query The similarity target, alive for the whole call.
+     *  @param[inout] metric This thread's scoring instance.
+     *  @param[inout] relation The engine's own filter over node IDs, or @c dummy_predicate_t.
+     *  @param[inout] predicate The caller's filter over node IDs, or @c dummy_predicate_t.
+     *  @param[inout] context The calling thread's scratch & telemetry; holds the matches.
+     *  @param[in] wanted How many matches to keep.
+     */
+    template <typename metric_type_, typename relation_type_, typename predicate_type_,
+              typename context_allocator_type_, typename query_type_ = value_t>
+        requires metric<metric_type_, value_t, distance_t> && query<query_type_, metric_type_, value_t>
+    expected<search_result_t> scan(query_type_ const& query, metric_type_& metric, relation_type_& relation,
+                                   predicate_type_& predicate, traversal_context_over<context_allocator_type_>& context,
+                                   std::size_t wanted) noexcept {
         context.results.clear();
-        context.frontier.clear();
-        context.visited.clear();
+        if (!wanted) return {};
+        auto const radius = [&]() noexcept {
+            return context.results.size() == wanted ? context.results.top().distance : unbounded_radius<distance_t>();
+        };
+        predicate_fold fold {relation, predicate, context.results, wanted};
+        return scan_rounds_(query, metric, radius, fold, context, wanted);
+    }
 
-        // One watermark snapshot bounds the whole walk; a certified mode proves its own
-        // certification through the shared mutex's wait-free probes instead of trusting it.
-        node_id_t first_invisible_id = 0;
-        [[maybe_unused]] u64_t entry_generation = 0;
-        if constexpr (synchronization_ == synchronization_t::concurrent_k)
-            first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-        else {
-            auto const entry_probe = shared_mutex_.snapshot();
-            if (!entry_probe.unlocked()) return {{}, status_t::contended_k};
-            entry_generation = entry_probe.generation;
-            auto const [watermark, watermark_status] = watermark_();
-            if (failed(watermark_status)) return {{}, watermark_status};
-            first_invisible_id = watermark;
-        }
-        if (!first_invisible_id) return {};
-
-        traversal_telemetry_t const telemetry_before = context.telemetry;
-        search_around_<synchronization_>(query, metric, snapshot_admission_t {first_invisible_id}, expansion_factor,
-                                         widest_row, context, fold);
-
-        // A refused walk still ranked whatever it reached; the telemetry says the ranking is
-        // short because scratch ran out, not because the graph had nothing better.
-        search_result_t result;
-        status_t status = status_t::success_k;
-        result.count = context.results.size();
-        result.telemetry = context.telemetry - telemetry_before;
-        if constexpr (synchronization_ != synchronization_t::concurrent_k) {
-            // The fence pairs with the release fence in `lock_shared`: a walk read that met a
-            // mutator's write proves its acquisition to the reload, which then reads a moved
-            // word. The watermark equality is the belt against generation wrap driven by inserts.
-            std::atomic_thread_fence(std::memory_order_acquire);
-            auto const exit_probe = shared_mutex_.snapshot();
-            if (!exit_probe.unlocked() || exit_probe.generation != entry_generation ||
-                atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire) != first_invisible_id)
-                status = status_t::contended_k;
-        }
-        return {result, status};
+    /**
+     *  @brief Scores @p query against every row published when the scan starts, handing every round
+     *      to @p fold: the exact sibling of the folding @c search, for verbs that reduce all rows
+     *      to something other than the nearest few, such as containment.
+     *
+     *  @param[inout] fold The reader of every scored round - see @c basic::fold. A @c sated_k ends
+     *      the scan successfully.
+     */
+    template <typename metric_type_, typename fold_type_, typename context_allocator_type_,
+              typename query_type_ = value_t>
+        requires metric<metric_type_, value_t, distance_t> && query<query_type_, metric_type_, value_t> &&
+                 fold<std::remove_cvref_t<fold_type_>, node_id_t, distance_t>
+    expected<search_result_t> scan(query_type_ const& query, metric_type_& metric, fold_type_&& fold,
+                                   traversal_context_over<context_allocator_type_>& context) noexcept {
+        context.results.clear();
+        auto const radius = []() noexcept { return unbounded_radius<distance_t>(); };
+        return scan_rounds_(query, metric, radius, fold, context, 1);
     }
 
 #pragma endregion Search
@@ -2230,9 +2548,8 @@ struct ram_index {
         /** Nodes in the largest such component. */
         std::size_t largest_component = 0;
 
-        /** Nodes no flood from the stochastic entry points reached - the
-         *  searcher's-eye blind spot. */
-        std::size_t unreachable_from_seeds = 0;
+        /** The audit @ref plan_health opens, swept to convergence - the searcher's view. */
+        health_result_t reachability;
 
         /** The smallest published out-degree. */
         std::size_t degree_min = 0;
@@ -2251,7 +2568,7 @@ struct ram_index {
 
     /**
      *  @brief Walks the whole graph, reporting components, degree spread, edge reciprocity, and
-     *      reachability from stochastic seeds.
+     *      reachability as @ref plan_health audits it.
      *
      *  Takes the shared mutex's unique side for the whole walk - live mutators answer
      *  @c contended_k at entry, and none can start until the report returns.
@@ -2336,17 +2653,16 @@ struct ram_index {
             report.largest_component = max_of(report.largest_component, flood(static_cast<node_id_t>(node)));
         }
 
-        // Reachability from as many stochastic landmarks as one search draws - the searcher's view.
-        // The coverage guard is load-bearing twice over: it ends the probe once the graph
-        // is covered, and it keeps every seed provably unvisited, which bounds the stack.
-        context.visited.clear();
-        std::size_t const seed_count = min_of<std::size_t>(connectivity(), node_count);
-        for (std::size_t seed = 0; seed != seed_count && context.visited.size() != node_count; ++seed) {
-            node_id_t draw = uniform_below<node_id_t> {visible}(context.random_generator);
-            while (context.visited.contains(draw)) draw = draw + 1 == visible ? 0 : draw + 1;
-            flood(draw);
+        auto [audit, audit_status] = plan_audit_(visible, allocator_);
+        if (failed(audit_status)) {
+            report.status = audit_status;
+            return report;
         }
-        report.unreachable_from_seeds = node_count - context.visited.size();
+        do
+            for (typename health_plan_t::step_t const step : audit.steps()) [[maybe_unused]]
+                std::size_t const marked = audit.sweep(step);
+        while (audit.advance_level());
+        report.reachability = audit.finish().value;
         return report;
     }
 
@@ -2670,10 +2986,8 @@ struct ram_index {
     /** Raises @ref connectivity to @p row, a row some wiring may write; a relaxed peek first, so a
      *  graph at its budget never writes the shared line. */
     void widen_(std::size_t row) noexcept {
-        atomic_ref<std::size_t> widest {widest_row_};
-        std::size_t observed = widest.load(std::memory_order_relaxed);
-        while (observed < row &&
-               !widest.compare_exchange_weak(observed, row, std::memory_order_relaxed, std::memory_order_relaxed)) {}
+        atomic_ref<std::size_t> const widest {widest_row_};
+        if (widest.load(std::memory_order_relaxed) < row) atomic_fetch_max(widest, row, std::memory_order_relaxed);
     }
 
     /** Forgets every record below @p visible, every key and every counter: what @c clear does under
@@ -2709,17 +3023,12 @@ struct ram_index {
 
     /** An audit over the IDs below @p visible, its bitsets placed by @p allocator. */
     expected<health_plan_t> plan_audit_(node_id_t visible, allocator_t const& allocator) noexcept {
-        using bitset_t = typename health_plan_t::bitset_t;
         // An empty graph is audited, not refused: no words to sweep, no steps, zero reached.
         std::size_t const words = divide_round_up<std::size_t>(visible, health_plan_t::lanes_k);
-        bitset_t reached {allocator}, linked_once {allocator}, linked_twice {allocator}, expanded {allocator};
-        if (failed(reached.resize(words)) || failed(linked_once.resize(words)) || failed(linked_twice.resize(words)) ||
-            failed(expanded.resize(words)))
+        typename health_plan_t::bits_t bits {allocator};
+        if (failed(bits.resize(health_plan_t::bitsets_k * words)))
             return {health_plan_t {allocator}, status_t::bad_alloc_k};
-        std::size_t const seed_count = min_of<std::size_t>(connectivity(), visible);
-        return {health_plan_t {*this, visible, seed_count, std::move(reached), std::move(linked_once),
-                               std::move(linked_twice), std::move(expanded)},
-                status_t::success_k};
+        return {health_plan_t {*this, visible, std::move(bits)}, status_t::success_k};
     }
 
     /** What @ref plan_refine and @ref plan_absorb share: every check, hold, claim and reservation
@@ -2832,9 +3141,8 @@ struct ram_index {
         if (parts * capacity > static_cast<std::size_t>(missing_k)) return refuse(status_t::overflow_k);
         if (failed(plan.receiver_holds_.reserve_exactly(parts)) ||
             failed(plan.receiver_seats_.reserve_exactly(parts)) ||
-            failed(plan.receiver_audits_.reserve_exactly(parts)) || failed(plan.part_sizes_.resize(parts)) ||
-            failed(plan.part_seams_.resize(parts)) || failed(plan.part_slots_.resize(rows)) ||
-            failed(plan.part_members_.resize(parts * capacity)))
+            failed(plan.receiver_audits_.reserve_exactly(parts)) || failed(plan.part_extents_.resize(parts)) ||
+            failed(plan.part_slots_.resize(rows)) || failed(plan.part_members_.resize(parts * capacity)))
             return refuse(status_t::bad_alloc_k);
 
         // From here the plan reopens the claims of every receiver it closed on any refusal, and at
@@ -2894,14 +3202,14 @@ struct ram_index {
         [[maybe_unused]] membership_t const self_marked = context.visited.insert(node_id);
         part_admission_t const other {across.first, min_of(across.bound, visible)};
         if (other.first_id < other.first_invisible_id) {
-            search_around_<concurrent_k>(value, metric, other, walk.expansion_factor, selector.connectivity, context,
-                                         dummy_fold_t {});
+            search_around_<concurrent_k>(value, metric, other, walk.expansion_factor, selector.connectivity,
+                                         context.results, context, dummy_fold_t {});
             context.frontier.clear();
         }
         snapshot_admission_t const every {visible};
         seed_from_row_(node_id, value, metric, every, walk.expansion_factor, context);
-        search_around_<concurrent_k>(value, metric, every, walk.expansion_factor, selector.connectivity, context,
-                                     dummy_fold_t {});
+        search_around_<concurrent_k>(value, metric, every, walk.expansion_factor, selector.connectivity,
+                                     context.results, context, dummy_fold_t {});
         add_row_candidates_(node_id, value, metric, every, context);
         selector(*this, metric, context);
 
@@ -3022,9 +3330,9 @@ struct ram_index {
         if (new_node_id) {
             node_id_t const first_invisible_id =
                 atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-            search_around_<synchronization_>(incoming, metric,
-                                             dispensed_admission_t {this, first_invisible_id, new_node_id},
-                                             walk.expansion_factor, connectivity, context, dummy_fold_t {});
+            search_around_<synchronization_>(
+                incoming, metric, dispensed_admission_t {this, first_invisible_id, new_node_id}, walk.expansion_factor,
+                connectivity, context.results, context, dummy_fold_t {});
         }
         selector(*this, metric, context);
 
@@ -3180,9 +3488,10 @@ struct ram_index {
         std::size_t const staged_count = context.staged_ids.size();
         if (!staged_count) return {walk_step_t::exhausted_k, status_t::success_k};
         drain_round(metric, staged_count, context, unbounded_radius<distance_t>());
-        if (fold.absorb(std::span<node_id_t const>(context.staged_ids),
-                        std::span<distance_t const>(context.staged_distances)) == walk_demand_t::sated_k)
-            return {walk_step_t::sated_k, status_t::success_k};
+        walk_demand_t const demand = fold.absorb(std::span<node_id_t const>(context.staged_ids),
+                                                 std::span<distance_t const>(context.staged_distances));
+        settle_fold(fold);
+        if (demand == walk_demand_t::sated_k) return {walk_step_t::sated_k, status_t::success_k};
         for (std::size_t lane = 0; lane != staged_count; ++lane) {
             scored_node_t const scored {context.staged_ids[lane], context.staged_distances[lane]};
             [[maybe_unused]] bool const ranked = context.results.insert(scored_node_t {scored}, expansion_factor);
@@ -3199,17 +3508,17 @@ struct ram_index {
      *  metric, compacted in @c context.staged_ids. A full staging ends the round early, with the
      *  entry it cut short back on the frontier. */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_, typename admission_type_,
-              typename context_type_>
+              typename stopping_type_, typename context_type_>
     walk_step_t expand_frontier_(query_type_ const& query, metric_type_& metric, admission_type_ const& admission,
-                                 std::size_t expansion_factor, std::size_t filling_rows,
+                                 std::size_t expansion_factor, std::size_t filling_rows, stopping_type_ const& stopping,
                                  context_type_& context) noexcept {
         context.staged_ids.clear();
         metric.reset(query);
         for (std::size_t expanded_count = 0; expanded_count != filling_rows && !context.frontier.empty();
              ++expanded_count) {
             scored_node_t const best = context.frontier.top();
-            bool const results_full = context.results.size() == expansion_factor;
-            if (results_full && best.distance > context.results.top().distance) {
+            bool const stopping_full = stopping.size() == expansion_factor;
+            if (stopping_full && best.distance > stopping.top().distance) {
                 if (expanded_count == 0) return walk_step_t::exhausted_k;
                 break;
             }
@@ -3224,6 +3533,9 @@ struct ram_index {
                 return walk_step_t::saturated_k;
             }
             context.frontier.pop();
+            // The next entry's record, not its row, which a writer may move until a copy locks it.
+            if (!context.frontier.empty())
+                prefetcher_.prefetch(&nodes_[context.frontier.top().node_id], sizeof(node_t));
 
             std::size_t kept = segment_start;
             for (std::size_t position = segment_start; position != segment_start + degree; ++position) {
@@ -3252,6 +3564,96 @@ struct ram_index {
         return walk_step_t::advanced_k;
     }
 
+    /** The rounds of both scans: every row below the watermark snapshot staged as many at a time as
+     *  the metric takes, drained within @p radius, and handed to @p fold, which may end the scan
+     *  with @c sated_k. A metric refusing an empty round can never finish, which a scan reports as
+     *  a refused allocation. */
+    template <typename query_type_, typename metric_type_, typename radius_type_, typename fold_type_,
+              typename context_type_>
+    expected<search_result_t> scan_rounds_(query_type_ const& query, metric_type_& metric, radius_type_ const& radius,
+                                           fold_type_& fold, context_type_& context, std::size_t wanted) noexcept {
+        node_id_t const first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+        if (!first_invisible_id) return {};
+        // A scan stages rounds and ranks, and never touches the frontier or the visited set.
+        std::size_t const staging = round_capacity(connectivity(), {wanted});
+        if (failed(context.staged_ids.reserve(staging)) || failed(context.staged_distances.reserve(staging)) ||
+            failed(context.results.reserve(wanted)))
+            return {{}, status_t::bad_alloc_k};
+        traversal_telemetry_t const telemetry_before = context.telemetry;
+        for (node_id_t first = 0; first != first_invisible_id;) {
+            metric.reset(query);
+            context.staged_ids.clear();
+            node_id_t next = first;
+            for (; next != first_invisible_id && context.staged_ids.size() != context.staged_ids.capacity(); ++next) {
+                if (metric.push(published_value_of(next)) == metric_staging_t::refused_k) break;
+                context.staged_ids.push_back_reserved(next);
+            }
+            if (next == first) return {{}, status_t::bad_alloc_k};
+            drain_round(metric, context.staged_ids.size(), context, radius());
+            walk_demand_t const demand = fold.absorb(std::span<node_id_t const>(context.staged_ids),
+                                                     std::span<distance_t const>(context.staged_distances));
+            settle_fold(fold);
+            if (demand == walk_demand_t::sated_k) break;
+            first = next;
+        }
+        return {{context.results.size(), context.telemetry - telemetry_before}, status_t::success_k};
+    }
+
+    /** The one walk behind @c search and @c search_if: @p fold reads every scored round and the
+     *  walk stops on @p stopping, its own candidates or the admitted set. */
+    template <synchronization_t synchronization_, typename metric_type_, typename fold_type_, typename stopping_type_,
+              typename context_allocator_type_, typename query_type_>
+    expected<search_result_t> fold_walk_(query_type_ const& query, metric_type_& metric, fold_type_&& fold,
+                                         stopping_type_ const& stopping,
+                                         traversal_context_over<context_allocator_type_>& context,
+                                         search_config_t config) noexcept {
+        std::size_t const widest_row = connectivity();
+        insert_config_t const walk = resolved_config_({config.expansion_factor}, widest_row);
+        if (status_t const sized = reserve_traversal(context, widest_row, walk); failed(sized)) return {{}, sized};
+        std::size_t const expansion_factor = walk.expansion_factor;
+        context.results.clear();
+        context.frontier.clear();
+        context.visited.clear();
+
+        // One watermark snapshot bounds the whole walk; a certified mode proves its own
+        // certification through the shared mutex's wait-free probes instead of trusting it.
+        node_id_t first_invisible_id = 0;
+        [[maybe_unused]] u64_t entry_generation = 0;
+        if constexpr (synchronization_ == synchronization_t::concurrent_k)
+            first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+        else {
+            auto const entry_probe = shared_mutex_.snapshot();
+            if (!entry_probe.unlocked()) return {{}, status_t::contended_k};
+            entry_generation = entry_probe.generation;
+            auto const [watermark, watermark_status] = watermark_();
+            if (failed(watermark_status)) return {{}, watermark_status};
+            first_invisible_id = watermark;
+        }
+        if (!first_invisible_id) return {};
+
+        traversal_telemetry_t const telemetry_before = context.telemetry;
+        search_around_<synchronization_>(query, metric, snapshot_admission_t {first_invisible_id}, expansion_factor,
+                                         widest_row, stopping, context, fold);
+
+        // A refused walk still ranked whatever it reached; the telemetry says the ranking is
+        // short because scratch ran out, not because the graph had nothing better.
+        search_result_t result;
+        status_t status = status_t::success_k;
+        result.count = context.results.size();
+        result.telemetry = context.telemetry - telemetry_before;
+        if constexpr (synchronization_ != synchronization_t::concurrent_k) {
+            // The fence pairs with the release fence in `lock_shared`: a walk read that met a
+            // mutator's write proves its acquisition to the reload, which then reads a moved
+            // word. The watermark equality is the belt against generation wrap driven by inserts.
+            std::atomic_thread_fence(std::memory_order_acquire);
+            auto const exit_probe = shared_mutex_.snapshot();
+            if (!exit_probe.unlocked() || exit_probe.generation != entry_generation ||
+                atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire) != first_invisible_id)
+                status = status_t::contended_k;
+        }
+        return {result, status};
+    }
+
     /**
      *  @brief The shared walk of @c search & @c insert: seed, then per round expand the
      *      nearest frontier entries and score the staged union in one builder round - every
@@ -3267,10 +3669,10 @@ struct ram_index {
      *  otherwise be empty - the seedings.
      */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_, typename admission_type_,
-              typename context_type_, typename fold_type_>
+              typename stopping_type_, typename context_type_, typename fold_type_>
     void search_around_(query_type_ const& query, metric_type_& metric, admission_type_ const& admission,
-                        std::size_t expansion_factor, std::size_t connectivity, context_type_& context,
-                        fold_type_&& fold) noexcept {
+                        std::size_t expansion_factor, std::size_t connectivity, stopping_type_ const& stopping,
+                        context_type_& context, fold_type_&& fold) noexcept {
         // A round expands the rows whose neighbors fill a walk's candidates, as `round_capacity`
         // sized.
         std::size_t const filling_rows = divide_round_up(expansion_factor, connectivity);
@@ -3278,7 +3680,7 @@ struct ram_index {
             // An empty frontier seeds: the first round, or a restart after it drained before the
             // candidates filled. Nothing left to seed from ends the walk.
             if (context.frontier.empty()) {
-                if (context.results.size() >= expansion_factor) return;
+                if (stopping.size() >= expansion_factor) return;
                 bool const restarting = !context.results.empty();
                 expected<walk_step_t> const seeded = sample_landmarks_(query, metric, admission, connectivity,
                                                                        expansion_factor, context, fold);
@@ -3287,9 +3689,9 @@ struct ram_index {
                 continue;
             }
             walk_step_t const expanded = expand_frontier_<synchronization_>(query, metric, admission, expansion_factor,
-                                                                            filling_rows, context);
+                                                                            filling_rows, stopping, context);
             if (expanded == walk_step_t::exhausted_k) return;
-            walk_step_t const ranked = rank_round_(metric, expansion_factor, context, fold);
+            walk_step_t const ranked = rank_round_(metric, expansion_factor, stopping, context, fold);
             if (expanded == walk_step_t::saturated_k || ranked != walk_step_t::advanced_k) return;
         }
     }
@@ -3297,19 +3699,20 @@ struct ram_index {
     /** One round's scoring half: drains the staged union through the metric, hands it to the fold,
      *  and pushes what improved the candidates into the frontier, shedding the frontier past the
      *  full candidates' radius first so the pushes fit. */
-    template <typename metric_type_, typename context_type_, typename fold_type_>
-    walk_step_t rank_round_(metric_type_& metric, std::size_t expansion_factor, context_type_& context,
-                            fold_type_&& fold) const noexcept {
+    template <typename metric_type_, typename stopping_type_, typename context_type_, typename fold_type_>
+    walk_step_t rank_round_(metric_type_& metric, std::size_t expansion_factor, stopping_type_ const& stopping,
+                            context_type_& context, fold_type_&& fold) const noexcept {
         std::size_t const staged_count = context.staged_ids.size();
         if (!staged_count) return walk_step_t::advanced_k;
-        // Full candidates only admit what beats their furthest member, so that member's distance is
-        // the radius.
-        bool const results_full = context.results.size() == expansion_factor;
+        // Full stopping candidates only admit what beats their furthest member, so that member's
+        // distance is the radius, which a filtered walk takes from its admitted set.
+        bool const stopping_full = stopping.size() == expansion_factor;
         drain_round(metric, staged_count, context,
-                    results_full ? context.results.top().distance : unbounded_radius<distance_t>());
-        if (fold.absorb(std::span<node_id_t const>(context.staged_ids),
-                        std::span<distance_t const>(context.staged_distances)) == walk_demand_t::sated_k)
-            return walk_step_t::sated_k;
+                    stopping_full ? stopping.top().distance : unbounded_radius<distance_t>());
+        walk_demand_t const demand = fold.absorb(std::span<node_id_t const>(context.staged_ids),
+                                                 std::span<distance_t const>(context.staged_distances));
+        settle_fold(fold);
+        if (demand == walk_demand_t::sated_k) return walk_step_t::sated_k;
         if (context.results.size() == expansion_factor &&
             context.frontier.capacity() - context.frontier.size() < staged_count)
             context.frontier.erase_below(context.results.top());
@@ -3503,6 +3906,8 @@ struct ram_index {
     alignas(default_alignment_k) shared_mutex_t shared_mutex_;
 
     [[no_unique_address]] allocator_t allocator_;
+
+    prefetcher_t prefetcher_;
 
 #pragma endregion Internals and State
 };

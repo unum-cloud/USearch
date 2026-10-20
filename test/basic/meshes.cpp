@@ -162,7 +162,8 @@ struct meshes_handmade_t {
     std::array<std::array<f64_t, 3>, 3> distances;
 };
 
-template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = standard_atomic_ref>
+template <typename wait_type_ = fu::standard_yield_t,
+          template <typename> class atomic_ref_template_ = standard_atomic_ref>
 struct meshes_fixture {
     using index_t =
         ram_index<mesh_t, us::utilities::uuid_t, u64_t, f64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
@@ -280,7 +281,7 @@ std::size_t test::basic::check_meshes(settings_t const& settings) {
     std::size_t failures = 0;
     failures += test_basic_scenarios<meshes_fixture_t>(settings.seed);
     failures += test_basic_scenarios<meshes_fixture<flaky_waiter_t>>(settings.seed);
-    failures += test_basic_scenarios<meshes_fixture<dummy_waiter_t, fu::preferred_atomic_ref>>(settings.seed);
+    failures += test_basic_scenarios<meshes_fixture<fu::standard_yield_t, fu::preferred_atomic_ref>>(settings.seed);
     failures += check_meshes_rigid_invariance();
     failures += check_meshes_kernel_parity(settings.seed);
     // The uuid key column.

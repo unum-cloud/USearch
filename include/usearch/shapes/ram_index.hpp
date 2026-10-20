@@ -77,9 +77,12 @@ struct codec {
         return status_t::success_k;
     }
 
+    /** What @ref view hands out for a stored row. */
+    using view_t = nk::matrix_view<scalar_t>;
+
     /** The @b [points,3] cloud a stored @p row holds, borrowed: every whole point its bytes
      *  hold. */
-    nk::matrix_view<scalar_t> view(bytes_view_t row) const noexcept {
+    view_t view(bytes_view_t row) const noexcept {
         std::span<scalar_t const> const coordinates = elements_of<scalar_t>(row);
         return nk::matrix_view<scalar_t>(coordinates.data(), coordinates.size() / 3, 3);
     }
@@ -93,9 +96,10 @@ struct codec {
  */
 template <typename kit_type_, typename key_type_ = uuid_t, typename wait_type_ = dummy_waiter_t,
           template <typename> class atomic_ref_template_ = standard_atomic_ref,
-          typename allocator_type_ = forkunion_allocator_t>
+          typename allocator_type_ = forkunion_allocator_t, typename cache_hints_type_ = dummy_cache_hints_t>
 using ram_index = basic::ram_index<
     value<typename kit_type_::scalar_t, typename std::allocator_traits<allocator_type_>::template rebind_alloc<char>>,
-    key_type_, u32_t, typename kit_type_::distance_t, wait_type_, atomic_ref_template_, allocator_type_>;
+    key_type_, u32_t, typename kit_type_::distance_t, wait_type_, atomic_ref_template_, allocator_type_,
+    cache_hints_type_>;
 
 } // namespace unum::usearch::shapes

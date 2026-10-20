@@ -14,6 +14,8 @@
 
 #include <cstddef> // `std::size_t`
 
+#include <span> // `std::span` - a batch's offsets and an absorb's donors
+
 #include <numkong/capabilities.h> // `nk_kernel_chamfers_packed_k` & kin - the metric a kit scores under
 #include <numkong/shapes.hpp>     // `nk::shapes_dtype` - the scalars a kit stores
 
@@ -23,27 +25,18 @@
 namespace unum::usearch::shapes {
 using namespace unum::usearch::utilities;
 
-/** Similarity Search over 3D point clouds of @p scalar_ on NVIDIA GPUs, under Chamfer or Hausdorff
- *  as the kernel kind it is built with names, scored by the kit @c shapes_ladder picks under
- *  @p capability_: a block walks each query, a warp scoring each candidate. Node IDs are
- *  @p node_id_type_, and @p kernels_type_ names the fatbin. */
+/** The kit hooks a shapes graph on NVIDIA GPUs reads, and the fatbin @p kernels_type_ names once
+ *  loaded: the Chamfer and Hausdorff kits @c shapes_ladder picks under @p capability_ for clouds of
+ *  @p scalar_, over node IDs of @p node_id_type_. */
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-struct vram_nvidia_index
-    : basic::vram_index<vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>, node_id_type_> {
-
-    using base_t = basic::vram_index<vram_nvidia_index, node_id_type_>;
+struct vram_nvidia_kits {
 
     /** Rungs of the kits' kernels: one, serving every cloud. */
     inline static constexpr std::size_t rungs_k = 1;
 
-    /** Pins the index to the storage allocator's device, scoring under @p kernel,
-     *  @c nk_kernel_chamfers_packed_k or @c nk_kernel_hausdorffs_packed_k. */
-    explicit vram_nvidia_index(nk_kernel_kind_t kernel,
-                               cuda_virtual_memory_allocator<byte_t> const& allocator = {}) noexcept
-        : base_t(kernel, allocator) {}
-
   private:
-    friend base_t;
+    template <typename, typename>
+    friend struct basic::vram_ragged_graph;
 
     /** The rung serving rows of @p longest bytes, or @c rungs_k when none does. Defined in
      *  @c vram_nvidia_metric.cuh, as are the members below reading the kit. */
@@ -76,9 +69,127 @@ struct vram_nvidia_index
         return kernels_[rung][static_cast<u32_t>(kernel)][gpu_rung_index(slots)];
     }
 
+    /** The kits read no parameters on the device. */
+    byte_t const* parameters_() const noexcept { return nullptr; }
+
     /** The fatbin on this device, and its kernels in @c vram_kernel_t order. */
     cuda_module_t module_;
     cuda_function_handle_t kernels_[rungs_k][static_cast<u32_t>(vram_kernel_t::count_k)][gpu_rungs_per_kernel_k] = {};
+};
+
+/** Similarity Search over 3D point clouds of @p scalar_ on NVIDIA GPUs, under Chamfer or Hausdorff
+ *  as the kernel kind it is built with names, scored by the kit @c shapes_ladder picks under
+ *  @p capability_: a block walks each query, a warp scoring each candidate. Node IDs are
+ *  @p node_id_type_, and @p kernels_type_ names the fatbin. It owns a @c basic::vram_ragged_graph
+ *  over its kits and forwards its verbs, types and constants, which that graph documents. */
+template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
+struct vram_nvidia_index {
+    using kits_t = vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>;
+    using graph_t = basic::vram_ragged_graph<node_id_type_, kits_t>;
+    using traversal_context_t = typename graph_t::traversal_context_t;
+    using node_id_t = typename graph_t::node_id_t;
+    using distance_t = typename graph_t::distance_t;
+    using small_size_t = typename graph_t::small_size_t;
+    using reserve_capacity_t = typename graph_t::reserve_capacity_t;
+    using insert_config_t = typename graph_t::insert_config_t;
+    using insert_result_t = typename graph_t::insert_result_t;
+    using search_config_t = typename graph_t::search_config_t;
+    using search_result_t = typename graph_t::search_result_t;
+    using refine_config_t = typename graph_t::refine_config_t;
+    using refine_result_t = typename graph_t::refine_result_t;
+    using health_result_t = typename graph_t::health_result_t;
+    using refine_plan_t = typename graph_t::refine_plan_t;
+    using save_plan_t = typename graph_t::save_plan_t;
+    using load_plan_t = typename graph_t::load_plan_t;
+
+    inline static constexpr std::size_t max_node_count_k = graph_t::max_node_count_k;
+    inline static constexpr synchronization_t synchronization_ceiling_k = graph_t::synchronization_ceiling_k;
+
+    /** Pins the index to the storage allocator's device, scoring under @p kernel,
+     *  @c nk_kernel_chamfers_packed_k or @c nk_kernel_hausdorffs_packed_k. */
+    explicit vram_nvidia_index(nk_kernel_kind_t kernel,
+                               cuda_virtual_memory_allocator<byte_t> const& allocator = {}) noexcept
+        : graph_(kernel, allocator) {}
+
+    std::size_t size() const noexcept { return graph_.size(); }
+    status_t status() const noexcept { return graph_.status(); }
+    std::size_t connectivity() const noexcept { return graph_.connectivity(); }
+    std::size_t capacity() const noexcept { return graph_.capacity(); }
+    std::size_t bytes_capacity() const noexcept { return graph_.bytes_capacity(); }
+    std::size_t memory_usage() const noexcept { return graph_.memory_usage(); }
+    cuda_device_specs_t const& device_specs() const noexcept { return graph_.device_specs(); }
+    nk_kernel_kind_t kernel() const noexcept { return graph_.kernel(); }
+    basic::vram_ragged_storage<node_id_t> storage() const noexcept { return graph_.storage(); }
+    expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return graph_.reserve(config); }
+
+    std::size_t traversal_memory_usage(byte_t const* values, std::span<std::size_t const> offsets,
+                                       insert_config_t config = {}) const noexcept {
+        return graph_.traversal_memory_usage(values, offsets, config);
+    }
+    expected<insert_result_t> insert(byte_t const* values, std::span<std::size_t const> offsets,
+                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
+        return graph_.insert(values, offsets, context, config);
+    }
+    std::size_t traversal_memory_usage(byte_t const* queries, std::span<std::size_t const> offsets,
+                                       search_config_t config) const noexcept {
+        return graph_.traversal_memory_usage(queries, offsets, config);
+    }
+    expected<search_result_t> search(byte_t const* queries, std::span<std::size_t const> offsets,
+                                     nk::matrix_span<node_id_t> result_ids,
+                                     nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                     search_config_t config = {}) noexcept {
+        return graph_.search(queries, offsets, result_ids, result_distances, context, config);
+    }
+
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t rows) const noexcept {
+        return graph_.traversal_memory_usage(config, rows);
+    }
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t rows, std::size_t receivers) const noexcept {
+        return graph_.traversal_memory_usage(config, rows, receivers);
+    }
+    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
+                                        refine_config_t config = {}) noexcept {
+        return graph_.plan_refine(nodes, context, config);
+    }
+    expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
+                                     refine_config_t config = {}) noexcept {
+        return graph_.refine(nodes, context, config);
+    }
+    expected<refine_plan_t> plan_absorb(std::span<vram_nvidia_index*> donors, traversal_context_t& context,
+                                        refine_config_t config = {}) noexcept {
+        return graph_.plan_absorb(donors, &vram_nvidia_index::graph_, context, config);
+    }
+    expected<refine_plan_t> plan_split(std::span<vram_nvidia_index*> receivers, traversal_context_t& context,
+                                       refine_config_t config = {}, u64_t seed = 0) noexcept {
+        return graph_.plan_split(receivers, &vram_nvidia_index::graph_, context, config, seed);
+    }
+    expected<health_result_t> health(traversal_context_t& context) noexcept { return graph_.health(context); }
+
+    expected<basic::columns_extents_t> columns_extents(traversal_context_t& context) noexcept {
+        return graph_.columns_extents(context);
+    }
+    template <typename key_type_>
+    expected<save_plan_t> plan_save(basic::columns<key_type_, node_id_t, byte_t, u64_t> columns,
+                                    traversal_context_t& context) noexcept {
+        return graph_.plan_save(columns, context);
+    }
+    template <typename key_type_>
+    status_t save(basic::columns<key_type_, node_id_t, byte_t, u64_t> columns, traversal_context_t& context) noexcept {
+        return graph_.save(columns, context);
+    }
+    template <typename key_type_>
+    expected<load_plan_t> plan_load(basic::columns<key_type_ const, node_id_t const, byte_t const, u64_t const> columns,
+                                    traversal_context_t& context) noexcept {
+        return graph_.plan_load(columns, context);
+    }
+    template <typename key_type_>
+    status_t load(basic::columns<key_type_ const, node_id_t const, byte_t const, u64_t const> columns,
+                  traversal_context_t& context) noexcept {
+        return graph_.load(columns, context);
+    }
+
+  private:
+    graph_t graph_;
 };
 
 } // namespace unum::usearch::shapes

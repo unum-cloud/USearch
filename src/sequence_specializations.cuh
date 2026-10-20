@@ -26,9 +26,9 @@
 #pragma region Sequence Variants
 
 /** An overlap distance is fixed point over the shared @c overlap_resolution_k. */
-template <sz_capability_t capability_, typename allocator_type_, typename cache_hints_type_>
+template <typename kit_type_, typename allocator_type_, typename cache_hints_type_>
 inline constexpr usearch_distance_t
-    distance_unit<us::sequence::overlap_metric<capability_, allocator_type_, cache_hints_type_>> =
+    distance_unit<us::sequence::overlap_metric<kit_type_, allocator_type_, cache_hints_type_>> =
         1.0 / us::sequence::overlap_resolution_k;
 
 /** Lowers one CPU class onto StringZilla's capability bits, which name backends rather than
@@ -83,11 +83,14 @@ struct sequence_geometry_t {
 template <sz_capability_t capability_, typename cache_hints_type_, typename callback_type_>
 decltype(auto) with_sequence_metric(usearch_sequence_metric_t metric, std::span<std::size_t const> window_widths,
                                     callback_type_&& callback) noexcept {
-    using bytes_t =
-        us::sequence::levenshtein_metric<capability_, sz_levenshtein_bytes_k, thread_allocator_t, cache_hints_type_>;
-    using runes_t =
-        us::sequence::levenshtein_metric<capability_, sz_levenshtein_runes_k, thread_allocator_t, cache_hints_type_>;
-    using overlap_t = us::sequence::overlap_metric<capability_, thread_allocator_t, cache_hints_type_>;
+    using bytes_t = us::sequence::levenshtein_metric<
+        typename us::sequence::levenshtein_ladder<sz_levenshtein_bytes_k, capability_>::kit_t, thread_allocator_t,
+        cache_hints_type_>;
+    using runes_t = us::sequence::levenshtein_metric<
+        typename us::sequence::levenshtein_ladder<sz_levenshtein_runes_k, capability_>::kit_t, thread_allocator_t,
+        cache_hints_type_>;
+    using overlap_t = us::sequence::overlap_metric<typename us::sequence::overlap_ladder<capability_>::kit_t,
+                                                   thread_allocator_t, cache_hints_type_>;
     auto levenshtein = [&]<typename metric_type_>(std::type_identity<metric_type_>) noexcept {
         return callback([](thread_allocator_t const& allocator, std::size_t staging) noexcept {
             metric_type_ made {allocator};
@@ -115,8 +118,9 @@ template <cpu_class_t cpu_class_>
 struct sequence_ram_variant {
     using executor_t = forkunion_executor_t;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
-    using index_t = us::sequence::ram_index<us::utilities::uuid_t, u32_t, dummy_waiter_t, standard_atomic_ref,
-                                            forkunion_allocator_t>;
+    using index_t = us::sequence::ram_index<us::utilities::uuid_t, u32_t, waiter_of<cpu_class_>,
+                                            atomic_ref_for_cpu_class<cpu_class_>::template type, forkunion_allocator_t,
+                                            cache_hints_t>;
     using value_t = typename index_t::value_t;
     using refine_plan_t = typename index_t::refine_plan_t;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
@@ -125,7 +129,8 @@ struct sequence_ram_variant {
     index_t index;
     sequence_geometry_t geometry;
 
-    explicit sequence_ram_variant(forkunion_allocator_t const& allocator) noexcept : index(allocator) {}
+    explicit sequence_ram_variant(forkunion_allocator_t const& allocator) noexcept
+        : index(allocator, machine_cache_line_bytes()) {}
 
     status_t reserve(usearch_sequence_reserve_t const& arguments) noexcept {
         return index.reserve(arguments.entries).status;
@@ -142,8 +147,7 @@ struct sequence_ram_variant {
         typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
         return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion});
     }
-    status_t refine(refine_plan_t& plan, refine_cursor_t& cursor, progress_ticks_t& ticks,
-                    executor_t& executor) noexcept;
+    status_t refine(refine_plan_t& plan, progress_ticks_t& ticks, executor_t& executor) noexcept;
     status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
@@ -179,19 +183,21 @@ expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::search(usearch
             return answer(chars_at(arguments.queries, row));
         };
         return search_entries(index, arguments.count, arguments.wanted, geometry.connectivity,
-                              arguments.expansion_factor, arguments.predicate, make_metric, query_of, landing, ticks,
-                              executor);
+                              arguments.expansion_factor, arguments.traversal, arguments.predicate, make_metric,
+                              query_of, landing, ticks, executor);
     };
     return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
                                                              with_metric);
 }
 
 template <cpu_class_t cpu_class_>
-status_t sequence_ram_variant<cpu_class_>::refine(refine_plan_t& plan, refine_cursor_t& cursor, progress_ticks_t& ticks,
+status_t sequence_ram_variant<cpu_class_>::refine(refine_plan_t& plan, progress_ticks_t& ticks,
                                                   executor_t& executor) noexcept {
     auto with_metric = [&](auto make_metric) noexcept {
-        return drive_refinement<index_t>(plan, cursor, make_metric, basic::keep_diverse_t {geometry.connectivity},
-                                         geometry.connectivity, ticks, executor);
+        auto [scratch, prepare_status] = prepare_refinement<index_t>(plan, geometry.connectivity, make_metric,
+                                                                     executor);
+        if (failed(prepare_status)) return prepare_status;
+        return drive_refinement(plan, scratch, basic::keep_diverse_t {geometry.connectivity}, ticks, executor);
     };
     return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
                                                              with_metric);
@@ -265,8 +271,8 @@ expected<traversal_telemetry_t> sequence_nvme_variant<cpu_class_>::search(usearc
         auto query_of = [&](std::size_t row, thread_allocator_t const&) noexcept {
             return expected<std::string_view> {chars_at(arguments.queries, row), status_t::success_k};
         };
-        return search_entries(index, arguments.count, arguments.wanted, arguments.expansion_factor, arguments.predicate,
-                              make_metric, query_of, landing, ticks, executor);
+        return search_entries(index, arguments.count, arguments.wanted, arguments.expansion_factor, arguments.traversal,
+                              arguments.predicate, make_metric, query_of, landing, ticks, executor);
     };
     return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
                                                              with_metric);

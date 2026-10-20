@@ -54,11 +54,11 @@ struct basic_handle {
         : variant(tag, placement) {}
 };
 
-/** The cursor over a modality's handle: a RAM variant's snapshot, one of @p cursor_types_, or the
- *  next row of an NVMe view, whose rows never change. */
-template <typename handle_type_, typename... cursor_types_>
+/** The cursor over a modality's handle: a RAM variant's snapshot, or the next row of an NVMe
+ *  view. */
+template <typename handle_type_>
 struct basic_cursor {
-    std::variant<std::monostate, cursor_types_..., std::size_t> cursor;
+    typename basic_cursors_of<typename handle_type_::variant_t>::type cursor;
 
     /** The handle the cursor was opened on, which every pull names again. */
     handle_type_* index = nullptr;
@@ -111,8 +111,10 @@ handle_type_* make_cpu_handle(typename handle_type_::traits_t::geometry_t& geome
     auto rung = [&]<typename variant_type_>(std::type_identity<variant_type_>) noexcept {
         if constexpr (std::is_same_v<typename variant_type_::executor_t, executor_type_>) {
             if (picked) return;
+            // The variant's waiter and atomic reference need the class's ForkUnion features too.
             if (variant_type_::cpu_class_k != cpu_class_t::serial_k &&
-                !numkong_admits(available, variant_type_::cpu_class_k))
+                !(numkong_admits(available, variant_type_::cpu_class_k) &&
+                  forkunion_admits<variant_type_::cpu_class_k>()))
                 return;
             if (!stores_scalar_of<variant_type_>(geometry)) return;
             picked = true;
@@ -330,9 +332,9 @@ void basic_clear(arguments_type_* arguments) noexcept {
 
 #pragma region Refinement
 
-/** The plan of a variant with the donors it lands: their variants, whose handles a call frees once
- *  landed, their indexes, which the plan nulls as it lands them, and where the calls stand. A
- *  variant declaring no plan, as an NVMe view, never mutates and refines nothing. */
+/** The plan of a variant, which also says where the calls stand, with the donors it lands: their
+ *  indexes, which the plan nulls as it lands them. A variant declaring no plan, as an NVMe view,
+ *  never mutates and refines nothing. */
 template <typename variant_type_>
 struct basic_refinement_of {
     using type = std::monostate;
@@ -341,10 +343,8 @@ template <typename variant_type_>
     requires requires { typename variant_type_::refine_plan_t; }
 struct basic_refinement_of<variant_type_> {
     struct type {
-        growing_buffer<variant_type_*, forkunion_allocator_t> donors;
         growing_buffer<typename variant_type_::index_t*, forkunion_allocator_t> landing;
         typename variant_type_::refine_plan_t plan;
-        refine_cursor_t cursor {};
     };
 };
 
@@ -382,9 +382,8 @@ std::optional<typename basic_refinement_of<variant_type_>::type> basic_open_refi
     using traits_t = typename handle_type_::traits_t;
     using refining_t = typename basic_refinement_of<variant_type_>::type;
     forkunion_allocator_t const allocator {no_memory_domain_k};
-    decltype(refining_t::donors) typed_donors {allocator};
     decltype(refining_t::landing) landing {allocator};
-    if (failed(typed_donors.reserve_exactly(count)) || failed(landing.reserve_exactly(count)))
+    if (failed(landing.reserve_exactly(count)))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the donors"), std::nullopt;
     for (std::size_t position = 0; position != count; ++position) {
         handle_type_* const donor = donors[position];
@@ -400,13 +399,12 @@ std::optional<typename basic_refinement_of<variant_type_>::type> basic_open_refi
                                    "A donor must share the index's residency, class and geometry"),
                    std::nullopt;
         finish_calls_using(donor);
-        typed_donors.push_back_reserved(typed);
         landing.push_back_reserved(&typed->index);
     }
     // The plan borrows the landing slots, whose storage moves along with the buffer.
     auto [plan, status] = variant.plan_refine(to_writable_span(landing), expansion);
     if (failed(status)) return propagate_error(status, outcome), std::nullopt;
-    return refining_t {std::move(typed_donors), std::move(landing), std::move(plan)};
+    return refining_t {std::move(landing), std::move(plan)};
 }
 
 /** Frees the handles of the donors @p refining landed, folding what their variants count into
@@ -415,8 +413,8 @@ template <typename handle_type_, typename variant_type_, typename refining_type_
 void basic_free_landed(variant_type_& variant, refining_type_& refining, handle_type_** donors) noexcept {
     for (std::size_t position = 0; position != refining.landing.size(); ++position) {
         if (refining.landing[position] || !donors[position]) continue;
-        if constexpr (requires { variant.absorbed(*refining.donors[position]); })
-            variant.absorbed(*refining.donors[position]);
+        if constexpr (requires { variant.absorbed(variant); })
+            variant.absorbed(*std::get_if<variant_type_>(&donors[position]->variant));
         delete std::exchange(donors[position], nullptr);
     }
 }
@@ -429,7 +427,7 @@ void basic_report_refined(basic::refine_result_t const& refined, arguments_type_
     if constexpr (requires { arguments.reachability; })
         if (arguments.reachability)
             *arguments.reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
-                                       refined.health.sweeps};
+                                       refined.health.sweeps, refined.health.back_sweeps};
     if constexpr (requires { arguments.visited; })
         if (arguments.visited) *arguments.visited = refined.visited_nodes;
 }
@@ -443,10 +441,8 @@ status_t basic_finish_refinement(variant_type_& variant, refining_type_& refinin
     if (plan.landing()) return status_t::success_k;
     // The re-selection a cancel left is skipped rather than finished.
     plan.stop();
-    if (plan.reselecting()) refining.cursor.taken = plan.steps().size();
     progress_ticks_t heal_alone {{}, 0};
-    if (status_t const healed = variant.refine(plan, refining.cursor, heal_alone, executor); failed(healed))
-        return healed;
+    if (status_t const healed = variant.refine(plan, heal_alone, executor); failed(healed)) return healed;
     auto const [refined, status] = plan.finish();
     if (succeeded(status)) basic_report_refined(refined, arguments);
     return status;
@@ -471,7 +467,7 @@ void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** 
                                               outcome);
         if (!refining) return;
         progress_ticks_t ticks {arguments->progress, refining->plan.audit.visible};
-        status_t const ran = variant.refine(refining->plan, refining->cursor, ticks, *executor);
+        status_t const ran = variant.refine(refining->plan, ticks, *executor);
         basic_free_landed(variant, *refining, donors);
         if (failed(ran) && ran != status_t::cancelled_k) return propagate_error(ran, outcome), void();
         // A stopped pass still heals, so its report stands beside the cancel.
@@ -568,7 +564,7 @@ void basic_refinement_next(arguments_type_* arguments) noexcept {
     if (arguments->stats) *arguments->stats = {};
     visit_refinement(*arguments, outcome, [&](auto& variant, auto& refining, auto& executor) noexcept {
         progress_ticks_t ticks {arguments->progress, refining.plan.audit.visible};
-        status_t const ran = variant.refine(refining.plan, refining.cursor, ticks, executor);
+        status_t const ran = variant.refine(refining.plan, ticks, executor);
         basic_free_landed(variant, refining, arguments->refinement->donors);
         // Running totals, so a cancelled or failed call still says how far the pass got.
         basic_report_refined(refining.plan.finish().value, *arguments);
@@ -668,8 +664,8 @@ void basic_search(arguments_type_* arguments) noexcept {
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if (!accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) return;
-            if (arguments->traversal == usearch_traversal_scan_k)
-                return propagate_error(usearch_status_unsupported_k, outcome, "No scan serves this modality yet"),
+            if (arguments->traversal == usearch_traversal_scan_k && device_of(variant) != host_device_k)
+                return propagate_error(usearch_status_unsupported_k, outcome, "No device scan serves this modality"),
                        void();
             // Matches land on host pages, which a device arena takes over and a host one keeps.
             bool const host_landing = arguments->arena && arguments->arena->device == host_device_k;

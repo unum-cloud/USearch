@@ -14,11 +14,11 @@
 #include <cstdlib> // `std::aligned_alloc`, `std::free` - the heap fallback of a domainless allocator
 
 #include <mutex>       // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
-#include <type_traits> // `std::remove_reference_t`, `std::true_type` - callback recovery & move propagation
+#include <type_traits> // `std::remove_reference_t`, `std::true_type`, `std::is_same_v` - callbacks, moves, hints
 #include <utility>     // `std::swap`, `std::move`, `std::exchange`
 
 #include <forkunion.h>         // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
-#include <forkunion/types.hpp> // `fu::spin_mutex_t` - the hold
+#include <forkunion/types.hpp> // `fu::spin_mutex_t` - the hold, `fu::is_cache_hints_functor` - the line tags
 
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the arenas' storage
 #include "usearch/utilities/types.hpp"       // `status_t`, `expected`
@@ -30,6 +30,16 @@ namespace unum::usearch::utilities {
  *  than including them. This is the first point both are visible, so it is where drift surfaces. */
 static_assert(default_alignment_k == fu::default_alignment_k,
               "USEARCH_DEFAULT_ALIGNMENT and FORKUNION_DEFAULT_ALIGNMENT disagree");
+
+/** ForkUnion's hints take ForkUnion's line tags; its standard hints alone emit nothing. */
+template <typename cache_hints_type_>
+    requires fu::is_cache_hints_functor<cache_hints_type_>::value
+struct cache_line_tags<cache_hints_type_> {
+    inline static constexpr bool prefetches_k = !std::is_same_v<cache_hints_type_, fu::standard_cache_hints_t>;
+    inline static constexpr fu::prefetch_line_t prefetch_k {};
+    inline static constexpr fu::demote_line_t demote_k {};
+    inline static constexpr fu::promote_line_t promote_k {};
+};
 
 #pragma region Placement
 

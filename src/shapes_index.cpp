@@ -294,9 +294,7 @@ struct usearch_shapes_index_handle_t : basic_handle<shapes_variant_t, shapes_tra
     using basic_handle::basic_handle;
 };
 
-struct usearch_shapes_cursor_handle_t
-    : basic_cursor<usearch_shapes_index_handle_t, ram_cursor_of<shapes_ram_variant<nk::f32_t, cpu_class_t::serial_k>>,
-                   ram_cursor_of<shapes_ram_variant<nk::f16_t, cpu_class_t::serial_k>>> {};
+struct usearch_shapes_cursor_handle_t : basic_cursor<usearch_shapes_index_handle_t> {};
 
 struct usearch_shapes_refinement_handle_t : basic_refinement<usearch_shapes_index_handle_t> {};
 

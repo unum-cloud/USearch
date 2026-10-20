@@ -17,6 +17,7 @@
 #include <array>       // `std::array` - the window widths, the handmade triples, a round's distances
 #include <memory>      // `std::unique_ptr`
 #include <new>         // `std::nothrow`
+#include <span>        // `std::span` - a batch of queries
 #include <string>      // `std::string` - a generated string before it is stored
 #include <string_view> // `std::string_view` - the symbols and the oracles' operands
 #include <vector>      // `std::vector` - generated values, templates, the oracle's rows
@@ -153,7 +154,7 @@ struct levenshtein_fixture {
     using index_t = sequence_index_t;
     using value_t = sequence_value_t;
     using allocator_t = typename index_t::allocator_t;
-    using metric_t = levenshtein_metric<sz_cap_any_k, symbol_>;
+    using metric_t = levenshtein_metric<typename levenshtein_ladder<symbol_, sz_cap_any_k>::kit_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
@@ -248,7 +249,7 @@ std::size_t check_levenshtein_kit(u64_t seed) {
             candidates.push_back(make_value(joined, allocator));
         }
 
-        levenshtein_metric<capability_, symbol_> metric;
+        levenshtein_metric<typename levenshtein_ladder<symbol_, capability_>::kit_t> metric;
         failures += expect_eq(metric.init(candidates_k), status_t::success_k);
         for (i64_t const radius : {unbounded_radius<i64_t>(), tight_radius_k}) {
             for (std::size_t const query : {std::size_t {0}, generated_k}) {
@@ -286,10 +287,23 @@ std::size_t check_overlap_kit(u64_t seed) {
         candidates.push_back(make_value("A", allocator));
         candidates.push_back(make_value("", allocator));
 
-        overlap_metric<capability_> metric;
+        overlap_metric<typename overlap_ladder<capability_>::kit_t> metric;
         failures += expect_eq(metric.init(candidates_k, sequence_window_widths_k), status_t::success_k);
         for (i64_t const radius : {unbounded_radius<i64_t>(), overlap_resolution_k / 2}) {
-            for (std::size_t const query : {std::size_t {0}, candidates_k - 1}) {
+            // A batch scores every query's row as that query alone would, and the empty query
+            // reopened right after it is prepared anew rather than taken for the batch.
+            std::array<std::string_view, 2> const batch {candidates[0], candidates[candidates_k - 1]};
+            metric.reset(std::span<std::string_view const>(batch));
+            for (sequence_value_t const& candidate : candidates)
+                failures += expect(metric.push(candidate) == metric_staging_t::staged_k);
+            std::array<i64_t, candidates_k * 2> batched;
+            metric.drain(batched, radius);
+            failures += expect_eq(metric.status(), status_t::success_k);
+            for (std::size_t slot = 0; slot != batched.size(); ++slot) {
+                i64_t const truth = overlap_oracle(batch[slot / candidates_k], candidates[slot % candidates_k]);
+                failures += truth <= radius ? expect_eq(batched[slot], truth) : expect(batched[slot] > radius);
+            }
+            for (std::size_t const query : {candidates_k - 1, std::size_t {0}}) {
                 metric.reset(candidates[query]);
                 for (sequence_value_t const& candidate : candidates)
                     failures += expect(metric.push(candidate) == metric_staging_t::staged_k);
@@ -312,7 +326,7 @@ std::size_t check_overlap_kit(u64_t seed) {
  *  directory: generated strings, the empty one, and one crossing a 4 KiB block. */
 std::size_t check_sequence_nvme(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
-    using metric_t = levenshtein_metric<sz_cap_any_k, sz_levenshtein_bytes_k, scratch_t>;
+    using metric_t = levenshtein_metric<levenshtein_ladder<sz_levenshtein_bytes_k, sz_cap_any_k>::kit_t, scratch_t>;
     using nvme_index_t = us::basic::nvme_index<codec_t, us::utilities::uuid_t, u32_t, i64_t, blocking_files_engine<>>;
     std::vector<std::string> texts;
     {
@@ -355,7 +369,7 @@ struct levenshtein_wide_fixture_t : levenshtein_bytes_fixture_t {
  *  the same file refuses it. */
 std::size_t check_sequence_nvme_node_ids(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
-    using metric_t = levenshtein_metric<sz_cap_any_k, sz_levenshtein_bytes_k, scratch_t>;
+    using metric_t = levenshtein_metric<levenshtein_ladder<sz_levenshtein_bytes_k, sz_cap_any_k>::kit_t, scratch_t>;
     using nvme_index_t = us::basic::nvme_index<codec_t, us::utilities::uuid_t, u64_t, i64_t, blocking_files_engine<>>;
     using mismatched_nvme_index_t =
         us::basic::nvme_index<codec_t, us::utilities::uuid_t, u32_t, i64_t, blocking_files_engine<>>;

@@ -21,7 +21,6 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <array>  // `std::array` - the query's three axes
 #include <limits> // `std::numeric_limits` - the distance a failed round reports
 #include <span>   // `std::span`
 
@@ -184,8 +183,8 @@ struct geospatial_ladder<caps_> {
 #pragma region Metric
 
 /**
- *  @brief The batched squared-chord metric: positions staged per round and scored in one 1×M kernel
- *      call, exact in 64-bit integers.
+ *  @brief The batched squared-chord metric: positions staged per round and scored in one N×M kernel
+ *      call over the N queries a reset opened, exact in 64-bit integers.
  *
  *  Transparent, so a round may open on a stored observation, a bare position, or a geodetic one,
  *  converted once here rather than by every caller. The round's query stays readable through
@@ -205,22 +204,30 @@ class chord_metric {
 
   private:
 
-    /** The round's query, in the stored form, and its three axes as the kernel reads them. */
+    /** The round's query, the first one of a batch, in the stored form. */
     earth_fixed_t query_ {};
-    std::array<i32_t, 3> query_coordinates_ {};
+
+    /** Every query's three axes as the kernel reads them, @b [queries,3]. */
+    growing_buffer<i32_t, allocator_t> query_coordinates_;
 
     /** The round's candidate positions, three axes each, in push order. */
     growing_buffer<i32_t, allocator_t> staged_;
 
-    /** The kernel's exact squares, one per staged candidate. */
+    /** The kernel's exact @b [queries,candidates] squares. */
     growing_buffer<nk_u64_t, allocator_t> squares_;
 
     /** Candidates the round holds, and the most it may. */
     std::size_t staged_count_ = 0;
     std::size_t staging_limit_ = 0;
 
+    /** The stored form of every query form a round opens on. */
+    static earth_fixed_t const& fixed_of_(earth_fixed_t const& query) noexcept { return query; }
+    static earth_fixed_t const& fixed_of_(earth_observation_t const& query) noexcept { return query.position; }
+    static earth_fixed_t fixed_of_(geodetic_t const& query) noexcept { return to_earth_fixed(query); }
+
   public:
-    explicit chord_metric(allocator_t const& allocator = {}) noexcept : staged_(allocator), squares_(allocator) {}
+    explicit chord_metric(allocator_t const& allocator = {}) noexcept
+        : query_coordinates_(allocator), staged_(allocator), squares_(allocator) {}
     chord_metric(chord_metric const&) = delete;
     chord_metric& operator=(chord_metric const&) = delete;
     chord_metric(chord_metric&&) noexcept = default;
@@ -233,6 +240,7 @@ class chord_metric {
      */
     status_t init(std::size_t staging_limit) noexcept {
         if (!staging_limit) return status_t::config_mismatch_k;
+        if (status_t const queried = query_coordinates_.reserve(3); failed(queried)) return queried;
         if (status_t const staged = staged_.resize_uninitialized(staging_limit * 3); failed(staged)) return staged;
         if (status_t const squared = squares_.resize_uninitialized(staging_limit); failed(squared)) return squared;
         staging_limit_ = staging_limit;
@@ -248,7 +256,8 @@ class chord_metric {
     /** Opens a round for a stored-form query, discarding whatever the previous round staged. */
     void reset(earth_fixed_t const& query) noexcept {
         query_ = query;
-        query_coordinates_ = {query.x_centimetres, query.y_centimetres, query.z_centimetres};
+        query_coordinates_.clear();
+        append_query_(query);
         staged_count_ = 0;
     }
 
@@ -257,6 +266,21 @@ class chord_metric {
 
     /** Opens a round for a geodetic query, converting it once. */
     void reset(geodetic_t const& query) noexcept { reset(to_earth_fixed(query)); }
+
+    /** Opens rounds scoring every query of @p queries at once, each converted once, so each
+     *  @ref drain writes @b [queries,candidates]; a refused growth leaves no query, and every
+     *  drain reports the largest distance. */
+    template <typename query_type_>
+        requires requires(query_type_ const& query) { fixed_of_(query); }
+    void reset(std::span<query_type_ const> queries) noexcept {
+        query_coordinates_.clear();
+        staged_count_ = 0;
+        if (failed(query_coordinates_.reserve(queries.size() * 3)) ||
+            failed(squares_.reserve(queries.size() * staging_limit_)))
+            return;
+        for (query_type_ const& query : queries) append_query_(fixed_of_(query));
+        if (!queries.empty()) query_ = fixed_of_(queries.front());
+    }
 
     /** Stages one candidate's position, or refuses once the round is full. */
     basic::metric_staging_t push(earth_observation_t const& candidate) noexcept {
@@ -269,15 +293,29 @@ class chord_metric {
         return basic::metric_staging_t::staged_k;
     }
 
-    /** Scores the round in one 1×M call and closes it; squared chords between Earth positions stay
-     *  below 2⁶³, and a failed round reports the largest distance. */
+    /** Scores the round in one N×M call and closes it, writing @b [queries,candidates]; squared
+     *  chords between Earth positions stay below 2⁶³, and a failed round reports the largest
+     *  distance. */
     void drain(std::span<i64_t> distances, i64_t) noexcept {
-        nk_status_t const scored = kit_t::sqeuclideans3d(query_coordinates_.data(), 1, staged_.data(), staged_count_,
-                                                         squares_.data(), sizeof(nk_u64_t) * staged_count_, nullptr);
+        std::size_t const queries = query_coordinates_.size() / 3;
+        nk_status_t const scored = queries * staged_count_ != distances.size()
+                                       ? nk_unexpected_dimensions_k
+                                       : kit_t::sqeuclideans3d(query_coordinates_.data(), queries, staged_.data(),
+                                                               staged_count_, squares_.data(),
+                                                               sizeof(nk_u64_t) * staged_count_, nullptr);
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
             distances[lane] = scored == nk_success_k ? static_cast<i64_t>(squares_[lane])
                                                      : (std::numeric_limits<i64_t>::max)();
         staged_count_ = 0;
+    }
+
+  private:
+
+    /** Appends @p query 's three axes, within the reserved queries. */
+    void append_query_(earth_fixed_t const& query) noexcept {
+        query_coordinates_.push_back_reserved(query.x_centimetres);
+        query_coordinates_.push_back_reserved(query.y_centimetres);
+        query_coordinates_.push_back_reserved(query.z_centimetres);
     }
 };
 

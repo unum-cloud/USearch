@@ -27,6 +27,12 @@ template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_levensht
                                                 sequence_nvidia_capabilities_k, sequence_nvidia_fatbin_t>;
 template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_overlap_k, u32_t,
                                                 sequence_nvidia_capabilities_k, sequence_nvidia_fatbin_t>;
+template struct us::sequence::vram_nvidia_kits<usearch_sequence_metric_levenshtein_bytes_k, u32_t,
+                                               sequence_nvidia_capabilities_k, sequence_nvidia_fatbin_t>;
+template struct us::sequence::vram_nvidia_kits<usearch_sequence_metric_levenshtein_utf8_k, u32_t,
+                                               sequence_nvidia_capabilities_k, sequence_nvidia_fatbin_t>;
+template struct us::sequence::vram_nvidia_kits<usearch_sequence_metric_overlap_k, u32_t, sequence_nvidia_capabilities_k,
+                                               sequence_nvidia_fatbin_t>;
 
 template __device__ void
 us::sequence::cuda_instantiate<sequence_nvidia_capabilities_k, usearch_sequence_metric_levenshtein_bytes_k, u32_t>();

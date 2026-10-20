@@ -94,7 +94,7 @@ static constexpr std::size_t vram_overlap_widths_k[] = {4, 8};
 template <usearch_sequence_metric_t metric_, sz_capability_t capability_>
 static auto make_sequence_metric(std::size_t staging, std::size_t& failures) {
     if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
-        overlap_metric<capability_> metric;
+        overlap_metric<typename overlap_ladder<capability_>::kit_t> metric;
         failures += expect_eq(metric.init(staging, vram_overlap_widths_k), status_t::success_k);
         return metric;
     }
@@ -102,7 +102,7 @@ static auto make_sequence_metric(std::size_t staging, std::size_t& failures) {
         constexpr sz_levenshtein_symbol_t symbol_k = metric_ == usearch_sequence_metric_levenshtein_utf8_k
                                                          ? sz_levenshtein_runes_k
                                                          : sz_levenshtein_bytes_k;
-        levenshtein_metric<capability_, symbol_k> metric;
+        levenshtein_metric<typename levenshtein_ladder<symbol_k, capability_>::kit_t> metric;
         failures += expect_eq(metric.init(staging), status_t::success_k);
         return metric;
     }

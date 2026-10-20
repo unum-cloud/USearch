@@ -149,27 +149,27 @@ struct shapes_ladder<nk::f32_t, caps_> {
 #pragma region Face
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::rung_serving_(
+std::size_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::rung_serving_(
     std::size_t longest) noexcept {
     using kit_t = typename shapes_ladder<scalar_, capability_>::kit_t;
     return kit_t::serves(longest) ? 0 : rungs_k;
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-u32_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::lanes_per_row_(std::size_t) noexcept {
+u32_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::lanes_per_row_(std::size_t) noexcept {
     using kit_t = typename shapes_ladder<scalar_, capability_>::kit_t;
     return kit_t::lanes_per_row_k;
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::span_bytes_(
+std::size_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::span_bytes_(
     byte_t const* data, std::size_t bytes) noexcept {
     using kit_t = typename shapes_ladder<scalar_, capability_>::kit_t;
     return kit_t::span_bytes(data, bytes);
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-expected<std::size_t> vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::saved_bytes_(
+expected<std::size_t> vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::saved_bytes_(
     bytes_view_t stored) noexcept {
     using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
     nk_size_t points = 0;
@@ -181,7 +181,7 @@ expected<std::size_t> vram_nvidia_index<scalar_, node_id_type_, capability_, ker
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::save_value_(
+status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::save_value_(
     bytes_view_t stored, bytes_span_t saved) noexcept {
     using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
     auto const [saved_bytes, saved_status] = saved_bytes_(stored);
@@ -193,7 +193,7 @@ status_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-expected<std::size_t> vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::stored_bytes_(
+expected<std::size_t> vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::stored_bytes_(
     bytes_view_t saved) noexcept {
     using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
     constexpr std::size_t point_bytes_k = 3 * sizeof(typename scalar_::raw_t);
@@ -205,7 +205,7 @@ expected<std::size_t> vram_nvidia_index<scalar_, node_id_type_, capability_, ker
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::load_value_(
+status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::load_value_(
     bytes_view_t saved, bytes_span_t stored) noexcept {
     using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
     constexpr std::size_t point_bytes_k = 3 * sizeof(typename scalar_::raw_t);
@@ -214,7 +214,7 @@ status_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_index<scalar_, node_id_type_, capability_, kernels_type_>::load_kernels_(int device) noexcept {
+status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::load_kernels_(int device) noexcept {
     auto [module, status] = cuda_module_t::load(device, kernels_type_::bytes());
     if (failed(status)) return status;
     module_ = std::move(module);

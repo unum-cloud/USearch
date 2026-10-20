@@ -15,10 +15,11 @@
  *
  *  A kit binds one ISA's engine: the @c init preparing a single query, and the one sweep scoring a
  *  whole round against it - @c distances for Levenshtein over one symbol, @c scores for overlap.
- *  @c levenshtein_ladder and @c overlap_ladder pick the widest kit this build compiled in under the
- *  requested capability mask, at compile time, so nothing tests a capability at run time. Each
- *  engine draws its blocks from the metric's own arena, which @c reset rewinds, so after the widest
- *  query and the largest round seen nothing reaches the metric's allocator again.
+ *  @c levenshtein_ladder and @c overlap_ladder pick the widest kit this build compiled in under a
+ *  capability mask, at compile time; @c src/ climbs them once per CPU class and hands each metric
+ *  the kit it picked, so nothing tests a capability at run time. Each engine draws its blocks from
+ *  the metric's own arena, which @c reset rewinds, so after the widest query and the largest round
+ *  seen nothing reaches the metric's allocator again.
  *
  *  @section sequence_ram_metric_levenshtein Levenshtein
  *
@@ -42,9 +43,10 @@
 #include <cstdint> // `std::int64_t`
 #include <cstring> // `std::memcpy` - the bytes a prepared engine holds
 
-#include <limits> // `std::numeric_limits` - the distance a failed round reports
-#include <memory> // `std::allocator`
-#include <span>   // `std::span`
+#include <concepts> // `std::convertible_to` - the queries a batched round takes
+#include <limits>   // `std::numeric_limits` - the distance a failed round reports
+#include <memory>   // `std::allocator`
+#include <span>     // `std::span`
 
 #include <forkunion/types.hpp> // `fu::standard_cache_hints_t`, `fu::prefetch_line_k` - the candidates' prefetches
 
@@ -368,18 +370,17 @@ struct overlap_ladder<caps_> {
  *  staging, and the sweep's distances; nothing reaches the allocator on the scoring path once
  *  @c init sized the round and the arena has held the widest query and round seen.
  *
- *  @tparam capability_ The admitted ISA backends as a capability mask; the widest kit this build compiled in
- *      among them is picked.
- *  @tparam symbol_ What one edit replaces: a byte, or a UTF-8 rune.
+ *  @tparam kit_type_ The engine of one ISA backend, as @c levenshtein_ladder picks it; its
+ *      @c symbol_k says what one edit replaces: a byte, or a UTF-8 rune.
  *  @tparam allocator_type_ places every buffer, one set per metric.
  *  @tparam cache_hints_type_ prefetches a staged candidate's bytes; ForkUnion's no-op policy by
  *      default.
  */
-template <sz_capability_t capability_ = sz_cap_any_k, sz_levenshtein_symbol_t symbol_ = sz_levenshtein_bytes_k,
+template <typename kit_type_ = typename levenshtein_ladder<sz_levenshtein_bytes_k, sz_cap_any_k>::kit_t,
           typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = fu::standard_cache_hints_t>
 class levenshtein_metric {
   public:
-    using kit_t = typename levenshtein_ladder<symbol_, capability_>::kit_t;
+    using kit_t = kit_type_;
     using allocator_t = allocator_type_;
     using is_transparent = void;
 
@@ -400,13 +401,16 @@ class levenshtein_metric {
      *  engine; grows to the longest query seen. */
     growing_buffer<char, allocator_t> prepared_;
 
-    /** The sweep's distances by push slot, as wide as the staging. */
+    /** The views a batched @ref reset prepares the engine from. */
+    growing_buffer<sz_string_view_t, allocator_t> queries_;
+
+    /** The sweep's @b [queries,candidates] distances, a query's row as wide as the staging. */
     growing_buffer<sz_size_t, allocator_t> swept_;
     status_t last_status_ = status_t::uninitialized_k;
 
   public:
     levenshtein_metric(allocator_t const& allocator = {}) noexcept
-        : arena_(allocator), staged_(allocator), prepared_(allocator), swept_(allocator) {}
+        : arena_(allocator), staged_(allocator), prepared_(allocator), queries_(allocator), swept_(allocator) {}
     levenshtein_metric(levenshtein_metric const&) = delete;
     levenshtein_metric& operator=(levenshtein_metric const&) = delete;
     levenshtein_metric(levenshtein_metric&&) noexcept = default;
@@ -433,7 +437,8 @@ class levenshtein_metric {
      *  discarding whatever the previous round staged. */
     void reset(sz::string_view_t query) noexcept {
         staged_.clear();
-        if (engine_.count && succeeded(last_status_) && to_string_view(prepared_) == to_string_view(query)) return;
+        // A batch's engine never matches, though its cleared bytes equal an empty query's.
+        if (engine_.count == 1 && succeeded(last_status_) && to_string_view(prepared_) == to_string_view(query)) return;
         engine_ = sz_levenshtein_engine_t {};
         arena_.clear();
         // Grow-only, so a thread's arena keeps one block per doubling rather than one per query.
@@ -444,14 +449,25 @@ class levenshtein_metric {
         if (!query.empty()) std::memcpy(prepared_.data(), query.data(), query.size());
         // An empty query prepares as one row of no symbols, scoring every candidate's own length.
         sz_string_view_t const view = as_string_view(query);
-        sz_strings_view_t queries;
-        sz_strings_from_string_views(&view, 1, &queries);
-        sz_allocator_t allocator = engine_allocator(arena_);
-        sz_status_t const prepared = kit_t::init(&engine_, &queries, kit_t::symbol_k, &allocator, nullptr);
-        if (prepared == sz_success_k) return;
+        prepare_(std::span<sz_string_view_t const>(&view, 1));
+    }
+
+    /** Opens rounds scoring every query of @p queries at once, all prepared into one engine, so
+     *  each @ref drain writes @b [queries,candidates]; a batch of one is a single query. */
+    template <typename query_type_>
+        requires std::convertible_to<query_type_ const&, sz::string_view_t>
+    void reset(std::span<query_type_ const> queries) noexcept {
+        if (queries.size() == 1) return reset(sz::string_view_t {queries.front()});
+        staged_.clear();
         engine_ = sz_levenshtein_engine_t {};
+        arena_.clear();
         prepared_.clear();
-        last_status_ = prepared == sz_bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k;
+        queries_.clear();
+        last_status_ = queries_.reserve(queries.size());
+        if (succeeded(last_status_)) last_status_ = swept_.reserve(queries.size() * staged_.capacity());
+        if (failed(last_status_)) return;
+        for (query_type_ const& query : queries) queries_.push_back_reserved(as_string_view(query));
+        prepare_(to_span(queries_));
     }
 
     /** @brief Stages one candidate, or refuses once the round is full. */
@@ -470,7 +486,8 @@ class levenshtein_metric {
      *  lengths alone put it past the radius. A failed round reports the furthest distance, so a
      *  full pool rejects it and an unfilled pool admits it last; @ref status is the only signal.
      *
-     *  @param[out] distances One slot per staged candidate, in push order.
+     *  @param[out] distances One slot per staged candidate, in push order, for every prepared
+     *      query, query-major.
      *  @param[in] radius The furthest distance the caller still tells apart.
      */
     void drain(std::span<i64_t> distances, i64_t radius) noexcept {
@@ -485,12 +502,24 @@ class levenshtein_metric {
         bool const scored = succeeded(last_status_) && kit_t::distances(&engine_, &candidates, nullptr, nullptr, bound,
                                                                         swept_.data(), count, nullptr) == sz_success_k;
         if (!scored && succeeded(last_status_)) last_status_ = status_t::bad_alloc_k;
-        for (std::size_t slot = 0; slot != count; ++slot)
+        for (std::size_t slot = 0; slot != distances.size(); ++slot)
             distances[slot] = scored ? static_cast<i64_t>(swept_[slot]) : (std::numeric_limits<i64_t>::max)();
         staged_.clear();
     }
 
   private:
+
+    /** Prepares the engine from @p views, leaving it empty and the status failed on a refusal. */
+    void prepare_(std::span<sz_string_view_t const> views) noexcept {
+        sz_strings_view_t queries;
+        sz_strings_from_string_views(views.data(), views.size(), &queries);
+        sz_allocator_t allocator = engine_allocator(arena_);
+        sz_status_t const prepared = kit_t::init(&engine_, &queries, kit_t::symbol_k, &allocator, nullptr);
+        if (prepared == sz_success_k) return;
+        engine_ = sz_levenshtein_engine_t {};
+        prepared_.clear();
+        last_status_ = prepared == sz_bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k;
+    }
 
     /** Starts the misses on every line of @p value, which the drain reads. */
     static void prefetch_(sz::string_view_t value) noexcept {
@@ -529,17 +558,16 @@ constexpr u64_t overlap_distance(u64_t longer, u64_t matches) noexcept {
  *  in fixed point over @ref overlap_resolution_k: zero where the windows coincide at every width,
  *  and @ref overlap_resolution_k where they share none.
  *
- *  @tparam capability_ The admitted ISA backends as a capability mask; the widest kit this build compiled in
- *      among them is picked.
+ *  @tparam kit_type_ The engine of one ISA backend, as @c overlap_ladder picks it.
  *  @tparam allocator_type_ places every buffer, one set per metric.
  *  @tparam cache_hints_type_ prefetches a staged candidate's bytes; ForkUnion's no-op policy by
  *      default.
  */
-template <sz_capability_t capability_ = sz_cap_any_k, typename allocator_type_ = std::allocator<byte_t>,
-          typename cache_hints_type_ = fu::standard_cache_hints_t>
+template <typename kit_type_ = typename overlap_ladder<sz_cap_any_k>::kit_t,
+          typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = fu::standard_cache_hints_t>
 class overlap_metric {
   public:
-    using kit_t = typename overlap_ladder<capability_>::kit_t;
+    using kit_t = kit_type_;
     using allocator_t = allocator_type_;
     using is_transparent = void;
 
@@ -560,11 +588,15 @@ class overlap_metric {
      *  engine; grows to the longest query seen. */
     growing_buffer<char, allocator_t> prepared_;
 
+    /** The queries @c engine_ holds, whose lengths every distance reads: one view of
+     *  @c prepared_, or a batched @ref reset's views. */
+    growing_buffer<sz_string_view_t, allocator_t> queries_;
+
     /** The widths windows are taken at, all sharing one B-tree. */
     growing_buffer<sz_size_t, allocator_t> window_widths_;
 
-    /** The round's @b [candidates, widths] match counts, a staged candidate's row by its push
-     *  slot. */
+    /** The round's @b [queries,candidates,widths] match counts, a staged candidate's row by its
+     *  push slot. */
     growing_buffer<sz_u32_t, allocator_t> matches_;
 
     /** How the last @ref init, @ref reset or @ref drain fared. */
@@ -572,7 +604,8 @@ class overlap_metric {
 
   public:
     overlap_metric(allocator_t const& allocator = {}) noexcept
-        : arena_(allocator), staged_(allocator), prepared_(allocator), window_widths_(allocator), matches_(allocator) {}
+        : arena_(allocator), staged_(allocator), prepared_(allocator), queries_(allocator), window_widths_(allocator),
+          matches_(allocator) {}
     overlap_metric(overlap_metric const&) = delete;
     overlap_metric& operator=(overlap_metric const&) = delete;
     overlap_metric(overlap_metric&&) noexcept = default;
@@ -611,25 +644,40 @@ class overlap_metric {
      *  discarding whatever the previous round staged. */
     void reset(sz::string_view_t query) noexcept {
         staged_.clear();
-        if (engine_.count && succeeded(last_status_) && to_string_view(prepared_) == to_string_view(query)) return;
+        // A batch's engine never matches, though its cleared bytes equal an empty query's.
+        if (engine_.count == 1 && succeeded(last_status_) && to_string_view(prepared_) == to_string_view(query)) return;
         engine_ = sz_overlap_engine_t {};
         arena_.clear();
         // Grow-only, so a thread's arena keeps one block per doubling rather than one per query.
         prepared_.clear();
+        queries_.clear();
         last_status_ = prepared_.reserve(query.size());
+        if (succeeded(last_status_)) last_status_ = queries_.reserve(1);
         if (failed(last_status_)) return;
         prepared_.extend_uninitialized(query.size());
         if (!query.empty()) std::memcpy(prepared_.data(), query.data(), query.size());
-        sz_string_view_t const view = as_string_view(query);
-        sz_strings_view_t queries;
-        sz_strings_from_string_views(&view, 1, &queries);
-        sz_allocator_t allocator = engine_allocator(arena_);
-        sz_status_t const prepared = kit_t::init(&engine_, &queries, window_widths_.data(), window_widths_.size(), 0,
-                                                 &allocator, nullptr);
-        if (prepared == sz_success_k) return;
+        queries_.push_back_reserved(as_string_view(to_string_view(prepared_)));
+        prepare_();
+    }
+
+    /** Opens rounds scoring every query of @p queries at once, all hashed into one B-tree, so each
+     *  @ref drain writes @b [queries,candidates]; the views stay borrowed until the next reset, and
+     *  a batch of one is a single query. */
+    template <typename query_type_>
+        requires std::convertible_to<query_type_ const&, sz::string_view_t>
+    void reset(std::span<query_type_ const> queries) noexcept {
+        if (queries.size() == 1) return reset(sz::string_view_t {queries.front()});
+        staged_.clear();
         engine_ = sz_overlap_engine_t {};
+        arena_.clear();
         prepared_.clear();
-        last_status_ = prepared == sz_bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k;
+        queries_.clear();
+        last_status_ = queries_.reserve(queries.size());
+        if (succeeded(last_status_))
+            last_status_ = matches_.reserve(queries.size() * staged_.capacity() * window_widths_.size());
+        if (failed(last_status_)) return;
+        for (query_type_ const& query : queries) queries_.push_back_reserved(as_string_view(query));
+        prepare_();
     }
 
     /** Stages one candidate, or refuses once the round is full. */
@@ -650,7 +698,8 @@ class overlap_metric {
      *  distance, so a full pool rejects it and an unfilled pool admits it last; @ref status is the
      *  only signal.
      *
-     *  @param[out] distances One slot per staged candidate, in push order.
+     *  @param[out] distances One slot per staged candidate, in push order, for every prepared
+     *      query, query-major.
      *  @param[in] radius The furthest distance the caller still tells apart.
      */
     void drain(std::span<i64_t> distances, i64_t radius) noexcept {
@@ -663,13 +712,28 @@ class overlap_metric {
         bool const scored = succeeded(last_status_) && kit_t::scores(&engine_, &candidates, share, matches_.data(),
                                                                      count * widths, widths, nullptr) == sz_success_k;
         if (!scored && succeeded(last_status_)) last_status_ = status_t::bad_alloc_k;
-        for (std::size_t slot = 0; slot != count; ++slot)
-            distances[slot] = scored ? distance_(staged_[slot].length, matches_.data() + slot * widths)
+        for (std::size_t slot = 0; slot != distances.size(); ++slot)
+            distances[slot] = scored ? distance_(queries_[slot / count].length, staged_[slot % count].length,
+                                                 matches_.data() + slot * widths)
                                      : (std::numeric_limits<i64_t>::max)();
         staged_.clear();
     }
 
   private:
+
+    /** Hashes @c queries_ into the engine, leaving it empty and the status failed on a refusal. */
+    void prepare_() noexcept {
+        sz_strings_view_t queries;
+        sz_strings_from_string_views(queries_.data(), queries_.size(), &queries);
+        sz_allocator_t allocator = engine_allocator(arena_);
+        sz_status_t const prepared = kit_t::init(&engine_, &queries, window_widths_.data(), window_widths_.size(), 0,
+                                                 &allocator, nullptr);
+        if (prepared == sz_success_k) return;
+        engine_ = sz_overlap_engine_t {};
+        prepared_.clear();
+        queries_.clear();
+        last_status_ = prepared == sz_bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k;
+    }
 
     /** Starts the misses on every line of @p value, which the drain reads. */
     static void prefetch_(sz::string_view_t value) noexcept {
@@ -685,10 +749,9 @@ class overlap_metric {
         return std::nextafter(static_cast<sz_f32_t>(share), 1.0f);
     }
 
-    /** One candidate's distance off its @p matches: the misses over whichever side has more windows
-     *  at every width, summed, scaled to @ref overlap_resolution_k. */
-    i64_t distance_(std::size_t length, sz_u32_t const* matches) const noexcept {
-        std::size_t const query_length = prepared_.size();
+    /** One pair's distance off its @p matches: the misses over whichever side has more windows at
+     *  every width, summed, scaled to @ref overlap_resolution_k. */
+    i64_t distance_(std::size_t query_length, std::size_t length, sz_u32_t const* matches) const noexcept {
         u64_t longer = 0, matched = 0;
         for (std::size_t index = 0; index != window_widths_.size(); ++index) {
             std::size_t const width = window_widths_[index];

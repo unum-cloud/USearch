@@ -184,26 +184,26 @@ struct geospatial_ladder<caps_> {
 #pragma region Face
 
 template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_index<node_id_type_, capability_, kernels_type_>::rung_serving_(std::size_t longest) noexcept {
+std::size_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::rung_serving_(std::size_t longest) noexcept {
     using kit_t = typename geospatial_ladder<capability_>::kit_t;
     return kit_t::serves(longest) ? 0 : rungs_k;
 }
 
 template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-u32_t vram_nvidia_index<node_id_type_, capability_, kernels_type_>::lanes_per_row_(std::size_t) noexcept {
+u32_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::lanes_per_row_(std::size_t) noexcept {
     using kit_t = typename geospatial_ladder<capability_>::kit_t;
     return kit_t::lanes_per_row_k;
 }
 
 template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_index<node_id_type_, capability_, kernels_type_>::span_bytes_(byte_t const* data,
-                                                                                      std::size_t bytes) noexcept {
+std::size_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::span_bytes_(byte_t const* data,
+                                                                                     std::size_t bytes) noexcept {
     using kit_t = typename geospatial_ladder<capability_>::kit_t;
     return kit_t::span_bytes(data, bytes);
 }
 
 template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_index<node_id_type_, capability_, kernels_type_>::load_kernels_(int device) noexcept {
+status_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::load_kernels_(int device) noexcept {
     auto [module, status] = cuda_module_t::load(device, kernels_type_::bytes());
     if (failed(status)) return status;
     module_ = std::move(module);

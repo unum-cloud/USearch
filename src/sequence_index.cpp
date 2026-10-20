@@ -275,8 +275,7 @@ struct usearch_sequence_index_handle_t : basic_handle<sequence_variant_t, sequen
     using basic_handle::basic_handle;
 };
 
-struct usearch_sequence_cursor_handle_t
-    : basic_cursor<usearch_sequence_index_handle_t, ram_cursor_of<sequence_ram_variant<cpu_class_t::serial_k>>> {};
+struct usearch_sequence_cursor_handle_t : basic_cursor<usearch_sequence_index_handle_t> {};
 
 struct usearch_sequence_refinement_handle_t : basic_refinement<usearch_sequence_index_handle_t> {};
 

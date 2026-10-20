@@ -209,7 +209,8 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
             1.0 / sequence::overlap_resolution_k);
     else if (metric == usearch_sequence_metric_levenshtein_utf8_k)
         exit_code = run_with(
-            std::type_identity<sequence::levenshtein_metric<sz_cap_any_k, sz_levenshtein_runes_k>> {},
+            std::type_identity<sequence::levenshtein_metric<
+                sequence::levenshtein_ladder<sz_levenshtein_runes_k, sz_cap_any_k>::kit_t>> {},
             [](auto& oracle) { return oracle.init(oracle_round_k); }, 1);
     else
         exit_code = run_with(

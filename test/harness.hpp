@@ -94,6 +94,62 @@ inline std::size_t report(char const* name, char const* skip_reason) {
     return 0;
 }
 
+/** A per-item test filter in the quad shape the engines ask, each item answered on its own. */
+template <typename per_item_type_>
+auto quad_predicate(per_item_type_ per_item) noexcept {
+    return [per_item]<typename item_type_, std::size_t extent_>(std::span<item_type_ const, extent_> items,
+                                                                std::span<admission_t, extent_> admissions) noexcept {
+        for (std::size_t lane = 0; lane != items.size(); ++lane) admissions[lane] = per_item(items[lane]);
+    };
+}
+
+/** A per-item test filter in the aggregating shape: it gathers every item an engine pushes beside
+ *  its payload and answers them all at the drain. */
+template <typename per_item_type_, typename item_type_, typename payload_type_>
+struct gathering_predicate {
+    per_item_type_ per_item;
+    std::vector<item_type_> items;
+    std::vector<payload_type_> payloads;
+
+    status_t reserve(std::size_t capacity) noexcept {
+        items.reserve(capacity);
+        payloads.reserve(capacity);
+        return status_t::success_k;
+    }
+
+    template <std::size_t extent_>
+    void push(std::span<item_type_ const, extent_> asked, std::span<payload_type_ const, extent_> carried) noexcept {
+        items.insert(items.end(), asked.begin(), asked.end());
+        payloads.insert(payloads.end(), carried.begin(), carried.end());
+    }
+
+    template <typename on_admitted_type_>
+    void drain(on_admitted_type_&& on_admitted) noexcept {
+        for (std::size_t position = 0; position != items.size(); ++position)
+            if (per_item(items[position]) == admission_t::admit_k) on_admitted(payloads[position]);
+        items.clear();
+        payloads.clear();
+    }
+};
+
+/** One @ref gathering_predicate per executor thread, the family an engine driving its own threads
+ *  hands each thread its own of. */
+template <typename per_item_type_, typename item_type_, typename payload_type_>
+struct gathering_predicates {
+    using thread_predicate_t = gathering_predicate<per_item_type_, item_type_, payload_type_>;
+    std::vector<thread_predicate_t> threads;
+
+    thread_predicate_t& of_thread(std::size_t thread) noexcept { return threads[thread]; }
+};
+
+/** A @ref gathering_predicates of @p threads, each gathering @p item_type_ beside @p payload_type_
+ *  and admitting what @p per_item admits. */
+template <typename item_type_, typename payload_type_, typename per_item_type_>
+gathering_predicates<per_item_type_, item_type_, payload_type_> gathering_per_thread(per_item_type_ per_item,
+                                                                                     std::size_t threads) {
+    return {std::vector(threads, gathering_predicate<per_item_type_, item_type_, payload_type_> {per_item, {}, {}})};
+}
+
 #pragma region Settings
 
 /** The text of the environment variable @p name, or nothing when it is unset or empty. */

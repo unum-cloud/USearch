@@ -10,6 +10,7 @@
 #include <cstdint> // `std::uint32_t`, `std::uint64_t`
 #include <cstring> // `std::memmove`, `std::memcmp`, `std::memcpy`
 
+#include <array>       // `std::array` - a quad's keys and admissions
 #include <atomic>      // `std::atomic`
 #include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words, `std::bit_width` - the bijection's span
 #include <concepts>    // `std::convertible_to` - the string-view conversion's constraint
@@ -19,7 +20,7 @@
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::type_identity_t`, `std::conditional_t` - the kit cascades
-#include <thread>      // `std::this_thread::yield`
+#include <utility>     // `std::make_index_sequence` - a round's tail at its static extent
 
 #include "usearch/types.h" // `usearch_status_t`, so the C++ mirror cannot drift from the ABI
 
@@ -818,11 +819,14 @@ struct health_result_t {
      *  counted. */
     std::size_t audited_nodes = 0;
 
-    /** Of those, the nodes forward-reachable from the landmark seeds - the searcher's view. */
+    /** Of those, the nodes a search reaches from its entry points - the searcher's view. */
     std::size_t reachable_nodes = 0;
 
-    /** Level-synchronous sweeps to convergence - a diameter proxy. */
+    /** Level-synchronous sweeps to convergence. */
     std::size_t sweeps = 0;
+
+    /** Levels the sweep back toward the entry point took, where an audit sweeps both ways. */
+    std::size_t back_sweeps = 0;
 };
 
 /** Folds another shard's audit in: populations add, and the depth is the deepest shard's, since a
@@ -831,6 +835,7 @@ inline health_result_t& operator+=(health_result_t& into, health_result_t const&
     into.audited_nodes += other.audited_nodes;
     into.reachable_nodes += other.reachable_nodes;
     into.sweeps = max_of(into.sweeps, other.sweeps);
+    into.back_sweeps = max_of(into.back_sweeps, other.back_sweeps);
     return into;
 }
 
@@ -1013,9 +1018,6 @@ std::size_t merge_search_results(std::span<entry_type_ const> results, keys_of_i
     return merged_count;
 }
 
-/** Tag: an uncapped monitored wait - the watched word is the only wake source. */
-struct wait_uncapped_t {};
-
 /** Tag: a capped monitored wait - re-checks on its own after a bounded pause. */
 struct wait_capped_t {};
 
@@ -1023,11 +1025,11 @@ struct wait_capped_t {};
  *  @brief Portable spin-wait baseline with the same call shape as ForkUnion's hardware wait
  *      monitors, like @c fu::x86_tpause_t, @c fu::arm64_wfet_t, and @c fu::risc5_wrs_t.
  *
- *  Ignores the watched word and simply yields the timeslice - correctness never depends on the
- *  waiter, only latency and power do. The first overload watches a @c std::atomic object; the
- *  second watches an in-place word owned through @c std::atomic_ref, like the slot-0 locks living
- *  inside neighbor rows. The waiting bound (capped or uncapped) arrives as an arbitrary tag type,
- *  so this header stays independent of ForkUnion.
+ *  Ignores the watched word and returns at once, so the loop re-checks it - correctness never
+ *  depends on the waiter, only latency and power do. The first overload watches a @c std::atomic
+ *  object; the second watches an in-place word owned through @c std::atomic_ref, like the slot-0
+ *  locks living inside neighbor rows. The waiting bound (capped or uncapped) arrives as an
+ *  arbitrary tag type, so this header stays independent of ForkUnion.
  *
  *  The pointer overload exists because of pre-C++26 STL limitations: @c std::atomic_ref cannot
  *  bind const-qualified objects until P3323, @c std::atomic::wait offers no timed variant, and
@@ -1038,25 +1040,116 @@ struct wait_capped_t {};
 struct dummy_waiter_t {
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
     void operator()(std::atomic<value_type_> const&, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
-        std::this_thread::yield();
     }
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
-    void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
-        std::this_thread::yield();
+    void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {}
+};
+
+/** The compiled-out cache hints, the default everywhere: a prefetcher over them hints nothing. */
+struct dummy_cache_hints_t {};
+
+/** The line tags a cache-hints type takes, and whether it emits any hint; the ForkUnion bridge
+ *  specializes it for ForkUnion's hints. */
+template <typename cache_hints_type_>
+struct cache_line_tags;
+
+template <>
+struct cache_line_tags<dummy_cache_hints_t> {
+    inline static constexpr bool prefetches_k = false;
+};
+
+/**
+ *  @brief Streams whole objects toward the core or away from it through @p cache_hints_type_, a
+ *      line at a time.
+ *
+ *  Engines build it from the raw hints @c src/ picks and the line bytes it reads once per machine.
+ *  Over hints that emit nothing, @ref prefetches_k is false, so a walk skips the loads that only
+ *  fed it.
+ */
+template <typename cache_hints_type_>
+struct object_prefetcher {
+    using tags_t = cache_line_tags<cache_hints_type_>;
+    inline static constexpr bool prefetches_k = tags_t::prefetches_k;
+
+    std::size_t line_bytes = default_alignment_k;
+
+    /** Pulls @p bytes from @p address into this core's L2 with read intent. */
+    void prefetch(void const* address, std::size_t bytes) const noexcept {
+        if constexpr (prefetches_k) hint_(address, bytes, tags_t::prefetch_k);
+    }
+
+    /** Pushes @p bytes from @p address away from this core, toward the last-level cache. */
+    void demote(void const* address, std::size_t bytes) const noexcept {
+        if constexpr (prefetches_k) hint_(address, bytes, tags_t::demote_k);
+    }
+
+    /** Pulls @p bytes from @p address toward this core with write intent. */
+    void promote(void const* address, std::size_t bytes) const noexcept {
+        if constexpr (prefetches_k) hint_(address, bytes, tags_t::promote_k);
+    }
+
+  private:
+    template <typename tag_type_>
+    void hint_(void const* address, std::size_t bytes, tag_type_ tag) const noexcept {
+        for (std::size_t offset = 0; offset < bytes; offset += line_bytes)
+            cache_hints_type_ {}(static_cast<byte_t const*>(address) + offset, tag);
     }
 };
 
 /**
- *  @brief The standard's @c std::atomic_ref, extended to bind a const word for loads - the one place a const reader of
- *      a plain synchronization word casts its constness away, so no owner has to declare that word @c mutable.
+ *  @brief The standard's @c std::atomic_ref, extended to bind a const word for loads - the one
+ *      place a const reader of a plain synchronization word casts its constness away, so no owner
+ *      has to declare that word @c mutable.
  *
- *  The standard binds const words only from C++26 on, per P3323; ForkUnion's references already do, and this is the
- *  analog for code that must build on the standard library alone. A const word only ever loads.
+ *  The standard binds const words only from C++26 on, per P3323; ForkUnion's references already
+ *  do, and this is the analog for code that must build on the standard library alone. A const word
+ *  only ever loads. The reference is held as a member, with every named verb forwarded.
  */
 template <typename value_type_>
-struct standard_atomic_ref : std::atomic_ref<value_type_> {
-    using std::atomic_ref<value_type_>::atomic_ref;
-    using std::atomic_ref<value_type_>::operator=;
+struct standard_atomic_ref {
+    explicit standard_atomic_ref(value_type_& word) noexcept : word_(word) {}
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept { return word_.load(order); }
+    void store(value_type_ value, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        word_.store(value, order);
+    }
+    value_type_ exchange(value_type_ value, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.exchange(value, order);
+    }
+    bool compare_exchange_weak(value_type_& expected, value_type_ desired,
+                               std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.compare_exchange_weak(expected, desired, order);
+    }
+    bool compare_exchange_weak(value_type_& expected, value_type_ desired, std::memory_order success,
+                               std::memory_order failure) const noexcept {
+        return word_.compare_exchange_weak(expected, desired, success, failure);
+    }
+    bool compare_exchange_strong(value_type_& expected, value_type_ desired,
+                                 std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.compare_exchange_strong(expected, desired, order);
+    }
+    bool compare_exchange_strong(value_type_& expected, value_type_ desired, std::memory_order success,
+                                 std::memory_order failure) const noexcept {
+        return word_.compare_exchange_strong(expected, desired, success, failure);
+    }
+    value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.fetch_add(operand, order);
+    }
+    value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.fetch_sub(operand, order);
+    }
+    value_type_ fetch_and(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.fetch_and(operand, order);
+    }
+    value_type_ fetch_or(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.fetch_or(operand, order);
+    }
+    value_type_ fetch_xor(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.fetch_xor(operand, order);
+    }
+
+  private:
+    std::atomic_ref<value_type_> word_;
 };
 
 template <typename value_type_>
@@ -1083,25 +1176,167 @@ struct dummy_predicate_t {
     constexpr admission_t operator()(args_types_&&...) const noexcept {
         return admission_t::admit_k;
     }
+
+    template <typename item_type_, std::size_t extent_>
+    constexpr void operator()(std::span<item_type_ const, extent_>,
+                              std::span<admission_t, extent_> admissions) const noexcept {
+        for (admission_t& admission : admissions) admission = admission_t::admit_k;
+    }
 };
 
-/** Judges @p keys through @p predicate into @p verdicts, in one call when it takes a span of keys,
- *  so a C handler behind an external store answers a whole quad at once, else key by key. */
-template <typename predicate_type_, typename key_type_, std::size_t extent_>
-inline void judge_keys(predicate_type_& predicate, std::span<key_type_, extent_> keys,
-                       std::span<admission_t, extent_> verdicts) noexcept {
-    if constexpr (requires { predicate(keys, verdicts); }) predicate(keys, verdicts);
-    else
-        for (std::size_t index = 0; index != keys.size(); ++index) verdicts[index] = predicate(keys[index]);
+/** Lanes in a quad, what a predicate hears per call: the candidates one NumKong finalize scores
+ *  together, reducing four accumulators into one 128-bit vector. */
+inline constexpr std::size_t quad_lanes_k = 4;
+
+/** The lanes one quad carries, one @p value_type_ each. */
+template <typename value_type_>
+using quad = std::array<value_type_, quad_lanes_k>;
+
+/** Calls @p body with @p count, at most @p limit_, as its compile-time extent, so whatever the body
+ *  sizes by that extent has a static size; a zero @p count calls nothing. */
+template <std::size_t limit_, typename body_type_>
+inline void with_static_extent(std::size_t count, body_type_&& body) noexcept {
+    [&]<std::size_t... extents_>(std::index_sequence<extents_...>) noexcept {
+        [[maybe_unused]] bool const called =
+            ((count == extents_ + 1 && (body.template operator()<extents_ + 1>(), true)) || ...);
+    }(std::make_index_sequence<limit_>());
 }
 
-/** The verdict @p predicate gives one @p key, asking a batched predicate about a span of one. */
-template <typename predicate_type_, typename key_type_>
-inline admission_t judge_key(predicate_type_& predicate, key_type_ const& key) noexcept {
-    admission_t verdict = admission_t::reject_k;
-    judge_keys(predicate, std::span<key_type_ const, 1>(&key, 1), std::span<admission_t, 1>(&verdict, 1));
-    return verdict;
+/** A predicate asked as candidates arrive, at most a quad a call, every call at a static extent: a
+ *  full quad, or a round's shorter tail. @p item_type_ is a key or a node ID. */
+template <typename predicate_type_, typename item_type_>
+concept immediate_predicate = requires(predicate_type_& predicate, std::span<item_type_ const, quad_lanes_k> items,
+                                       std::span<admission_t, quad_lanes_k> admissions) {
+    predicate(items, admissions);
+};
+
+/** A predicate that pays per call, so it gathers candidates beside the engine's @p payload_type_
+ *  and answers them together: a drain hands each admitted payload on and leaves it empty. */
+template <typename predicate_type_, typename item_type_, typename payload_type_>
+concept aggregating_predicate = requires(predicate_type_& predicate, std::span<item_type_ const, quad_lanes_k> items,
+                                         std::span<payload_type_ const, quad_lanes_k> payloads) {
+    predicate.push(items, payloads);
+    predicate.drain([](payload_type_ const&) noexcept {});
+};
+
+/** A family handing each executor thread a predicate of its own, as an engine driving its own
+ *  threads needs of an aggregating one. */
+template <typename predicate_type_>
+concept per_thread_predicates = requires(predicate_type_& predicate, std::size_t thread) {
+    { predicate.of_thread(thread) } -> std::same_as<typename predicate_type_::thread_predicate_t&>;
+};
+
+/** Asks @p predicate about a quad of @p items, handing @p on_admitted the payload of each it
+ *  admits. */
+template <typename predicate_type_, typename item_type_, typename payload_type_, std::size_t extent_,
+          typename on_admitted_type_>
+inline void ask_quad(predicate_type_& predicate, std::span<item_type_ const, extent_> items,
+                     std::span<payload_type_ const, extent_> payloads, on_admitted_type_&& on_admitted) noexcept {
+    std::array<admission_t, extent_> admissions;
+    predicate(items, std::span<admission_t, extent_>(admissions));
+    for (std::size_t lane = 0; lane != extent_; ++lane)
+        if (admissions[lane] == admission_t::admit_k) on_admitted(payloads[lane]);
 }
+
+/** An aggregating @p predicate only gathers the quad, answering it at @ref settle_predicate. */
+template <typename predicate_type_, typename item_type_, typename payload_type_, std::size_t extent_,
+          typename on_admitted_type_>
+    requires aggregating_predicate<predicate_type_, item_type_, payload_type_>
+inline void ask_quad(predicate_type_& predicate, std::span<item_type_ const, extent_> items,
+                     std::span<payload_type_ const, extent_> payloads, on_admitted_type_&&) noexcept {
+    predicate.push(items, payloads);
+}
+
+/** Ends a round for @p predicate: an immediate one answered every quad already. */
+template <typename predicate_type_, typename on_admitted_type_>
+inline void settle_predicate(predicate_type_&, on_admitted_type_&&) noexcept {}
+
+/** Answers everything an aggregating @p predicate gathered, handing @p on_admitted each admitted
+ *  payload. */
+template <typename predicate_type_, typename on_admitted_type_>
+    requires requires(predicate_type_& predicate, on_admitted_type_&& on_admitted) { predicate.drain(on_admitted); }
+inline void settle_predicate(predicate_type_& predicate, on_admitted_type_&& on_admitted) noexcept {
+    predicate.drain(on_admitted);
+}
+
+/** Reserves nothing for an immediate @p predicate, which gathers nothing. */
+template <typename predicate_type_>
+inline status_t reserve_predicate(predicate_type_&, std::size_t) noexcept {
+    return status_t::success_k;
+}
+
+/** Reserves an aggregating @p predicate for @p candidates between two settles, on whatever arena
+ *  its engine rewound last. */
+template <typename predicate_type_>
+    requires requires(predicate_type_& predicate, std::size_t candidates) {
+        { predicate.reserve(candidates) } -> std::same_as<status_t>;
+    }
+inline status_t reserve_predicate(predicate_type_& predicate, std::size_t candidates) noexcept {
+    return predicate.reserve(candidates);
+}
+
+/** The predicate executor thread @p thread asks: @p predicate itself, which every thread shares. */
+template <typename predicate_type_>
+inline predicate_type_& thread_predicate(predicate_type_& predicate, std::size_t) noexcept {
+    return predicate;
+}
+
+/** A family keeping one aggregating predicate per thread hands each thread its own, so an engine
+ *  driving its own threads settles each thread's rounds apart. */
+template <per_thread_predicates predicate_type_>
+inline typename predicate_type_::thread_predicate_t& thread_predicate(predicate_type_& predicate,
+                                                                      std::size_t thread) noexcept {
+    return predicate.of_thread(thread);
+}
+
+/** Ends a round for @p fold, letting a fold behind an aggregating predicate answer it. */
+template <typename fold_type_>
+inline void settle_fold(fold_type_&) noexcept {}
+
+template <typename fold_type_>
+    requires requires(fold_type_& fold) { fold.settle(); }
+inline void settle_fold(fold_type_& fold) noexcept {
+    fold.settle();
+}
+
+/**
+ *  @brief A predicate over keys asked about node IDs: @p key_of_type_ maps a node ID to its key, a
+ *      key column or an index's lookup, and the keys go on at the extent the IDs came in.
+ *
+ *  An aggregating predicate is forwarded the same way, its payloads untouched, so the engines fold
+ *  over node IDs alone whichever shape the caller's predicate has.
+ */
+template <typename predicate_type_, typename key_of_type_>
+struct node_predicate {
+    predicate_type_& predicate;
+    key_of_type_ key_of;
+
+    template <typename node_id_type_, std::size_t extent_,
+              typename key_type_ = std::invoke_result_t<key_of_type_ const&, node_id_type_>>
+        requires immediate_predicate<predicate_type_, key_type_>
+    void operator()(std::span<node_id_type_ const, extent_> nodes,
+                    std::span<admission_t, extent_> admissions) noexcept {
+        std::array<key_type_, extent_> keys;
+        for (std::size_t lane = 0; lane != extent_; ++lane) keys[lane] = key_of(nodes[lane]);
+        predicate(std::span<key_type_ const, extent_>(keys), admissions);
+    }
+
+    template <typename node_id_type_, typename payload_type_, std::size_t extent_,
+              typename key_type_ = std::invoke_result_t<key_of_type_ const&, node_id_type_>>
+        requires aggregating_predicate<predicate_type_, key_type_, payload_type_>
+    void push(std::span<node_id_type_ const, extent_> nodes,
+              std::span<payload_type_ const, extent_> payloads) noexcept {
+        std::array<key_type_, extent_> keys;
+        for (std::size_t lane = 0; lane != extent_; ++lane) keys[lane] = key_of(nodes[lane]);
+        predicate.push(std::span<key_type_ const, extent_>(keys), payloads);
+    }
+
+    template <typename on_admitted_type_>
+        requires requires(predicate_type_& predicate, on_admitted_type_&& on_admitted) { predicate.drain(on_admitted); }
+    void drain(on_admitted_type_&& on_admitted) noexcept {
+        predicate.drain(on_admitted);
+    }
+};
 
 /** The compiled-out default progress watcher: always carries on, so an unwatched long
  *  verb runs to completion with no cancellation checks surviving inlining. */

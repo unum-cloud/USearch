@@ -78,18 +78,22 @@ struct codec_t {
         return status_of(value.assign(chars_of(input)));
     }
 
+    /** What @ref view hands out for a stored row. */
+    using view_t = std::string_view;
+
     /** The string a stored @p row holds, borrowed. */
-    std::string_view view(bytes_view_t row) const noexcept { return chars_of(row); }
+    view_t view(bytes_view_t row) const noexcept { return chars_of(row); }
 };
 
 /** Similarity Search over byte sequences: owned strings, integer distances, and a metric chosen per
  *  call - so a graph built under one kernel is queried under another without rebuilding. */
 template <typename key_type_ = uuid_t, typename node_id_type_ = u32_t, typename wait_type_ = dummy_waiter_t,
           template <typename> class atomic_ref_template_ = standard_atomic_ref,
-          typename allocator_type_ = std::allocator<byte_t>>
+          typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = dummy_cache_hints_t>
 using ram_index =
     basic::ram_index<sz::string<typename std::allocator_traits<allocator_type_>::template rebind_alloc<char>>,
-                     key_type_, node_id_type_, i64_t, wait_type_, atomic_ref_template_, allocator_type_>;
+                     key_type_, node_id_type_, i64_t, wait_type_, atomic_ref_template_, allocator_type_,
+                     cache_hints_type_>;
 
 using ram_index_t = ram_index<>;
 
