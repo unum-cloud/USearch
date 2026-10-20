@@ -582,45 +582,41 @@ struct vram_apple_index {
      *  while the shard holds several parts, into a shadow matrix that replaces the walked rows once
      *  the device finishes; unlike the CUDA pass no back-link merge follows, since the heal's audit
      *  and reconnection, run on the host over unified memory in @ref advance, restore whatever a
-     *  re-selection strands. @ref plan_refine sized every buffer, so no phase allocates. Holds the
-     *  index's batch lock from plan to death, so demands an exclusive caller.
+     *  re-selection strands. @ref plan_refine sized every buffer, so no phase allocates. Every
+     *  phase takes the context the plan was opened on back from its caller. Holds the index's batch
+     *  lock from plan to death, so demands an exclusive caller.
      */
     struct refine_plan_t {
         refine_plan_t() noexcept = default;
         refine_plan_t(refine_plan_t&&) noexcept = default;
         refine_plan_t& operator=(refine_plan_t&&) noexcept = default;
 
-        /** Submits the current phase's pass on the context's stream; the audit, on the host, waits
-         *  for @ref advance. */
-        status_t queue() noexcept {
+        /** Submits the current phase's pass on @p context 's stream under @p config; the audit, on
+         *  the host, waits for @ref advance. */
+        status_t queue(traversal_context_t& context, refine_config_t config) noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
-            if (phase_ == phase_t::reselect_k) {
-                walked_ = round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
-                status_ = index_->submit_pass_(*context_, config_, walked_, {}, parts_, round_);
-            }
-            else if (phase_ == phase_t::heal_k) {
-                walked_ = {0, static_cast<node_id_t>(context_->audit_.islands.size())};
-                status_ = index_->submit_pass_(*context_, config_, walked_, to_span(context_->audit_.islands));
-            }
-            else walked_ = {};
+            if (phase_ == phase_t::reselect_k)
+                status_ = index_->submit_pass_(context, config, walked_(), {}, parts_, round_);
+            else if (phase_ == phase_t::heal_k)
+                status_ = index_->submit_pass_(context, config, walked_(), to_span(audit_.islands));
             return status_;
         }
 
-        /** Waits for the submitted pass, if one was. */
-        status_t wait() noexcept {
-            if (index_ && succeeded(status_) && !walked_.empty()) status_ = context_->wait();
+        /** Waits on @p context for the submitted pass, if one was. */
+        status_t wait(traversal_context_t& context) noexcept {
+            if (index_ && succeeded(status_) && !walked_().empty()) status_ = context.wait();
             return status_;
         }
 
-        /** Lands the pass on the host, audits after the rounds and every heal, picks the next
-         *  phase, and answers whether one follows. */
-        bool advance() noexcept {
+        /** Lands the pass from @p context on the host, audits after the rounds and every heal,
+         *  picks the next phase, and answers whether one follows. */
+        bool advance(traversal_context_t& context) noexcept {
             if (!index_ || failed(status_) || phase_ == phase_t::done_k) return false;
-            metal_audit_t& audit = context_->audit_;
-            if (!walked_.empty())
+            metal_audit_t& audit = audit_;
+            if (iota_view<node_id_t> const walked = walked_(); !walked.empty())
                 tally_ += index_->land_pass_(
-                    *context_, walked_, phase_ == phase_t::heal_k ? to_span(audit.islands) : std::span<u32_t const> {});
+                    context, walked, phase_ == phase_t::heal_k ? to_span(audit.islands) : std::span<u32_t const> {});
             if (phase_ == phase_t::reselect_k) {
                 if (++round_ < rounds_) return true;
                 phase_ = phase_t::audit_k;
@@ -670,14 +666,23 @@ struct vram_apple_index {
         friend struct vram_apple_index;
         enum class phase_t : u8_t { reselect_k, audit_k, heal_k, done_k };
 
+        /** The rows the current phase's pass walks: the round's nodes while re-selecting, every
+         *  island while healing, and none while auditing. */
+        iota_view<node_id_t> walked_() const noexcept {
+            if (phase_ == phase_t::reselect_k) return round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
+            if (phase_ == phase_t::heal_k) return {0, static_cast<node_id_t>(audit_.islands.size())};
+            return {};
+        }
+
         std::unique_lock<std::mutex> batch_;
         vram_apple_index* index_ = nullptr;
-        traversal_context_t* context_ = nullptr;
-        refine_config_t config_ {};
 
-        /** The IDs the first round re-selects, and the rows the submitted pass walks. */
+        /** The audit whose reached rows and islands the heal walks and reconnects, from one
+         *  @ref advance to the next. */
+        metal_audit_t audit_ {};
+
+        /** The IDs the first round re-selects. */
         iota_view<node_id_t> nodes_;
-        iota_view<node_id_t> walked_;
 
         /** Parts the rounds merge, the rounds, and the round queued or, once they
          *  ended, finished. */
@@ -727,7 +732,7 @@ struct vram_apple_index {
                     device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, candidate_slots), rows);
                 failed(sized))
                 return {std::move(plan), sized};
-            metal_audit_t& audit = context.audit_;
+            metal_audit_t& audit = plan.audit_;
             for (growing_buffer<u8_t>* marks : {&audit.reached, &audit.frontier, &audit.next_frontier})
                 if (failed(marks->reserve_exactly(rows))) return {std::move(plan), status_t::bad_alloc_k};
             if (failed(audit.islands.reserve_exactly(rows)) || failed(audit.in_links.reserve_exactly(rows)))
@@ -735,8 +740,6 @@ struct vram_apple_index {
         }
         node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
         plan.index_ = this;
-        plan.context_ = &context;
-        plan.config_ = config;
         plan.nodes_ = {min_of(nodes.first, bound), bound};
         plan.parts_ = static_cast<u32_t>(parts);
         plan.rounds_ = parts ? static_cast<u32_t>(std::bit_width(parts - 1)) : 1u;
@@ -752,8 +755,9 @@ struct vram_apple_index {
         auto [plan, status] = plan_refine(nodes, context, config, part_bases);
         if (failed(status)) return {{}, status};
         do
-            if (status_t const landed = plan.queue(); failed(landed) || failed(plan.wait())) break;
-        while (plan.advance());
+            if (status_t const landed = plan.queue(context, config); failed(landed) || failed(plan.wait(context)))
+                break;
+        while (plan.advance(context));
         return plan.finish();
     }
 
@@ -778,18 +782,13 @@ struct vram_apple_index {
         columns_t columns {};
         node_id_t id_shift = 0;
         node_id_t visible = 0;
-        std::size_t batch_rows = 0;
-        std::size_t covered_vectors = 0;
-        std::size_t covered_neighbors = 0;
+        std::size_t covered = 0;
 
         save_plan_t() noexcept = default;
         save_plan_t(vram_apple_index& index, columns_t columns, node_id_t id_shift, node_id_t visible) noexcept
-            : columns(columns), id_shift(id_shift), visible(visible),
-              batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k))),
-              index_(&index) {}
+            : columns(columns), id_shift(id_shift), visible(visible), index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
-            : columns(other.columns), id_shift(other.id_shift), visible(other.visible), batch_rows(other.batch_rows),
-              covered_vectors(other.covered_vectors), covered_neighbors(other.covered_neighbors),
+            : columns(other.columns), id_shift(other.id_shift), visible(other.visible), covered(other.covered),
               index_(std::exchange(other.index_, nullptr)) {}
         save_plan_t& operator=(save_plan_t&&) = delete;
         save_plan_t(save_plan_t const&) = delete;
@@ -805,15 +804,18 @@ struct vram_apple_index {
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = position * batch_rows;
-            std::size_t const bound = min_of(first + batch_rows, static_cast<std::size_t>(visible));
+            std::size_t const first = position * batch_rows();
+            std::size_t const bound = min_of(first + batch_rows(), static_cast<std::size_t>(visible));
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = step.index_rows;
             return step;
         }
         indexed_range<save_plan_t> steps() const noexcept {
-            return {this, index_ && batch_rows ? divide_round_up<std::size_t>(visible, batch_rows) : 0};
+            return {this, index_ && visible ? divide_round_up<std::size_t>(visible, batch_rows()) : 0};
+        }
+        std::size_t batch_rows() const noexcept {
+            return min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k));
         }
 
         /** Copies the step's rows out of the storage: vectors unpadded, neighbors rebased onto
@@ -839,21 +841,19 @@ struct vram_apple_index {
             if (!norms_rows.empty())
                 std::memcpy(norms_rows.data(), index_->norms_column_.host + rows.first * sizeof(norms_t),
                             norms_rows.size());
-            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
             node_id_t const* const source = index_->neighbor_rows_() + rows.first * connectivity;
             node_id_t* const landed = reinterpret_cast<node_id_t*>(neighbors_rows.data());
             for (std::size_t slot = 0; slot != rows.size() * connectivity; ++slot)
                 landed[slot] = source[slot] < visible ? static_cast<node_id_t>(source[slot] + id_shift)
                                                       : node_id_unknown_k;
-            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            standard_atomic_ref<std::size_t> {covered}.fetch_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const nodes = static_cast<std::size_t>(visible);
-            if (standard_atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != nodes ||
-                standard_atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != nodes)
+            if (standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != nodes)
                 return status_t::config_mismatch_k;
             index_ = nullptr;
             return status_t::success_k;
@@ -892,25 +892,19 @@ struct vram_apple_index {
      *  relocate the storage its steps write; @ref finish derives the norms no step carried and
      *  publishes. */
     struct [[nodiscard]] load_plan_t {
-        columns_view_t columns {};
-        iota_view<node_id_t> source_range {};
         node_id_t base = 0;
         std::size_t rows = 0;
-        std::size_t batch_rows = 0;
-        std::size_t covered_vectors = 0;
-        std::size_t covered_neighbors = 0;
+        std::size_t covered = 0;
         std::size_t covered_norms = 0;
 
         load_plan_t() noexcept = default;
         load_plan_t(vram_apple_index& index, std::unique_lock<std::mutex>&& batch, node_id_t base,
                     std::size_t rows) noexcept
-            : base(base), rows(rows), batch_rows(min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k))),
-              index_(&index), batch_(std::move(batch)) {}
+            : base(base), rows(rows), index_(&index), batch_(std::move(batch)) {}
         load_plan_t(load_plan_t&& other) noexcept
-            : columns(other.columns), source_range(other.source_range), base(other.base),
-              rows(std::exchange(other.rows, 0)), batch_rows(other.batch_rows), covered_vectors(other.covered_vectors),
-              covered_neighbors(other.covered_neighbors), covered_norms(other.covered_norms),
-              index_(std::exchange(other.index_, nullptr)), batch_(std::move(other.batch_)) {}
+            : base(other.base), rows(std::exchange(other.rows, 0)), covered(other.covered),
+              covered_norms(other.covered_norms), index_(std::exchange(other.index_, nullptr)),
+              batch_(std::move(other.batch_)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
         load_plan_t(load_plan_t const&) = delete;
         load_plan_t& operator=(load_plan_t const&) = delete;
@@ -933,18 +927,17 @@ struct vram_apple_index {
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = static_cast<std::size_t>(base) + position * batch_rows;
-            std::size_t const bound = min_of(first + batch_rows, static_cast<std::size_t>(base) + rows);
+            std::size_t const first = static_cast<std::size_t>(base) + position * batch_rows();
+            std::size_t const bound = min_of(first + batch_rows(), static_cast<std::size_t>(base) + rows);
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
             return step;
         }
         indexed_range<load_plan_t> steps() const noexcept {
-            return {this, index_ && batch_rows ? divide_round_up(rows, batch_rows) : 0};
+            return {this, index_ && rows ? divide_round_up(rows, batch_rows()) : 0};
         }
-
-        status_t load(step_t const& step) noexcept { return load(step, columns, source_range); }
+        std::size_t batch_rows() const noexcept { return min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k)); }
 
         /** Copies the step's rows out of @p columns into the storage: vectors padded, norms where
          *  carried, neighbors rebased from @p source_range onto the appended range and
@@ -976,13 +969,12 @@ struct vram_apple_index {
                             norms_rows.size());
                 standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
             }
-            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
             std::span<node_id_t> const landed {index_->neighbor_rows_() + range.first * connectivity,
                                                range.size() * connectivity};
             std::memcpy(landed.data(), neighbors_rows.data(), neighbors_rows.size());
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
-            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
+            standard_atomic_ref<std::size_t> {covered}.fetch_add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1009,12 +1001,11 @@ struct vram_apple_index {
                             source.norms_column_.host + from * sizeof(norms_t), count * sizeof(norms_t));
                 standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(count, std::memory_order_acq_rel);
             }
-            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(count, std::memory_order_acq_rel);
             std::span<node_id_t> const landed {index_->neighbor_rows_() + into * connectivity, count * connectivity};
             std::memcpy(landed.data(), source.neighbor_rows_() + from * connectivity, landed.size_bytes());
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
-            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(count, std::memory_order_acq_rel);
+            standard_atomic_ref<std::size_t> {covered}.fetch_add(count, std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1022,8 +1013,7 @@ struct vram_apple_index {
          *  appended rows. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
-            if (standard_atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != rows ||
-                standard_atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != rows)
+            if (standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
             if (rows) {
                 if (index_->stores_norms() &&
@@ -1043,24 +1033,9 @@ struct vram_apple_index {
         std::unique_lock<std::mutex> batch_;
     };
 
-    /** Opens a load of @p rows from @p columns at the watermark: claims them, or lands them under
-     *  the claim word its caller closed; a batch or load in flight refuses it. */
-    expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows,
-                                    iota_view<node_id_t> source_range) noexcept {
-        if (!dimensions_) return {{}, status_t::uninitialized_k};
-        if (columns.vectors.size() < rows * packed_row_bytes() ||
-            columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
-            (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
-            return {{}, status_t::config_mismatch_k};
-        auto [plan, status] = plan_load(rows);
-        if (failed(status)) return {{}, status};
-        plan.columns = columns;
-        plan.source_range = source_range;
-        return {std::move(plan), status};
-    }
-
-    /** Opens a load of @p rows the caller sources per step, as the sharded index drives its
-     *  parts. */
+    /** Opens a load of @p rows at the watermark, sourced per step, as the sharded index drives its
+     *  parts: claims them, or lands them under the claim word its caller closed; a batch or load in
+     *  flight refuses it. */
     expected<load_plan_t> plan_load(std::size_t rows) noexcept {
         if (!dimensions_) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
@@ -1084,12 +1059,18 @@ struct vram_apple_index {
         return {load_plan_t {*this, std::move(batch), base, rows}, status_t::success_k};
     }
 
-    /** Appends the whole source on the calling thread. */
+    /** Appends the whole source on the calling thread; columns shorter than @p rows are refused
+     *  before a row is claimed. */
     status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range) noexcept {
-        auto [plan, status] = plan_load(columns, rows, source_range);
+        if (!dimensions_) return status_t::uninitialized_k;
+        if (columns.vectors.size() < rows * packed_row_bytes() ||
+            columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
+            (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
+            return status_t::config_mismatch_k;
+        auto [plan, status] = plan_load(rows);
         if (failed(status)) return status;
         for (typename load_plan_t::step_t const step : plan.steps())
-            if (status_t const loaded = plan.load(step); failed(loaded)) return loaded;
+            if (status_t const loaded = plan.load(step, columns, source_range); failed(loaded)) return loaded;
         return plan.finish();
     }
 

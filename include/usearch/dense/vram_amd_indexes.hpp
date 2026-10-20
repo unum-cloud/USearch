@@ -422,7 +422,7 @@ struct vram_amd_indexes {
             return failure;
         }
 
-        /** One context per shard, opened for the whole batch. */
+        /** One context per shard: the batch's launches stay in flight on it until @ref finish. */
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
 
         /** One part per shard, in placement order. */
@@ -649,8 +649,10 @@ struct vram_amd_indexes {
                 for (typename index_t::refine_plan_t& plan : shard_plans_) plan.stop();
                 dummy_progress_t heal_alone;
                 healed = drive_(heal_alone);
-                for (typename index_t::refine_plan_t const& plan : shard_plans_)
-                    if (status_t const kept = plan.finish().status; failed(kept) && succeeded(healed)) healed = kept;
+                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
+                    if (status_t const kept = shard_plans_[shard].finish(traversals_[shard]).status;
+                        failed(kept) && succeeded(healed))
+                        healed = kept;
             }
             refine_result_t const result = running();
             shard_plans_.clear();
@@ -663,7 +665,8 @@ struct vram_amd_indexes {
          *  pending. */
         refine_result_t running() const noexcept {
             refine_result_t result;
-            for (typename index_t::refine_plan_t const& plan : shard_plans_) result += plan.finish().value;
+            for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
+                result += shard_plans_[shard].finish(traversals_[shard]).value;
             return result;
         }
 
@@ -699,10 +702,12 @@ struct vram_amd_indexes {
                 for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
                     reselected |= shard_plans_[shard].reselecting();
                     if (succeeded(fanout_t::enter(owner_->shards_, shard))) [[maybe_unused]]
-                        status_t const queued = shard_plans_[shard].queue();
+                        status_t const queued = shard_plans_[shard].queue(traversals_[shard], config_);
                 }
-                for (typename index_t::refine_plan_t& plan : shard_plans_)
-                    if (status_t const waited = plan.wait(); failed(waited) && succeeded(outcome)) outcome = waited;
+                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
+                    if (status_t const waited = shard_plans_[shard].wait(traversals_[shard]);
+                        failed(waited) && succeeded(outcome))
+                        outcome = waited;
                 advancing = 0;
                 std::size_t visited = 0;
                 for (typename index_t::refine_plan_t& plan : shard_plans_) {
@@ -715,11 +720,10 @@ struct vram_amd_indexes {
             return outcome;
         }
 
-        /** One run per shard, on its stream, so no other call on the executor rewinds what the plan
-         *  keeps between its calls. */
+        /** One run per shard on its stream, holding the device scratch in flight across phases. */
         growing_buffer<typename executor_t::arena_t, forkunion_allocator_t> arenas_;
 
-        /** One walk context per shard, over its run of the plan. */
+        /** One walk context per shard over its run, each pass queued on it across phases. */
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
 
         /** Every shard's own pass in placement order; none until the donors landed. */

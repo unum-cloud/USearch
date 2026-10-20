@@ -317,12 +317,12 @@ struct vram_audit_landing_t {
     u32_t claims[2];
 };
 
-/** Device scratch one refine plan carves once from a @p traversal_context_type_ and its passes and
- *  audits reuse, or the audit share one @c health carves: the reached set and two frontiers, the
- *  levels counter beside the last two sweeps' expanded counters, by the sweep number's parity, the
- *  unreached, reconnected and claim counters an audit lands together, then for a refine the passes'
- *  buffers, the unreached rows' IDs and in-link counts, and the parts' bases. Sweeps run until one
- *  expands nothing: every row joins one frontier at most, so the rows bound them. */
+/** Device scratch one refine plan carves once from a @p traversal_context_type_ and its phases
+ *  reuse, or the audit share one @c health carves: the reached set and two frontiers, the levels
+ *  counter beside the last two sweeps' expanded counters, by the sweep number's parity, the
+ *  unreached, reconnected and claim counters an audit lands together, then for a refine the
+ *  unreached rows' IDs and the parts' bases. Sweeps run until one expands nothing: every row joins
+ *  one frontier at most, so the rows bound them. */
 template <typename traversal_context_type_>
 struct vram_refine_scratch {
     typename traversal_context_type_::bytes_ptr_t bytes;
@@ -339,19 +339,23 @@ struct vram_refine_scratch {
     /** The walk's and the merge's claim counters, the last pass's completion oracle. */
     u32_t* claims = nullptr;
 
-    /** The reverse buckets' fill counters, then the bitset of rows the merge re-selects. */
-    u32_t* bucket_counts = nullptr;
-    vram_bitset_t touched;
+    /** The rows the last audit left unreached, which the heal walks. */
     u32_t* island_ids = nullptr;
-    u32_t* in_links = nullptr;
-
-    /** The shadow neighbors the walks land and the reverse buckets, @b [rows,connectivity] each. */
-    u32_t* shadow_neighbors = nullptr;
-    u32_t* buckets = nullptr;
 
     /** The ascending first rows of the parts the walks merge, uploaded once by the plan. */
     u32_t* part_bases = nullptr;
     std::size_t words = 0;
+};
+
+/** The buffers one refinement pass uses up, carved from its context's staging when it queues: the
+ *  reverse buckets' fill counters, then the bitset of rows the merge re-selects, the shadow
+ *  neighbors the walks land and the reverse buckets, @b [rows,connectivity] each. A reconnection
+ *  counts its in-links over the fill counters, since it queues after its pass. */
+struct vram_refine_passes_t {
+    u32_t* bucket_counts = nullptr;
+    vram_bitset_t touched;
+    u32_t* shadow_neighbors = nullptr;
+    u32_t* buckets = nullptr;
 };
 
 #pragma endregion Shard Types
@@ -1021,9 +1025,9 @@ struct vram_shard_core {
      *
      *  A phase queues its launches and the landing of its counters behind the context's event and
      *  never waits; @ref plan_refine made every allocation, so no phase allocates, and only a
-     *  device fault fails one. Demands an exclusive caller: the merge writes live neighbors with
-     *  plain stores. A stopped sequence of phases leaves the graph correct and merely less
-     *  improved.
+     *  device fault fails one. Every phase takes the context the plan was opened on back from its
+     *  caller. Demands an exclusive caller: the merge writes live neighbors with plain stores. A
+     *  stopped sequence of phases leaves the graph correct and merely less improved.
      */
     struct refine_plan_t {
 
@@ -1032,58 +1036,45 @@ struct vram_shard_core {
         refine_plan_t(refine_plan_t&&) noexcept = default;
         refine_plan_t& operator=(refine_plan_t&&) noexcept = default;
 
-        /** Queues the current phase on the context's stream, then the landing of its counters and
-         *  telemetry behind the context's event; never waits and never allocates. */
-        status_t queue() noexcept {
+        /** Queues the current phase on @p context 's stream under @p config, then the landing of
+         *  its counters and telemetry behind the context's event; never waits and never
+         *  allocates. */
+        status_t queue(traversal_context_t& context, refine_config_t config) noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
-            stream_handle_t const stream = context_->stream();
+            if (context.device() != index_->device_.ordinal) return status_t::config_mismatch_k;
+            stream_handle_t const stream = context.stream();
             switch (phase_) {
             case phase_t::reselect_k: {
-                iota_view<node_id_t> const range = round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
-                walked_ = range.size();
-                if (walked_)
-                    status_ = index_->kernels_.refine_pass_(*index_, *context_, scratch_, config_, range, {}, parts_,
+                iota_view<node_id_t> const range = round_nodes_();
+                if (!range.empty())
+                    status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config, range, {}, parts_,
                                                             round_);
                 if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), 0, stream);
                 break;
             }
-            case phase_t::audit_k:
-                walked_ = 0;
-                status_ = queue_sweeps_();
-                break;
+            case phase_t::audit_k: status_ = queue_sweeps_(context); break;
             case phase_t::heal_k:
                 // The island IDs replace the range: offsets below their count index them. Only
                 // island rows change, and no reached row points at one, so the audit before stands.
                 // A continued audit sweeps on alone.
-                walked_ = next_sweep_ ? 0 : islands_;
-                if (walked_)
-                    status_ = index_->kernels_.refine_pass_(*index_, *context_, scratch_, config_, {0, islands_},
+                if (!next_sweep_ && islands_)
+                    status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config, {0, islands_},
                                                             {scratch_.island_ids, islands_});
                 if (succeeded(status_) && !next_sweep_)
-                    status_ = index_->kernels_.queue_reconnect_(*index_, scratch_, islands_, scratch_rows_, stream);
-                if (succeeded(status_)) status_ = queue_sweeps_();
+                    status_ = index_->kernels_.queue_reconnect_(*index_, context, scratch_, islands_);
+                if (succeeded(status_)) status_ = queue_sweeps_(context);
                 break;
             default: return status_t::success_k;
             }
-            if (succeeded(status_)) status_ = context_->record();
+            if (succeeded(status_)) status_ = context.record();
             return status_;
         }
 
-        /** Queues the audit's next batch of sweeps, its seeds first when it starts. */
-        status_t queue_sweeps_() noexcept {
-            status_t const queued = next_sweep_
-                                        ? index_->kernels_.queue_sweeps_(*index_, *context_, scratch_, landing_.get(),
-                                                                         next_sweep_)
-                                        : index_->kernels_.queue_audit_(*index_, *context_, scratch_, landing_.get());
-            next_sweep_ = next_sweep_ ? 2 * next_sweep_ : 2;
-            return queued;
-        }
-
-        /** Sleeps until the queued phase landed, on the context's event. */
-        status_t wait() noexcept {
+        /** Sleeps until the queued phase landed, on @p context 's event. */
+        status_t wait(traversal_context_t& context) noexcept {
             if (!index_ || phase_ == phase_t::done_k) return status_;
-            if (succeeded(status_)) status_ = context_->event_.wait();
+            if (succeeded(status_)) status_ = context.event_.wait();
             return status_;
         }
 
@@ -1092,13 +1083,14 @@ struct vram_shard_core {
         bool advance() noexcept {
             if (!index_ || failed(status_) || phase_ == phase_t::done_k) return false;
             audit_landing_t const& landed = *landing_;
+            std::size_t const walked = walked_(), rows = index_->size();
             // The claim counts are the completion oracle: every offset claimed means every row
             // landed.
-            if (walked_ && (landed.claims[0] < walked_ || landed.claims[1] < scratch_rows_)) {
+            if (walked && (landed.claims[0] < walked || landed.claims[1] < rows)) {
                 status_ = status_t::device_error_k;
                 return false;
             }
-            tally_.visited_nodes += walked_;
+            tally_.visited_nodes += walked;
             if (phase_ == phase_t::reselect_k) {
                 if (++round_ < rounds_) return true;
                 phase_ = phase_t::audit_k;
@@ -1107,7 +1099,7 @@ struct vram_shard_core {
             // A last sweep that still expanded leaves rows unjudged, so the phase sweeps on.
             if (landed.last_expanded) return true;
             next_sweep_ = 0;
-            tally_.health = audited_(landed, scratch_rows_);
+            tally_.health = audited_(landed, rows);
             tally_.islands_reconnected = landed.reconnected;
             u32_t const left = landed.unreached;
             if (phase_ == phase_t::audit_k) tally_.islands_found = left;
@@ -1132,12 +1124,12 @@ struct vram_shard_core {
         /** Nodes re-selected so far. */
         std::size_t visited() const noexcept { return tally_.visited_nodes; }
 
-        /** The pass: its telemetry read from the last landing, complete once @ref advance answered
-         *  false, otherwise @c cancelled_k; a failure a phase kept answers instead. */
-        expected<refine_result_t> finish() const noexcept {
+        /** The pass: its telemetry read from @p context 's last landing, complete once @ref advance
+         *  answered false, otherwise @c cancelled_k; a failure a phase kept answers instead. */
+        expected<refine_result_t> finish(traversal_context_t const& context) const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
             refine_result_t result = tally_;
-            vram_telemetry_block_t const spent = context_->spent();
+            vram_telemetry_block_t const spent = context.spent();
             result.changed_nodes = spent.changed_nodes;
             result.visited_members = spent.hops;
             result.computed_distances = spent.scored;
@@ -1150,15 +1142,36 @@ struct vram_shard_core {
         friend struct vram_shard_core;
         enum class phase_t : u8_t { reselect_k, audit_k, heal_k, done_k };
 
+        /** Queues the audit's next batch of sweeps on @p context, its seeds first when it
+         *  starts. */
+        status_t queue_sweeps_(traversal_context_t& context) noexcept {
+            status_t const queued = next_sweep_
+                                        ? index_->kernels_.queue_sweeps_(*index_, context, scratch_, landing_.get(),
+                                                                         next_sweep_)
+                                        : index_->kernels_.queue_audit_(*index_, context, scratch_, landing_.get());
+            next_sweep_ = next_sweep_ ? 2 * next_sweep_ : 2;
+            return queued;
+        }
+
+        /** The nodes the current round re-selects: the planned range first, every node below its
+         *  bound in a later round. */
+        iota_view<node_id_t> round_nodes_() const noexcept {
+            return round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
+        }
+
+        /** Rows the queued phase walked: the round's nodes while re-selecting, and the islands when
+         *  a heal round's queue began a fresh audit, which leaves the next sweep at two. */
+        std::size_t walked_() const noexcept {
+            if (phase_ == phase_t::reselect_k) return round_nodes_().size();
+            return phase_ == phase_t::heal_k && next_sweep_ == 2 ? islands_ : 0;
+        }
+
         refine_scratch_t scratch_;
         vram_shard_core* index_ = nullptr;
-        traversal_context_t* context_ = nullptr;
         audit_landing_ptr_t landing_ {nullptr, landing_return_t {}};
-        refine_config_t config_ {};
 
-        /** The IDs the first round re-selects, and the rows the scratch covers. */
+        /** The IDs the first round re-selects. */
         iota_view<node_id_t> nodes_;
-        std::size_t scratch_rows_ = 0;
 
         /** Parts the rounds merge, the rounds, and the round queued or, once they
          *  ended, finished. */
@@ -1166,8 +1179,7 @@ struct vram_shard_core {
         u32_t rounds_ = 1;
         u32_t round_ = 0;
 
-        /** Rows the queued phase walks, and the islands the last audit left. */
-        std::size_t walked_ = 0;
+        /** The islands the last audit left. */
         u32_t islands_ = 0;
 
         /** The audit sweep the next batch queues from, zero before an audit starts. */
@@ -1179,8 +1191,9 @@ struct vram_shard_core {
 
     /**
      *  @brief Opens a refinement of the nodes in @p nodes, clamped to the published IDs, on
-     *      @p context 's stream: carves the scratch, grows the context's arena for the widest walk,
-     *      takes a page-locked landing and queues the upload of @p part_bases.
+     *      @p context 's stream: carves the scratch, grows the context's arena for the widest walk
+     *      and its staging for the passes, takes a page-locked landing and queues the upload of
+     *      @p part_bases.
      *
      *  No phase allocates. An empty range heals alone.
      *
@@ -1192,7 +1205,8 @@ struct vram_shard_core {
      *  never leaves its group, and the heal's passes walk no part first.
      *
      *  @param[in] nodes The ID range to walk; IDs at or past @c size() are skipped.
-     *  @param[inout] context The driving context; its arena grows to the pass's shape.
+     *  @param[inout] context The driving context, which every phase takes back; its arena and
+     *      staging grow to the pass's shape.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @param[in] part_bases The ascending first rows of the parts; need not outlive the plan.
      */
@@ -1219,6 +1233,9 @@ struct vram_shard_core {
         if (!context.ensure_arena(
                 arena_warps * build_arena_shape_(expansion, candidate_slots, walks).template slice_bytes<node_id_t>()))
             return {std::move(plan), status_t::bad_alloc_k};
+        if (std::size_t const staging_bytes = refine_staging_bytes_();
+            staging_bytes && !context.ensure_staging(staging_bytes))
+            return {std::move(plan), status_t::bad_alloc_k};
         stream_handle_t const stream = context.stream();
         // Zeroed once, so every pass adds up, and landed with every phase. A pageable upload stages
         // on the host at once and waits on nothing.
@@ -1228,10 +1245,7 @@ struct vram_shard_core {
             return {std::move(plan), status_t::device_error_k};
         node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
         plan.index_ = this;
-        plan.context_ = &context;
-        plan.config_ = config;
         plan.nodes_ = {min_of(nodes.first, bound), bound};
-        plan.scratch_rows_ = rows;
         plan.parts_ = static_cast<u32_t>(parts);
         plan.rounds_ = parts ? static_cast<u32_t>(std::bit_width(parts - 1)) : 1u;
         plan.phase_ = plan.nodes_.empty() && plan.rounds_ == 1 ? refine_plan_t::phase_t::audit_k
@@ -1246,9 +1260,10 @@ struct vram_shard_core {
         auto [plan, status] = plan_refine(nodes, context, config, part_bases);
         if (failed(status)) return {{}, status};
         do
-            if (status_t const landed = plan.queue(); failed(landed) || failed(plan.wait())) break;
+            if (status_t const landed = plan.queue(context, config); failed(landed) || failed(plan.wait(context)))
+                break;
         while (plan.advance());
-        return plan.finish();
+        return plan.finish(context);
     }
 
     /** A split of this index into @p receivers, the inverse of an absorb, which no dense GPU face
@@ -1288,7 +1303,8 @@ struct vram_shard_core {
 
     /** The bytes an executor's run must hold before a context carved over it can refine the rows
      *  published now under @p config, @p walks walks of a row sharing one visited set: the
-     *  context's counters, the walks' arena, and the scratch the refine carves once. */
+     *  context's counters, the walks' arena, the passes' staging, and the scratch the refine
+     *  carves once. */
     std::size_t traversal_memory_usage(refine_config_t config, u32_t walks = 1) const noexcept {
         if (!dimensions() || !device_.multiprocessor_count) return 0;
         auto aligned = [](std::size_t bytes) noexcept {
@@ -1301,7 +1317,7 @@ struct vram_shard_core {
                                         kernels_type_::resident_blocks_(vram_kernel_t::refine_k, candidate_slots) *
                                         vram_warps_per_block_k;
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
-               aligned(arena_warps * arena_shape.slice_bytes<node_id_t>()) +
+               aligned(arena_warps * arena_shape.slice_bytes<node_id_t>()) + aligned(refine_staging_bytes_()) +
                aligned(scratch_bytes_(scratch_use_t::refine_k));
     }
 
@@ -1333,25 +1349,15 @@ struct vram_shard_core {
         /** The stream every device-to-host copy queues on. */
         stream_handle_t stream = nullptr;
 
-        /** Page-locked host bytes in two halves of @c half_rows rows each: packed vector rows, then
-         *  their neighbor IDs, then their norms. */
+        /** Page-locked host bytes in two halves of @ref half_rows rows each: packed vector rows,
+         *  then their neighbor IDs, then their norms. */
         bounce_t bounce {typename vendor_t::pinned_allocator_t {}};
 
         /** Rows under the watermark at planning. */
         node_id_t visible = 0;
 
-        /** Rows one batch carries - a bounce's worth, or every row when fewer. */
-        std::size_t batch_rows = 0;
-
-        /** Rows one half of the bounce carries: half a batch, so two halves pin what one batch
-         *  would. */
-        std::size_t half_rows = 0;
-
-        /** Rows whose vectors landed, tallied through @c std::atomic_ref. */
-        std::size_t covered_vectors = 0;
-
-        /** Rows whose neighbors landed, tallied through @c std::atomic_ref. */
-        std::size_t covered_neighbors = 0;
+        /** Rows whose vectors and neighbors landed, tallied through @c std::atomic_ref. */
+        std::size_t covered = 0;
 
         save_plan_t() noexcept = default;
 
@@ -1361,18 +1367,15 @@ struct vram_shard_core {
         save_plan_t(vram_shard_core const& index, columns_t columns, node_id_t id_shift,
                     typename executor_t::stream_t const& stream, node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), stream(stream.handle),
-              bounce(typename vendor_t::pinned_allocator_t {stream}), visible(visible),
-              batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k))),
-              half_rows(divide_round_up<std::size_t>(batch_rows, 2)), index_(&index) {}
+              bounce(typename vendor_t::pinned_allocator_t {stream}), visible(visible), index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
             : columns(other.columns), id_shift(other.id_shift), stream(other.stream), bounce(std::move(other.bounce)),
-              visible(other.visible), batch_rows(other.batch_rows), half_rows(other.half_rows),
-              covered_vectors(other.covered_vectors), covered_neighbors(other.covered_neighbors),
+              visible(other.visible), covered(other.covered),
               crossed_ {std::move(other.crossed_[0]), std::move(other.crossed_[1])},
               pending_(std::exchange(other.pending_, {})), pending_half_(other.pending_half_),
               index_(std::exchange(other.index_, nullptr)) {}
         save_plan_t& operator=(save_plan_t&&) = delete;
-        // The tallies are this plan's own: a copy would tally into a twin `finish` never reads.
+        // The tally is this plan's own: a copy would tally into a twin `finish` never reads.
         save_plan_t(save_plan_t const&) = delete;
         save_plan_t& operator=(save_plan_t const&) = delete;
 
@@ -1400,8 +1403,8 @@ struct vram_shard_core {
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = position * batch_rows;
-            std::size_t const bound = min_of(first + batch_rows, static_cast<std::size_t>(visible));
+            std::size_t const first = position * batch_rows();
+            std::size_t const bound = min_of(first + batch_rows(), static_cast<std::size_t>(visible));
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = step.index_rows;
@@ -1410,8 +1413,17 @@ struct vram_shard_core {
 
         /** The steps the save spans - one bounce-sized batch each. */
         indexed_range<save_plan_t> steps() const noexcept {
-            return {this, index_ && batch_rows ? divide_round_up<std::size_t>(visible, batch_rows) : 0};
+            return {this, index_ && visible ? divide_round_up<std::size_t>(visible, batch_rows()) : 0};
         }
+
+        /** Rows one batch carries - a bounce's worth, or every row when fewer. */
+        std::size_t batch_rows() const noexcept {
+            return min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k));
+        }
+
+        /** Rows one half of the bounce carries: half a batch, so two halves pin what one batch
+         *  would. */
+        std::size_t half_rows() const noexcept { return divide_round_up<std::size_t>(batch_rows(), 2); }
 
         /**
          *  @brief Copies step @p step 's rows off the device into the plan's own columns.
@@ -1436,14 +1448,14 @@ struct vram_shard_core {
                 flat_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes).empty() ||
                 flat_rows(columns.norms, first, rows.size(), sizeof(norms_t)).empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
-            for (std::size_t chunk = rows.first; chunk < rows.bound; chunk += half_rows) {
-                std::size_t const bound = min_of<std::size_t>(chunk + half_rows, rows.bound);
+            for (std::size_t chunk = rows.first; chunk < rows.bound; chunk += half_rows()) {
+                std::size_t const bound = min_of<std::size_t>(chunk + half_rows(), rows.bound);
                 // Every half but the pending one has landed, so the other one is free.
                 std::size_t const half = pending_.index_rows.empty() ? 0 : pending_half_ ^ 1;
                 byte_t* const bounce_vectors =
-                    bounce.data() + half * half_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
-                byte_t* const bounce_neighbors = bounce_vectors + half_rows * scalar_row_bytes;
-                byte_t* const bounce_norms = bounce_neighbors + half_rows * neighbors_row_bytes;
+                    bounce.data() + half * half_rows() * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
+                byte_t* const bounce_neighbors = bounce_vectors + half_rows() * scalar_row_bytes;
+                byte_t* const bounce_norms = bounce_neighbors + half_rows() * neighbors_row_bytes;
                 std::size_t const count = bound - chunk;
                 if (failed(vendor_t::copy_2d(bounce_vectors, scalar_row_bytes,
                                              index_->vectors_rows_() + chunk * index_->row_bytes(), index_->row_bytes(),
@@ -1473,8 +1485,7 @@ struct vram_shard_core {
             if (!index_) return status_t::uninitialized_k;
             if (status_t const landed = land_pending_(); failed(landed)) return landed;
             std::size_t const nodes = static_cast<std::size_t>(visible);
-            if (standard_atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != nodes ||
-                standard_atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != nodes)
+            if (standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != nodes)
                 return status_t::config_mismatch_k;
             index_ = nullptr;
             return status_t::success_k;
@@ -1492,10 +1503,11 @@ struct vram_shard_core {
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
-            byte_t* const bounce_vectors =
-                bounce.data() + pending_half_ * half_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
-            byte_t* const bounce_neighbors = bounce_vectors + half_rows * scalar_row_bytes;
-            byte_t* const bounce_norms = bounce_neighbors + half_rows * neighbors_row_bytes;
+            byte_t* const bounce_vectors = bounce.data() +
+                                           pending_half_ * half_rows() *
+                                               (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
+            byte_t* const bounce_neighbors = bounce_vectors + half_rows() * scalar_row_bytes;
+            byte_t* const bounce_norms = bounce_neighbors + half_rows() * neighbors_row_bytes;
             bytes_span_t const vectors_rows = flat_rows(columns.vectors, rows.first, rows.size(), scalar_row_bytes);
             bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, rows.first, rows.size(),
                                                           neighbors_row_bytes);
@@ -1504,14 +1516,13 @@ struct vram_shard_core {
                                                                         bytes_of(bounce_vectors, vectors_rows.size()));
             if (!norms_rows.empty()) [[maybe_unused]]
                 status_t const copied_norms = copy_bytes(norms_rows, bytes_of(bounce_norms, norms_rows.size()));
-            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
 
             std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors),
                                                rows.size() * connectivity};
             for (node_id_t& neighbor : landed)
                 neighbor = neighbor < visible ? static_cast<node_id_t>(neighbor + id_shift) : node_id_unknown_k;
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(neighbors_rows, std::as_bytes(landed));
-            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            standard_atomic_ref<std::size_t> {covered}.fetch_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1554,7 +1565,7 @@ struct vram_shard_core {
             return {{}, status_t::config_mismatch_k};
         if (failed(vendor_t::select(device_.ordinal))) return {{}, status_t::device_error_k};
         save_plan_t plan {*this, columns, id_shift, stream, static_cast<node_id_t>(rows)};
-        std::size_t const bounce_bytes = 2 * plan.half_rows *
+        std::size_t const bounce_bytes = 2 * plan.half_rows() *
                                          (packed_row_bytes() + connectivity() * sizeof(node_id_t) + sizeof(norms_t));
         if (bounce_bytes && failed(plan.bounce.resize_uninitialized(bounce_bytes))) return {{}, status_t::bad_alloc_k};
         return {std::move(plan), status_t::success_k};
@@ -1590,18 +1601,13 @@ struct vram_shard_core {
      */
     struct [[nodiscard]] load_plan_t {
 
-        /** Where the rows come from, vetted against them at planning. */
-        columns_view_t columns {};
-
-        /** The ID space the source's rows speak. */
-        iota_view<node_id_t> source_range {};
-
         /** The stream every copy into the index and every kernel queue on, whose device every step
          *  and @c finish select first. */
         stream_handle_t stream = nullptr;
 
-        /** Page-locked host bytes in two halves of @c half_rows rows each: packed vector rows, then
-         *  their neighbor IDs, then their norms, pinned at planning by @ref pin_bounce or never. */
+        /** Page-locked host bytes in two halves of @ref half_rows rows each: packed vector rows,
+         *  then their neighbor IDs, then their norms, pinned at planning by @ref pin_bounce or
+         *  never. */
         bounce_t bounce {typename vendor_t::pinned_allocator_t {}};
 
         /** The first appended ID - the row the claim landed at. */
@@ -1610,18 +1616,8 @@ struct vram_shard_core {
         /** Rows the plan appends. */
         std::size_t rows = 0;
 
-        /** Rows one batch carries - a bounce's worth, or every row when fewer. */
-        std::size_t batch_rows = 0;
-
-        /** Rows one half of the bounce carries: half a batch, so two halves pin what one batch
-         *  would. */
-        std::size_t half_rows = 0;
-
-        /** Rows whose vectors landed, tallied through @c std::atomic_ref. */
-        std::size_t covered_vectors = 0;
-
-        /** Rows whose neighbors landed, tallied through @c std::atomic_ref. */
-        std::size_t covered_neighbors = 0;
+        /** Rows whose vectors and neighbors landed, tallied through @c std::atomic_ref. */
+        std::size_t covered = 0;
 
         /** Rows whose norms landed from the columns, tallied through @c std::atomic_ref; @c finish
          *  derives every row's when it falls short. */
@@ -1632,17 +1628,13 @@ struct vram_shard_core {
         /** The index appended to at @p base on @p stream, under the claim over its rows or a claim
          *  word its caller closed; only @ref plan_load calls it, with the index's device current,
          *  where the events are born. */
-        load_plan_t(vram_shard_core& index, columns_view_t columns, iota_view<node_id_t> source_range,
-                    typename executor_t::stream_t const& stream, node_id_t base, std::size_t rows) noexcept
-            : columns(columns), source_range(source_range), stream(stream.handle),
-              bounce(typename vendor_t::pinned_allocator_t {stream}), base(base), rows(rows),
-              batch_rows(min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k))),
-              half_rows(divide_round_up<std::size_t>(batch_rows, 2)), index_(&index) {}
+        load_plan_t(vram_shard_core& index, typename executor_t::stream_t const& stream, node_id_t base,
+                    std::size_t rows) noexcept
+            : stream(stream.handle), bounce(typename vendor_t::pinned_allocator_t {stream}), base(base), rows(rows),
+              index_(&index) {}
         load_plan_t(load_plan_t&& other) noexcept
-            : columns(other.columns), source_range(other.source_range), stream(other.stream),
-              bounce(std::move(other.bounce)), base(other.base), rows(std::exchange(other.rows, 0)),
-              batch_rows(other.batch_rows), half_rows(other.half_rows), covered_vectors(other.covered_vectors),
-              covered_neighbors(other.covered_neighbors), covered_norms(other.covered_norms),
+            : stream(other.stream), bounce(std::move(other.bounce)), base(other.base),
+              rows(std::exchange(other.rows, 0)), covered(other.covered), covered_norms(other.covered_norms),
               crossed_ {std::move(other.crossed_[0]), std::move(other.crossed_[1])}, chunks_(other.chunks_),
               index_(std::exchange(other.index_, nullptr)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
@@ -1679,8 +1671,8 @@ struct vram_shard_core {
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = static_cast<std::size_t>(base) + position * batch_rows;
-            std::size_t const bound = min_of(first + batch_rows, static_cast<std::size_t>(base) + rows);
+            std::size_t const first = static_cast<std::size_t>(base) + position * batch_rows();
+            std::size_t const bound = min_of(first + batch_rows(), static_cast<std::size_t>(base) + rows);
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
@@ -1689,19 +1681,15 @@ struct vram_shard_core {
 
         /** The steps the append spans - one bounce-sized batch each. */
         indexed_range<load_plan_t> steps() const noexcept {
-            return {this, index_ && batch_rows ? divide_round_up(rows, batch_rows) : 0};
+            return {this, index_ && rows ? divide_round_up(rows, batch_rows()) : 0};
         }
 
-        /**
-         *  @brief Copies step @p step 's rows out of the plan's own columns through the bounce.
-         *
-         *  The vectors go into the fragment-padded matrix rows, whose fresh tails arrive zeroed,
-         *  and their norms where the columns carry them, then the neighbors with every ID inside
-         *  @c source_range folded onto the appended range and every other onto the sentinel.
-         *
-         *  @param[in] step The step to fill, as @ref steps hands them out.
-         */
-        status_t load(step_t const& step) noexcept { return load(step, columns, source_range); }
+        /** Rows one batch carries - a bounce's worth, or every row when fewer. */
+        std::size_t batch_rows() const noexcept { return min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k)); }
+
+        /** Rows one half of the bounce carries: half a batch, so two halves pin what one batch
+         *  would. */
+        std::size_t half_rows() const noexcept { return divide_round_up<std::size_t>(batch_rows(), 2); }
 
         /** Pins the bounce at planning, for a plan whose steps cross host memory or another
          *  device's storage; a plan whose rows move between matrices on one device never pins. */
@@ -1709,18 +1697,21 @@ struct vram_shard_core {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const row_bytes = index_->packed_row_bytes() + index_->connectivity() * sizeof(node_id_t) +
                                           sizeof(norms_t);
-            return bounce.empty() ? bounce.resize_uninitialized(2 * half_rows * row_bytes) : status_t::success_k;
+            return bounce.empty() ? bounce.resize_uninitialized(2 * half_rows() * row_bytes) : status_t::success_k;
         }
 
         /**
-         *  @brief The same copy out of @p columns under @p source_range rather than the plan's own.
+         *  @brief Copies step @p step 's rows out of @p columns through the bounce.
          *
-         *  This is what a sharded plan drives, one part's slice at a time, its step naming the rows
-         *  in that part's row and ID spaces.
+         *  The vectors go into the fragment-padded matrix rows, whose fresh tails arrive zeroed,
+         *  and their norms where the columns carry them, then the neighbors with every ID inside
+         *  @p source_range folded onto the appended range and every other onto the sentinel. A
+         *  sharded plan drives it one part's slice at a time, its step naming the rows in that
+         *  part's row and ID spaces.
          *
          *  @param[in] step The step to fill; its source rows address @p columns.
-         *  @param[in] columns The part's own columns.
-         *  @param[in] source_range The ID space the part's rows speak.
+         *  @param[in] columns The rows' columns, one part's under a sharded plan.
+         *  @param[in] source_range The ID space those rows speak.
          */
         status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
             if (!index_ || bounce.empty()) return status_t::uninitialized_k;
@@ -1745,13 +1736,13 @@ struct vram_shard_core {
                 return status_t::config_mismatch_k;
             // Dot reserves no norms column, so a part's column has nowhere to land.
             bool const normed = index_->stores_norms() && !norms_rows.empty();
-            std::size_t const half_bytes = half_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
-            for (std::size_t done = 0; done < range.size(); done += half_rows) {
-                std::size_t const count = min_of(half_rows, range.size() - done), into = range.first + done;
+            std::size_t const half_bytes = half_rows() * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
+            for (std::size_t done = 0; done < range.size(); done += half_rows()) {
+                std::size_t const count = min_of(half_rows(), range.size() - done), into = range.first + done;
                 std::size_t const half = chunks_++ % 2;
                 byte_t* const bounce_vectors = bounce.data() + half * half_bytes;
-                byte_t* const bounce_neighbors = bounce_vectors + half_rows * scalar_row_bytes;
-                byte_t* const bounce_norms = bounce_neighbors + half_rows * neighbors_row_bytes;
+                byte_t* const bounce_neighbors = bounce_vectors + half_rows() * scalar_row_bytes;
+                byte_t* const bounce_norms = bounce_neighbors + half_rows() * neighbors_row_bytes;
                 // The host refills a half only once the copies out of it landed, while the other
                 // half's copies run.
                 if (chunks_ > 2 && failed(crossed_[half].wait())) return index_->fail_(status_t::device_error_k);
@@ -1782,8 +1773,7 @@ struct vram_shard_core {
             }
             if (normed)
                 standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
-            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
-            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
+            standard_atomic_ref<std::size_t> {covered}.fetch_add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1838,14 +1828,14 @@ struct vram_shard_core {
             else {
                 if (bounce.empty()) return status_t::uninitialized_k;
                 stream_handle_t const reading = source_stream.handle;
-                for (std::size_t done = 0; done < count; done += half_rows) {
-                    std::size_t const batch = min_of(half_rows, count - done);
+                for (std::size_t done = 0; done < count; done += half_rows()) {
+                    std::size_t const batch = min_of(half_rows(), count - done);
                     std::size_t const read = from + done, written = into + done;
                     std::size_t const half = chunks_++ % 2;
                     byte_t* const bounce_vectors =
-                        bounce.data() + half * half_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
-                    byte_t* const bounce_neighbors = bounce_vectors + half_rows * scalar_row_bytes;
-                    byte_t* const bounce_norms = bounce_neighbors + half_rows * neighbors_row_bytes;
+                        bounce.data() + half * half_rows() * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
+                    byte_t* const bounce_neighbors = bounce_vectors + half_rows() * scalar_row_bytes;
+                    byte_t* const bounce_norms = bounce_neighbors + half_rows() * neighbors_row_bytes;
                     // The source refills a half only once the plan's stream wrote it in; an event
                     // never recorded holds nothing back.
                     if (failed(vendor_t::select(source_device)) || failed(vendor_t::follow(reading, crossed_[half])) ||
@@ -1874,8 +1864,7 @@ struct vram_shard_core {
             if (failed(index_->launch_rebase_links_(range, source_range, shift, stream)))
                 return index_->fail_(status_t::device_error_k);
             if (normed) standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(count, std::memory_order_acq_rel);
-            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(count, std::memory_order_acq_rel);
-            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(count, std::memory_order_acq_rel);
+            standard_atomic_ref<std::size_t> {covered}.fetch_add(count, std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1888,8 +1877,7 @@ struct vram_shard_core {
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (failed(vendor_t::select(index_->device_specs().ordinal))) return status_t::device_error_k;
-            if (standard_atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != rows ||
-                standard_atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != rows)
+            if (standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
             if (rows) {
                 // One launch derives every row, so a load mixing carried and missing norms
@@ -1923,43 +1911,23 @@ struct vram_shard_core {
     };
 
     /**
-     *  @brief Opens a load of @p rows from @p columns at the watermark on @p stream: claims them,
-     *      or lands them under the claim word its caller closed, grows the storage to hold them -
-     *      the fresh neighbor rows arrive sentinel-filled - and pins the double-buffered bounce.
+     *  @brief Opens a load of @p rows at the watermark on @p stream: claims them, or lands them
+     *      under the claim word its caller closed, and grows the storage to hold them - the fresh
+     *      neighbor rows arrive sentinel-filled.
      *
-     *  Refuses an unreserved index, a kept failure, columns shorter than the rows, a batch or load
-     *  in flight, and rows past the ID space.
+     *  Its steps source the rows from host columns, as a sharded plan drives its parts, or from
+     *  other indexes, as an absorb does; a plan whose steps cross host memory pins its bounce
+     *  first. Refuses an unreserved index, a kept failure, a batch or load in flight, and rows past
+     *  the ID space.
      *
-     *  @param[in] columns Where the rows come from, every column but an empty norms one sized for
-     *      @p rows.
      *  @param[in] rows Rows to append.
-     *  @param[in] source_range The ID space the source's rows speak.
      *  @param[in] stream The stream every copy and the norms kernel queue on.
      */
-    expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
-                                    typename executor_t::stream_t const& stream) noexcept {
-        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
-        if (columns.vectors.size() < rows * packed_row_bytes() ||
-            columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
-            (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
-            return {{}, status_t::config_mismatch_k};
-        auto [plan, status] = plan_load(rows, stream);
-        if (failed(status)) return {{}, status};
-        if (status_t const pinned = plan.pin_bounce(); failed(pinned)) return {{}, pinned};
-        plan.columns = columns;
-        plan.source_range = source_range;
-        return {std::move(plan), status};
-    }
-
-    /** Opens a load of @p rows the caller sources per step - what a sharded plan drives, its parts
-     *  arriving one slice at a time rather than as one pair of columns, and what an absorb drives,
-     *  its parts read out of other indexes. */
     expected<load_plan_t> plan_load(std::size_t rows, typename executor_t::stream_t const& stream) noexcept {
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (failed(vendor_t::select(device_.ordinal))) return {{}, status_t::device_error_k};
-        if (!rows)
-            return {load_plan_t {*this, {}, {}, stream, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
+        if (!rows) return {load_plan_t {*this, stream, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
         // A closed word is the caller's, who refines or absorbs around the load; an open one is
         // claimed like a batch's, so no batch lands beside it.
         bool const claiming = !claims_.closed();
@@ -1970,19 +1938,26 @@ struct vram_shard_core {
             base = first_id;
         }
         else if (rows > max_node_count_k - base) return {{}, status_t::overflow_k};
-        load_plan_t plan {*this, {}, {}, stream, base, rows};
+        load_plan_t plan {*this, stream, base, rows};
         if (status_t const grown = grow_rows_(base + rows, stream.handle); failed(grown)) return {{}, grown};
         return {std::move(plan), status_t::success_k};
     }
 
     /** Appends the whole source on the calling thread - the one-shot over @ref plan_load for a
-     *  caller with no streams to fan the steps out over. */
+     *  caller with no streams to fan the steps out over; columns shorter than @p rows are refused
+     *  before a row is claimed. */
     status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
                   typename executor_t::stream_t const& stream) noexcept {
-        auto [plan, status] = plan_load(columns, rows, source_range, stream);
+        if (!vectors_matrix_.reserved_bytes()) return status_t::uninitialized_k;
+        if (columns.vectors.size() < rows * packed_row_bytes() ||
+            columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
+            (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
+            return status_t::config_mismatch_k;
+        auto [plan, status] = plan_load(rows, stream);
         if (failed(status)) return status;
+        if (status_t const pinned = plan.pin_bounce(); failed(pinned)) return pinned;
         for (typename load_plan_t::step_t const step : plan.steps())
-            if (status_t const loaded = plan.load(step); failed(loaded)) return loaded;
+            if (status_t const loaded = plan.load(step, columns, source_range); failed(loaded)) return loaded;
         return plan.finish();
     }
 
@@ -2266,13 +2241,31 @@ struct vram_shard_core {
     enum class scratch_use_t : bool { audit_k, refine_k };
 
     /** Bytes of the scratch over the rows published now: the audit share, and for @c refine_k the
-     *  passes' buffers, the islands' IDs and in-links, and @p parts bases too. */
+     *  islands' IDs and @p parts bases too. */
     std::size_t scratch_bytes_(scratch_use_t use, std::size_t parts = 0) const noexcept {
         std::size_t const rows = size(), words = divide_round_up<std::size_t>(rows, 32);
-        std::size_t const passes_words = use == scratch_use_t::refine_k
-                                             ? rows * (3 + 2 * connectivity()) + words + parts
-                                             : 0;
-        return (words * 3 + 7 + passes_words) * sizeof(u32_t);
+        std::size_t const refine_words = use == scratch_use_t::refine_k ? rows + parts : 0;
+        return (words * 3 + 7 + refine_words) * sizeof(u32_t);
+    }
+
+    /** Bytes of the staging one refinement pass carves over the rows published now. */
+    std::size_t refine_staging_bytes_() const noexcept {
+        std::size_t const rows = size(), words = divide_round_up<std::size_t>(rows, 32);
+        return (rows + words + 2 * rows * connectivity()) * sizeof(u32_t);
+    }
+
+    /** The buffers one refinement pass uses up, from @p context 's staging, which @ref plan_refine
+     *  grew for them; all null when it could not. */
+    vram_refine_passes_t refine_passes_(traversal_context_t& context) const noexcept {
+        vram_refine_passes_t passes;
+        std::size_t const rows = size(), words = divide_round_up<std::size_t>(rows, 32);
+        byte_t* const staging = context.ensure_staging(refine_staging_bytes_());
+        if (!staging) return passes;
+        passes.bucket_counts = reinterpret_cast<u32_t*>(staging);
+        passes.touched.words = passes.bucket_counts + rows;
+        passes.shadow_neighbors = passes.touched.words + words;
+        passes.buckets = passes.shadow_neighbors + rows * connectivity();
+        return passes;
     }
 
     /** Carves the scratch over the rows published now, for @c refine_k the whole of a refine's
@@ -2298,13 +2291,8 @@ struct vram_shard_core {
         scratch.reconnected = scratch.unreached + 1;
         scratch.claims = scratch.reconnected + 1;
         if (use == scratch_use_t::refine_k) {
-            scratch.bucket_counts = scratch.claims + 2;
-            scratch.touched.words = scratch.bucket_counts + rows;
-            scratch.island_ids = scratch.touched.words + scratch.words;
-            scratch.in_links = scratch.island_ids + rows;
-            scratch.shadow_neighbors = scratch.in_links + rows;
-            scratch.buckets = scratch.shadow_neighbors + rows * connectivity();
-            scratch.part_bases = scratch.buckets + rows * connectivity();
+            scratch.island_ids = scratch.claims + 2;
+            scratch.part_bases = scratch.island_ids + rows;
         }
         if (failed(vendor_t::fill(scratch.reconnected, 0, sizeof(u32_t), context.stream())))
             return {std::move(scratch), status_t::device_error_k};

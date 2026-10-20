@@ -490,10 +490,13 @@ struct vram_amd_kernels {
         std::size_t const nodes_count = core.size();
         std::size_t const walk_count = nodes.size();
         hip_stream_handle_t const stream = context.stream();
-        // The claims, the reverse buckets' counters and the bitset of rows the merge re-selects lie
-        // back to back.
-        if (hip_api().fill_async(scratch.claims, 0, (2 + nodes_count + scratch.words) * sizeof(u32_t), stream) !=
-            hip_success_k)
+        vram_refine_passes_t const passes = core.refine_passes_(context);
+        if (!passes.bucket_counts) return status_t::bad_alloc_k;
+        // The reverse buckets' counters and the bitset of rows the merge re-selects lie back to
+        // back.
+        if (hip_api().fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != hip_success_k ||
+            hip_api().fill_async(passes.bucket_counts, 0, (nodes_count + scratch.words) * sizeof(u32_t), stream) !=
+                hip_success_k)
             return status_t::device_error_k;
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the candidate sizes
@@ -514,7 +517,7 @@ struct vram_amd_kernels {
 
         u32_t const selection_rows = core.walk_selection_rows_(expansion, candidate_slots);
         vram_refine_t view {core.storage(), //
-                            scratch.shadow_neighbors,
+                            passes.shadow_neighbors,
                             nodes.bound,
                             arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(selection_rows),
                             selection_rows,
@@ -535,7 +538,7 @@ struct vram_amd_kernels {
         // neighbors with the new reverse links; islands scatter nothing, so only their own rows
         // merge.
         if (node_ids.empty() && walk_count != nodes_count)
-            if (hip_api().copy_async(scratch.shadow_neighbors, core.neighbors_matrix_.base(),
+            if (hip_api().copy_async(passes.shadow_neighbors, core.neighbors_matrix_.base(),
                                      nodes_count * core.connectivity() * sizeof(u32_t), hip_copy_device_to_device_k,
                                      stream) != hip_success_k)
                 return status_t::device_error_k;
@@ -546,7 +549,7 @@ struct vram_amd_kernels {
         // forward & reverse candidates into its final live row. A heal round over island IDs
         // re-selects the islands' own rows alone: re-judging the rows they pick would drop the
         // links that reconnected earlier islands.
-        return launch_refine_back_links_(core, view, scratch, static_cast<u32_t>(walk_count), stream);
+        return launch_refine_back_links_(core, view, passes, static_cast<u32_t>(walk_count), stream);
     }
 
     /** Queues a reachability audit from as many stride-spread landmarks as one search draws - the
@@ -622,18 +625,23 @@ struct vram_amd_kernels {
     }
 
     /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected
-     *  over @p rows rows: the reached in-links first, so no reconnection takes the last link a
-     *  reached node is found through, then each island into a reached pick or its landmark. */
-    status_t queue_reconnect_(core_t& core, refine_scratch_t const& scratch, u32_t islands, std::size_t rows,
-                              hip_stream_handle_t stream) noexcept {
-        if (hip_api().fill_async(scratch.in_links, 0, rows * sizeof(u32_t), stream) != hip_success_k)
+     *  on @p context 's stream: the reached in-links first, counted in the pass's staging, so no
+     *  reconnection takes the last link a reached node is found through, then each island into a
+     *  reached pick or its landmark. */
+    status_t queue_reconnect_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
+                              u32_t islands) noexcept {
+        std::size_t const rows = core.size();
+        hip_stream_handle_t const stream = context.stream();
+        u32_t* const in_links = core.refine_passes_(context).bucket_counts;
+        if (!in_links) return status_t::bad_alloc_k;
+        if (hip_api().fill_async(in_links, 0, rows * sizeof(u32_t), stream) != hip_success_k)
             return status_t::device_error_k;
         vram_arguments_t heal {};
         heal.graph.neighbors = core.neighbor_rows_();
         heal.graph.rows_count = static_cast<u32_t>(rows);
         heal.graph.connectivity = static_cast<u32_t>(core.connectivity());
         heal.graph.reached = scratch.reached;
-        heal.graph.in_links = scratch.in_links;
+        heal.graph.in_links = in_links;
         heal.graph.island_ids = scratch.island_ids;
         heal.graph.islands_count = islands;
         heal.graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(core.connectivity(), rows));
@@ -739,22 +747,22 @@ struct vram_amd_kernels {
     }
 
     /** Scatters the @p walk_count walked rows' shadow neighbors into the reverse buckets of
-     *  @p scratch, then merges every touched row's forward and reverse candidates into its live
+     *  @p passes, then merges every touched row's forward and reverse candidates into its live
      *  neighbors. */
-    status_t launch_refine_back_links_(core_t& core, vram_refine_t const& view, refine_scratch_t const& scratch,
+    status_t launch_refine_back_links_(core_t& core, vram_refine_t const& view, vram_refine_passes_t const& passes,
                                        u32_t walk_count, hip_stream_handle_t stream) noexcept {
         vram_arguments_t arguments {};
         vram_graph_t& graph = arguments.graph;
-        graph.neighbors = scratch.shadow_neighbors;
+        graph.neighbors = passes.shadow_neighbors;
         graph.rows_count = view.sampling_bound;
         graph.first_id = view.first_id;
         graph.walk_count = walk_count;
         graph.node_ids = view.node_ids;
         graph.connectivity = static_cast<u32_t>(core.connectivity());
         graph.bucket_width = static_cast<u32_t>(core.connectivity());
-        graph.bucket_ids = scratch.buckets;
-        graph.bucket_counts = scratch.bucket_counts;
-        graph.touched = scratch.touched;
+        graph.bucket_ids = passes.buckets;
+        graph.bucket_counts = passes.bucket_counts;
+        graph.touched = passes.touched;
         if (status_t const launched = launch_(
                 vram_kernel_t::scatter_back_links_k, 0,
                 core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::scatter_back_links_k, 0), 0, stream,
@@ -770,7 +778,8 @@ struct vram_amd_kernels {
                                                       ? 0u
                                                       : core.build_scratch_bytes_per_warp(core.reselection_rows_());
         arguments.refine.selection_rows = core.reselection_rows_();
-        arguments.refine.assigned_rows = scratch.claims + 1;
+        // The merge's claim counter follows the walk's.
+        arguments.refine.assigned_rows = view.assigned_rows + 1;
         arguments.refine.node_ids = nullptr;
         arguments.refine.first_id = 0;
         arguments.refine.end_id = view.sampling_bound;
@@ -1059,11 +1068,6 @@ struct vram_amd_index {
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
                   typename executor_t::stream_t const& stream) const noexcept {
         return core_.save(columns, synchronization, scratch, stream);
-    }
-
-    expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
-                                    typename executor_t::stream_t const& stream) noexcept {
-        return core_.plan_load(columns, rows, source_range, stream);
     }
 
     expected<load_plan_t> plan_load(std::size_t rows, typename executor_t::stream_t const& stream) noexcept {

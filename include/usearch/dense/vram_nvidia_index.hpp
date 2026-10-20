@@ -634,10 +634,13 @@ struct vram_nvidia_kernels {
         std::size_t const nodes_count = core.size();
         std::size_t const walk_count = nodes.size();
         cuda_stream_handle_t const stream = context.stream();
-        // The claims, the reverse buckets' counters and the bitset of rows the merge re-selects lie
-        // back to back.
-        if (cuda_fill_async(scratch.claims, 0, (2 + nodes_count + scratch.words) * sizeof(u32_t), stream) !=
-            cuda_success_k)
+        vram_refine_passes_t const passes = core.refine_passes_(context);
+        if (!passes.bucket_counts) return status_t::bad_alloc_k;
+        // The reverse buckets' counters and the bitset of rows the merge re-selects lie back to
+        // back.
+        if (cuda_fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != cuda_success_k ||
+            cuda_fill_async(passes.bucket_counts, 0, (nodes_count + scratch.words) * sizeof(u32_t), stream) !=
+                cuda_success_k)
             return status_t::device_error_k;
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the candidate sizes
@@ -660,10 +663,10 @@ struct vram_nvidia_kernels {
         launch.nodes = nodes;
         launch.node_ids = node_ids.data();
         launch.nodes_count = static_cast<u32_t>(nodes_count);
-        launch.shadow_neighbors = scratch.shadow_neighbors;
-        launch.buckets = scratch.buckets;
-        launch.bucket_counts = scratch.bucket_counts;
-        launch.touched = scratch.touched;
+        launch.shadow_neighbors = passes.shadow_neighbors;
+        launch.buckets = passes.buckets;
+        launch.bucket_counts = passes.bucket_counts;
+        launch.touched = passes.touched;
         launch.claims = scratch.claims;
         launch.bucket_width = static_cast<u32_t>(core.connectivity());
         launch.arena = arena;
@@ -679,7 +682,7 @@ struct vram_nvidia_kernels {
         // neighbors with the new reverse links; islands scatter nothing, so only their own rows
         // merge.
         if (node_ids.empty() && walk_count != nodes_count)
-            if (cuda_copy_async(scratch.shadow_neighbors, core.neighbors_matrix_.base(),
+            if (cuda_copy_async(passes.shadow_neighbors, core.neighbors_matrix_.base(),
                                 nodes_count * core.connectivity() * sizeof(u32_t), stream) != cuda_success_k)
                 return status_t::device_error_k;
         if (status_t const launched = launch_refine_(core, launch, context); failed(launched)) return launched;
@@ -745,11 +748,16 @@ struct vram_nvidia_kernels {
     }
 
     /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected
-     *  over @p rows rows: the reached in-links first, so no reconnection takes the last link a
-     *  reached node is found through, then each island into a reached pick or its landmark. */
-    status_t queue_reconnect_(core_t& core, refine_scratch_t const& scratch, u32_t islands, std::size_t rows,
-                              cuda_stream_handle_t stream) noexcept {
-        if (cuda_fill_async(scratch.in_links, 0, rows * sizeof(u32_t), stream) != cuda_success_k)
+     *  on @p context 's stream: the reached in-links first, counted in the pass's staging, so no
+     *  reconnection takes the last link a reached node is found through, then each island into a
+     *  reached pick or its landmark. */
+    status_t queue_reconnect_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
+                              u32_t islands) noexcept {
+        std::size_t const rows = core.size();
+        cuda_stream_handle_t const stream = context.stream();
+        u32_t* const in_links = core.refine_passes_(context).bucket_counts;
+        if (!in_links) return status_t::bad_alloc_k;
+        if (cuda_fill_async(in_links, 0, rows * sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
         vram_arguments_t arguments {};
         vram_graph_t& graph = arguments.graph;
@@ -757,7 +765,7 @@ struct vram_nvidia_kernels {
         graph.rows_count = static_cast<u32_t>(rows);
         graph.connectivity = static_cast<u32_t>(core.connectivity());
         graph.reached = scratch.reached;
-        graph.in_links = scratch.in_links;
+        graph.in_links = in_links;
         graph.island_ids = scratch.island_ids;
         graph.islands_count = islands;
         graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(core.connectivity(), rows));
@@ -1373,11 +1381,6 @@ struct vram_nvidia_index {
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
                   typename executor_t::stream_t const& stream) const noexcept {
         return core_.save(columns, synchronization, scratch, stream);
-    }
-
-    expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
-                                    typename executor_t::stream_t const& stream) noexcept {
-        return core_.plan_load(columns, rows, source_range, stream);
     }
 
     expected<load_plan_t> plan_load(std::size_t rows, typename executor_t::stream_t const& stream) noexcept {

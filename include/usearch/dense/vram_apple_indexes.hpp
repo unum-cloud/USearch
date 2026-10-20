@@ -356,7 +356,7 @@ struct vram_apple_indexes {
             return failure;
         }
 
-        /** One context per shard, opened for the whole batch. */
+        /** One context per shard: the batch's launches stay in flight on it until @ref finish. */
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
 
         /** One part per shard, in placement order. */
@@ -624,17 +624,19 @@ struct vram_apple_indexes {
             std::size_t advancing = 0;
             do {
                 bool reselected = false;
-                for (typename index_t::refine_plan_t& plan : shard_plans_) {
-                    reselected |= plan.reselecting();
-                    [[maybe_unused]] status_t const queued = plan.queue();
+                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
+                    reselected |= shard_plans_[shard].reselecting();
+                    [[maybe_unused]] status_t const queued = shard_plans_[shard].queue(traversals_[shard], config_);
                 }
-                for (typename index_t::refine_plan_t& plan : shard_plans_)
-                    if (status_t const waited = plan.wait(); failed(waited) && succeeded(outcome)) outcome = waited;
+                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
+                    if (status_t const waited = shard_plans_[shard].wait(traversals_[shard]);
+                        failed(waited) && succeeded(outcome))
+                        outcome = waited;
                 advancing = 0;
                 std::size_t visited = 0;
-                for (typename index_t::refine_plan_t& plan : shard_plans_) {
-                    advancing += plan.advance();
-                    visited += plan.visited();
+                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
+                    advancing += shard_plans_[shard].advance(traversals_[shard]);
+                    visited += shard_plans_[shard].visited();
                 }
                 if (advancing && reselected && on_visited(visited, population_) == continuation_t::cancel_k)
                     return status_t::cancelled_k;
@@ -642,7 +644,7 @@ struct vram_apple_indexes {
             return outcome;
         }
 
-        /** One walk context per shard over its device's stream, owning its buffers. */
+        /** One walk context per shard over its stream, each pass queued on it across phases. */
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
 
         /** Every shard's own pass in placement order; none until the donors landed. */
