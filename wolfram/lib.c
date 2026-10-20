@@ -1247,6 +1247,7 @@ static int answer_health(WolframLibraryData library_data, call_t* call, DataStor
     store_size(library_data, store, "Audited", call->reachability.audited);
     store_size(library_data, store, "Reachable", call->reachability.reachable);
     store_size(library_data, store, "Sweeps", call->reachability.sweeps);
+    store_size(library_data, store, "BackSweeps", call->reachability.back_sweeps);
     return LIBRARY_NO_ERROR;
 }
 

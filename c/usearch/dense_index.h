@@ -113,9 +113,9 @@
  *  @c usearch_dense_maxsim stage on the arena's host pages and land their outputs where it lives,
  *  through the stream of the call's own executor.
  *
- *  A VRAM handle refuses a search with a @c predicate with @c usearch_status_device_k, since a host
- *  predicate cannot narrow a device walk, and an AMD or Apple one refuses a
- *  @c usearch_traversal_scan_k scan with @c usearch_status_unsupported_k; RAM and NVMe answer both.
+ *  A VRAM handle refuses a search with a @c predicate, since a host predicate cannot narrow a
+ *  device walk, and an AMD or Apple one refuses a @c usearch_traversal_scan_k scan, both with
+ *  @c usearch_status_unsupported_k; RAM and NVMe answer both.
  *  @c usearch_dense_cursor_init answers on RAM, while VRAM rows are read back by key or by search.
  *  @c usearch_dense_search_stream_init, @c usearch_dense_sample and @c usearch_dense_split are
  *  unsupported on both, and so are a cursor opened at @c starts and a pull asking for @c links.
@@ -1636,12 +1636,21 @@ typedef struct usearch_dense_multiply_t {
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
+
+    /** How rows are reached: a walk, the default; no residency multiplies by an exact scan yet. */
+    usearch_traversal_t traversal;
+
+    /** The @b optional admission filter, asked about a scored quad of keys at a time; a pair it
+     *  rejects is neither written nor counted, while the walk still routes through it. */
+    usearch_predicate_t predicate;
 } usearch_dense_multiply_t;
 
 /**
  *  @brief Approximate sparse product of a run of rows against the indexed rows - the linear
  *      algebra sibling of @c usearch_dense_search, reporting @b every pair the traversal scored
  *      instead of only the nearest. @ref dense_index_linear_algebra
+ *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
+ *  @retval usearch_status_unsupported_k A scan, or a @c predicate on a VRAM handle.
  *
  *  A walk scores many times the pairs a search reports, and each of them is an exact product the
  *  caller would otherwise recompute - this verb hands them all back. Pairs arrive in traversal
@@ -1771,6 +1780,14 @@ typedef struct usearch_dense_attend_t {
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
+
+    /** How rows are reached: a walk, the default; no residency attends by an exact scan yet. */
+    usearch_traversal_t traversal;
+
+    /** The @b optional admission filter, asked about a scored quad of keys at a time; a key it
+     *  rejects folds into no head and resolves no value row, while the walk still routes through
+     *  it. */
+    usearch_predicate_t predicate;
 } usearch_dense_attend_t;
 
 /**
@@ -1779,6 +1796,8 @@ typedef struct usearch_dense_attend_t {
  *  @retval usearch_status_invalid_argument_k @c value_lookup is NULL.
  *  @retval usearch_status_shape_mismatch_k @c head_count does not divide @c count, or a lookup yields
  *      a NULL row.
+ *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
+ *  @retval usearch_status_unsupported_k A scan, or a @c predicate on a VRAM handle.
  *
  *  One walk per token runs by a search's own frontier and stopping rule, ranking a key by the best
  *  of the token's heads, so every head's own region is explored. Every key the walk scores folds into
@@ -1850,10 +1869,12 @@ typedef struct usearch_dense_maxsim_t {
     /** Queries - the batch axis; the outputs have @c count rows of @c wanted entries. */
     size_t count;
 
-    /** The token rows of every query laid end to end, @c count times @c rows_per_query of them. */
+    /** The token rows of every query laid end to end, @c count times @c rows_per_query of them, or
+     *  as many as @c query_offsets spans. */
     usearch_rows_view_t queries;
 
-    /** Rows in every query; uniform, so ColBERT's padding applies as is. */
+    /** Rows in every query; uniform, so ColBERT's padding applies as is; unread when
+     *  @c query_offsets is set. */
     size_t rows_per_query;
 
     /** Output for the scored keys inside @c arena, @c scores carrying each key's summed maxima,
@@ -1874,21 +1895,36 @@ typedef struct usearch_dense_maxsim_t {
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
+
+    /** How candidates are nominated: a walk, the default, or a scan nominating every key. */
+    usearch_traversal_t traversal;
+
+    /** The @b optional filter over keys, asked before any key's rows are reduced. */
+    usearch_predicate_t predicate;
+
+    /** The @b optional offsets of every query's rows, @c count + 1 of them; @c NULL keeps
+     *  @c rows_per_query. */
+    size_t const* query_offsets;
 } usearch_dense_maxsim_t;
 
 /**
  *  @brief Late-interaction scoring of multi-row queries against multi-row entries: every query row
  *      takes its best match within a key, and those maxima sum to that key's score.
  *  @ref dense_index_linear_algebra
+ *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
+ *  @retval usearch_status_shape_mismatch_k A query without rows, or @c query_offsets decreasing.
+ *  @retval usearch_status_unsupported_k A scan, a @c predicate or ragged @c query_offsets on a VRAM
+ *      handle.
  *
  *  This is what @c values_per_key above one exists for. A document is one key holding its token
  *  rows, and the walk stays over individual tokens under a plain inner product - no set-to-set
  *  metric is ever evaluated, since the grouping happens in the reduction rather than in the graph.
  *  That is also why an entry's rows need no ordering and two documents need not share a row count.
  *
- *  Approximate in the same way its siblings are: each query row contributes only the tokens its walk
- *  ranked - as many as the expansion factor - so a key whose per-row maxima are non-negative can
- *  score below its exact value but never above it. Widening the expansion factor narrows that gap.
+ *  Exact for every key it scores: the walks only nominate keys, each query row taking as many
+ *  tokens as the expansion factor, and every row of a nominated key then folds into that key's
+ *  per-row maxima. A walk may miss a key none of its rows ranked; a scan nominates every key.
+ *  Widening the expansion factor narrows what a walk misses.
  *
  *  Runs on the inner-product kinds, since a maximum over logits is what late interaction sums.
  *  A graph frozen under a distance kind refuses with @c usearch_status_config_mismatch_k.

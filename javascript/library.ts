@@ -49,6 +49,7 @@ export interface CompiledReachability {
   audited: number;
   reachable: number;
   sweeps: number;
+  backSweeps: number;
 }
 
 /** The geometry and metric a checkpoint froze, in the canonical spellings. */

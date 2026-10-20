@@ -137,6 +137,7 @@ static napi_value usearch_js_finish_health(napi_env env, usearch_js_call_t* call
     napi_set_named_property(env, object, "audited", usearch_js_number(env, reachability->audited));
     napi_set_named_property(env, object, "reachable", usearch_js_number(env, reachability->reachable));
     napi_set_named_property(env, object, "sweeps", usearch_js_number(env, reachability->sweeps));
+    napi_set_named_property(env, object, "backSweeps", usearch_js_number(env, reachability->back_sweeps));
     return object;
 }
 

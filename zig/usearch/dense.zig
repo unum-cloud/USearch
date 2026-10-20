@@ -193,8 +193,10 @@ pub const DenseReachability = extern struct {
     audited: usize = 0,
     /// Of those, the entries a search reaches from the landmarks; the rest wait for a `refine`.
     reachable: usize = 0,
-    /// Levels the sweep took to converge - a diameter proxy.
+    /// Levels the sweep took to converge.
     sweeps: usize = 0,
+    /// Levels the sweep back toward the entry point took, where an audit sweeps both ways.
+    back_sweeps: usize = 0,
 };
 
 /// The online-softmax carry of one query row - Flash Attention's running maximum and partition.
@@ -697,6 +699,8 @@ const usearch_dense_multiply_t = extern struct {
     expansion_factor: usize,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
+    traversal: Traversal = .walk,
+    predicate: Predicate = .{},
 };
 
 const usearch_dense_attend_t = extern struct {
@@ -717,6 +721,8 @@ const usearch_dense_attend_t = extern struct {
     score_scale: f32,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
+    traversal: Traversal = .walk,
+    predicate: Predicate = .{},
 };
 
 const usearch_dense_maxsim_t = extern struct {
@@ -733,6 +739,9 @@ const usearch_dense_maxsim_t = extern struct {
     expansion_factor: usize,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
+    traversal: Traversal = .walk,
+    predicate: Predicate = .{},
+    query_offsets: ?[*]const usize = null,
 };
 
 extern fn usearch_dense_init_ram(arguments: *usearch_dense_init_ram_t) void;

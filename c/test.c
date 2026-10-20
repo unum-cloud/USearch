@@ -1305,9 +1305,9 @@ size_t pull_to_end(usearch_dense_index_t index, usearch_executor_t executor, use
     return pulled;
 }
 
-/** A cursor opened at a key steps to the entries that key's entries link to, once each and never
- *  the key's own, and an absent key steps nowhere, while a plain scan still yields every row once.
- *  An implementation that cannot step yet says so, and that half skips. */
+/** A cursor opened at a key yields that key's own entries, then the entries they link to, once
+ *  each, and an absent key starts nothing, while a plain scan still yields every row once. An
+ *  implementation that cannot step yet says so, and that half skips. */
 void test_cursor_steps(void) {
     printf("Test: Cursor Steps\n");
     usearch_outcome_t outcome = {0};
@@ -1326,21 +1326,27 @@ void test_cursor_steps(void) {
         expect(yielded[row] == (row == 0 ? 2u : row == 1 ? 0u : 1u), "A plain scan must yield every row once");
 
     usearch_key_t const start = key_of(0);
-    usearch_dense_cursor_init(
-        &(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome, .start = &start});
+    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor,
+                                                              .index = index,
+                                                              .outcome = &outcome,
+                                                              .starts_count = 1,
+                                                              .starts = &start});
     if (outcome.status == usearch_status_unsupported_k)
         printf("Test: Cursor Steps - SKIPPED the step: %s\n", outcome.message);
     else {
         expect(!outcome.message, outcome.message);
         memset(yielded, 0, sizeof(yielded));
-        expect(pull_to_end(index, executor, arena, cursor, yielded) != 0, "A key's entries must link somewhere");
-        expect_eq(yielded[0], 0, "A step must never yield the start key's own entries");
-        for (size_t row = 0; row != neighborhood_rows_k; ++row)
-            expect(yielded[row] <= 1, "A step must yield each linked entry once");
+        expect(pull_to_end(index, executor, arena, cursor, yielded) > 2, "A key's entries must link somewhere");
+        expect_eq(yielded[0], 2, "A walk must yield both of the start key's own entries");
+        for (size_t row = 1; row != neighborhood_rows_k; ++row)
+            expect(yielded[row] <= 1, "A walk must yield each linked entry once");
 
         usearch_key_t const absent = key_of(neighborhood_rows_k);
-        usearch_dense_cursor_init(
-            &(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome, .start = &absent});
+        usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor,
+                                                                  .index = index,
+                                                                  .outcome = &outcome,
+                                                                  .starts_count = 1,
+                                                                  .starts = &absent});
         expect(!outcome.message, outcome.message);
         expect_eq(pull_to_end(index, executor, arena, cursor, yielded), 0, "An absent key must step nowhere");
     }
@@ -1499,23 +1505,19 @@ void test_sequence_round_trip(void) {
         size_t pulled[2] = {0};
         for (size_t pull = 0; pull != 2; ++pull) {
             usearch_keys_view_t cursor_keys = {0};
-            usearch_tape_view_t cursor_sequences = {0};
             usearch_sequence_cursor_next(&(usearch_sequence_cursor_next_t) {.index = viewed,
                                                                             .executor = storage,
                                                                             .outcome = &outcome,
                                                                             .cursor = cursor,
                                                                             .keys = &cursor_keys,
-                                                                            .sequences = &cursor_sequences,
                                                                             .written = &pulled[pull],
                                                                             .arena = arena,
                                                                             .wanted = 3});
             expect(!outcome.message, outcome.message);
             if (pull == 0)
-                expect(
-                    pulled[0] == 3 && value_of(((usearch_key_t const*)cursor_keys.data)[2]) == 2 &&
-                        cursor_sequences.offsets[2] - cursor_sequences.offsets[1] == 7 &&
-                        memcmp((uint8_t const*)cursor_sequences.data + cursor_sequences.offsets[1], "sitting", 7) == 0,
-                    "A cursor over storage reads rows in insertion order");
+                expect(pulled[0] == 3 && value_of(((usearch_key_t const*)cursor_keys.data)[1]) == 1 &&
+                           value_of(((usearch_key_t const*)cursor_keys.data)[2]) == 2,
+                       "A cursor over storage reads rows in insertion order");
         }
         expect(pulled[1] == 1, "A cursor over storage stops at the last row");
         usearch_sequence_cursor_free(cursor);
@@ -1783,25 +1785,19 @@ void test_shapes_round_trip(void) {
             &(usearch_shapes_cursor_init_t) {.cursor = &cursor, .index = viewed, .outcome = &outcome});
         expect(!outcome.message, outcome.message);
         usearch_keys_view_t cursor_keys = {0};
-        usearch_tape_view_t cursor_shapes = {0};
         size_t pulled = 0;
         usearch_shapes_cursor_next(&(usearch_shapes_cursor_next_t) {.index = viewed,
                                                                     .executor = storage,
                                                                     .outcome = &outcome,
                                                                     .cursor = cursor,
                                                                     .keys = &cursor_keys,
-                                                                    .shapes = &cursor_shapes,
                                                                     .written = &pulled,
                                                                     .arena = arena,
-                                                                    .wanted = 8,
-                                                                    .outputs_scalar = usearch_scalar_f32_k});
+                                                                    .wanted = 8});
         expect(!outcome.message, outcome.message);
-        expect(
-            pulled == 3 && value_of(((usearch_key_t const*)cursor_keys.data)[2]) == 2 && cursor_shapes.offsets[3] == 12,
-            "A cursor over storage reads every pose in insertion order");
-        for (size_t coordinate = 0; coordinate != 36; ++coordinate)
-            expect(fabsf(((float const*)cursor_shapes.data)[coordinate] - points[coordinate]) < 1e-6f,
-                   "A cursor over storage hands every stored pose back");
+        expect(pulled == 3 && value_of(((usearch_key_t const*)cursor_keys.data)[1]) == 1 &&
+                   value_of(((usearch_key_t const*)cursor_keys.data)[2]) == 2,
+               "A cursor over storage reads every pose in insertion order");
         usearch_shapes_cursor_free(cursor);
         usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = viewed,
                                                           .executor = storage,
@@ -2031,7 +2027,7 @@ void test_geospatial_round_trip(void) {
     expect(description.size == 4 && description.metadata.connectivity == 12, "A loaded index describes the saved one");
 
     // The same checkpoint served from storage judges every relation on the rows its walks read and
-    // answers reads as RAM does, refusing writes, containment walks and saves.
+    // answers reads and containment as RAM does, refusing writes and saves.
     usearch_executor_t storage = NULL;
     usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage, .outcome = &outcome, .threads = 1});
     expect(!outcome.message, outcome.message);
@@ -2100,20 +2096,17 @@ void test_geospatial_round_trip(void) {
             &(usearch_geospatial_cursor_init_t) {.cursor = &cursor, .index = viewed, .outcome = &outcome});
         expect(!outcome.message, outcome.message);
         usearch_keys_view_t cursor_keys = {0};
-        usearch_geospatial_observation_t const* cursor_observations = NULL;
         size_t pulled = 0;
         usearch_geospatial_cursor_next(&(usearch_geospatial_cursor_next_t) {.index = viewed,
                                                                             .executor = storage,
                                                                             .outcome = &outcome,
                                                                             .cursor = cursor,
                                                                             .keys = &cursor_keys,
-                                                                            .observations = &cursor_observations,
                                                                             .written = &pulled,
                                                                             .arena = arena,
                                                                             .wanted = 8});
         expect(!outcome.message, outcome.message);
-        expect(pulled == 4 && value_of(((usearch_key_t const*)cursor_keys.data)[3]) == 3 &&
-                   fabs(cursor_observations[3].latitude_degrees - 48.8566) < 1e-6,
+        expect(pulled == 4 && value_of(((usearch_key_t const*)cursor_keys.data)[3]) == 3,
                "A cursor over storage reads every observation in insertion order");
         usearch_geospatial_cursor_free(cursor);
 
@@ -2124,7 +2117,23 @@ void test_geospatial_round_trip(void) {
                                                                   .keys = {keys, sizeof(usearch_key_t)},
                                                                   .observations = observations});
         expect_eq(outcome.status, usearch_status_read_only_k, "A view from storage refuses every mutation");
+
+        // Containment over storage reports the entries the walk in RAM reports, in any order.
         usearch_matches_tape_view_t balls = {0};
+        size_t ram_reported = 0, nvme_reported = 0;
+        unsigned ram_keys = 0, nvme_keys = 0;
+        usearch_geospatial_within(&(usearch_geospatial_within_t) {.index = index,
+                                                                  .executor = executor,
+                                                                  .outcome = &outcome,
+                                                                  .count = 1,
+                                                                  .queries = observations,
+                                                                  .relation = usearch_geospatial_relation_near_k,
+                                                                  .tolerance = {.metres = 500},
+                                                                  .matches = &balls,
+                                                                  .written = &ram_reported,
+                                                                  .arena = arena});
+        expect(!outcome.message, outcome.message);
+        for (size_t match = 0; match != ram_reported; ++match) ram_keys |= 1u << value_of(balls.keys[match]);
         usearch_geospatial_within(&(usearch_geospatial_within_t) {.index = viewed,
                                                                   .executor = storage,
                                                                   .outcome = &outcome,
@@ -2133,8 +2142,12 @@ void test_geospatial_round_trip(void) {
                                                                   .relation = usearch_geospatial_relation_near_k,
                                                                   .tolerance = {.metres = 500},
                                                                   .matches = &balls,
+                                                                  .written = &nvme_reported,
                                                                   .arena = arena});
-        expect_eq(outcome.status, usearch_status_unsupported_k, "A view from storage walks no radius yet");
+        expect(!outcome.message, outcome.message);
+        for (size_t match = 0; match != nvme_reported; ++match) nvme_keys |= 1u << value_of(balls.keys[match]);
+        expect(ram_reported == 3 && nvme_reported == 3 && ram_keys == 7 && nvme_keys == 7,
+               "A view from storage reports the containment RAM reports, Paris left out");
         usearch_geospatial_save(&(
             usearch_geospatial_save_t) {.index = viewed, .executor = storage, .outcome = &outcome, .path = path_view});
         expect_eq(outcome.status, usearch_status_unsupported_k, "A view from storage already is its checkpoint");
@@ -3318,7 +3331,7 @@ void test_vram_scan(size_t const collection_size, size_t const dimensions) {
         size_t widest_batch = 0;
         search.predicate = (usearch_predicate_t) {admits_even, &widest_batch};
         usearch_dense_search(&search);
-        expect_eq(outcome.status, usearch_status_device_k, "A host predicate cannot narrow a device scan");
+        expect_eq(outcome.status, usearch_status_unsupported_k, "A host predicate cannot narrow a device scan");
     }
     else expect_eq(outcome.status, usearch_status_unsupported_k, "Only NVIDIA devices scan");
 

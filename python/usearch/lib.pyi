@@ -453,7 +453,9 @@ class On[IndexT]:
         /,
         *,
         expansion_factor: int = 0,
+        traversal: Traversal = ...,
         dtype: Scalar | None = None,
+        predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -569,7 +571,9 @@ class DeferredOn[IndexT]:
         /,
         *,
         expansion_factor: int = 0,
+        traversal: Traversal = ...,
         dtype: Scalar | None = None,
+        predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
@@ -656,10 +660,10 @@ class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, 
         ...
 
 @final
-class DenseReachability(structseq[Any], tuple[int, int, int]):
+class DenseReachability(structseq[Any], tuple[int, int, int, int]):
     """One reachability audit, as `usearch_reachability_t` holds it."""
 
-    __match_args__: Final = ("audited", "reachable", "sweeps")
+    __match_args__: Final = ("audited", "reachable", "sweeps", "back_sweeps")
 
     @property
     def audited(self) -> int:
@@ -673,7 +677,12 @@ class DenseReachability(structseq[Any], tuple[int, int, int]):
 
     @property
     def sweeps(self) -> int:
-        """Levels the sweep took to converge, a diameter proxy."""
+        """Levels the sweep took to converge."""
+        ...
+
+    @property
+    def back_sweeps(self) -> int:
+        """Levels the sweep back toward the entry point took, where an audit sweeps both ways."""
         ...
 
 @final
@@ -984,7 +993,9 @@ class DenseIndex:
         /,
         *,
         expansion_factor: int = 0,
+        traversal: Traversal = ...,
         dtype: Scalar | None = None,
+        predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,

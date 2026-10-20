@@ -307,14 +307,16 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *     this, never a later size.
      * @param reachable the entries a search reaches; the rest no search finds until a refinement
      *     re-links them.
-     * @param sweeps the levels the sweep took to converge, a diameter proxy.
+     * @param sweeps the levels the sweep took to converge.
+     * @param backSweeps the levels the sweep back toward the entry point took, where an audit
+     *     sweeps both ways.
      */
-    public record DenseReachability(long audited, long reachable, long sweeps) {
+    public record DenseReachability(long audited, long reachable, long sweeps, long backSweeps) {
 
         /** Lifts a {@code usearch_reachability_t}. */
         static DenseReachability lift(MemorySegment reachability) {
             long[] fields = reachability.toArray(ValueLayout.JAVA_LONG);
-            return new DenseReachability(fields[0], fields[1], fields[2]);
+            return new DenseReachability(fields[0], fields[1], fields[2], fields[3]);
         }
     }
 
@@ -1577,7 +1579,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     }
 
     private static final MemoryLayout PREDICATE = MemoryLayout.structLayout(
-                    Library.POINTER.withName("callback"), Library.POINTER.withName("state"))
+                    Library.POINTER.withName("callback"),
+                    Library.POINTER.withName("state"),
+                    Library.ENUM.withName("cost"),
+                    Library.padding())
             .withName("predicate");
     private static final MemoryLayout PROGRESS = MemoryLayout.structLayout(
                     Library.POINTER.withName("callback"),
@@ -1603,7 +1608,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /** {@code usearch_reachability_t}. */
     static final StructLayout REACHABILITY = MemoryLayout.structLayout(
-            Library.SIZE.withName("audited"), Library.SIZE.withName("reachable"), Library.SIZE.withName("sweeps"));
+            Library.SIZE.withName("audited"),
+            Library.SIZE.withName("reachable"),
+            Library.SIZE.withName("sweeps"),
+            Library.SIZE.withName("back_sweeps"));
 
     /** {@code usearch_dense_softmax_state_t}. */
     static final StructLayout SOFTMAX_STATE = MemoryLayout.structLayout(
@@ -1804,7 +1812,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("wanted"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
-                    STATS));
+                    STATS,
+                    Library.ENUM.withName("traversal"),
+                    Library.padding(),
+                    PREDICATE));
 
     static final Verb ATTEND = new Verb(
             "usearch_dense_attend",
@@ -1824,7 +1835,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     ValueLayout.JAVA_FLOAT.withName("score_scale"),
                     Library.padding(),
                     PROGRESS,
-                    STATS));
+                    STATS,
+                    Library.ENUM.withName("traversal"),
+                    Library.padding(),
+                    PREDICATE));
 
     static final Verb MAXSIM = new Verb(
             "usearch_dense_maxsim",
@@ -1838,7 +1852,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("wanted"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
-                    STATS));
+                    STATS,
+                    Library.ENUM.withName("traversal"),
+                    Library.padding(),
+                    PREDICATE,
+                    Library.POINTER.withName("query_offsets")));
 
     /** {@code usearch_value_lookup_t}. */
     private static final FunctionDescriptor LOOKUP = FunctionDescriptor.ofVoid(

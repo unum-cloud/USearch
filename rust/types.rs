@@ -271,12 +271,17 @@ pub struct usearch_nvme_options_t {
 pub type usearch_predicate_callback_t =
     Option<unsafe extern "C" fn(*const usearch_key_t, *mut c_int, usize, *mut c_void)>;
 
+pub type usearch_predicate_cost_t = c_int;
+
+pub const usearch_predicate_cost_cheap_k: usearch_predicate_cost_t = 0;
+
 /// Mirrors `usearch_predicate_t`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct usearch_predicate_t {
     pub callback: usearch_predicate_callback_t,
     pub state: *mut c_void,
+    pub cost: usearch_predicate_cost_t,
 }
 
 /// Periodic advance report and the caller's chance to stop the call.
@@ -1187,11 +1192,13 @@ pub(crate) fn lower_predicate(predicate: &Option<&Predicate>, callbacks: &Callba
             usearch_predicate_t {
                 callback: Some(admission_trampoline),
                 state: callbacks.state(),
+                cost: usearch_predicate_cost_cheap_k,
             }
         }
         None => usearch_predicate_t {
             callback: None,
             state: ptr::null_mut(),
+            cost: usearch_predicate_cost_cheap_k,
         },
     }
 }

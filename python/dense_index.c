@@ -540,13 +540,14 @@ PyTypeObject DenseIndexDescriptionType;
 static PyStructSequence_Field DenseReachability_fields[] = {
     {"audited", "Entries published when the audit started, the population it judged."},
     {"reachable", "Of those, the entries a search reaches; the rest wait for a `refine` to re-link them."},
-    {"sweeps", "Levels the sweep took to converge, a diameter proxy."},
+    {"sweeps", "Levels the sweep took to converge."},
+    {"back_sweeps", "Levels the sweep back toward the entry point took, where an audit sweeps both ways."},
     {NULL, NULL},
 };
 
 PyStructSequence_Desc usearch_py_dense_reachability_desc = {
     "usearch.DenseReachability", "One reachability audit, as `usearch_reachability_t` holds it.",
-    DenseReachability_fields, 3};
+    DenseReachability_fields, 4};
 
 PyTypeObject DenseReachabilityType;
 
@@ -653,11 +654,12 @@ static void health_submit(void* call) { usearch_dense_health(&((health_call_t*)c
 
 static PyObject* health_answer(void* erased) {
     usearch_reachability_t const* const reachability = &((health_call_t*)erased)->reachability;
-    PyObject* fields[3] = {NULL, NULL, NULL};
+    PyObject* fields[4] = {NULL, NULL, NULL, NULL};
     (void)((fields[0] = PyLong_FromSize_t(reachability->audited)) &&
            (fields[1] = PyLong_FromSize_t(reachability->reachable)) &&
-           (fields[2] = PyLong_FromSize_t(reachability->sweeps)));
-    return usearch_py_struct_sequence_steal(&DenseReachabilityType, fields, 3);
+           (fields[2] = PyLong_FromSize_t(reachability->sweeps)) &&
+           (fields[3] = PyLong_FromSize_t(reachability->back_sweeps)));
+    return usearch_py_struct_sequence_steal(&DenseReachabilityType, fields, 4);
 }
 
 static usearch_py_verb_t const health_verb = {sizeof(health_call_t), health_submit, health_answer,
@@ -1616,8 +1618,9 @@ static PyObject* DenseIndex_attend(PyObject* self, PyObject* const* args, Py_ssi
 }
 
 static char const doc_DenseIndex_maxsim[] =                                                      //
-    "maxsim(queries, rows_per_query, wanted, arena, /, *, expansion_factor=0, dtype=None,\n"     //
-    "    progress=None, progress_steps=0, stats=None) -> Matches\n"                              //
+    "maxsim(queries, rows_per_query, wanted, arena, /, *, expansion_factor=0,\n"                 //
+    "    traversal=Traversal.WALK, dtype=None, predicate=None, progress=None,\n"                 //
+    "    progress_steps=0, stats=None) -> Matches\n"                                             //
     "\n"                                                                                         //
     "Late-interaction scoring of multi-row queries against multi-row entries: every query\n"     //
     "row takes its best match within a key, and those maxima sum to that key's score.\n"         //
@@ -1636,8 +1639,12 @@ static char const doc_DenseIndex_maxsim[] =                                     
     "  wanted (int): Upper bound on matches per query - the 'k' over documents, not rows.\n"     //
     "  arena (Arena): Where the scored documents land, rewound by the call.\n"                   //
     "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Widening it\n" //
-    "    narrows the gap to the exact score, which a walk can only under-report.\n"              //
+    "    nominates more documents, each still scored exactly.\n"                                 //
+    "  traversal (Traversal, optional): `Traversal.WALK`, the default, nominates documents by\n" //
+    "    walking the graph; `Traversal.SCAN` nominates every document, on RAM and NVMe.\n"       //
     "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"          //
+    "  predicate (callable, optional): Admits a Key when it returns truthy, asked before any\n"  //
+    "    of its rows are scored, so a rejected document never scores.\n"                         //
     "  progress (callable, optional): Called with (completed, total) queries; returning\n"       //
     "    False stops the batch and raises `CancelledError`, None carries on.\n"                  //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
@@ -1652,6 +1659,7 @@ typedef struct maxsim_call_t {
     usearch_py_call_t call;
     usearch_dense_maxsim_t arguments;
     usearch_py_buffer_backing_t queries;
+    usearch_py_callback_t predicate;
     walk_reports_t reports;
     usearch_matches_view_t matches;
 } maxsim_call_t;
@@ -1667,12 +1675,15 @@ static PyObject* maxsim_answer(void* erased) {
 static void maxsim_release(void* erased) {
     maxsim_call_t* const call = (maxsim_call_t*)erased;
     usearch_py_buffer_release(&call->queries);
+    Py_CLEAR(call->predicate.callable);
     walk_reports_release(&call->reports);
     usearch_py_call_release(&call->call);
 }
 
-static int maxsim_traverse(void* call, visitproc visit, void* arg) {
-    return walk_reports_traverse(&((maxsim_call_t*)call)->reports, visit, arg);
+static int maxsim_traverse(void* erased, visitproc visit, void* arg) {
+    maxsim_call_t* const call = (maxsim_call_t*)erased;
+    Py_VISIT(call->predicate.callable);
+    return walk_reports_traverse(&call->reports, visit, arg);
 }
 
 static usearch_py_verb_t const maxsim_verb = {sizeof(maxsim_call_t), maxsim_submit, maxsim_answer, maxsim_release,
@@ -1680,16 +1691,25 @@ static usearch_py_verb_t const maxsim_verb = {sizeof(maxsim_call_t), maxsim_subm
 
 static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
-    PyObject *queries_object, *rows_per_query_object, *wanted_object, *arena_object, *expansion_object, *dtype_object,
-        *progress_object, *progress_steps_object, *stats_object;
+    PyObject *queries_object, *rows_per_query_object, *wanted_object, *arena_object, *expansion_object,
+        *traversal_object, *dtype_object, *predicate_object, *progress_object, *progress_steps_object, *stats_object;
     usearch_py_argument_t const arguments[] = {
-        {"queries", &queries_object},   {"rows_per_query", &rows_per_query_object}, {"wanted", &wanted_object},
-        {"arena", &arena_object},       {"expansion_factor", &expansion_object},    {"dtype", &dtype_object},
-        {"progress", &progress_object}, {"progress_steps", &progress_steps_object}, {"stats", &stats_object},
+        {"queries", &queries_object},
+        {"rows_per_query", &rows_per_query_object},
+        {"wanted", &wanted_object},
+        {"arena", &arena_object},
+        {"expansion_factor", &expansion_object},
+        {"traversal", &traversal_object},
+        {"dtype", &dtype_object},
+        {"predicate", &predicate_object},
+        {"progress", &progress_object},
+        {"progress_steps", &progress_steps_object},
+        {"stats", &stats_object},
     };
     usearch_py_receiver_t receiver;
     usearch_dense_index_t handle = NULL;
     size_t rows_per_query = 0, wanted = 0, expansion_factor = 0, progress_steps = 0;
+    int traversal = usearch_traversal_walk_k;
     usearch_scalar_t dtype = usearch_scalar_unknown_k;
     if (usearch_py_arguments_parse("maxsim", args, positional_args_count, args_names_tuple, 4, 4, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
@@ -1698,6 +1718,8 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
         usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
+        (traversal_object &&
+         usearch_py_enum_from_object(traversal_object, "traversal", &usearch_py_traversal, &traversal) != 0) ||
         usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0)
         return NULL;
 
@@ -1715,6 +1737,7 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
     size_t const queries_count = queries.rows / rows_per_query;
     Py_ssize_t extent = 0;
     if (usearch_py_matrix_bytes(queries_count, wanted, sizeof(usearch_key_t), &extent) != 0 ||
+        usearch_py_callback_from_object(predicate_object, "predicate", &call->call, &call->predicate) != 0 ||
         walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0 ||
         usearch_py_arena_claim(arena_object, &call->call.arena) != 0)
         return usearch_py_call_discard(&receiver, &maxsim_verb, call);
@@ -1733,6 +1756,8 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
         .expansion_factor = expansion_factor,
         .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
         .stats = &call->reports.stats,
+        .traversal = (usearch_traversal_t)traversal,
+        .predicate = usearch_py_predicate_registered(&call->predicate),
     };
     return usearch_py_call_run(&receiver, &maxsim_verb, call);
 }

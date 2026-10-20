@@ -641,6 +641,14 @@ pub const usearch_progress_t = extern struct {
     }
 };
 
+/// How costly one predicate call is, which decides how many keys each call carries.
+pub const PredicateCost = enum(c_int) {
+    /// Asked as candidates arrive, at most four keys a call, with nothing buffered.
+    cheap = 0,
+    /// Asked once per traversal round or scan run about every candidate it gathered.
+    expensive = 1,
+};
+
 /// Which candidate keys a filtered search may report: a handler and the state forwarded into it.
 /// Build one with `Predicate.of`; the default admits everything. Mirrors `usearch_predicate_t`.
 pub const Predicate = extern struct {
@@ -648,6 +656,8 @@ pub const Predicate = extern struct {
     callback: ?PredicateFunction = null,
     /// Opaque pointer forwarded into every `callback` call.
     state: ?*anyopaque = null,
+    /// How many keys each `callback` call carries.
+    cost: PredicateCost = .cheap,
 
     /// Wraps `admits` in a trampoline generated per call site, asking it about each key of a batch.
     /// Pass `{}` for a predicate needing no context, and a single-item pointer otherwise.

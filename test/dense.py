@@ -1164,17 +1164,15 @@ def test_maxsim_refuses_ragged_queries(executor):
         index.on(executor).maxsim(tokens[: _LATE_INTERACTION_TOKENS + 1], _LATE_INTERACTION_TOKENS, 4, Arena())
 
 
-def test_maxsim_refuses_a_predicate(executor):
-    """`maxsim` has no filtered sibling, so the keyword is refused rather than ignored."""
+def test_maxsim_scores_only_admitted_documents(executor):
+    """A predicate is asked before any of a document's rows score, so a rejected one never lands."""
     index, tokens = late_interaction_index(executor)
-    with pytest.raises(TypeError):
-        index.on(executor).maxsim(
-            tokens[:_LATE_INTERACTION_TOKENS],
-            _LATE_INTERACTION_TOKENS,
-            4,
-            Arena(),
-            predicate=lambda key: True,
-        )
+    matches = scored_documents(index, tokens, 2, 4, executor, predicate=lambda key: int(key) % 2 == 0)
+    found = keys_to_integers(matches.keys)
+    counts = np.asarray(matches.counts)
+    for query_index in range(len(counts)):
+        assert counts[query_index] > 0
+        assert np.all(found[query_index, : counts[query_index]] % 2 == 0)
 
 
 def test_maxsim_refuses_a_distance_kind(executor):

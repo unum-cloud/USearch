@@ -168,9 +168,13 @@ public readonly struct DenseReachability
     /// re-links them.</summary>
     public ulong Reachable { get; init; }
 
-    /// <summary>The levels the sweep took to converge, a diameter proxy; the deepest shard's on a
+    /// <summary>The levels the sweep took to converge; the deepest shard's on a
     /// sharded handle.</summary>
     public ulong Sweeps { get; init; }
+
+    /// <summary>The levels the sweep back toward the entry point took, where an audit sweeps both
+    /// ways.</summary>
+    public ulong BackSweeps { get; init; }
 }
 
 /// <summary>
@@ -1319,6 +1323,7 @@ internal unsafe struct DenseHealthCall(CallHandles handles) : ICall<DenseReachab
         this.Result = new DenseReachability
         {
             Audited = audit->Audited, Reachable = audit->Reachable, Sweeps = audit->Sweeps,
+            BackSweeps = audit->BackSweeps,
         };
     }
 }
@@ -2225,6 +2230,7 @@ internal struct NativeDenseReachability
     public nuint Audited;
     public nuint Reachable;
     public nuint Sweeps;
+    public nuint BackSweeps;
 }
 
 /// <summary>The arguments of <c>usearch_dense_init_ram</c>.</summary>
@@ -2587,6 +2593,8 @@ internal unsafe struct NativeDenseMultiply
     public nuint ExpansionFactor;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
+    public Traversal Traversal;
+    public NativePredicate Predicate;
 }
 
 /// <summary>The arguments of <c>usearch_dense_attend</c>.</summary>
@@ -2610,6 +2618,8 @@ internal unsafe struct NativeDenseAttend
     public float ScoreScale;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
+    public Traversal Traversal;
+    public NativePredicate Predicate;
 }
 
 /// <summary>The arguments of <c>usearch_dense_maxsim</c>.</summary>
@@ -2629,6 +2639,9 @@ internal unsafe struct NativeDenseMaxsim
     public nuint ExpansionFactor;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
+    public Traversal Traversal;
+    public NativePredicate Predicate;
+    public nuint* QueryOffsets;
 }
 
 #endregion Native Vocabulary

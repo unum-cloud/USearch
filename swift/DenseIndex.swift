@@ -142,13 +142,16 @@ public struct DenseReachability: Equatable, Sendable {
     /// Of those, the entries a search reaches from the landmarks; the rest no search finds until
     /// a refinement re-links them.
     public var reachable: Int
-    /// The levels the sweep took to converge - a diameter proxy.
+    /// The levels the sweep took to converge.
     public var sweeps: Int
+    /// The levels the sweep back toward the entry point took, where an audit sweeps both ways.
+    public var backSweeps: Int
 
     init(_ raw: usearch_reachability_t) {
         audited = raw.audited
         reachable = raw.reachable
         sweeps = raw.sweeps
+        backSweeps = raw.back_sweeps
     }
 }
 
@@ -1710,7 +1713,10 @@ struct DenseCall {
             wanted: wanted,
             expansion_factor: config.expansionFactor,
             progress: progress,
-            stats: config.stats?.raw
+            stats: config.stats?.raw,
+            traversal: Traversal.walk.raw,
+            predicate: usearch_predicate_t(),
+            query_offsets: nil
         )
         usearch_dense_maxsim(&arguments)
         func read() -> Matches { Matches(write: write, view: matches.pointee, endIndex: count) }
@@ -1743,7 +1749,9 @@ struct DenseCall {
             wanted: config.wanted,
             expansion_factor: config.expansionFactor,
             progress: progress,
-            stats: config.stats?.raw
+            stats: config.stats?.raw,
+            traversal: Traversal.walk.raw,
+            predicate: usearch_predicate_t()
         )
         usearch_dense_multiply(&arguments)
         func read() -> DenseProducts {
@@ -1792,7 +1800,9 @@ struct DenseCall {
             expansion_factor: config.expansionFactor,
             score_scale: config.scoreScale,
             progress: progress,
-            stats: config.stats?.raw
+            stats: config.stats?.raw,
+            traversal: Traversal.walk.raw,
+            predicate: usearch_predicate_t()
         )
         usearch_dense_attend(&arguments)
         let rows = queries.rows
@@ -1960,9 +1970,9 @@ private let admissionTrampoline: usearch_predicate_callback_t = { keys, admissio
 extension Landing {
     /// Lends an optional predicate as the struct a search takes; nil lends nulls.
     fileprivate func lend(_ predicate: (@Sendable (Key) throws -> Bool)?) -> usearch_predicate_t {
-        guard let predicate else { return usearch_predicate_t(callback: nil, state: nil) }
+        guard let predicate else { return usearch_predicate_t() }
         let state = place(AdmissionState(admits: predicate, landing: self))
-        return usearch_predicate_t(callback: admissionTrampoline, state: state)
+        return usearch_predicate_t(callback: admissionTrampoline, state: state, cost: usearch_predicate_cost_cheap_k)
     }
 }
 

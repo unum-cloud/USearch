@@ -259,8 +259,10 @@ export interface DenseReachability {
   audited: number;
   /** Of those, the entries a search reaches from the landmarks; the rest stay unfound until a `refine`. */
   reachable: number;
-  /** Levels the sweep took to converge - a diameter proxy. */
+  /** Levels the sweep took to converge. */
   sweeps: number;
+  /** Levels the sweep back toward the entry point took, where an audit sweeps both ways. */
+  backSweeps: number;
 }
 
 /** The geometry every dense index freezes at initialization, whatever its residency. */

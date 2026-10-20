@@ -660,9 +660,12 @@ typedef struct usearch_reachability_t {
      *  a refinement re-links them. */
     size_t reachable;
 
-    /** Levels the sweep took to converge - a diameter proxy; the deepest shard's on a sharded
-     *  handle. */
+    /** Levels the sweep took to converge; the deepest shard's on a sharded handle. */
     size_t sweeps;
+
+    /** Levels the sweep back toward the entry point took, where an audit sweeps both ways; the
+     *  deepest shard's on a sharded handle. */
+    size_t back_sweeps;
 } usearch_reachability_t;
 
 /**
@@ -758,6 +761,17 @@ typedef enum usearch_admission_t {
 typedef void (*usearch_predicate_callback_t)(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count,
                                              void* state);
 
+/** How costly one predicate call is, which decides how many keys each call carries. */
+typedef enum usearch_predicate_cost_t {
+
+    /** Asked as candidates arrive, at most four keys a call, with nothing buffered. */
+    usearch_predicate_cost_cheap_k = 0,
+
+    /** Asked once per traversal round or scan run about every candidate it gathered, for handlers
+     *  that pay per call, such as a lookup in an external database. */
+    usearch_predicate_cost_expensive_k = 1,
+} usearch_predicate_cost_t;
+
 /** Which candidate keys a filtered search may report: a handler and the state it is called with. */
 typedef struct usearch_predicate_t {
 
@@ -766,6 +780,9 @@ typedef struct usearch_predicate_t {
 
     /** Opaque pointer forwarded into every @c callback call. */
     void* state;
+
+    /** How many keys each @c callback call carries; zero stays cheap. */
+    usearch_predicate_cost_t cost;
 } usearch_predicate_t;
 
 /** Whether the operation a handler is watching carries on or unwinds. */

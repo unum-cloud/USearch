@@ -385,6 +385,8 @@ pub struct usearch_dense_multiply_t {
     pub expansion_factor: usize,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
+    pub traversal: usearch_traversal_t,
+    pub predicate: usearch_predicate_t,
 }
 
 pub type usearch_dense_softmax_state_t = DenseSoftmaxState;
@@ -411,6 +413,8 @@ pub struct usearch_dense_attend_t {
     pub score_scale: f32,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
+    pub traversal: usearch_traversal_t,
+    pub predicate: usearch_predicate_t,
 }
 
 #[repr(C)]
@@ -428,6 +432,9 @@ pub struct usearch_dense_maxsim_t {
     pub expansion_factor: usize,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
+    pub traversal: usearch_traversal_t,
+    pub predicate: usearch_predicate_t,
+    pub query_offsets: *const usize,
 }
 
 extern "C" {
@@ -645,8 +652,10 @@ pub struct DenseReachability {
     pub audited: usize,
     /// Of those, the entries a search reaches; the rest no search finds until a refinement re-links them.
     pub reachable: usize,
-    /// Levels the sweep took to converge, a diameter proxy; the deepest shard's on a sharded handle.
+    /// Levels the sweep took to converge; the deepest shard's on a sharded handle.
     pub sweeps: usize,
+    /// Levels the sweep back toward the entry point took, where an audit sweeps both ways.
+    pub back_sweeps: usize,
 }
 
 /// The online-softmax carry of one query row, which folds one attention call into another over
@@ -2382,6 +2391,9 @@ impl<'arena, Queries: RowsView> Calling for DenseMaxsim<'_, 'arena, Queries> {
             expansion_factor: self.config.expansion_factor,
             progress,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            traversal: Traversal::Walk as usearch_traversal_t,
+            predicate: lower_predicate(&None, callbacks),
+            query_offsets: ptr::null(),
         })
     }
 
@@ -2437,6 +2449,8 @@ impl<'arena, Left: RowsView> Calling for DenseMultiply<'_, 'arena, Left> {
             expansion_factor: self.config.expansion_factor,
             progress,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            traversal: Traversal::Walk as usearch_traversal_t,
+            predicate: lower_predicate(&None, callbacks),
         })
     }
 
@@ -2540,6 +2554,8 @@ impl<'arena, Queries: RowsView, Value: Element> Calling for DenseAttend<'_, '_, 
             score_scale: self.config.score_scale,
             progress,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            traversal: Traversal::Walk as usearch_traversal_t,
+            predicate: lower_predicate(&None, callbacks),
         })
     }
 

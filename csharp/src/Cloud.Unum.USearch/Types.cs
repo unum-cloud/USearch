@@ -848,6 +848,15 @@ internal enum Admission : int
     Admit = 1,
 }
 
+/// <summary>How costly one predicate call is, which decides how many keys each call carries.</summary>
+internal enum PredicateCost : int
+{
+    /// <summary>Asked as candidates arrive, at most four keys a call, with nothing buffered.</summary>
+    Cheap = 0,
+    /// <summary>Asked once per traversal round or scan run about every candidate it gathered.</summary>
+    Expensive = 1,
+}
+
 #endregion Filtering
 
 #region Executors
@@ -1662,6 +1671,8 @@ internal unsafe struct NativePredicate
     public delegate* unmanaged[Cdecl]<Key*, Admission*, nuint, IntPtr, void> Callback;
     /// <summary>Opaque pointer forwarded into every handler call.</summary>
     public IntPtr State;
+    /// <summary>How many keys each handler call carries.</summary>
+    public PredicateCost Cost;
 }
 
 /// <summary>The arguments of <c>usearch_executor_for_ram</c>.</summary>

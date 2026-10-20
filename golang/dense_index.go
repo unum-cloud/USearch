@@ -202,8 +202,11 @@ type DenseReachability struct {
 	// Reachable counts those a search reaches; the rest no search finds until a refinement
 	// re-links them.
 	Reachable uint
-	// Sweeps counts the levels the sweep took to converge, a diameter proxy.
+	// Sweeps counts the levels the sweep took to converge.
 	Sweeps uint
+	// BackSweeps counts the levels the sweep back toward the entry point took, where an audit
+	// sweeps both ways.
+	BackSweeps uint
 }
 
 // DenseSoftmaxState is the online-softmax carry of one query row, which folds one attention

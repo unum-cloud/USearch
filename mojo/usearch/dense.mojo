@@ -60,6 +60,7 @@ from usearch.types import (
     NvmeOptions,
     Outcome,
     PredicateArguments,
+    PredicateCost,
     ProgressArguments,
     RamOptions,
     RowsView,
@@ -177,13 +178,16 @@ struct DenseReachability(Defaultable, ImplicitlyCopyable):
     var reachable: c_size_t
     """Of those, the entries a search reaches; the rest no search finds until a `refine` re-links them."""
     var sweeps: c_size_t
-    """Levels the sweep took to converge - a diameter proxy."""
+    """Levels the sweep took to converge."""
+    var back_sweeps: c_size_t
+    """Levels the sweep back toward the entry point took, where an audit sweeps both ways."""
 
     def __init__(out self):
         """Zeroes the audit, which is what a failed call leaves."""
         self.audited = c_size_t(0)
         self.reachable = c_size_t(0)
         self.sweeps = c_size_t(0)
+        self.back_sweeps = c_size_t(0)
 
 
 @fieldwise_init
@@ -1053,6 +1057,8 @@ struct DenseMultiplyArguments(ImplicitlyCopyable):
     var expansion_factor: c_size_t
     var progress: ProgressArguments
     var stats: Address
+    var traversal: Traversal
+    var predicate: PredicateArguments
 
 
 @fieldwise_init
@@ -1076,6 +1082,8 @@ struct DenseAttendArguments(ImplicitlyCopyable):
     var score_scale: Float32
     var progress: ProgressArguments
     var stats: Address
+    var traversal: Traversal
+    var predicate: PredicateArguments
 
 
 @fieldwise_init
@@ -1095,6 +1103,9 @@ struct DenseMaxsimArguments(ImplicitlyCopyable):
     var expansion_factor: c_size_t
     var progress: ProgressArguments
     var stats: Address
+    var traversal: Traversal
+    var predicate: PredicateArguments
+    var query_offsets: Address
 
 
 comptime DenseInitRam = Verb[DenseInitRamArguments]
@@ -1566,7 +1577,7 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
                 self.traversal,
-                PredicateArguments(self.predicate, self.predicate_state),
+                PredicateArguments(self.predicate, self.predicate_state, PredicateCost.CHEAP),
                 ProgressArguments(),
                 self.stats,
             ),
@@ -1621,6 +1632,9 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
                 c_size_t(self.expansion_factor),
                 ProgressArguments(),
                 self.stats,
+                Traversal.WALK,
+                PredicateArguments(NULL_ADDRESS, NULL_ADDRESS, PredicateCost.CHEAP),
+                NULL_ADDRESS,
             ),
             library.symbols().dense_maxsim,
         )
@@ -1673,6 +1687,8 @@ struct _DenseMultiplyCall[origin: MutOrigin](Call):
                 c_size_t(self.expansion_factor),
                 ProgressArguments(),
                 self.stats,
+                Traversal.WALK,
+                PredicateArguments(NULL_ADDRESS, NULL_ADDRESS, PredicateCost.CHEAP),
             ),
             library.symbols().dense_multiply,
         )
@@ -1739,6 +1755,8 @@ struct _DenseAttendCall[dtype: DType, origin: MutOrigin](Call):
                 self.score_scale,
                 ProgressArguments(),
                 self.stats,
+                Traversal.WALK,
+                PredicateArguments(NULL_ADDRESS, NULL_ADDRESS, PredicateCost.CHEAP),
             ),
             library.symbols().dense_attend,
         )

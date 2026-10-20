@@ -499,6 +499,18 @@ struct ProgressArguments(Defaultable, ImplicitlyCopyable):
 
 
 @fieldwise_init
+struct PredicateCost(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """How costly one predicate call is, which decides how many keys each call carries."""
+
+    var code: c_int
+    """The raw value the ABI exchanges."""
+    comptime CHEAP = Self(0)
+    """Asked as candidates arrive, at most four keys a call, with nothing buffered."""
+    comptime EXPENSIVE = Self(1)
+    """Asked once per traversal round or scan run about every candidate it gathered."""
+
+
+@fieldwise_init
 struct PredicateArguments(ImplicitlyCopyable):
     """`usearch_predicate_t`: which candidate keys a filtered search may report - a handler and the
     state it is called with."""
@@ -507,6 +519,8 @@ struct PredicateArguments(ImplicitlyCopyable):
     """A `usearch_predicate_callback_t` compiled in C; `NULL_ADDRESS` admits every key."""
     var state: Address
     """Forwarded into every `callback` call."""
+    var cost: PredicateCost
+    """How many keys each `callback` call carries."""
 
 
 # endregion Residency & Execution
