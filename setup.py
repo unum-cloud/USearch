@@ -184,7 +184,7 @@ install_requires = [
 ]
 if use_numkong:
     include_dirs.append("numkong/include")
-    install_requires.append("numkong")
+    install_requires.append("numkong>=7.8.6")
 
 
 # With Clang, `setuptools` doesn't properly use the `language="c++"` argument we pass.
