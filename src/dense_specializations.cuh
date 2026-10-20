@@ -220,23 +220,57 @@ struct device_value_lookup_t {
 using vram_attend_lookup_t = dense::vram_keyed_lookup<us::utilities::uuid_t, device_value_lookup_t>;
 #endif
 
+/** One traversal context per executor thread, carved after the call's one rewind from that
+ *  thread's arena, which keeps its widest chunk between calls; the array sits in the first arena.
+ *  Empty off RAM, where the towers keep their own. */
+template <typename indexes_type_>
+struct dense_scratch {
+    explicit dense_scratch(typename indexes_type_::executor_t&) noexcept {}
+    status_t prepare(typename indexes_type_::executor_t&) noexcept { return status_t::success_k; }
+};
+
+template <typename indexes_type_>
+    requires is_ram_index<indexes_type_>
+struct dense_scratch<indexes_type_> {
+    using traversal_context_t = typename indexes_type_::traversal_context_t;
+
+    growing_buffer<traversal_context_t, thread_allocator_t> traversals;
+
+    explicit dense_scratch(forkunion_executor_t& executor) noexcept
+        : traversals(thread_allocator_t {executor.arena(0)}) {}
+
+    /** Rewinds every arena, keeping the high-water mark of earlier calls, and carves one context
+     *  per thread; the verb sizes them. */
+    status_t prepare(forkunion_executor_t& executor) noexcept {
+        if (status_t const rewound = executor.reserve(0); failed(rewound)) return rewound;
+        if (failed(traversals.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
+        for (std::size_t thread = 0; thread != executor.size(); ++thread)
+            traversals.push_back_reserved(traversal_context_t {thread_allocator_t {executor.arena(thread)}});
+        return status_t::success_k;
+    }
+};
+
 /** Searches @p index under an expensive @p predicate through a family of per-thread predicates
- *  gathering what the traversal @p config names hands them. Every call rewinds the executor's
- *  arenas, so each builds its own family, and the engine reserves it for the widest round it
- *  settles. */
+ *  gathering what the traversal @p config names hands them; the engine opens the family and
+ *  reserves it for the widest round it settles. */
 template <typename index_type_>
 expected<typename index_type_::search_result_t> search_with_expensive_predicate(
     index_type_& index, dense::rows_view_t queries, typename index_type_::executor_t& executor,
-    typename index_type_::search_config_t config, nk::matrix_span<typename index_type_::key_t> keys,
-    nk::matrix_span<f64_t> distances, std::span<std::size_t> counts, usearch_predicate_t predicate) noexcept {
+    dense_scratch<index_type_>& scratch, typename index_type_::search_config_t config,
+    nk::matrix_span<typename index_type_::key_t> keys, nk::matrix_span<f64_t> distances, std::span<std::size_t> counts,
+    usearch_predicate_t predicate) noexcept {
     if (config.traversal == traversal_t::scan_k) {
-        expensive_predicates<typename index_type_::scan_payload_t> scanned;
-        if (status_t const prepared = scanned.prepare(predicate, executor, 0); failed(prepared)) return {{}, prepared};
-        return index.search_if(queries, executor, config, keys, distances, counts, scanned);
+        expensive_predicates<typename index_type_::scan_payload_t> scanned {predicate};
+        if constexpr (is_ram_index<index_type_>)
+            return index.search_if(queries, executor, to_writable_span(scratch.traversals), config, keys, distances,
+                                   counts, scanned);
+        else return index.search_if(queries, executor, config, keys, distances, counts, scanned);
     }
-    expensive_predicates<typename index_type_::walk_payload_t> walked;
-    if (status_t const prepared = walked.prepare(predicate, executor, 0); failed(prepared)) return {{}, prepared};
-    return index.search_if(queries, executor, config, keys, distances, counts, walked);
+    expensive_predicates<typename index_type_::walk_payload_t> walked {predicate};
+    if constexpr (is_ram_index<index_type_>)
+        return index.search_if(queries, executor, to_writable_span(scratch.traversals), config, keys, distances, counts,
+                               walked);
+    else return index.search_if(queries, executor, config, keys, distances, counts, walked);
 }
 
 /** One variant's verbs, fixed to the C layer's callback types and wrapped as non-template members
@@ -263,6 +297,9 @@ struct specialized_index {
     using keys_span_t = nk::matrix_span<key_t>;
     using scores_span_t = nk::matrix_span<f64_t>;
     using counts_span_t = std::span<std::size_t>;
+
+    /** What the C layer carved for one call: the contexts on RAM, nothing elsewhere. */
+    using scratch_t = dense_scratch<index_type_>;
 
     /** What an attend resolves value rows through: a host callback per batch on RAM, a device call per key on GPU. */
     using attend_lookup_t = std::conditional_t<is_vram_index<index_type_>, device_value_lookup_t, value_lookup_t>;
@@ -303,53 +340,56 @@ struct specialized_index {
     /** Opens a refinement the caller holds, landing @p donors first when any are named. */
     expected<refine_plan_t> plan_absorb(std::span<index_type_*> donors, executor_t& executor,
                                         refine_config_t config) noexcept;
-    status_t run(refine_plan_t& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    expected<refine_result_t> finish(refine_plan_t& plan, executor_t& executor) noexcept;
+    status_t run(refine_plan_t& plan, executor_t& executor, scratch_t& scratch, progress_ticks_t& ticks) noexcept;
+    expected<refine_result_t> finish(refine_plan_t& plan, executor_t& executor, scratch_t& scratch) noexcept;
     expected<health_result_t> health(executor_t& executor) noexcept;
-    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
-                                     keys_span_t keys, scores_span_t distances, counts_span_t counts,
-                                     dummy_predicate_t) noexcept;
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, scratch_t& scratch,
+                                     search_config_t config, keys_span_t keys, scores_span_t distances,
+                                     counts_span_t counts, dummy_predicate_t) noexcept;
 
     /** Narrows a walk by a host predicate, which a device walk cannot take, so a GPU index answers
      *  @c unsupported_k. */
-    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
-                                     keys_span_t keys, scores_span_t distances, counts_span_t counts,
-                                     predicate_t& predicate) noexcept;
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, scratch_t& scratch,
+                                     search_config_t config, keys_span_t keys, scores_span_t distances,
+                                     counts_span_t counts, predicate_t& predicate) noexcept;
 
     /** Narrows a walk or a scan by an expensive host @p predicate, asked once per round each thread
      *  settles; a GPU index answers @c unsupported_k. */
-    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
-                                     keys_span_t keys, scores_span_t distances, counts_span_t counts,
-                                     usearch_predicate_t predicate) noexcept;
-    expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys,
-                                       scores_span_t products, counts_span_t counts) noexcept;
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, scratch_t& scratch,
+                                     search_config_t config, keys_span_t keys, scores_span_t distances,
+                                     counts_span_t counts, usearch_predicate_t predicate) noexcept;
+    expected<search_result_t> multiply(rows_view_t left, executor_t& executor, scratch_t& scratch,
+                                       search_config_t config, keys_span_t keys, scores_span_t products,
+                                       counts_span_t counts) noexcept;
 
     /** Narrows the written pairs by a host predicate, which a device walk cannot take, so a GPU
      *  index answers @c unsupported_k. */
-    expected<search_result_t> multiply_if(rows_view_t left, executor_t& executor, search_config_t config,
-                                          keys_span_t keys, scores_span_t products, counts_span_t counts,
-                                          predicate_t& predicate) noexcept;
+    expected<search_result_t> multiply_if(rows_view_t left, executor_t& executor, scratch_t& scratch,
+                                          search_config_t config, keys_span_t keys, scores_span_t products,
+                                          counts_span_t counts, predicate_t& predicate) noexcept;
 
     /** Late interaction of the queries @p query_offsets cut @p queries into; a GPU index walks
      *  uniform queries alone, answering @c unsupported_k for a scan or ragged offsets. */
     expected<search_result_t> maxsim(rows_view_t queries, std::span<std::size_t const> query_offsets,
-                                     executor_t& executor, search_config_t config, keys_span_t keys,
+                                     executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
                                      scores_span_t scores, counts_span_t counts) noexcept;
 
     /** Narrows the nominated keys by a host predicate, which a device walk cannot take, so a GPU
      *  index answers @c unsupported_k. */
     expected<search_result_t> maxsim_if(rows_view_t queries, std::span<std::size_t const> query_offsets,
-                                        executor_t& executor, search_config_t config, keys_span_t keys,
-                                        scores_span_t scores, counts_span_t counts, predicate_t& predicate) noexcept;
+                                        executor_t& executor, scratch_t& scratch, search_config_t config,
+                                        keys_span_t keys, scores_span_t scores, counts_span_t counts,
+                                        predicate_t& predicate) noexcept;
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
                                      f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
-                                     executor_t& executor, search_config_t config) noexcept;
+                                     executor_t& executor, scratch_t& scratch, search_config_t config) noexcept;
 
     /** Narrows the folded keys by a host predicate, which a device walk cannot take, so a GPU index
      *  answers @c unsupported_k. */
     expected<search_result_t> attend_if(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
                                         f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
-                                        executor_t& executor, search_config_t config, predicate_t& predicate) noexcept;
+                                        executor_t& executor, scratch_t& scratch, search_config_t config,
+                                        predicate_t& predicate) noexcept;
     status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t save(bytes_span_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
@@ -449,13 +489,18 @@ expected<typename specialized_index<index_type_>::insert_result_t> specialized_i
     std::size_t const count = keys.size();
     // Only a handler splits the call, and one plan still publishes every slice at once.
     std::size_t const chunk = ticks.slice();
+    scratch_t scratch {executor};
+    if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
     auto [plan, status] = index.plan_insert(count, executor, config);
     if (failed(status)) return {{}, status};
     for (std::size_t landed = 0; landed != count;) {
         std::size_t const taking = min_of(chunk, count - landed);
-        if (status_t const stepped = plan.insert(landed, keys[nk::range(landed, landed + taking)],
-                                                 rows.slice(landed, taking));
-            failed(stepped)) {
+        status_t stepped = status_t::success_k;
+        if constexpr (is_ram_index<index_type_>)
+            stepped = plan.insert(landed, keys[nk::range(landed, landed + taking)], rows.slice(landed, taking),
+                                  to_writable_span(scratch.traversals));
+        else stepped = plan.insert(landed, keys[nk::range(landed, landed + taking)], rows.slice(landed, taking));
+        if (failed(stepped)) {
             // A refused RAM step dispensed nothing, so the dropped plan releases every claim.
             if constexpr (is_ram_index<index_type_>) return {{}, stepped};
             else break;
@@ -486,15 +531,17 @@ expected<typename specialized_index<index_type_>::refine_plan_t> specialized_ind
     return index.plan_absorb(donors, executor, config);
 }
 template <typename index_type_>
-status_t specialized_index<index_type_>::run(refine_plan_t& plan, executor_t& executor,
+status_t specialized_index<index_type_>::run(refine_plan_t& plan, executor_t& executor, scratch_t& scratch,
                                              progress_ticks_t& ticks) noexcept {
-    return plan.run(executor,
-                    [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
+    auto const report = [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); };
+    if constexpr (is_ram_index<index_type_>) return plan.run(executor, to_writable_span(scratch.traversals), report);
+    else return plan.run(executor, report);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::refine_result_t> specialized_index<index_type_>::finish(
-    refine_plan_t& plan, executor_t& executor) noexcept {
-    return plan.finish(executor);
+    refine_plan_t& plan, executor_t& executor, scratch_t& scratch) noexcept {
+    if constexpr (is_ram_index<index_type_>) return plan.finish(executor, to_writable_span(scratch.traversals));
+    else return plan.finish(executor);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::health_result_t> specialized_index<index_type_>::health(
@@ -503,41 +550,51 @@ expected<typename specialized_index<index_type_>::health_result_t> specialized_i
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
-    counts_span_t counts, dummy_predicate_t) noexcept {
-    return index.search(queries, executor, config, keys, distances, counts);
+    rows_view_t queries, executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
+    scores_span_t distances, counts_span_t counts, dummy_predicate_t) noexcept {
+    if constexpr (is_ram_index<index_type_>)
+        return index.search(queries, executor, to_writable_span(scratch.traversals), config, keys, distances, counts);
+    else return index.search(queries, executor, config, keys, distances, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
-    counts_span_t counts, predicate_t& predicate) noexcept {
+    rows_view_t queries, executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
+    scores_span_t distances, counts_span_t counts, predicate_t& predicate) noexcept {
     if constexpr (is_vram_index<index_type_>) return {{}, status_t::unsupported_k};
-    else return index.search_if(queries, executor, config, keys, distances, counts, predicate);
+    else
+        return index.search_if(queries, executor, to_writable_span(scratch.traversals), config, keys, distances, counts,
+                               predicate);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
-    counts_span_t counts, usearch_predicate_t predicate) noexcept {
+    rows_view_t queries, executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
+    scores_span_t distances, counts_span_t counts, usearch_predicate_t predicate) noexcept {
     if constexpr (is_vram_index<index_type_>) return {{}, status_t::unsupported_k};
-    else return search_with_expensive_predicate(index, queries, executor, config, keys, distances, counts, predicate);
+    else
+        return search_with_expensive_predicate(index, queries, executor, scratch, config, keys, distances, counts,
+                                               predicate);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply(
-    rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t products,
-    counts_span_t counts) noexcept {
-    return index.multiply(left, executor, config, keys, products, counts);
+    rows_view_t left, executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
+    scores_span_t products, counts_span_t counts) noexcept {
+    if constexpr (is_ram_index<index_type_>)
+        return index.multiply(left, executor, to_writable_span(scratch.traversals), config, keys, products, counts);
+    else return index.multiply(left, executor, config, keys, products, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply_if(
-    rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t products,
-    counts_span_t counts, predicate_t& predicate) noexcept {
+    rows_view_t left, executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
+    scores_span_t products, counts_span_t counts, predicate_t& predicate) noexcept {
     if constexpr (is_vram_index<index_type_>) return {{}, status_t::unsupported_k};
-    else return index.multiply_if(left, executor, config, keys, products, counts, predicate);
+    else
+        return index.multiply_if(left, executor, to_writable_span(scratch.traversals), config, keys, products, counts,
+                                 predicate);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim(
-    rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, search_config_t config,
-    keys_span_t keys, scores_span_t scores, counts_span_t counts) noexcept {
+    rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, scratch_t& scratch,
+    search_config_t config, keys_span_t keys, scores_span_t scores, counts_span_t counts) noexcept {
     if constexpr (is_vram_index<index_type_>) {
         std::size_t const rows_per_query = query_offsets[1] - query_offsets[0];
         for (std::size_t query = 0; query != counts.size(); ++query)
@@ -546,30 +603,39 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
         return index.maxsim(queries.slice(query_offsets.front(), query_offsets.back() - query_offsets.front()),
                             rows_per_query, executor, config, keys, scores, counts);
     }
-    else return index.maxsim(queries, query_offsets, executor, config, keys, scores, counts);
+    else
+        return index.maxsim(queries, query_offsets, executor, to_writable_span(scratch.traversals), config, keys,
+                            scores, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim_if(
-    rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, search_config_t config,
-    keys_span_t keys, scores_span_t scores, counts_span_t counts, predicate_t& predicate) noexcept {
+    rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, scratch_t& scratch,
+    search_config_t config, keys_span_t keys, scores_span_t scores, counts_span_t counts,
+    predicate_t& predicate) noexcept {
     if constexpr (is_vram_index<index_type_>) return {{}, status_t::unsupported_k};
-    else return index.maxsim_if(queries, query_offsets, executor, config, keys, scores, counts, predicate);
+    else
+        return index.maxsim_if(queries, query_offsets, executor, to_writable_span(scratch.traversals), config, keys,
+                               scores, counts, predicate);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
     rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
-    std::span<dense::softmax_state_t> carry, executor_t& executor, search_config_t config) noexcept {
-    return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
+    std::span<dense::softmax_state_t> carry, executor_t& executor, scratch_t& scratch,
+    search_config_t config) noexcept {
+    if constexpr (is_ram_index<index_type_>)
+        return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor,
+                            to_writable_span(scratch.traversals), config);
+    else return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend_if(
     rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
-    std::span<dense::softmax_state_t> carry, executor_t& executor, search_config_t config,
+    std::span<dense::softmax_state_t> carry, executor_t& executor, scratch_t& scratch, search_config_t config,
     predicate_t& predicate) noexcept {
     if constexpr (is_vram_index<index_type_>) return {{}, status_t::unsupported_k};
     else
-        return index.attend_if(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config,
-                               predicate);
+        return index.attend_if(queries, head_count, value_lookup, score_scale, outputs, carry, executor,
+                               to_writable_span(scratch.traversals), config, predicate);
 }
 template <typename index_type_>
 status_t specialized_index<index_type_>::save(std::string_view path, executor_t& executor,
@@ -635,6 +701,9 @@ struct specialized_index<index_type_> {
     using keys_span_t = nk::matrix_span<key_t>;
     using scores_span_t = nk::matrix_span<f64_t>;
     using counts_span_t = std::span<std::size_t>;
+
+    /** What the C layer carved for one call: the contexts on RAM, nothing elsewhere. */
+    using scratch_t = dense_scratch<index_type_>;
     using attend_lookup_t = value_lookup_t;
 
     index_type_& index;
@@ -650,32 +719,35 @@ struct specialized_index<index_type_> {
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) noexcept;
     status_t get(std::span<key_t const> keys, rows_span_t vectors, std::size_t wanted, std::span<std::size_t> entries,
                  executor_t& executor) noexcept;
-    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
-                                     keys_span_t keys, scores_span_t distances, counts_span_t counts,
-                                     dummy_predicate_t) noexcept;
-    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
-                                     keys_span_t keys, scores_span_t distances, counts_span_t counts,
-                                     predicate_t& predicate) noexcept;
-    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
-                                     keys_span_t keys, scores_span_t distances, counts_span_t counts,
-                                     usearch_predicate_t predicate) noexcept;
-    expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys,
-                                       scores_span_t products, counts_span_t counts) noexcept;
-    expected<search_result_t> multiply_if(rows_view_t left, executor_t& executor, search_config_t config,
-                                          keys_span_t keys, scores_span_t products, counts_span_t counts,
-                                          predicate_t& predicate) noexcept;
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, scratch_t& scratch,
+                                     search_config_t config, keys_span_t keys, scores_span_t distances,
+                                     counts_span_t counts, dummy_predicate_t) noexcept;
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, scratch_t& scratch,
+                                     search_config_t config, keys_span_t keys, scores_span_t distances,
+                                     counts_span_t counts, predicate_t& predicate) noexcept;
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, scratch_t& scratch,
+                                     search_config_t config, keys_span_t keys, scores_span_t distances,
+                                     counts_span_t counts, usearch_predicate_t predicate) noexcept;
+    expected<search_result_t> multiply(rows_view_t left, executor_t& executor, scratch_t& scratch,
+                                       search_config_t config, keys_span_t keys, scores_span_t products,
+                                       counts_span_t counts) noexcept;
+    expected<search_result_t> multiply_if(rows_view_t left, executor_t& executor, scratch_t& scratch,
+                                          search_config_t config, keys_span_t keys, scores_span_t products,
+                                          counts_span_t counts, predicate_t& predicate) noexcept;
     expected<search_result_t> maxsim(rows_view_t queries, std::span<std::size_t const> query_offsets,
-                                     executor_t& executor, search_config_t config, keys_span_t keys,
+                                     executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
                                      scores_span_t scores, counts_span_t counts) noexcept;
     expected<search_result_t> maxsim_if(rows_view_t queries, std::span<std::size_t const> query_offsets,
-                                        executor_t& executor, search_config_t config, keys_span_t keys,
-                                        scores_span_t scores, counts_span_t counts, predicate_t& predicate) noexcept;
+                                        executor_t& executor, scratch_t& scratch, search_config_t config,
+                                        keys_span_t keys, scores_span_t scores, counts_span_t counts,
+                                        predicate_t& predicate) noexcept;
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
                                      f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
-                                     executor_t& executor, search_config_t config) noexcept;
+                                     executor_t& executor, scratch_t& scratch, search_config_t config) noexcept;
     expected<search_result_t> attend_if(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
                                         f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
-                                        executor_t& executor, search_config_t config, predicate_t& predicate) noexcept;
+                                        executor_t& executor, scratch_t& scratch, search_config_t config,
+                                        predicate_t& predicate) noexcept;
 
     /** Opens a cursor over every row into @p walk, which holds any variant's cursor. */
     template <typename walk_type_>
@@ -764,64 +836,67 @@ status_t specialized_index<index_type_>::get(std::span<key_t const> keys, rows_s
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
-    counts_span_t counts, dummy_predicate_t) noexcept {
+    rows_view_t queries, executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
+    scores_span_t distances, counts_span_t counts, dummy_predicate_t) noexcept {
     return index.search(queries, executor, config, keys, distances, counts);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
-    counts_span_t counts, predicate_t& predicate) noexcept {
+    rows_view_t queries, executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
+    scores_span_t distances, counts_span_t counts, predicate_t& predicate) noexcept {
     return index.search_if(queries, executor, config, keys, distances, counts, predicate);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
-    counts_span_t counts, usearch_predicate_t predicate) noexcept {
-    return search_with_expensive_predicate(index, queries, executor, config, keys, distances, counts, predicate);
+    rows_view_t queries, executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
+    scores_span_t distances, counts_span_t counts, usearch_predicate_t predicate) noexcept {
+    return search_with_expensive_predicate(index, queries, executor, scratch, config, keys, distances, counts,
+                                           predicate);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply(
-    rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t products,
-    counts_span_t counts) noexcept {
+    rows_view_t left, executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
+    scores_span_t products, counts_span_t counts) noexcept {
     return index.multiply(left, executor, config, keys, products, counts);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply_if(
-    rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t products,
-    counts_span_t counts, predicate_t& predicate) noexcept {
+    rows_view_t left, executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
+    scores_span_t products, counts_span_t counts, predicate_t& predicate) noexcept {
     return index.multiply_if(left, executor, config, keys, products, counts, predicate);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim(
-    rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, search_config_t config,
-    keys_span_t keys, scores_span_t scores, counts_span_t counts) noexcept {
+    rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, scratch_t&,
+    search_config_t config, keys_span_t keys, scores_span_t scores, counts_span_t counts) noexcept {
     return index.maxsim(queries, query_offsets, executor, config, keys, scores, counts);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim_if(
-    rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, search_config_t config,
-    keys_span_t keys, scores_span_t scores, counts_span_t counts, predicate_t& predicate) noexcept {
+    rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, scratch_t&,
+    search_config_t config, keys_span_t keys, scores_span_t scores, counts_span_t counts,
+    predicate_t& predicate) noexcept {
     return index.maxsim_if(queries, query_offsets, executor, config, keys, scores, counts, predicate);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
     rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
-    std::span<dense::softmax_state_t> carry, executor_t& executor, search_config_t config) noexcept {
+    std::span<dense::softmax_state_t> carry, executor_t& executor, scratch_t& scratch,
+    search_config_t config) noexcept {
     return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend_if(
     rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
-    std::span<dense::softmax_state_t> carry, executor_t& executor, search_config_t config,
+    std::span<dense::softmax_state_t> carry, executor_t& executor, scratch_t& scratch, search_config_t config,
     predicate_t& predicate) noexcept {
     return index.attend_if(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config, predicate);
 }

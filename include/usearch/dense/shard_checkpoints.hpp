@@ -458,10 +458,10 @@ struct [[nodiscard]] shard_load_plan {
 
     /** An empty plan over @p allocator; only @ref open ever fills it. */
     explicit shard_load_plan(forkunion_allocator_t allocator) noexcept
-        : mappings_(allocator), parts_(allocator), landings_(allocator), plans_(allocator), steps_(allocator) {}
+        : mappings_(allocator), parts_(allocator), landings_(allocator), plans_(allocator) {}
     shard_load_plan(shard_load_plan&& other) noexcept
         : mappings_(std::move(other.mappings_)), parts_(std::move(other.parts_)), landings_(std::move(other.landings_)),
-          plans_(std::move(other.plans_)), steps_(std::move(other.steps_)), residency_(std::move(other.residency_)),
+          seats_(other.seats_), plans_(std::move(other.plans_)), residency_(std::move(other.residency_)),
           shards_(std::exchange(other.shards_, nullptr)) {}
     shard_load_plan& operator=(shard_load_plan&&) = delete;
     shard_load_plan(shard_load_plan const&) = delete;
@@ -518,20 +518,34 @@ struct [[nodiscard]] shard_load_plan {
 
     /** Step @p position of the plan; an empty one past the last. */
     step_t operator[](std::size_t position) const noexcept {
-        if (position >= steps().size()) return {};
-        return steps_[position];
+        step_t found;
+        std::size_t passed = 0;
+        for_each_step_([&](step_t const& step) noexcept {
+            if (passed++ != position) return true;
+            found = step;
+            return false;
+        });
+        return found;
     }
 
     /** The steps the load spans - every shard's own, in placement order; none once spent. */
-    indexed_range<shard_load_plan> steps() const noexcept { return {this, shards_ ? steps_.size() : 0}; }
+    indexed_range<shard_load_plan> steps() const noexcept {
+        std::size_t count = 0;
+        for_each_step_([&](step_t const&) noexcept {
+            ++count;
+            return true;
+        });
+        return {this, count};
+    }
 
     /** The contiguous run of steps shard @p shard owns - what a home-first drain takes. */
     iota_view<std::size_t> steps_of(std::size_t shard) const noexcept {
-        if (!shards_) return {};
-        std::size_t first = 0;
-        while (first != steps_.size() && steps_[first].shard != shard) ++first;
-        std::size_t bound = first;
-        while (bound != steps_.size() && steps_[bound].shard == shard) ++bound;
+        std::size_t first = 0, bound = 0;
+        for_each_step_([&](step_t const& step) noexcept {
+            first += step.shard < shard;
+            bound += step.shard <= shard;
+            return step.shard <= shard;
+        });
         return {first, bound};
     }
 
@@ -604,9 +618,6 @@ struct [[nodiscard]] shard_load_plan {
     status_t land_rows_(std::size_t shard, iota_view<std::size_t> rows, key_of_type_& key_of) noexcept {
         shards_type_& shards = *shards_;
         typename shards_type_::shard_t& one = shards[shard];
-        if (status_t const covered = one.keys.cover(rows.bound); failed(covered)) return covered;
-        auto [seats, seat_status] = shards.locators().claim(rows.size());
-        if (failed(seat_status)) return seat_status;
         std::size_t written = 0;
         one.keys.for_each_span(rows, [&](std::span<key_t> run) noexcept {
             for (key_t& key : run) key = key_of(written++);
@@ -614,7 +625,7 @@ struct [[nodiscard]] shard_load_plan {
         if (status_t const landed = residency_.land_keys(shards, shard, rows, plans_[shard]); failed(landed))
             return landed;
         for (std::size_t row = rows.first; row != rows.bound; ++row)
-            shards.locators().insert(seats, one.keys[row], key_locator_t {shard, static_cast<node_id_t>(row)});
+            shards.locators().insert(seats_, one.keys[row], key_locator_t {shard, static_cast<node_id_t>(row)});
         return status_t::success_k;
     }
 
@@ -641,7 +652,8 @@ struct [[nodiscard]] shard_load_plan {
 
     /**
      *  @brief Vets the plan's parts, assigns them onto the shards per @p config 's placement,
-     *      reserves from it, and opens one load plan per shard over the rows it ends up with.
+     *      reserves from it, and opens one load plan per shard over the rows it ends up with,
+     *      covering their keys and claiming their locator seats.
      *
      *  A shard takes its parts in order and appends them at one base, so the flat steps are the
      *  intersections of each part's rows with the chunks or batches they land in - a part that
@@ -690,12 +702,28 @@ struct [[nodiscard]] shard_load_plan {
             auto [inner, status] = residency_.open_shard_load(shards, shard, shard_rows[shard]);
             if (failed(status)) return status;
             plans_.push_back_reserved(std::move(inner));
-            typename index_t::load_plan_t const& opened = plans_[shard];
-            std::size_t first_row = opened.base;
+            if (status_t const covered = shards[shard].keys.cover(plans_[shard].base + plans_[shard].rows);
+                failed(covered))
+                return covered;
+        }
+        auto [seats, seat_status] = shards.locators().claim(rows());
+        if (failed(seat_status)) return seat_status;
+        seats_ = seats;
+        return status_t::success_k;
+    }
+
+    /** Visits the flat steps in order, each landing's share of each chunk or batch of its shard's
+     *  plan, until @p visit answers @c false; none once spent. */
+    template <typename visit_type_>
+    void for_each_step_(visit_type_&& visit) const noexcept {
+        if (!shards_) return;
+        for (std::size_t shard = 0; shard != plans_.size(); ++shard) {
+            typename index_t::load_plan_t const& plan = plans_[shard];
+            std::size_t first_row = plan.base;
             for (checkpoint_assignment_t const& assignment : landings_) {
                 if (assignment.shard != shard) continue;
                 std::size_t const bound_row = first_row + assignment.rows.size();
-                for (typename index_t::load_plan_t::step_t const batch : opened.steps()) {
+                for (typename index_t::load_plan_t::step_t const batch : plan.steps()) {
                     std::size_t const low = max_of<std::size_t>(batch.index_rows.first, first_row);
                     std::size_t const high = min_of<std::size_t>(batch.index_rows.bound, bound_row);
                     if (low >= high) continue;
@@ -708,12 +736,11 @@ struct [[nodiscard]] shard_load_plan {
                     step.inner.index_rows = {static_cast<node_id_t>(low), static_cast<node_id_t>(high)};
                     step.inner.source_rows = {static_cast<node_id_t>(assignment.rows.first + low - first_row),
                                               static_cast<node_id_t>(assignment.rows.first + high - first_row)};
-                    if (failed(steps_.push_back(step))) return status_t::bad_alloc_k;
+                    if (!visit(step)) return;
                 }
                 first_row = bound_row;
             }
         }
-        return status_t::success_k;
     }
 
     /** The files the parts were mapped from; every part's rows are read out of them. */
@@ -722,15 +749,16 @@ struct [[nodiscard]] shard_load_plan {
     /** The checkpoint's parts, vetted at opening. */
     growing_buffer<safegraphs_catalog_part_t, forkunion_allocator_t> parts_;
 
-    /** Which part lands where, in the order each shard appends them - the sequence @c finish walks
-     *  to place the keys. */
+    /** Which part lands where, in the order each shard appends them - the sequence the steps follow
+     *  and @c finish walks to place the keys. */
     growing_buffer<checkpoint_assignment_t, forkunion_allocator_t> landings_;
+
+    /** The locator seats every landed key takes, claimed at opening, so @c finish never
+     *  allocates. */
+    typename shards_type_::locators_map_t::seats_t seats_ {};
 
     /** One plan per shard, in placement order. */
     growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans_;
-
-    /** The flat steps, grouped by shard. */
-    growing_buffer<step_t, forkunion_allocator_t> steps_;
 
     /** What the residency does beyond the shared steps, owned for the plan's whole life. */
     [[no_unique_address]] residency_type_ residency_ {};

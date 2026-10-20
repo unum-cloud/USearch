@@ -185,6 +185,34 @@ void admits_even(usearch_key_t const* keys, usearch_admission_t* admissions, siz
         admissions[index] = keys[index].bytes[15] % 2 == 0 ? usearch_admit_k : usearch_reject_k;
 }
 
+/** Searches the @p count rows of @p data on @p index under an expensive @ref admits_even, walking
+ *  and then scanning, and expects every match even: each thread's family of gathers lives through
+ *  the call however the engine rewinds its scratch. */
+void expect_expensive_narrows(usearch_dense_index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                              float* data, size_t count, size_t dimensions) {
+    usearch_outcome_t outcome = {0};
+    usearch_matches_view_t matches = {0};
+    size_t widest_batch = 0;
+    usearch_traversal_t const traversals[2] = {usearch_traversal_walk_k, usearch_traversal_scan_k};
+    for (size_t pass = 0; pass != 2; ++pass) {
+        usearch_dense_search(
+            &(usearch_dense_search_t) {.index = index,
+                                       .executor = executor,
+                                       .outcome = &outcome,
+                                       .count = count,
+                                       .queries = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+                                       .matches = &matches,
+                                       .arena = arena,
+                                       .wanted = 1,
+                                       .traversal = traversals[pass],
+                                       .predicate = {admits_even, &widest_batch, usearch_predicate_cost_expensive_k}});
+        expect(!outcome.message, outcome.message);
+        for (size_t row = 0; row != count; ++row)
+            expect(matches.counts[row] == 0 || matches.keys[row].bytes[15] % 2 == 0,
+                   "An expensive predicate must narrow the matches");
+    }
+}
+
 /** Initializes an index twice, checking the outcome at each step, and reserves capacity,
  *  verifying that size, capacity, dimensions, and connectivity describe back as configured. */
 void test_init(size_t const collection_size, size_t const dimensions) {
@@ -307,6 +335,7 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     for (size_t row = 0; row != collection_size; ++row)
         expect(matches.counts[row] == 0 || matches.keys[row].bytes[15] % 2 == 0, "A predicate must narrow the matches");
     expect(widest_batch != 0 && widest_batch <= 4, "A walk must ask its predicate about one scored quad at a time");
+    expect_expensive_narrows(index, executor, arena, data, collection_size, dimensions);
 
     // Where the walk may miss a few self-queries, an exact scan finds every one.
     usearch_dense_search(&(usearch_dense_search_t) {.index = index,
@@ -2676,6 +2705,7 @@ void test_nvme_view(size_t const dimensions) {
     for (size_t row = 0; row != rows_count; ++row)
         expect(matches.counts[row] == 1 && memcmp(matches.keys[row].bytes, keys[row].bytes, sizeof(usearch_key_t)) == 0,
                "An exact scan of a view must find every self-query itself");
+    expect_expensive_narrows(view, storage, arena, data, rows_count, dimensions);
 
     size_t entries = 0;
     usearch_dense_count(&(usearch_dense_count_t) {.index = view,

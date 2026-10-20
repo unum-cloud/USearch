@@ -329,12 +329,18 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     report.expansion = bench.index->non_zero_expansion_factor(config);
     [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &report.threads);
 
+    // The passes' steps cannot fail on contexts reserved for their walks.
+    for (std::unique_ptr<typename bench_t::traversal_t> const& traversal : bench.traversals)
+        if (failed(bench.index->reserve_traversal(*traversal, {config.expansion_factor}))) {
+            fmt::println("Failed to reserve the refinement walks");
+            return false;
+        }
+
     std::vector<std::size_t> changed_per_pass;
     changed_per_pass.reserve(max_refines);
     progress_bar_t progress {"refining", max_refines, bench.settings.terminal};
     for (std::size_t pass = 0; pass != max_refines; ++pass) {
-        auto [plan, plan_status] = bench.index->plan_refine({0, static_cast<node_id_t>(nodes)}, *bench.traversals[0],
-                                                            config);
+        auto [plan, plan_status] = bench.index->plan_refine({0, static_cast<node_id_t>(nodes)}, config);
         if (failed(plan_status)) {
             fmt::println("Failed to open refinement pass {}: status {}", pass, int(plan_status));
             return false;

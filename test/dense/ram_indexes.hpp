@@ -84,9 +84,9 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
     {
         auto [plan, plan_status] = recipient.plan_insert(1, drivers[0].executor);
         failures += expect(succeeded(plan_status));
-        failures += expect_eq(
-            plan.insert(0, std::span<key_t const> {&next_key, 1}, vectors(nk::range(0, 1), nk::slice)),
-            status_t::success_k);
+        failures += expect_eq(plan.insert(0, std::span<key_t const> {&next_key, 1}, vectors(nk::range(0, 1), nk::slice),
+                                          to_writable_span(drivers[0].traversals)),
+                              status_t::success_k);
         failures += expect_eq(recipient.absorb(donor, drivers[1].executor).status, status_t::contended_k);
         failures += expect_eq(donor.size(), part);
         failures += expect(succeeded(plan.finish().status));
@@ -204,10 +204,11 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
         auto product_keys = nk::matrix<key_t>::zeros({queries_count, rows_count}).value;
         auto products = nk::matrix<typename indexes_type_::dot_result_t>::zeros({queries_count, rows_count}).value;
         std::array<std::size_t, queries_count> counts;
-        failures += expect(succeeded(indexes
-                                         .multiply_if(left, driver.executor, exhaustive, product_keys.span(),
-                                                      products.span(), std::span {counts}, admit_even)
-                                         .status));
+        failures += expect(
+            succeeded(indexes
+                          .multiply_if(left, driver.executor, to_writable_span(driver.traversals), exhaustive,
+                                       product_keys.span(), products.span(), std::span {counts}, admit_even)
+                          .status));
         for (std::size_t row = 0; row != queries_count; ++row) {
             failures += expect(counts[row] > 0 && counts[row] <= rows_count / 2);
             for (std::size_t pair = 0; pair != min_of(counts[row], rows_count); ++pair)
@@ -217,8 +218,8 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
         search_config_t scan;
         scan.traversal = traversal_t::scan_k;
         failures += expect(indexes
-                               .multiply_if(left, driver.executor, scan, product_keys.span(), products.span(),
-                                            std::span {counts}, admit_even)
+                               .multiply_if(left, driver.executor, to_writable_span(driver.traversals), scan,
+                                            product_keys.span(), products.span(), std::span {counts}, admit_even)
                                .status == status_t::unsupported_k);
 
         // Every even document's exact score: each query row's best dot among its tokens, summed.
@@ -242,8 +243,9 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
         for (search_config_t const config : {exhaustive, scan}) {
             failures += expect(
                 succeeded(indexes
-                              .maxsim_if(queries, std::span<std::size_t const> {query_offsets}, driver.executor, config,
-                                         found_keys.span(), found_scores.span(), std::span {counts}, admit_even)
+                              .maxsim_if(queries, std::span<std::size_t const> {query_offsets}, driver.executor,
+                                         to_writable_span(driver.traversals), config, found_keys.span(),
+                                         found_scores.span(), std::span {counts}, admit_even)
                               .status));
             for (std::size_t query = 0; query != queries_count; ++query) {
                 failures += expect_eq(counts[query], wanted);
@@ -261,10 +263,11 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
         auto const reject_all = quad_predicate([](key_t) noexcept { return admission_t::reject_k; });
         auto outputs = nk::matrix<f32_t>::zeros({queries_count, dimensions}).value;
         std::array<softmax_state_t, queries_count> carry;
-        failures += expect(succeeded(indexes
-                                         .attend_if(left, 1, no_rows, 1.0f, outputs.span(), std::span {carry},
-                                                    driver.executor, exhaustive, reject_all)
-                                         .status));
+        failures += expect(
+            succeeded(indexes
+                          .attend_if(left, 1, no_rows, 1.0f, outputs.span(), std::span {carry}, driver.executor,
+                                     to_writable_span(driver.traversals), exhaustive, reject_all)
+                          .status));
         for (softmax_state_t const& state : carry) failures += expect_eq(state.partition, 0.0f);
         return failures;
     }

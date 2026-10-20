@@ -2800,8 +2800,13 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
     us::dense::rows_view_t const all = rows_of(rows, rows_count);
     for (std::size_t resolved = 0; resolved != rows_count;) {
         std::size_t const taking = min_of(chunk, rows_count - resolved);
-        expected<typename variant_type_::search_result_t> const found = sink(
-            specialized_index {variant}, all.slice(resolved, taking), *executor, search_config, resolved, taking);
+        // Each chunk is one call of the verb, so it rewinds the arenas once and carves contexts.
+        dense_scratch<variant_type_> scratch {*executor};
+        if (status_t const prepared = scratch.prepare(*executor); failed(prepared))
+            return propagate_error(prepared, outcome, "Failed to carve the contexts");
+        expected<typename variant_type_::search_result_t> const found = sink(specialized_index {variant},
+                                                                             all.slice(resolved, taking), *executor,
+                                                                             scratch, search_config, resolved, taking);
         if (!crossed(found, stats, outcome)) return false;
         resolved += taking;
         if (ticks(resolved / rows_per_query, queries) == continuation_t::cancel_k)
@@ -2826,12 +2831,12 @@ static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor
     nk::matrix_span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys), count, wanted};
     nk::matrix_span<f64_t> const scores {landing.scores, count, wanted};
     auto sink = [&](specialized_index<variant_type_> view, us::dense::rows_view_t chunk_rows,
-                    typename variant_type_::executor_t& executor, typename variant_type_::search_config_t config,
-                    std::size_t resolved, std::size_t taking) noexcept {
+                    typename variant_type_::executor_t& executor, dense_scratch<variant_type_>& scratch,
+                    typename variant_type_::search_config_t config, std::size_t resolved, std::size_t taking) noexcept {
         std::size_t const first = resolved / rows_per_query, matched = taking / rows_per_query;
         nk::range_t const chunk_range = nk::range(first, first + matched);
-        return verb(view, chunk_rows, executor, config, keys(chunk_range, nk::slice), scores(chunk_range, nk::slice),
-                    std::span<std::size_t> {landing.counts + first, matched});
+        return verb(view, chunk_rows, executor, scratch, config, keys(chunk_range, nk::slice),
+                    scores(chunk_range, nk::slice), std::span<std::size_t> {landing.counts + first, matched});
     };
     return for_each_dense_chunk(variant, executor, count * rows_per_query, rows, rows_per_query, expansion_factor,
                                 progress, stats, outcome, sink);
@@ -2878,12 +2883,17 @@ static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const&
         nk::range_t const chunk = nk::range(first, first + taking);
         std::span<std::size_t const> const chunk_offsets = query_offsets.subspan(first, taking + 1);
         std::span<std::size_t> const chunk_counts {landing.counts + first, taking};
+        // Each chunk is one call of the verb, so it rewinds the arenas once and carves contexts.
+        dense_scratch<variant_type_> scratch {*executor};
+        if (status_t const prepared = scratch.prepare(*executor); failed(prepared))
+            return propagate_error(prepared, outcome, "Failed to carve the contexts");
         specialized_index view {variant};
         expected<typename variant_type_::search_result_t> const found =
-            predicate.predicate.callback ? view.maxsim_if(all, chunk_offsets, *executor, config, keys(chunk, nk::slice),
-                                                          scores(chunk, nk::slice), chunk_counts, predicate)
-                                         : view.maxsim(all, chunk_offsets, *executor, config, keys(chunk, nk::slice),
-                                                       scores(chunk, nk::slice), chunk_counts);
+            predicate.predicate.callback
+                ? view.maxsim_if(all, chunk_offsets, *executor, scratch, config, keys(chunk, nk::slice),
+                                 scores(chunk, nk::slice), chunk_counts, predicate)
+                : view.maxsim(all, chunk_offsets, *executor, scratch, config, keys(chunk, nk::slice),
+                              scores(chunk, nk::slice), chunk_counts);
         if (!crossed(found, arguments.stats, outcome)) return false;
         first += taking;
         if (ticks(first, count) == continuation_t::cancel_k)
@@ -3307,13 +3317,14 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                                            : carve_matches(arena->memory, count, wanted, landing, outcome)))
                     return;
                 auto search_with = [&](auto&& predicate) noexcept {
-                    return match_dense_rows(
-                        variant, arguments->executor, count, arguments->queries, 1, landing,
-                        arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
-                        [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
-                            config.traversal = static_cast<traversal_t>(arguments->traversal);
-                            return view.search(rows, executor, config, keys, distances, counts, predicate);
-                        });
+                    return match_dense_rows(variant, arguments->executor, count, arguments->queries, 1, landing,
+                                            arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
+                                            [&](auto view, auto rows, auto& executor, auto& scratch, auto config,
+                                                auto keys, auto distances, auto counts) {
+                                                config.traversal = static_cast<traversal_t>(arguments->traversal);
+                                                return view.search(rows, executor, scratch, config, keys, distances,
+                                                                   counts, predicate);
+                                            });
                 };
                 bool searched = false;
                 if (!keyed.predicate.callback) searched = search_with(dummy_predicate_t {});
@@ -3623,7 +3634,10 @@ USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_
                                                                          outcome);
         if (!executor) return;
         progress_ticks_t ticks {arguments->progress, specialized_index {variant}.size()};
-        status_t const ran = specialized_index {variant}.run(refining->plan, *executor, ticks);
+        dense_scratch<variant_type_> scratch {*executor};
+        if (status_t const prepared = scratch.prepare(*executor); failed(prepared))
+            return propagate_error(prepared, outcome, "Failed to carve the contexts"), void();
+        status_t const ran = specialized_index {variant}.run(refining->plan, *executor, scratch, ticks);
         // The plan nulls every donor it landed; their handles go with them.
         for (std::size_t position = 0; position != refinement->count; ++position)
             if (!refining->donors[position] && refinement->donors[position])
@@ -3659,7 +3673,10 @@ USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_fin
         typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
                                                                          outcome);
         if (!executor) return;
-        auto const [refined, status] = specialized_index {variant}.finish(refining->plan, *executor);
+        dense_scratch<variant_type_> scratch {*executor};
+        if (status_t const prepared = scratch.prepare(*executor); failed(prepared))
+            return propagate_error(prepared, outcome, "Failed to carve the contexts"), void();
+        auto const [refined, status] = specialized_index {variant}.finish(refining->plan, *executor, scratch);
         accumulate_stats(arguments->stats, refined);
         if (failed(status)) return propagate_error(status, outcome), void();
         if (arguments->changed) *arguments->changed = refined.changed_nodes;
@@ -3739,15 +3756,15 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                     nk::matrix_span<key_t> const kept_keys {reinterpret_cast<key_t*>(keys), count, width};
                     nk::matrix_span<f64_t> const kept_scores {scores, count, width};
                     auto sink = [&](specialized_index<variant_type_> view, us::dense::rows_view_t chunk_rows,
-                                    typename variant_type_::executor_t& executor,
+                                    typename variant_type_::executor_t& executor, dense_scratch<variant_type_>& scratch,
                                     typename variant_type_::search_config_t config, std::size_t resolved,
                                     std::size_t taking) noexcept {
                         nk::range_t const chunk = nk::range(resolved, resolved + taking);
                         if (keyed.predicate.callback)
-                            return view.multiply_if(chunk_rows, executor, config, kept_keys(chunk, nk::slice),
+                            return view.multiply_if(chunk_rows, executor, scratch, config, kept_keys(chunk, nk::slice),
                                                     kept_scores(chunk, nk::slice), scored.subspan(resolved, taking),
                                                     keyed);
-                        return view.multiply(chunk_rows, executor, config, kept_keys(chunk, nk::slice),
+                        return view.multiply(chunk_rows, executor, scratch, config, kept_keys(chunk, nk::slice),
                                              kept_scores(chunk, nk::slice), scored.subspan(resolved, taking));
                     };
                     return for_each_dense_chunk(variant, arguments->executor, count, arguments->left, 1,
@@ -3844,7 +3861,7 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                 std::span<us::dense::softmax_state_t> const carried {
                     reinterpret_cast<us::dense::softmax_state_t*>(carry), carry ? count : 0};
                 auto sink = [&](specialized_index<variant_type_> view, us::dense::rows_view_t chunk_rows,
-                                typename variant_type_::executor_t& executor,
+                                typename variant_type_::executor_t& executor, dense_scratch<variant_type_>& scratch,
                                 typename variant_type_::search_config_t config, std::size_t resolved,
                                 std::size_t taking) noexcept {
                     f32_t const score_scale = requested_scale > 0
@@ -3855,9 +3872,10 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                                                                   : carried.subspan(resolved, taking);
                     if (keyed.predicate.callback)
                         return view.attend_if(chunk_rows, head_count, value_lookup, score_scale,
-                                              outputs.slice(resolved, taking), chunk_carry, executor, config, keyed);
+                                              outputs.slice(resolved, taking), chunk_carry, executor, scratch, config,
+                                              keyed);
                     return view.attend(chunk_rows, head_count, value_lookup, score_scale,
-                                       outputs.slice(resolved, taking), chunk_carry, executor, config);
+                                       outputs.slice(resolved, taking), chunk_carry, executor, scratch, config);
                 };
                 if (!for_each_dense_chunk(variant, arguments->executor, count, arguments->queries, head_count,
                                           arguments->expansion_factor, arguments->progress, arguments->stats, outcome,

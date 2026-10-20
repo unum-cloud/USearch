@@ -92,6 +92,12 @@ struct bench_indexes_context {
     /** The worker threads and per-thread arenas every batched verb runs on. */
     forkunion_executor_t executor;
 
+    /** One arena per executor thread, owned here, and one traversal context over each, built once
+     *  the executor spawns and handed to every batched verb, so no call carves its own. */
+    growing_buffer<typename forkunion_executor_t::arena_t, forkunion_allocator_t> arenas {forkunion_allocator_t {}};
+    growing_buffer<typename indexes_t::traversal_context_t, forkunion_allocator_t> traversals {
+        forkunion_allocator_t {}};
+
     /** The backend-neutral judgment state both phases fill. */
     bench_results_t results;
 
@@ -171,6 +177,17 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
         return false;
     }
     bench.executor = std::move(executor);
+    std::size_t const threads = bench.executor.size();
+    if (failed(bench.arenas.reserve_exactly(threads)) || failed(bench.traversals.reserve_exactly(threads))) {
+        fmt::println("Failed to build the traversal contexts");
+        return false;
+    }
+    for (std::size_t thread = 0; thread != threads; ++thread) {
+        bench.arenas.push_back_reserved(
+            typename forkunion_executor_t::arena_t {forkunion_allocator_t {bench.executor.memory_domain(thread)}});
+        bench.traversals.push_back_reserved(typename bench_t::indexes_t::traversal_context_t {
+            arena_allocator<byte_t, forkunion_allocator_t>(bench.arenas[thread])});
+    }
 
     // AMX tile state needs a per-thread OS permission handshake before first use.
     nk_capability_t available = 0;
@@ -416,8 +433,8 @@ bool run_search(streamed_dataset_type_& streamed) {
         nk::matrix_span<distance_t> const distances = bench.results.hit_distances(nk::range(base, base + count),
                                                                                   nk::slice);
         auto search = [&](auto const&... ranking) noexcept {
-            return bench.indexes.search(batch, ranking..., bench.executor, config, keys, distances,
-                                        std::span<std::size_t> {counts.data(), count});
+            return bench.indexes.search(batch, ranking..., bench.executor, to_writable_span(bench.traversals), config,
+                                        keys, distances, std::span<std::size_t> {counts.data(), count});
         };
         auto const [result, status] = [&]() noexcept {
             if constexpr (!nk::is_integral_dtype<typename index_t::scalar_t>())

@@ -64,8 +64,8 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
         std::size_t const count = min_of(batch_rows, query_count - base);
         nk::range_t const batch = nk::range(std::size_t {0}, count);
         auto const [result, status] = bench.indexes.multiply(
-            inputs.rows(nk::range(base, base + count), nk::slice), bench.executor, config, keys(batch, nk::slice),
-            products(batch, nk::slice), std::span {counts.data(), count});
+            inputs.rows(nk::range(base, base + count), nk::slice), bench.executor, to_writable_span(bench.traversals),
+            config, keys(batch, nk::slice), products(batch, nk::slice), std::span {counts.data(), count});
         if (failed(status))
             return fmt::println("Multiply refused a batch of {} rows at row {}: {}", count, base,
                                 status_to_string(status)),
@@ -92,7 +92,7 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     started = steady_clock_t::now();
     auto const [attended, attend_status] = bench.indexes.attend(inputs.rows, head_count, value_of, inputs.score_scale,
                                                                 outputs.span(), std::span {carry}, bench.executor,
-                                                                config);
+                                                                to_writable_span(bench.traversals), config);
     double const attend_seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     if (failed(attend_status))
         return fmt::println("Attend refused {} queries: {}", query_count / head_count, status_to_string(attend_status)),
