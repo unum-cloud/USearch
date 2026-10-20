@@ -29,7 +29,8 @@
  *
  *  @section dense_nvme_rewrites_phases Rewrite Phases
  *
- *  - @b Route scans the key column of every source part to count the rows each key range takes.
+ *  - @b Route, while a split by keys plans, scans the key column of every source part to count the
+ *    rows each key range takes.
  *  - @b Copy moves keys and values in target order, derives the norms, and rewires the neighbors a
  *    target keeps.
  *  - @b Build builds contiguous blocks of rows in a RAM index inside the workspace and writes their
@@ -357,592 +358,8 @@ struct nvme_indexes {
                                  latencies, executor);
     }
 
-    /** Whether a MaxSim plan nominates candidates, reduces their rows, or has finished. */
-    enum class maxsim_phase_t : u8_t {
-
-        /** Walks or a scan nominate the candidate keys. */
-        nominate_k,
-
-        /** Every row of every candidate folds into its per-query-row maxima. */
-        normalize_k,
-
-        /** Every query's best totals are ranked, ready to land. */
-        done_k,
-    };
-
     /** NumKong's aggregation over the stored scalar's dots, what a MaxSim total sums in. */
     using total_t = typename scalar_t::reduce_moments_sum_t;
-
-    /**
-     *  @brief Exact late interaction over the parts on storage, planned in phases.
-     *
-     *  Walks nominate the keys every query's rows ranked, admitted by the predicate as the walks
-     *  score; a scan nominates every key, each asked of the predicate once. Normalization folds
-     *  every row of every candidate into one maximum per query row, and the maxima sum into the
-     *  candidate's total. Every step spreads over every thread of the executor, and the barrier
-     *  between phases runs on one.
-     *
-     *  Under a walk, one key scan counts every candidate's rows, a second lists them, and each
-     *  candidate's rows are read on the one thread claiming it. A scan reads every key and value
-     *  run once, folding each row through compare-exchanges, since a key's rows land on any thread;
-     *  its maxima hold one value per distinct key and query row, refused with @c bad_alloc_k past
-     *  memory.
-     */
-    struct maxsim_plan_t {
-        struct step_t {
-            std::size_t position = 0;
-        };
-
-        explicit maxsim_plan_t(forkunion_allocator_t const& allocator) noexcept
-            : staged_(allocator), query_norms_(allocator), walk_keys_(allocator), walk_distances_(allocator),
-              walk_counts_(allocator), candidates_(allocator), segment_starts_(allocator), maxima_starts_(allocator),
-              table_(allocator), row_starts_(allocator), locators_(allocator), maxima_(allocator), scored_(allocator),
-              ranked_(allocator), ranked_counts_(allocator) {}
-        maxsim_plan_t(maxsim_plan_t&&) noexcept = default;
-        maxsim_plan_t& operator=(maxsim_plan_t&&) noexcept = default;
-        maxsim_plan_t(maxsim_plan_t const&) = delete;
-        maxsim_plan_t& operator=(maxsim_plan_t const&) = delete;
-
-        step_t operator[](std::size_t position) const noexcept { return {position}; }
-
-        /** The current phase's steps: one to nominate, then three under a walk and two under a
-         *  scan; none once ranked. */
-        indexed_range<maxsim_plan_t> steps() const noexcept {
-            if (!owner_ || phase_ == maxsim_phase_t::done_k) return {this, 0u};
-            if (phase_ == maxsim_phase_t::nominate_k) return {this, 1u};
-            return {this, traversal_ == traversal_t::scan_k ? 2u : 3u};
-        }
-
-        /** Runs @p step of the current phase over every thread of @p executor, which it claims
-         *  while it runs; @p predicate is asked about every nominated key. */
-        template <typename predicate_type_>
-        status_t run(step_t const& step, executor_t& executor, predicate_type_& predicate) noexcept {
-            if (!owner_) return status_t::uninitialized_k;
-            bool const scanning = traversal_ == traversal_t::scan_k;
-            if (phase_ == maxsim_phase_t::nominate_k)
-                return scanning ? collect_keys_(executor) : nominate_walks_(executor, predicate);
-            if (phase_ != maxsim_phase_t::normalize_k) return status_t::success_k;
-            if (scanning) return step.position ? fold_runs_(executor) : admit_candidates_(predicate);
-            switch (step.position) {
-            case 0: return count_rows_(executor);
-            case 1: return list_rows_(executor);
-            default: return fold_rows_(executor);
-            }
-        }
-
-        /** The barrier between phases: deduplicates the nominations, or ranks every query's
-         *  totals, and answers whether another phase follows. */
-        bool advance() noexcept {
-            if (!owner_) return false;
-            if (phase_ == maxsim_phase_t::nominate_k) {
-                if (failed(deduplicate_())) return false;
-                phase_ = maxsim_phase_t::normalize_k;
-                return true;
-            }
-            if (phase_ == maxsim_phase_t::normalize_k) {
-                if (failed(rank_totals_())) return false;
-                phase_ = maxsim_phase_t::done_k;
-            }
-            return false;
-        }
-
-        /**
-         *  @brief Lands every query's ranking, largest totals first, each key once, its total cast
-         *      into @p score_type_.
-         *  @return @c cancelled_k unless every phase ran, or @c bad_alloc_k when a barrier could
-         *      not grow its buffers.
-         */
-        template <typename score_type_>
-        expected<search_result_t> finish(nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> scores,
-                                         std::span<std::size_t> counts) noexcept {
-            if (!owner_) return {{}, status_t::uninitialized_k};
-            if (failed(failure_)) return {telemetry_, failure_};
-            if (phase_ != maxsim_phase_t::done_k) return {telemetry_, status_t::cancelled_k};
-            search_result_t result = telemetry_;
-            result.count = 0;
-            for (std::size_t query = 0; query != counts.size(); ++query) {
-                std::size_t landed = 0;
-                for (std::size_t rank = 0; rank != ranked_counts_[query]; ++rank) {
-                    maxsim_ranked<total_t> const& entry = ranked_[query * wanted_ + rank];
-                    key_t const& key = candidates_[entry.candidate];
-                    bool repeated = false;
-                    for (std::size_t earlier = 0; earlier != landed; ++earlier)
-                        repeated |= same_key_(keys(query, earlier), key);
-                    if (repeated) continue;
-                    keys(query, landed) = key, scores(query, landed) = static_cast<score_type_>(entry.total);
-                    ++landed;
-                }
-                counts[query] = landed;
-                result.count += landed;
-            }
-            return {result, status_t::success_k};
-        }
-
-      private:
-        friend struct nvme_indexes;
-
-        /** The view the plan reads; null for a refused plan. */
-        nvme_indexes const* owner_ = nullptr;
-
-        /** The caller's query rows, which a walk reads in its own scalar. */
-        rows_view_t queries_;
-
-        /** Where every query's rows start among @c queries_, then where the last ends. */
-        std::span<std::size_t const> query_offsets_;
-
-        /** Steady-clock nanoseconds per query row of a walk, or empty. */
-        std::span<u64_t> latencies_;
-
-        /** Whether walks or a scan nominate. */
-        traversal_t traversal_ = traversal_t::walk_k;
-
-        /** Keys each query row's walk ranks. */
-        std::size_t expansion_factor_ = 0;
-
-        /** Keys each query keeps. */
-        std::size_t wanted_ = 0;
-
-        /** The current phase. */
-        maxsim_phase_t phase_ = maxsim_phase_t::nominate_k;
-
-        /** A barrier's refusal, which @c finish answers. */
-        status_t failure_ = status_t::success_k;
-
-        /** What every step read and scored. */
-        search_result_t telemetry_ {};
-
-        /** The bytes the imported query rows live in. */
-        growing_buffer<byte_t, forkunion_allocator_t> staged_;
-
-        /** The query rows imported into the stored scalar. */
-        vectors_view_t query_rows_;
-
-        /** The norms of every imported query row. */
-        growing_buffer<vector_norms_t, forkunion_allocator_t> query_norms_;
-
-        /** A walk's ranked keys, one row per query row, as many as the expansion factor. */
-        growing_buffer<key_t, forkunion_allocator_t> walk_keys_;
-
-        /** A walk's distances, parallel to @c walk_keys_. */
-        growing_buffer<distance_t, forkunion_allocator_t> walk_distances_;
-
-        /** Keys a walk ranked per query row. */
-        growing_buffer<std::size_t, forkunion_allocator_t> walk_counts_;
-
-        /** Nominated keys: a segment per query under a walk, one all queries share under a scan. */
-        growing_buffer<key_t, forkunion_allocator_t> candidates_;
-
-        /** Where each query's segment starts, then where the last ends. */
-        growing_buffer<std::size_t, forkunion_allocator_t> segment_starts_;
-
-        /** Where each query's maxima start under a walk, then where the last end. */
-        growing_buffer<std::size_t, forkunion_allocator_t> maxima_starts_;
-
-        /** An exact table of candidate positions, one past each, zero in an empty slot. */
-        growing_buffer<u32_t, forkunion_allocator_t> table_;
-
-        /** Under a walk, where each candidate's rows start in @c locators_, then where they end. */
-        growing_buffer<std::size_t, forkunion_allocator_t> row_starts_;
-
-        /** Under a walk, every candidate's rows, grouped by candidate. */
-        growing_buffer<nvme_locator<u32_t>, forkunion_allocator_t> locators_;
-
-        /** One maximum per candidate and query row it answers. */
-        growing_buffer<dot_result_t, forkunion_allocator_t> maxima_;
-
-        /** Every candidate one query scored, the widest query's worth. */
-        growing_buffer<maxsim_ranked<total_t>, forkunion_allocator_t> scored_;
-
-        /** Each query's best, as many as wanted, largest first. */
-        growing_buffer<maxsim_ranked<total_t>, forkunion_allocator_t> ranked_;
-
-        /** How many each query keeps. */
-        growing_buffer<std::size_t, forkunion_allocator_t> ranked_counts_;
-
-        std::size_t queries_count_() const noexcept { return query_offsets_.size() - 1; }
-        std::size_t rows_of_(std::size_t query) const noexcept {
-            return query_offsets_[query + 1] - query_offsets_[query];
-        }
-
-        /** Where query @p query 's rows start among the imported ones. */
-        std::size_t first_row_of_(std::size_t query) const noexcept {
-            return query_offsets_[query] - query_offsets_.front();
-        }
-
-        /** The query whose segment holds candidate @p position under a walk. */
-        std::size_t query_of_(std::size_t position) const noexcept {
-            std::size_t query = 0;
-            while (segment_starts_[query + 1] <= position) ++query;
-            return query;
-        }
-
-        /** The maxima candidate @p position keeps for @p query. */
-        std::span<dot_result_t> maxima_of_(std::size_t position, std::size_t query) noexcept {
-            std::size_t const rows = rows_of_(query);
-            if (traversal_ == traversal_t::scan_k)
-                return to_writable_span(maxima_).subspan(position * query_rows_.extent(0) + first_row_of_(query), rows);
-            return to_writable_span(maxima_).subspan(maxima_starts_[query] + (position - segment_starts_[query]) * rows,
-                                                     rows);
-        }
-
-        /** Empties the table and sizes it for @p entries positions. */
-        status_t reset_table_(std::size_t entries) noexcept {
-            std::size_t const slots = ceil2(max_of<std::size_t>(entries * 2, 16));
-            if (failed(table_.resize_uninitialized(slots))) return status_t::bad_alloc_k;
-            std::memset(table_.data(), 0, table_.size() * sizeof(u32_t));
-            return status_t::success_k;
-        }
-
-        /** The position holding @p key in the table, or @p position, which it then records. */
-        std::size_t find_or_insert_(key_t const& key, std::size_t position) noexcept {
-            std::size_t const mask = table_.size() - 1;
-            for (std::size_t slot = mix_bits(std::hash<key_t> {}(key)) & mask;; slot = (slot + 1) & mask) {
-                if (!table_[slot]) {
-                    table_[slot] = static_cast<u32_t>(position + 1);
-                    return position;
-                }
-                if (same_key_(candidates_[table_[slot] - 1], key)) return table_[slot] - 1;
-            }
-        }
-
-        /** The position holding @p key in the table, or the candidates' count when none does. */
-        std::size_t find_(key_t const& key) const noexcept {
-            std::size_t const mask = table_.size() - 1;
-            for (std::size_t slot = mix_bits(std::hash<key_t> {}(key)) & mask; table_[slot]; slot = (slot + 1) & mask)
-                if (same_key_(candidates_[table_[slot] - 1], key)) return table_[slot] - 1;
-            return segment_starts_.back();
-        }
-
-        /** Walks every query row, ranking as many keys as the expansion factor that @p predicate
-         *  admits. */
-        template <typename predicate_type_>
-        status_t nominate_walks_(executor_t& executor, predicate_type_& predicate) noexcept {
-            using row_t = search_row<dummy_heads_t, predicate_type_, distance_t>;
-            nvme_indexes const& owner = *owner_;
-            std::size_t const rows_count = query_rows_.extent(0), width = expansion_factor_;
-            walk_shape_t const shape = index_t::template walk_shape_<row_t>(
-                to_span(owner.media_), to_span(owner.parts_), owner.kernel_, executor.queue_depth(), executor.size(),
-                rows_count, width, staged_rows_bytes(vector_dtype_k, 1, queries_.columns));
-            auto [call, call_status] = nvme_begin_call(executor, to_span(owner.media_), shape.scratch_bytes,
-                                                       shape.buffers, shape.buffer_bytes);
-            if (failed(call_status)) return call_status;
-            nk::matrix_span<key_t> const keys {walk_keys_.data(), rows_count, width};
-            nk::matrix_span<distance_t> const distances {walk_distances_.data(), rows_count, width};
-            typename row_t::inputs_t const inputs {queries_.slice(query_offsets_.front(), rows_count),
-                                                   owner.kernel_,
-                                                   nullptr,
-                                                   &predicate,
-                                                   width,
-                                                   keys,
-                                                   distances,
-                                                   to_writable_span(walk_counts_)};
-            expected<search_result_t> const walked = row_walker<index_t, row_t>::run_walks(
-                to_span(owner.media_), to_span(owner.parts_), executor, shape, inputs, to_span(walk_counts_),
-                latencies_);
-            telemetry_ = walked.value;
-            return walked.status;
-        }
-
-        /** Reads every key, in placement order, into the candidates. */
-        status_t collect_keys_(executor_t& executor) noexcept {
-            nvme_indexes const& owner = *owner_;
-            std::size_t const rows_count = owner.size();
-            if (failed(candidates_.resize_uninitialized(rows_count))) return status_t::bad_alloc_k;
-            auto [call, call_status] = owner.begin_scans_(executor, 1);
-            if (failed(call_status)) return call_status;
-            auto describe = [&](std::size_t run, u64_t& progress) noexcept -> std::array<extent_t, 1> {
-                if (progress++) return {};
-                return {owner.run_extent_(owner.locate_run_(0, rows_count, run, key_column_k), key_column_k)};
-            };
-            auto consume = [&](std::size_t, std::size_t run, std::array<extent_t, 1> const& extents,
-                               std::array<byte_t const*, 1> const& landed) noexcept {
-                run_t const located = owner.locate_run_(0, rows_count, run, key_column_k);
-                nvme_part_t const& part = owner.parts_[extents[0].shard];
-                for (std::size_t row = 0; row != located.rows; ++row)
-                    candidates_[located.position + row] = safegraphs_widened_key<key_t>(
-                        landed[0] + row * part.key_row_bytes, part.key_dtype);
-            };
-            auto const [reads, status] = owner.scan_reads_(executor, owner.runs_count_(0, rows_count, key_column_k),
-                                                           describe, consume);
-            telemetry_.scan_reads += reads;
-            return status;
-        }
-
-        /** Keeps each key once per segment, then sizes every query's maxima. */
-        status_t deduplicate_() noexcept {
-            std::size_t const queries_count = queries_count_();
-            if (failed(segment_starts_.resize(queries_count + 1)) || failed(maxima_starts_.resize(queries_count + 1)))
-                return failure_ = status_t::bad_alloc_k;
-            std::size_t kept = 0;
-            if (traversal_ == traversal_t::scan_k) {
-                if (failed(reset_table_(candidates_.size()))) return failure_ = status_t::bad_alloc_k;
-                for (std::size_t row = 0; row != candidates_.size(); ++row)
-                    if (find_or_insert_(candidates_[row], kept) == kept) candidates_[kept] = candidates_[row], ++kept;
-                for (std::size_t& start : segment_starts_) start = 0;
-                segment_starts_.back() = kept;
-                return status_t::success_k;
-            }
-            std::size_t const width = expansion_factor_;
-            std::size_t widest = 0;
-            for (std::size_t query = 0; query != queries_count; ++query)
-                widest = max_of(widest, rows_of_(query) * width);
-            if (failed(reset_table_(widest))) return failure_ = status_t::bad_alloc_k;
-            for (std::size_t query = 0; query != queries_count; ++query) {
-                segment_starts_[query] = kept;
-                std::memset(table_.data(), 0, table_.size() * sizeof(u32_t));
-                for (std::size_t row = first_row_of_(query); row != first_row_of_(query + 1); ++row)
-                    for (std::size_t hit = 0; hit != walk_counts_[row]; ++hit) {
-                        key_t const& key = walk_keys_[row * width + hit];
-                        if (find_or_insert_(key, kept) == kept) candidates_[kept++] = key;
-                    }
-            }
-            segment_starts_.back() = kept;
-            for (std::size_t query = 0; query != queries_count; ++query)
-                maxima_starts_[query + 1] = maxima_starts_[query] +
-                                            (segment_starts_[query + 1] - segment_starts_[query]) * rows_of_(query);
-            return fill_maxima_(maxima_starts_.back());
-        }
-
-        /** Sizes the maxima at @p count values, each starting below any dot. */
-        status_t fill_maxima_(std::size_t count) noexcept {
-            if (failed(maxima_.resize_uninitialized(count))) return failure_ = status_t::bad_alloc_k;
-            for (dot_result_t& maximum : maxima_) maximum = dot_result_t::finite_min();
-            return status_t::success_k;
-        }
-
-        /** Asks @p predicate about every distinct key a scan nominated, a quad at a time, keeping
-         *  the ones it admits in order. */
-        template <typename predicate_type_>
-        status_t admit_candidates_(predicate_type_& predicate) noexcept {
-            std::size_t const count = segment_starts_.back();
-            auto&& admits = thread_predicate(predicate, 0);
-            if (status_t const reserved = reserve_predicate(admits, count); failed(reserved)) return reserved;
-            std::size_t kept = 0;
-            auto keep = [&](scan_payload_t position) noexcept { candidates_[kept++] = candidates_[position]; };
-            for (std::size_t first = 0; first < count; first += quad_lanes_k)
-                with_static_extent<quad_lanes_k>(
-                    min_of(quad_lanes_k, count - first), [&]<std::size_t extent_>() noexcept {
-                        std::array<scan_payload_t, extent_> positions;
-                        for (std::size_t lane = 0; lane != extent_; ++lane)
-                            positions[lane] = static_cast<scan_payload_t>(first + lane);
-                        ask_quad(admits, std::span<key_t const, extent_>(candidates_.data() + first, extent_),
-                                 std::span<scan_payload_t const, extent_>(positions), keep);
-                    });
-            settle_predicate(admits, keep);
-            segment_starts_.back() = kept;
-            if (failed(reset_table_(kept))) return status_t::bad_alloc_k;
-            for (std::size_t position = 0; position != kept; ++position)
-                find_or_insert_(candidates_[position], position);
-            return fill_maxima_(kept * query_rows_.extent(0));
-        }
-
-        /** Counts every candidate's rows in one key scan. */
-        status_t count_rows_(executor_t& executor) noexcept {
-            std::size_t const count = segment_starts_.back();
-            if (failed(row_starts_.resize(count + 1))) return status_t::bad_alloc_k;
-            std::memset(row_starts_.data(), 0, row_starts_.size() * sizeof(std::size_t));
-            if (!count) return status_t::success_k;
-            auto [call, call_status] = owner_->begin_scans_(executor, 1);
-            if (failed(call_status)) return call_status;
-            return owner_->scan_keys_(
-                to_span(candidates_).first(count), executor, [&](std::size_t position, nvme_locator<u32_t>) noexcept {
-                    std::atomic_ref<std::size_t>(row_starts_[position]).fetch_add(1, std::memory_order_relaxed);
-                });
-        }
-
-        /** Lists every candidate's rows in a second key scan, grouped by candidate. */
-        status_t list_rows_(executor_t& executor) noexcept {
-            std::size_t const count = segment_starts_.back();
-            // Each start becomes its candidate's end, and every listed row steps it back once.
-            for (std::size_t position = 1; position <= count; ++position)
-                row_starts_[position] += row_starts_[position - 1];
-            if (failed(locators_.resize_uninitialized(row_starts_[count]))) return status_t::bad_alloc_k;
-            if (!count) return status_t::success_k;
-            auto [call, call_status] = owner_->begin_scans_(executor, 1);
-            if (failed(call_status)) return call_status;
-            return owner_->scan_keys_(
-                to_span(candidates_).first(count), executor,
-                [&](std::size_t position, nvme_locator<u32_t> locator) noexcept {
-                    std::size_t const slot =
-                        std::atomic_ref<std::size_t>(row_starts_[position]).fetch_sub(1, std::memory_order_relaxed) - 1;
-                    locators_[slot] = locator;
-                });
-        }
-
-        /** Reads every candidate's rows on the one thread claiming it, folding each into the
-         *  maxima of the query that nominated the candidate. */
-        status_t fold_rows_(executor_t& executor) noexcept {
-            nvme_indexes const& owner = *owner_;
-            std::size_t const count = segment_starts_.back();
-            auto [call, call_status] = owner.begin_scans_(executor, 1);
-            if (failed(call_status)) return call_status;
-            auto describe = [&](std::size_t position, u64_t& progress) noexcept -> std::array<extent_t, 1> {
-                std::size_t const row = row_starts_[position] + static_cast<std::size_t>(progress++);
-                if (row == row_starts_[position + 1]) return {};
-                nvme_locator<u32_t> const locator = locators_[row];
-                nvme_part_t const& part = owner.parts_[locator.shard];
-                return {extent_t {locator.shard, part.values_begin + u64_t(locator.node) * part.value_row_bytes,
-                                  part.value_row_bytes}};
-            };
-            auto consume = [&](std::size_t, std::size_t position, std::array<extent_t, 1> const& extents,
-                               std::array<byte_t const*, 1> const& landed) noexcept {
-                std::size_t const query = query_of_(position);
-                vector_view_t const row {reinterpret_cast<scalar_t const*>(landed[0]),
-                                         owner.parts_[extents[0].shard].dimensions};
-                fold_row_(row, first_row_of_(query), maxima_of_(position, query),
-                          [](dot_result_t& maximum, dot_result_t dot) noexcept { maximum = max_of(maximum, dot); });
-            };
-            auto const [reads, status] = owner.scan_reads_(executor, count, describe, consume);
-            telemetry_.value_reads += reads;
-            telemetry_.computed_distances += locators_.size() * query_rows_.extent(0);
-            return status;
-        }
-
-        /** Reads every key and value run once, folding each row of an admitted key into its maxima
-         *  for every query. */
-        status_t fold_runs_(executor_t& executor) noexcept {
-            nvme_indexes const& owner = *owner_;
-            std::size_t const rows_count = owner.size(), count = segment_starts_.back();
-            std::size_t const queries_rows = query_rows_.extent(0);
-            if (!count) return status_t::success_k;
-            auto [call, call_status] = owner.template begin_scans_<2>(executor, 1);
-            if (failed(call_status)) return call_status;
-            // Runs follow the wider of the key and value rows, so both runs of a task fit a buffer.
-            column_t const runs_column = owner.parts_[0].value_row_bytes >= owner.parts_[0].key_row_bytes
-                                             ? value_column_k
-                                             : key_column_k;
-            auto describe = [&](std::size_t run, u64_t& progress) noexcept -> std::array<extent_t, 2> {
-                if (progress++) return {};
-                run_t const located = owner.locate_run_(0, rows_count, run, runs_column);
-                return {owner.run_extent_(located, key_column_k), owner.run_extent_(located, value_column_k)};
-            };
-            auto consume = [&](std::size_t, std::size_t, std::array<extent_t, 2> const& extents,
-                               std::array<byte_t const*, 2> const& landed) noexcept {
-                nvme_part_t const& part = owner.parts_[extents[1].shard];
-                std::size_t const run_rows = static_cast<std::size_t>(extents[1].bytes / part.value_row_bytes);
-                for (std::size_t row = 0; row != run_rows; ++row) {
-                    key_t const key = safegraphs_widened_key<key_t>(landed[0] + row * part.key_row_bytes,
-                                                                    part.key_dtype);
-                    std::size_t const position = find_(key);
-                    if (position == count) continue;
-                    vector_view_t const values {
-                        reinterpret_cast<scalar_t const*>(landed[1] + row * part.value_row_bytes), part.dimensions};
-                    fold_row_(
-                        values, 0, to_writable_span(maxima_).subspan(position * queries_rows, queries_rows),
-                        [](dot_result_t& maximum, dot_result_t dot) noexcept {
-                            std::atomic_ref<dot_result_t> const shared {maximum};
-                            dot_result_t seen = shared.load(std::memory_order_relaxed);
-                            while (seen < dot && !shared.compare_exchange_weak(seen, dot, std::memory_order_relaxed)) {}
-                        });
-                }
-            };
-            auto const [reads, status] = owner.template scan_reads_<2>(
-                executor, owner.runs_count_(0, rows_count, runs_column), describe, consume);
-            telemetry_.scan_reads += reads;
-            telemetry_.computed_distances += rows_count * queries_rows;
-            return status;
-        }
-
-        /** Scores stored @p row against the imported query rows from @p first on, as many as
-         *  @p maxima holds, a quad of query rows a call, and hands @p update each maximum beside
-         *  its dot. */
-        template <typename update_type_>
-        void fold_row_(vector_view_t row, std::size_t first, std::span<dot_result_t> maxima,
-                       update_type_&& update) const noexcept {
-            nk_kernel_kind_t const kernel = owner_->kernel_;
-            vector_norms_t const row_norms = index_t::norms_(kernel, row);
-            for (std::size_t offset = 0; offset < maxima.size(); offset += quad_lanes_k) {
-                std::size_t const lanes = min_of(quad_lanes_k, maxima.size() - offset);
-                quad<vector_view_t> lane_rows;
-                quad<vector_norms_t> lane_norms;
-                for (std::size_t lane = 0; lane != quad_lanes_k; ++lane) {
-                    std::size_t const source = first + offset + min_of(lane, lanes - 1);
-                    lane_rows[lane] = query_rows_.row(source).as_vector();
-                    lane_norms[lane] = query_norms_[source];
-                }
-                scores_result<dot_result_t> const scored = dense::scores<quads_kit_t>(kernel, row, row_norms, lane_rows,
-                                                                                      lane_norms);
-                for (std::size_t lane = 0; lane != lanes; ++lane) update(maxima[offset + lane], scored.dots[lane]);
-            }
-        }
-
-        /** Sums every candidate's maxima per query into its total, and keeps each query's best. */
-        status_t rank_totals_() noexcept {
-            std::size_t const queries_count = queries_count_();
-            bool const scanning = traversal_ == traversal_t::scan_k;
-            std::size_t widest = 0;
-            for (std::size_t query = 0; query != queries_count; ++query)
-                widest = max_of(
-                    widest, scanning ? segment_starts_.back() : segment_starts_[query + 1] - segment_starts_[query]);
-            if (failed(scored_.resize_uninitialized(widest))) return failure_ = status_t::bad_alloc_k;
-            auto better = [](maxsim_ranked<total_t> const& first, maxsim_ranked<total_t> const& second) noexcept {
-                return first.total != second.total ? first.total > second.total : first.candidate < second.candidate;
-            };
-            for (std::size_t query = 0; query != queries_count; ++query) {
-                std::size_t const begin = scanning ? 0 : segment_starts_[query];
-                std::size_t const end = scanning ? segment_starts_.back() : segment_starts_[query + 1];
-                for (std::size_t position = begin; position != end; ++position) {
-                    total_t total {};
-                    for (dot_result_t const maximum : maxima_of_(position, query)) total += total_t(maximum);
-                    scored_[position - begin] = {static_cast<u32_t>(position), total};
-                }
-                std::size_t const kept = min_of(end - begin, wanted_);
-                partial_sort(to_writable_span(scored_).first(end - begin), kept, better);
-                for (std::size_t rank = 0; rank != kept; ++rank) ranked_[query * wanted_ + rank] = scored_[rank];
-                ranked_counts_[query] = kept;
-            }
-            return status_t::success_k;
-        }
-    };
-
-    /**
-     *  @brief Plans exact late interaction of the queries @p query_offsets cut @p queries into,
-     *      keeping @p wanted keys per query, for @ref maxsim_if to drive.
-     *
-     *  @param[in] query_offsets Where every query's rows start in @p queries, then where the last
-     *      ends.
-     *  @param[out] latencies Steady-clock nanoseconds per query row of a walk, or empty.
-     *  @return @c shape_mismatch_k for a query without rows, @c config_mismatch_k for offsets past
-     *      the rows or rows of another width, or unless the parts rank by dot.
-     */
-    expected<maxsim_plan_t> plan_maxsim(rows_view_t queries, std::span<std::size_t const> query_offsets,
-                                        search_config_t config, std::size_t wanted,
-                                        std::span<u64_t> latencies = {}) const noexcept {
-        maxsim_plan_t plan {allocator_};
-        if (parts_.empty()) return {std::move(plan), status_t::uninitialized_k};
-        if (kernel_ != nk_kernel_dot_k || query_offsets.empty()) return {std::move(plan), status_t::config_mismatch_k};
-        std::size_t const queries_count = query_offsets.size() - 1;
-        for (std::size_t query = 0; query != queries_count; ++query)
-            if (query_offsets[query + 1] <= query_offsets[query]) return {std::move(plan), status_t::shape_mismatch_k};
-        std::size_t const rows_count = query_offsets.back() - query_offsets.front();
-        if (query_offsets.back() > queries.rows || (rows_count && queries.columns != dimensions()) ||
-            (!latencies.empty() && latencies.size() != rows_count))
-            return {std::move(plan), status_t::config_mismatch_k};
-        std::size_t const width = non_zero_expansion_factor(config);
-        bool const walking = config.traversal != traversal_t::scan_k;
-        if (failed(plan.staged_.resize_uninitialized(staged_rows_bytes(vector_dtype_k, rows_count, queries.columns))) ||
-            failed(plan.query_norms_.resize_uninitialized(rows_count)) ||
-            failed(plan.walk_keys_.resize_uninitialized(walking ? rows_count * width : 0)) ||
-            failed(plan.walk_distances_.resize_uninitialized(walking ? rows_count * width : 0)) ||
-            failed(plan.walk_counts_.resize_uninitialized(walking ? rows_count : 0)) ||
-            failed(plan.candidates_.resize_uninitialized(walking ? rows_count * width : 0)) ||
-            failed(plan.ranked_.resize_uninitialized(queries_count * wanted)) ||
-            failed(plan.ranked_counts_.resize(queries_count)))
-            return {std::move(plan), status_t::bad_alloc_k};
-        // A product walks by dot, which never narrows at unit RMS.
-        plan.query_rows_ = import_staged_rows<elementwise_kit_t, rmscast_kit_t, scalar_t>(
-            queries, query_offsets.front(), rows_count, nk_kernel_dot_k, plan.staged_.data());
-        for (std::size_t row = 0; row != rows_count; ++row)
-            plan.query_norms_[row] = index_t::norms_(kernel_, plan.query_rows_.row(row).as_vector());
-        plan.owner_ = this;
-        plan.queries_ = queries;
-        plan.query_offsets_ = query_offsets;
-        plan.latencies_ = latencies;
-        plan.traversal_ = config.traversal;
-        plan.expansion_factor_ = width;
-        plan.wanted_ = wanted;
-        return {std::move(plan), status_t::success_k};
-    }
 
     /**
      *  @brief Late-interaction scores of query groups against every shard: each query row takes its
@@ -952,7 +369,7 @@ struct nvme_indexes {
      *  @param[in] queries The token rows of every query, laid end to end.
      *  @param[in] query_offsets Where every query's rows start in @p queries, then where the last
      *      ends: one more than @p counts.
-     *  @param[inout] executor The threads, their engines and their scratch; claimed by every step.
+     *  @param[inout] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The walk configuration; each row nominates as many keys as its expansion
      *      factor, and a @c traversal_t::scan_k scan nominates every key.
      *  @param[out] keys The best-scoring keys of each query, one query per row, as many keys as its
@@ -988,16 +405,56 @@ struct nvme_indexes {
         static_assert(!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
                       "An engine driving its own threads takes an aggregating predicate per thread");
-        if (query_offsets.size() != counts.size() + 1) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = rankings_refusal(counts.size(), keys, scores); failed(refusal))
+        using slice_t = arena_allocator<byte_t>;
+        using row_t = search_row<dummy_heads_t, std::remove_reference_t<predicate_type_>, distance_t>;
+        std::size_t const queries_count = counts.size(), wanted = keys.extent(1), threads = executor.size();
+        if (query_offsets.size() != queries_count + 1) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = rankings_refusal(queries_count, keys, scores); failed(refusal))
             return {{}, refusal};
-        auto [plan, plan_status] = plan_maxsim(queries, query_offsets, config, keys.extent(1), latencies);
-        if (failed(plan_status)) return {{}, plan_status};
-        do {
-            for (typename maxsim_plan_t::step_t const step : plan.steps())
-                if (status_t const ran = plan.run(step, executor, predicate); failed(ran)) return {{}, ran};
-        } while (plan.advance());
-        return plan.finish(keys, scores, counts);
+        if (parts_.empty()) return {{}, status_t::uninitialized_k};
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        for (std::size_t query = 0; query != queries_count; ++query)
+            if (query_offsets[query + 1] <= query_offsets[query]) return {{}, status_t::shape_mismatch_k};
+        std::size_t const rows_count = query_offsets.back() - query_offsets.front();
+        if (query_offsets.back() > queries.rows || (rows_count && queries.columns != dimensions()) ||
+            (!latencies.empty() && latencies.size() != rows_count))
+            return {{}, status_t::config_mismatch_k};
+        std::memset(counts.data(), 0, counts.size_bytes());
+        if (!queries_count || !wanted) return {{}, status_t::success_k};
+
+        // One call serves every pass: a walk's engines and arenas, then two scans.
+        bool const scanning = config.traversal == traversal_t::scan_k;
+        walk_shape_t const shape = scanning ? walk_shape_t {}
+                                            : index_t::template walk_shape_<row_t>(
+                                                  to_span(media_), to_span(parts_), kernel_, executor.queue_depth(),
+                                                  threads, rows_count, non_zero_expansion_factor(config),
+                                                  staged_rows_bytes(vector_dtype_k, 1, queries.columns));
+        std::size_t const staged_bytes = staged_rows_bytes(vector_dtype_k, rows_count, queries.columns);
+        std::size_t const shared_bytes = staged_bytes + slice_t::reserved_bytes(rows_count * sizeof(vector_norms_t)) +
+                                         slice_t::reserved_bytes(threads * wanted * sizeof(maxsim_ranked<total_t>));
+        auto [call, call_status] = scanning
+                                       ? begin_scans_<2>(executor, 2, shared_bytes)
+                                       : begin_scans_(executor, 2, shared_bytes + shape.scratch_bytes, shape.buffers);
+        if (failed(call_status)) return {{}, call_status};
+        if (status_t const opened = open_predicate(predicate, executor); failed(opened)) return {{}, opened};
+        scratch_allocator_t const scratch {executor.arena(0)};
+        growing_buffer<byte_t, scratch_allocator_t> staged {scratch};
+        growing_buffer<vector_norms_t, scratch_allocator_t> query_norms {scratch};
+        growing_buffer<maxsim_ranked<total_t>, scratch_allocator_t> ranked {scratch};
+        if (failed(staged.resize_uninitialized(staged_bytes)) || failed(query_norms.resize_uninitialized(rows_count)) ||
+            failed(ranked.resize_uninitialized(threads * wanted)))
+            return {{}, status_t::bad_alloc_k};
+        // A product walks by dot, which never narrows at unit RMS.
+        vectors_view_t const query_rows = import_staged_rows<elementwise_kit_t, rmscast_kit_t, scalar_t>(
+            queries, query_offsets.front(), rows_count, nk_kernel_dot_k, staged.data());
+        for (std::size_t row = 0; row != rows_count; ++row)
+            query_norms[row] = index_t::norms_(kernel_, query_rows.row(row).as_vector());
+        nk::matrix_span<maxsim_ranked<total_t>> const rankings {ranked.data(), threads, wanted};
+        if (scanning)
+            return scan_maxsim_(query_offsets, query_rows, to_span(query_norms), rankings, executor, keys, scores,
+                                counts, predicate);
+        return walk_maxsim_(queries, query_offsets, query_rows, to_span(query_norms), shape, rankings, executor, keys,
+                            scores, counts, predicate, latencies);
     }
 
     /**
@@ -1086,7 +543,7 @@ struct nvme_indexes {
         if (keys.empty()) return status_t::success_k;
         auto [call, call_status] = begin_scans_(executor, 1);
         if (failed(call_status)) return call_status;
-        return scan_keys_(keys, executor, [&](std::size_t position, nvme_locator<u32_t>) noexcept {
+        return scan_keys_(keys, executor, [&](std::size_t, std::size_t position, nvme_locator<u32_t>) noexcept {
             std::atomic_ref<std::size_t>(entries[position]).fetch_add(1, std::memory_order_relaxed);
         });
     }
@@ -1140,7 +597,7 @@ struct nvme_indexes {
             return first.shard != second.shard ? first.shard < second.shard : first.node < second.node;
         };
         status_t const scanned = scan_keys_(
-            keys, executor, [&](std::size_t position, nvme_locator<u32_t> locator) noexcept {
+            keys, executor, [&](std::size_t, std::size_t position, nvme_locator<u32_t> locator) noexcept {
                 std::unique_lock<fu::spin_mutex_t> const held {stripes[position % stripes_count]};
                 nvme_locator<u32_t>* const rows = kept.data() + position * wanted;
                 std::size_t slot = min_of(entries[position]++, wanted);
@@ -1601,11 +1058,11 @@ struct nvme_indexes {
 
     /** Begins a call of @p scans scans over every shard, each landing @p reads_per_task_ reads per
      *  task: every thread's arena sized for their slots and @p scratch_bytes more, and every engine
-     *  for a queue depth of slots, each as many staging buffers as reads, every buffer as wide as a
-     *  walk's. */
+     *  for a queue depth of slots, each as many staging buffers as reads, and at least @p buffers
+     *  for a walk sharing the call, every buffer as wide as a walk's. */
     template <std::size_t reads_per_task_ = 1>
-    expected<call_t> begin_scans_(executor_t& executor, std::size_t scans,
-                                  std::size_t scratch_bytes = 0) const noexcept {
+    expected<call_t> begin_scans_(executor_t& executor, std::size_t scans, std::size_t scratch_bytes = 0,
+                                  std::size_t buffers = 0) const noexcept {
         using slice_t = arena_allocator<byte_t>;
         std::size_t const depth = max_of<std::size_t>(executor.queue_depth(), 1);
         // What `scan_reads_` carves per scan, and padding to the first boundary.
@@ -1613,7 +1070,7 @@ struct nvme_indexes {
                                        slice_t::reserved_bytes(depth * sizeof(u32_t)) +
                                        slice_t::reserved_bytes(depth * reads_per_task_ * sizeof(io_completion_t));
         return nvme_begin_call(executor, to_span(media_), scans * scan_bytes + scratch_bytes + default_alignment_k,
-                               depth * reads_per_task_, staging_bytes_());
+                               max_of(depth * reads_per_task_, buffers), staging_bytes_());
     }
 
     /**
@@ -1835,8 +1292,8 @@ struct nvme_indexes {
 
     /**
      *  @brief Scans every part's key column in runs, matching every row against an exact table of
-     *      @p keys, and calls @p on_hit with the batch position and the row's locator for every
-     *      match, repeats included.
+     *      @p keys, and calls @p on_hit with the scanning thread, the batch position and the row's
+     *      locator for every match, repeats included.
      *
      *  The table holds each distinct key's first batch position, the positions sharing it chained
      *  behind; it is exact, so no row is ever matched by a key it does not hold. Runs inside a call
@@ -1867,7 +1324,7 @@ struct nvme_indexes {
             if (progress++) return {};
             return {run_extent_(locate_run_(0, rows_count, run, key_column_k), key_column_k)};
         };
-        auto consume = [&](std::size_t, std::size_t, auto const& extents, auto const& landed) noexcept {
+        auto consume = [&](std::size_t thread, std::size_t, auto const& extents, auto const& landed) noexcept {
             extent_t const& extent = extents[0];
             byte_t const* const bytes = landed[0];
             nvme_part_t const& part = parts_[extent.shard];
@@ -1876,7 +1333,7 @@ struct nvme_indexes {
                 key_t const key = safegraphs_widened_key<key_t>(bytes + row * part.key_row_bytes, part.key_dtype);
                 std::size_t const slot = slot_of(key);
                 for (std::size_t position = heads[slot]; position != empty_k; position = chains[position])
-                    on_hit(position, nvme_locator<u32_t> {extent.shard, static_cast<node_id_t>(first + row)});
+                    on_hit(thread, position, nvme_locator<u32_t> {extent.shard, static_cast<node_id_t>(first + row)});
             }
         };
         return scan_reads_(executor, runs_count_(0, rows_count, key_column_k), describe, consume).status;
@@ -1956,6 +1413,7 @@ struct nvme_indexes {
                                        slice_t::reserved_bytes(threads * wanted * sizeof(scan_match_t));
         auto [call, call_status] = begin_scans_<2>(executor, 1, share_bytes + home_bytes);
         if (failed(call_status)) return {{}, call_status};
+        if (status_t const opened = open_predicate(predicate, executor); failed(opened)) return {{}, opened};
         auto carve = [](arena_t& arena, std::size_t bytes) noexcept {
             return arena.allocate(max_of<std::size_t>(bytes, 1), default_alignment_k);
         };
@@ -2146,6 +1604,346 @@ struct nvme_indexes {
     }
 
 #pragma endregion Scans
+
+#pragma region MaxSim
+
+    /** A row the MaxSim key scan listed: where it sits, and the candidate whose key it holds. */
+    struct maxsim_match_t {
+
+        /** The row's shard and node. */
+        nvme_locator<u32_t> locator;
+
+        /** The candidate the row folds into. */
+        u64_t position = 0;
+    };
+
+    static_assert(sizeof(maxsim_match_t) == 16, "A listed row is a 16-byte hot entry");
+
+    /**
+     *  @brief Late interaction nominated by walks, inside the call @ref maxsim_if began: every
+     *      query row walks every shard, and each query sorts its rows' keys and keeps each once.
+     *
+     *  One key scan counts every candidate's rows and lists them, each thread into its own arena,
+     *  and each candidate's rows are read on the one thread claiming it, so its maxima take plain
+     *  maxima. A query's maxima start where the previous query's end, one per candidate and row.
+     */
+    template <typename score_type_, typename predicate_type_>
+    expected<search_result_t> walk_maxsim_(rows_view_t queries, std::span<std::size_t const> query_offsets,
+                                           vectors_view_t query_rows, std::span<vector_norms_t const> query_norms,
+                                           walk_shape_t const& shape, nk::matrix_span<maxsim_ranked<total_t>> rankings,
+                                           executor_t& executor, nk::matrix_span<key_t> keys,
+                                           nk::matrix_span<score_type_> scores, std::span<std::size_t> counts,
+                                           predicate_type_& predicate, std::span<u64_t> latencies) noexcept {
+        using row_t = search_row<dummy_heads_t, predicate_type_, distance_t>;
+        using matches_t = growing_buffer<maxsim_match_t, scratch_allocator_t>;
+        std::size_t const queries_count = counts.size(), rows_count = query_rows.extent(0);
+        std::size_t const width = shape.expansion_factor;
+        scratch_allocator_t const scratch {executor.arena(0)};
+        growing_buffer<key_t, scratch_allocator_t> candidates {scratch};
+        growing_buffer<distance_t, scratch_allocator_t> distances {scratch};
+        growing_buffer<std::size_t, scratch_allocator_t> walked {scratch}, segment_starts {scratch},
+            maxima_starts {scratch};
+        if (failed(candidates.resize_uninitialized(rows_count * width)) ||
+            failed(distances.resize_uninitialized(rows_count * width)) ||
+            failed(walked.resize_uninitialized(rows_count)) ||
+            failed(segment_starts.resize_uninitialized(queries_count + 1)) ||
+            failed(maxima_starts.resize_uninitialized(queries_count + 1)))
+            return {{}, status_t::bad_alloc_k};
+        nk::matrix_span<key_t> const walk_keys {candidates.data(), rows_count, width};
+        nk::matrix_span<distance_t> const walk_distances {distances.data(), rows_count, width};
+        typename row_t::inputs_t const inputs {queries.slice(query_offsets.front(), rows_count),
+                                               kernel_,
+                                               nullptr,
+                                               &predicate,
+                                               width,
+                                               walk_keys,
+                                               walk_distances,
+                                               to_writable_span(walked)};
+        auto [result, walk_status] = row_walker<index_t, row_t>::run_walks(to_span(media_), to_span(parts_), executor,
+                                                                           shape, inputs, to_span(walked), latencies);
+        result.count = 0;
+        if (failed(walk_status)) return {result, walk_status};
+
+        // Each query gathers its rows' keys behind the previous query's, sorts them by bytes, and
+        // keeps each once.
+        auto by_bytes = [](key_t const& first, key_t const& second) noexcept {
+            return std::memcmp(&first, &second, sizeof(key_t)) < 0;
+        };
+        std::size_t nominated = 0, maxima_count = 0;
+        for (std::size_t query = 0; query != queries_count; ++query) {
+            std::size_t const begin = nominated;
+            for (std::size_t row = query_offsets[query] - query_offsets.front();
+                 row != query_offsets[query + 1] - query_offsets.front(); ++row)
+                for (std::size_t hit = 0; hit != walked[row]; ++hit) candidates[nominated++] = walk_keys(row, hit);
+            std::span<key_t> const gathered = to_writable_span(candidates).subspan(begin, nominated - begin);
+            partial_sort(gathered, gathered.size(), by_bytes);
+            nominated = begin;
+            for (key_t const& key : gathered)
+                if (nominated == begin || !same_key_(candidates[nominated - 1], key)) candidates[nominated++] = key;
+            segment_starts[query] = begin;
+            maxima_starts[query] = maxima_count;
+            maxima_count += (nominated - begin) * (query_offsets[query + 1] - query_offsets[query]);
+        }
+        segment_starts[queries_count] = nominated;
+        maxima_starts[queries_count] = maxima_count;
+        if (!nominated) return {result, status_t::success_k};
+
+        // One key scan counts every candidate's rows and lists them, each thread in its own arena.
+        std::span<key_t const> const nominations = to_span(candidates).first(nominated);
+        growing_buffer<std::size_t, scratch_allocator_t> row_starts {scratch};
+        growing_buffer<matches_t, scratch_allocator_t> matches {scratch};
+        if (failed(row_starts.resize(nominated + 1)) || failed(matches.reserve_exactly(executor.size())))
+            return {result, status_t::bad_alloc_k};
+        for (std::size_t thread = 0; thread != executor.size(); ++thread)
+            matches.push_back_reserved(matches_t {scratch_allocator_t {executor.arena(thread)}});
+        status_t listing = status_t::success_k;
+        status_t const scanned = scan_keys_(
+            nominations, executor, [&](std::size_t thread, std::size_t position, nvme_locator<u32_t> locator) noexcept {
+                std::atomic_ref<std::size_t>(row_starts[position]).fetch_add(1, std::memory_order_relaxed);
+                if (failed(matches[thread].push_back({locator, position})))
+                    std::atomic_ref<status_t>(listing).store(status_t::bad_alloc_k, std::memory_order_relaxed);
+            });
+        if (failed(scanned)) return {result, scanned};
+        if (failed(listing)) return {result, listing};
+
+        // Each count becomes its candidate's end, and every listed row steps it back once.
+        for (std::size_t position = 1; position <= nominated; ++position)
+            row_starts[position] += row_starts[position - 1];
+        growing_buffer<nvme_locator<u32_t>, scratch_allocator_t> locators {scratch};
+        if (failed(locators.resize_uninitialized(row_starts[nominated]))) return {result, status_t::bad_alloc_k};
+        for (matches_t const& listed : matches)
+            for (maxsim_match_t const& match : listed) locators[--row_starts[match.position]] = match.locator;
+
+        growing_buffer<dot_result_t, scratch_allocator_t> folded {scratch};
+        if (failed(folded.resize_uninitialized(maxima_count))) return {result, status_t::bad_alloc_k};
+        for (dot_result_t& maximum : folded) maximum = dot_result_t::finite_min();
+        std::span<dot_result_t> const maxima = to_writable_span(folded);
+        std::span<std::size_t const> const starts = to_span(segment_starts);
+        auto describe = [&](std::size_t position, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+            std::size_t const row = row_starts[position] + static_cast<std::size_t>(progress++);
+            if (row == row_starts[position + 1]) return {};
+            nvme_locator<u32_t> const locator = locators[row];
+            nvme_part_t const& part = parts_[locator.shard];
+            return {extent_t {locator.shard, part.values_begin + u64_t(locator.node) * part.value_row_bytes,
+                              part.value_row_bytes}};
+        };
+        auto consume = [&](std::size_t, std::size_t position, std::array<extent_t, 1> const& extents,
+                           std::array<byte_t const*, 1> const& landed) noexcept {
+            std::size_t const query = static_cast<std::size_t>(lower_bound(starts, position + 1) - starts.data()) - 1;
+            std::size_t const first = query_offsets[query] - query_offsets.front();
+            std::size_t const rows = query_offsets[query + 1] - query_offsets[query];
+            vector_view_t const row {reinterpret_cast<scalar_t const*>(landed[0]), parts_[extents[0].shard].dimensions};
+            fold_row_(row, query_rows(nk::range(first, first + rows), nk::slice), query_norms.subspan(first, rows),
+                      maxima.subspan(maxima_starts[query] + (position - starts[query]) * rows, rows),
+                      [](dot_result_t& maximum, dot_result_t dot) noexcept { maximum = max_of(maximum, dot); });
+        };
+        auto const [reads, read_status] = scan_reads_(executor, nominated, describe, consume);
+        result.value_reads += reads;
+        if (failed(read_status)) return {result, read_status};
+
+        for (std::size_t query = 0; query != queries_count; ++query)
+            result.computed_distances += (row_starts[starts[query + 1]] - row_starts[starts[query]]) *
+                                         (query_offsets[query + 1] - query_offsets[query]);
+        status_t const ranked = executor.for_tasks(queries_count, [&](std::size_t query, std::size_t thread,
+                                                                      std::size_t) noexcept {
+            std::size_t const begin = starts[query], end = starts[query + 1];
+            std::size_t const rows = query_offsets[query + 1] - query_offsets[query];
+            nk::matrix_span<dot_result_t> const query_maxima {maxima.data() + maxima_starts[query], end - begin, rows};
+            counts[query] = rank_candidates_(
+                nominations.subspan(begin, end - begin), query_maxima, to_span(rankings.row(thread).as_vector()),
+                to_span(keys.row(query).as_vector()), to_span(scores.row(query).as_vector()));
+        });
+        for (std::size_t const count : counts) result.count += count;
+        return {result, ranked};
+    }
+
+    /**
+     *  @brief Late interaction nominated by a scan, inside the call @ref maxsim_if began: every key
+     *      is a candidate, each distinct one asked of the predicate once.
+     *
+     *  A scan reads every key and value run once, folding each row through compare-exchanges, since
+     *  a key's rows land on any thread; its maxima hold one value per distinct key and query row,
+     *  refused with @c bad_alloc_k past memory.
+     */
+    template <typename score_type_, typename predicate_type_>
+    expected<search_result_t> scan_maxsim_(std::span<std::size_t const> query_offsets, vectors_view_t query_rows,
+                                           std::span<vector_norms_t const> query_norms,
+                                           nk::matrix_span<maxsim_ranked<total_t>> rankings, executor_t& executor,
+                                           nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> scores,
+                                           std::span<std::size_t> counts, predicate_type_& predicate) noexcept {
+        std::size_t const queries_count = counts.size(), rows_count = size(), queries_rows = query_rows.extent(0);
+        scratch_allocator_t const scratch {executor.arena(0)};
+        growing_buffer<key_t, scratch_allocator_t> candidates {scratch};
+        growing_buffer<u32_t, scratch_allocator_t> table {scratch};
+        if (failed(candidates.resize_uninitialized(rows_count)) ||
+            failed(table.resize_uninitialized(ceil2(max_of<std::size_t>(rows_count * 2, 16)))))
+            return {{}, status_t::bad_alloc_k};
+        search_result_t result;
+
+        // Every key, in placement order.
+        auto describe_keys = [&](std::size_t run, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+            if (progress++) return {};
+            return {run_extent_(locate_run_(0, rows_count, run, key_column_k), key_column_k)};
+        };
+        auto collect_keys = [&](std::size_t, std::size_t run, std::array<extent_t, 1> const& extents,
+                                std::array<byte_t const*, 1> const& landed) noexcept {
+            run_t const located = locate_run_(0, rows_count, run, key_column_k);
+            nvme_part_t const& part = parts_[extents[0].shard];
+            for (std::size_t row = 0; row != located.rows; ++row)
+                candidates[located.position + row] = safegraphs_widened_key<key_t>(landed[0] + row * part.key_row_bytes,
+                                                                                   part.key_dtype);
+        };
+        auto const [key_reads, collect_status] = scan_reads_(executor, runs_count_(0, rows_count, key_column_k),
+                                                             describe_keys, collect_keys);
+        result.scan_reads += key_reads;
+        if (failed(collect_status)) return {result, collect_status};
+
+        // An exact table of positions over the first `slots` of `table`, one past each, zero empty.
+        std::size_t slots = 0, admitted = 0;
+        auto reset_table = [&](std::size_t entries) noexcept {
+            slots = ceil2(max_of<std::size_t>(entries * 2, 16));
+            std::memset(table.data(), 0, slots * sizeof(u32_t));
+        };
+        auto find_or_insert = [&](key_t const& key, std::size_t position) noexcept -> std::size_t {
+            std::size_t const mask = slots - 1;
+            for (std::size_t slot = mix_bits(std::hash<key_t> {}(key)) & mask;; slot = (slot + 1) & mask) {
+                if (!table[slot]) {
+                    table[slot] = static_cast<u32_t>(position + 1);
+                    return position;
+                }
+                if (same_key_(candidates[table[slot] - 1], key)) return table[slot] - 1;
+            }
+        };
+        auto find = [&](key_t const& key) noexcept -> std::size_t {
+            std::size_t const mask = slots - 1;
+            for (std::size_t slot = mix_bits(std::hash<key_t> {}(key)) & mask; table[slot]; slot = (slot + 1) & mask)
+                if (same_key_(candidates[table[slot] - 1], key)) return table[slot] - 1;
+            return admitted;
+        };
+        reset_table(rows_count);
+        std::size_t kept = 0;
+        for (std::size_t row = 0; row != rows_count; ++row)
+            if (find_or_insert(candidates[row], kept) == kept) candidates[kept++] = candidates[row];
+
+        // The predicate hears each distinct key once, a quad at a time, and the admitted keep their
+        // order.
+        auto&& admits = thread_predicate(predicate, 0);
+        if (status_t const reserved = reserve_predicate(admits, kept); failed(reserved)) return {result, reserved};
+        auto keep = [&](scan_payload_t position) noexcept { candidates[admitted++] = candidates[position]; };
+        for (std::size_t first = 0; first < kept; first += quad_lanes_k)
+            with_static_extent<quad_lanes_k>(min_of(quad_lanes_k, kept - first), [&]<std::size_t extent_>() noexcept {
+                std::array<scan_payload_t, extent_> positions;
+                for (std::size_t lane = 0; lane != extent_; ++lane)
+                    positions[lane] = static_cast<scan_payload_t>(first + lane);
+                ask_quad(admits, std::span<key_t const, extent_>(candidates.data() + first, extent_),
+                         std::span<scan_payload_t const, extent_>(positions), keep);
+            });
+        settle_predicate(admits, keep);
+        if (!admitted) return {result, status_t::success_k};
+        reset_table(admitted);
+        for (std::size_t position = 0; position != admitted; ++position) find_or_insert(candidates[position], position);
+
+        growing_buffer<dot_result_t, scratch_allocator_t> folded {scratch};
+        if (failed(folded.resize_uninitialized(admitted * queries_rows))) return {result, status_t::bad_alloc_k};
+        for (dot_result_t& maximum : folded) maximum = dot_result_t::finite_min();
+        nk::matrix_span<dot_result_t> const maxima {folded.data(), admitted, queries_rows};
+        // Runs follow the wider of the key and value rows, so both runs of a task fit a buffer.
+        column_t const runs_column = parts_[0].value_row_bytes >= parts_[0].key_row_bytes ? value_column_k
+                                                                                          : key_column_k;
+        auto describe_runs = [&](std::size_t run, u64_t& progress) noexcept -> std::array<extent_t, 2> {
+            if (progress++) return {};
+            run_t const located = locate_run_(0, rows_count, run, runs_column);
+            return {run_extent_(located, key_column_k), run_extent_(located, value_column_k)};
+        };
+        auto fold_runs = [&](std::size_t, std::size_t, std::array<extent_t, 2> const& extents,
+                             std::array<byte_t const*, 2> const& landed) noexcept {
+            nvme_part_t const& part = parts_[extents[1].shard];
+            std::size_t const run_rows = static_cast<std::size_t>(extents[1].bytes / part.value_row_bytes);
+            for (std::size_t row = 0; row != run_rows; ++row) {
+                std::size_t const position = find(
+                    safegraphs_widened_key<key_t>(landed[0] + row * part.key_row_bytes, part.key_dtype));
+                if (position == admitted) continue;
+                vector_view_t const values {reinterpret_cast<scalar_t const*>(landed[1] + row * part.value_row_bytes),
+                                            part.dimensions};
+                fold_row_(
+                    values, query_rows, query_norms, to_span(maxima.row(position).as_vector()),
+                    [](dot_result_t& maximum, dot_result_t dot) noexcept {
+                        std::atomic_ref<dot_result_t> const shared {maximum};
+                        dot_result_t seen = shared.load(std::memory_order_relaxed);
+                        while (seen < dot && !shared.compare_exchange_weak(seen, dot, std::memory_order_relaxed)) {}
+                    });
+            }
+        };
+        auto const [run_reads, fold_status] = scan_reads_<2>(executor, runs_count_(0, rows_count, runs_column),
+                                                             describe_runs, fold_runs);
+        result.scan_reads += run_reads;
+        result.computed_distances += rows_count * queries_rows;
+        if (failed(fold_status)) return {result, fold_status};
+
+        status_t const ranked = executor.for_tasks(
+            queries_count, [&](std::size_t query, std::size_t thread, std::size_t) noexcept {
+                std::size_t const first = query_offsets[query] - query_offsets.front();
+                std::size_t const rows = query_offsets[query + 1] - query_offsets[query];
+                counts[query] = rank_candidates_(
+                    to_span(candidates).first(admitted), maxima(nk::all, nk::range(first, first + rows), nk::slice),
+                    to_span(rankings.row(thread).as_vector()), to_span(keys.row(query).as_vector()),
+                    to_span(scores.row(query).as_vector()));
+            });
+        for (std::size_t const count : counts) result.count += count;
+        return {result, ranked};
+    }
+
+    /** Ranks @p candidates by the sums of their rows of @p maxima, largest first and ties by
+     *  position, keeping the best in @p ranked, and lands as many as it holds into @p keys and
+     *  @p scores; answers how many landed. */
+    template <typename score_type_>
+    static std::size_t rank_candidates_(std::span<key_t const> candidates, nk::matrix_view<dot_result_t> maxima,
+                                        std::span<maxsim_ranked<total_t>> ranked, std::span<key_t> keys,
+                                        std::span<score_type_> scores) noexcept {
+        auto better = [](maxsim_ranked<total_t> const& first, maxsim_ranked<total_t> const& second) noexcept {
+            return first.total != second.total ? first.total > second.total : first.candidate < second.candidate;
+        };
+        std::size_t kept = 0, worst = 0;
+        for (std::size_t candidate = 0; candidate != candidates.size(); ++candidate) {
+            total_t total {};
+            for (dot_result_t const maximum : to_span(maxima.row(candidate).as_vector())) total += total_t(maximum);
+            maxsim_ranked<total_t> const entry {static_cast<u32_t>(candidate), total};
+            if (kept == ranked.size() && !better(entry, ranked[worst])) continue;
+            ranked[kept == ranked.size() ? worst : kept++] = entry;
+            if (kept != ranked.size()) continue;
+            worst = 0;
+            for (std::size_t slot = 1; slot != kept; ++slot)
+                if (better(ranked[worst], ranked[slot])) worst = slot;
+        }
+        partial_sort(ranked.first(kept), kept, better);
+        for (std::size_t rank = 0; rank != kept; ++rank)
+            keys[rank] = candidates[ranked[rank].candidate],
+            scores[rank] = static_cast<score_type_>(ranked[rank].total);
+        return kept;
+    }
+
+    /** Scores stored @p row against @p query_rows, as many as @p maxima holds, a quad of query rows
+     *  a call, and hands @p update each maximum beside its dot. */
+    template <typename update_type_>
+    void fold_row_(vector_view_t row, vectors_view_t query_rows, std::span<vector_norms_t const> query_norms,
+                   std::span<dot_result_t> maxima, update_type_&& update) const noexcept {
+        vector_norms_t const row_norms = index_t::norms_(kernel_, row);
+        for (std::size_t offset = 0; offset < maxima.size(); offset += quad_lanes_k) {
+            std::size_t const lanes = min_of(quad_lanes_k, maxima.size() - offset);
+            quad<vector_view_t> lane_rows;
+            quad<vector_norms_t> lane_norms;
+            for (std::size_t lane = 0; lane != quad_lanes_k; ++lane) {
+                std::size_t const source = offset + min_of(lane, lanes - 1);
+                lane_rows[lane] = query_rows.row(source).as_vector();
+                lane_norms[lane] = query_norms[source];
+            }
+            scores_result<dot_result_t> const scored = dense::scores<quads_kit_t>(kernel_, row, row_norms, lane_rows,
+                                                                                  lane_norms);
+            for (std::size_t lane = 0; lane != lanes; ++lane) update(maxima[offset + lane], scored.dots[lane]);
+        }
+    }
+
+#pragma endregion MaxSim
 
 #pragma region Reachability
 
@@ -2381,9 +2179,6 @@ struct nvme_indexes_cursor {
  *  steps; @c finish_k once it answered false. */
 enum class nvme_rewrite_phase_t : u8_t {
 
-    /** Counts the rows every key range of a split takes. */
-    route_k,
-
     /** Moves keys and values into the target in target order, with their norms and the neighbors it
      *  keeps. */
     copy_k,
@@ -2510,10 +2305,13 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_type_ co
 
 /** Cuts @p source as @p policy says, drops and counts the edges the cut crosses, and repairs every
  *  target part: in RAM when it fits the workspace, otherwise by walks, back-links and a heal. The
- *  source and the policy's fences are borrowed until the plan dies. */
+ *  source and the policy's fences are borrowed until the plan dies. A split by keys routes while
+ *  it plans, scanning every source part's key column over @p executor. */
 template <typename indexes_type_, typename split_type_>
 expected<nvme_rewrite_plan<indexes_type_>> plan_split(indexes_type_ const& source, split_type_ const& policy,
-                                                      std::string_view target, bytes_span_t workspace,
+                                                      std::string_view target,
+                                                      typename indexes_type_::executor_t& executor,
+                                                      bytes_span_t workspace,
                                                       nvme_rewrite_config_t const& config = {}) noexcept;
 
 /** Copies @p source and re-selects @p rows of it, in placement order across its parts, by walks of
@@ -2579,11 +2377,24 @@ struct [[nodiscard]] nvme_rewrite_plan {
 
     /** Step @p position of the current phase; an empty one past the last. */
     step_t operator[](std::size_t position) const noexcept {
-        return position < steps_.size() ? steps_[position] : step_t {};
+        for (std::size_t unit = 0, first = 0; unit != units_(); ++unit) {
+            cut_t const cut = cut_(unit);
+            std::size_t const count = cut.steps();
+            if (position - first < count) {
+                iota_view<std::size_t> const rows = cut.rows_of(position - first);
+                return {position, unit, {static_cast<node_id_t>(rows.first), static_cast<node_id_t>(rows.bound)}};
+            }
+            first += count;
+        }
+        return {};
     }
 
     /** The current phase's steps, positionally; none once the plan is done. */
-    indexed_range<nvme_rewrite_plan> steps() const noexcept { return {this, steps_.size()}; }
+    indexed_range<nvme_rewrite_plan> steps() const noexcept {
+        std::size_t count = 0;
+        for (std::size_t unit = 0; unit != units_(); ++unit) count += cut_(unit).steps();
+        return {this, count};
+    }
 
     /** The phase whose steps run now. */
     nvme_rewrite_phase_t phase() const noexcept { return phase_; }
@@ -2591,10 +2402,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** Runs @p step of the current phase across every thread of @p executor, which it claims while
      *  it runs. */
     status_t run(step_t const& step, executor_t& executor) noexcept {
-        if (failed(failure_)) return failure_;
-        if (step.position >= steps_.size()) return status_t::config_mismatch_k;
+        if (step.position >= steps().size()) return status_t::config_mismatch_k;
         switch (phase_) {
-        case nvme_rewrite_phase_t::route_k: return route_(step, executor);
         case nvme_rewrite_phase_t::copy_k: return copy_(step, executor);
         case nvme_rewrite_phase_t::build_k: return build_(step, executor);
         case nvme_rewrite_phase_t::reselect_k: return reselect_(step, executor);
@@ -2607,13 +2416,9 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** The barrier between phases, one caller after every step ran: enters the next phase with
      *  steps and answers whether one follows. */
     bool advance() noexcept {
-        while (phase_ != nvme_rewrite_phase_t::finish_k && succeeded(failure_)) {
+        while (phase_ != nvme_rewrite_phase_t::finish_k) {
             phase_ = static_cast<nvme_rewrite_phase_t>(static_cast<u8_t>(phase_) + 1);
-            if (status_t const entered = enter_(); failed(entered)) {
-                failure_ = entered;
-                return false;
-            }
-            if (!steps_.empty()) return true;
+            if (!steps().empty()) return true;
         }
         return false;
     }
@@ -2621,7 +2426,6 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** Writes every part header, then the manifest: the commit. @c cancelled_k before the last
      *  phase ended. */
     expected<result_t> finish() noexcept {
-        if (failed(failure_)) return {result_, failure_};
         if (targets_.empty()) return {result_, status_t::uninitialized_k};
         if (phase_ != nvme_rewrite_phase_t::finish_k) return {result_, status_t::cancelled_k};
         std::span<safegraphs_custom_field_t const> const fields = to_span(fields_);
@@ -2657,7 +2461,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
                                                                bytes_span_t, nvme_rewrite_config_t const&) noexcept;
     template <typename other_type_, typename split_type_>
     friend expected<nvme_rewrite_plan<other_type_>> plan_split(other_type_ const&, split_type_ const&, std::string_view,
-                                                               bytes_span_t, nvme_rewrite_config_t const&) noexcept;
+                                                               typename other_type_::executor_t&, bytes_span_t,
+                                                               nvme_rewrite_config_t const&) noexcept;
     template <typename other_type_>
     friend expected<nvme_rewrite_plan<other_type_>> plan_refine(other_type_ const&, iota_view<std::size_t>,
                                                                 std::string_view, bytes_span_t,
@@ -2902,9 +2707,9 @@ struct [[nodiscard]] nvme_rewrite_plan {
         return status_t::success_k;
     }
 
-    /** Opens the plan's common state: the workspace, the walk breadth, the kernel and the header
-     *  fields, the target's paths and the geometry of the first source part, and removes a stale
-     *  manifest so no half-written part is ever named. */
+    /** Opens the plan's common state: the workspace, the configuration and the header fields
+     *  naming the kernel of @p view, and the target's paths, and removes a stale manifest so no
+     *  half-written part is ever named. */
     status_t open_(std::string_view target, bytes_span_t workspace, nvme_rewrite_config_t const& config,
                    indexes_t const& view) noexcept {
         save_config_t const save {checkpoint_layout_t::distributed_k, config.alignment, synchronization_t::immutable_k,
@@ -2912,15 +2717,10 @@ struct [[nodiscard]] nvme_rewrite_plan {
         if (status_t const valid = save.validate(); failed(valid)) return valid;
         if (target.empty()) return status_t::invalid_argument_k;
         if (!view.shards_count()) return status_t::uninitialized_k;
-        nvme_part_t const& first = view.parts_[0];
         workspace_ = workspace;
-        alignment_ = config.alignment;
-        dimensions_ = first.dimensions, connectivity_ = first.connectivity, value_row_bytes_ = first.value_row_bytes;
-        expansion_factor_ = config.expansion_factor ? config.expansion_factor : default_expansion_factor(connectivity_);
-        kernel_ = view.kernel();
-        norms_bytes_ = view.stores_norms() ? sizeof(vector_norms_t) : 0;
+        config_ = config;
         if (failed(fields_.reserve_exactly(1 + config.provenance.size()))) return status_t::bad_alloc_k;
-        fields_.push_back_reserved({"metric", nk_kernel_name(kernel_)});
+        fields_.push_back_reserved({"metric", nk_kernel_name(view.kernel())});
         for (safegraphs_custom_field_t const& field : config.provenance) fields_.push_back_reserved(field);
         if (failed(keep_path_(manifest_, target)) || failed(keep_path_(stem_, safegraphs_stem(target))))
             return status_t::bad_alloc_k;
@@ -2929,13 +2729,14 @@ struct [[nodiscard]] nvme_rewrite_plan {
     }
 
     /** Appends every non-empty part of @p view to the sources, refusing a geometry or a kernel
-     *  other than the first one's. */
-    status_t add_sources_(indexes_t const& view) noexcept {
-        if (view.kernel() != kernel_) return status_t::config_mismatch_k;
+     *  other than those of the first part of @p first, the view the plan opened with. */
+    status_t add_sources_(indexes_t const& view, indexes_t const& first) noexcept {
+        nvme_part_t const& shape = first.parts_[0];
+        if (view.kernel() != first.kernel()) return status_t::config_mismatch_k;
         for (u32_t part = 0; part != view.parts_.size(); ++part) {
             nvme_part_t const& opened = view.parts_[part];
-            if (opened.dimensions != dimensions_ || opened.connectivity != connectivity_ ||
-                opened.value_row_bytes != value_row_bytes_ || opened.key_dtype != safegraphs_key_dtype<key_t>())
+            if (opened.dimensions != shape.dimensions || opened.connectivity != shape.connectivity ||
+                opened.value_row_bytes != shape.value_row_bytes || opened.key_dtype != safegraphs_key_dtype<key_t>())
                 return status_t::config_mismatch_k;
             if (!opened.nodes) continue;
             source_t source;
@@ -2951,25 +2752,23 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** Creates one target part per entry of @p rows, with its header framed, its file sized and its
      *  one-part view open, and the buckets its back-links spill into. */
     status_t open_targets_(std::span<std::size_t const> rows) noexcept {
-        if (failed(targets_.reserve_exactly(rows.size())) || failed(bucket_bases_.reserve_exactly(rows.size() + 1)))
-            return status_t::bad_alloc_k;
-        std::size_t buckets = 0;
+        if (failed(targets_.reserve_exactly(rows.size()))) return status_t::bad_alloc_k;
         for (std::size_t part = 0; part != rows.size(); ++part) {
             if (!rows[part] || rows[part] >= node_id_unknown_k) return status_t::overflow_k;
             safegraphs_regular_shape_t const shape {
                 rows[part],
                 safegraphs_key_dtype<key_t>(),
                 dtype_of(scalar_t::dtype()),
-                dimensions_,
+                dimensions_(),
                 dtype_t::u32_k,
-                connectivity_,
-                norms_bytes_ ? dtype_of(dot_result_t::dtype()) : dtype_t::unknown_k};
-            auto const [header, frame_status] = safegraphs_regular_header(shape, alignment_, to_span(fields_));
+                connectivity_(),
+                norms_bytes_() ? dtype_of(dot_result_t::dtype()) : dtype_t::unknown_k};
+            auto const [header, frame_status] = safegraphs_regular_header(shape, config_.alignment, to_span(fields_));
             if (failed(frame_status)) return frame_status;
             targets_.push_back_reserved(
                 target_t {paths_t {allocator_}, seekable_file_t {}, header, indexes_t {allocator_}});
             target_t& target = targets_.back();
-            target.view.kernel_ = kernel_;
+            target.view.kernel_ = kernel_();
             paths_t name {allocator_};
             auto const [path, path_status] = safegraphs_part_path(name, path_of_(stem_), part, rows.size());
             if (failed(path_status)) return path_status;
@@ -2983,8 +2782,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
             if (failed(medium_status)) return medium_status;
             nvme_part_t viewed;
             viewed.nodes = static_cast<u32_t>(rows[part]);
-            viewed.dimensions = static_cast<u32_t>(dimensions_);
-            viewed.connectivity = static_cast<u32_t>(connectivity_);
+            viewed.dimensions = static_cast<u32_t>(dimensions_());
+            viewed.connectivity = static_cast<u32_t>(connectivity_());
             viewed.key_row_bytes = static_cast<u32_t>(header.key.row_bytes());
             viewed.key_dtype = header.key.dtype;
             viewed.value_row_bytes = static_cast<u32_t>(header.value.row_bytes());
@@ -2994,129 +2793,164 @@ struct [[nodiscard]] nvme_rewrite_plan {
             if (failed(target.view.media_.push_back(medium_t {std::move(file_medium)})) ||
                 failed(target.view.parts_.push_back(viewed)))
                 return status_t::bad_alloc_k;
-            bucket_bases_.push_back_reserved(buckets);
-            buckets += divide_round_up(rows[part], bucket_rows_);
         }
-        bucket_bases_.push_back_reserved(buckets);
-        if (failed(buckets_.resize(buckets))) return status_t::bad_alloc_k;
+        if (failed(buckets_.resize(bucket_base_(targets_.size())))) return status_t::bad_alloc_k;
         std::size_t widest = 0;
         for (std::size_t const part_rows : rows) widest = max_of(widest, part_rows);
         if (heal_bytes_(widest) > workspace_.size()) return status_t::bad_alloc_k;
         return status_t::success_k;
     }
 
-    /** Sizes every step from the workspace, refusing one too small for a single row of any phase
-     *  the plan runs. */
-    status_t size_steps_(std::size_t routing_bytes) noexcept {
-        std::size_t const copy_reserved = routing_bytes + copy_slices_() * default_alignment_k;
-        std::size_t const reselect_reserved = reselect_slices_k * default_alignment_k;
+    /** Refuses a workspace too small for a single row of any phase the plan runs. */
+    status_t size_steps_() const noexcept {
         // A back-link step's proposals take at most half the workspace, its batches the rest.
         std::size_t const back_link_reserved = workspace_.size() / 2 +
                                                (back_link_slices_k + back_link_batch_slices_k) * default_alignment_k;
-        copy_rows_ = workspace_.size() > copy_reserved ? (workspace_.size() - copy_reserved) / copy_row_bytes_() : 0;
-        reselect_rows_ = workspace_.size() > reselect_reserved
-                             ? (workspace_.size() - reselect_reserved) / reselect_row_bytes_()
-                             : 0;
-        bucket_rows_ = workspace_.size() / 2 / (sizeof(u32_t) + connectivity_ * sizeof(scored_node_t));
         bool const back_links_fit = workspace_.size() >= back_link_reserved + back_link_row_bytes_();
-        if (!copy_rows_ || !reselect_rows_ || !bucket_rows_ || !back_links_fit) return status_t::bad_alloc_k;
+        if (!copy_rows_() || !reselect_rows_() || !bucket_rows_() || !back_links_fit) return status_t::bad_alloc_k;
         return status_t::success_k;
     }
 
-    /** Enters the current phase: lists its steps, opening the targets a split by keys sized during
-     *  routing. */
-    status_t enter_() noexcept {
-        steps_.clear();
+    /** The units the current phase cuts into steps: source parts while copying, target parts
+     *  after. */
+    std::size_t units_() const noexcept {
         switch (phase_) {
-        case nvme_rewrite_phase_t::route_k:
-            if (fences_.empty()) return status_t::success_k;
-            for (std::size_t source = 0; source != sources_.size(); ++source)
-                if (status_t const listed = add_step_(source, 0, sources_[source].rows); failed(listed)) return listed;
-            return status_t::success_k;
-        case nvme_rewrite_phase_t::copy_k:
-            if (targets_.empty())
-                if (status_t const opened = open_routed_targets_(); failed(opened)) return opened;
-            for (std::size_t index = 0; index != sources_.size(); ++index) {
-                source_t const& source = sources_[index];
-                for (std::size_t first = 0; first < source.rows;) {
-                    std::size_t const range_end = min_of((first / source.stride + 1) * source.stride, source.rows);
-                    std::size_t const bound = min_of(first + copy_rows_, range_end);
-                    if (status_t const listed = add_step_(index, first, bound); failed(listed)) return listed;
-                    first = bound;
-                }
-            }
-            return status_t::success_k;
-        case nvme_rewrite_phase_t::build_k:
-            if (!build_rows_) return status_t::success_k;
-            for (std::size_t part = 0; part != targets_.size(); ++part)
-                for (std::size_t first = 0; first < targets_[part].view.size(); first += build_rows_)
-                    if (status_t const listed = add_step_(part, first,
-                                                          min_of(first + build_rows_, targets_[part].view.size()));
-                        failed(listed))
-                        return listed;
-            return status_t::success_k;
-        case nvme_rewrite_phase_t::reselect_k:
-            for (std::size_t part = 0; part != selected_.size(); ++part) {
-                iota_view<std::size_t> const rows = selected_[part];
-                std::size_t const nodes = targets_[part].view.size();
-                // A whole part the workspace holds as one RAM index is refined in RAM, in one step.
-                std::size_t const step_rows = rows.size() == nodes &&
-                                                      ram_fits_(nodes, neighbors_row_bytes_(), refine_slices_k)
-                                                  ? nodes
-                                                  : reselect_rows_;
-                for (std::size_t first = rows.first; first < rows.bound; first += step_rows)
-                    if (status_t const listed = add_step_(part, first, min_of(first + step_rows, rows.bound));
-                        failed(listed))
-                        return listed;
-            }
-            return status_t::success_k;
-        case nvme_rewrite_phase_t::back_link_k:
-            for (std::size_t part = 0; part != targets_.size(); ++part)
-                for (std::size_t bucket = bucket_bases_[part]; bucket != bucket_bases_[part + 1]; ++bucket) {
-                    if (!buckets_[bucket].bytes) continue;
-                    std::size_t const first = (bucket - bucket_bases_[part]) * bucket_rows_;
-                    if (status_t const listed = add_step_(part, first,
-                                                          min_of(first + bucket_rows_, targets_[part].view.size()));
-                        failed(listed))
-                        return listed;
-                }
-            return status_t::success_k;
-        case nvme_rewrite_phase_t::heal_k:
-            for (std::size_t part = 0; part != targets_.size(); ++part)
-                if (status_t const listed = add_step_(part, 0, targets_[part].view.size()); failed(listed))
-                    return listed;
-            return status_t::success_k;
-        default: return status_t::success_k;
+        case nvme_rewrite_phase_t::copy_k: return sources_.size();
+        case nvme_rewrite_phase_t::finish_k: return 0;
+        default: return targets_.size();
         }
     }
 
-    /** Lists the step over rows [first, bound) of part @p part. */
-    status_t add_step_(std::size_t part, std::size_t first, std::size_t bound) noexcept {
-        step_t const step {steps_.size(), part, {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)}};
-        return steps_.push_back(step);
+    /** Rows of one unit of the current phase: @b [first,first+rows) cut at every @c stride rows
+     *  past @c first, and into steps of at most @c chunk rows. */
+    struct cut_t {
+        std::size_t first = 0;
+        std::size_t rows = 0;
+        std::size_t stride = 1;
+        std::size_t chunk = 1;
+
+        std::size_t steps() const noexcept {
+            return rows / stride * divide_round_up(stride, chunk) + divide_round_up(rows % stride, chunk);
+        }
+
+        /** The rows of step @p step of the unit. */
+        iota_view<std::size_t> rows_of(std::size_t step) const noexcept {
+            std::size_t const per_stride = divide_round_up(stride, chunk), range = step / per_stride;
+            std::size_t const offset = range * stride + step % per_stride * chunk;
+            return {first + offset, first + min_of(offset + chunk, min_of((range + 1) * stride, rows))};
+        }
+    };
+
+    /** How the current phase cuts unit @p unit: a copy step stays inside one target range of its
+     *  source part, a build step is a block, a re-select step a batch or a whole part refined in
+     *  RAM, a back-link step a bucket, and a heal step a whole part. */
+    cut_t cut_(std::size_t unit) const noexcept {
+        switch (phase_) {
+        case nvme_rewrite_phase_t::copy_k: {
+            source_t const& source = sources_[unit];
+            return {0, source.rows, source.stride, copy_rows_()};
+        }
+        case nvme_rewrite_phase_t::build_k: {
+            std::size_t const nodes = targets_[unit].view.size(), block_rows = build_rows_();
+            return {0, block_rows ? nodes : 0, nodes, max_of<std::size_t>(block_rows, 1)};
+        }
+        case nvme_rewrite_phase_t::reselect_k: {
+            iota_view<std::size_t> const rows = selected_of_(unit);
+            std::size_t const nodes = targets_[unit].view.size();
+            // A whole part the workspace holds as one RAM index is refined in RAM, in one step.
+            bool const in_ram = rows.size() == nodes && ram_fits_(nodes, neighbors_row_bytes_(), refine_slices_k);
+            return {rows.first, rows.size(), max_of<std::size_t>(rows.size(), 1), in_ram ? nodes : reselect_rows_()};
+        }
+        case nvme_rewrite_phase_t::back_link_k: {
+            std::size_t const nodes = targets_[unit].view.size();
+            return {0, nodes, nodes, bucket_rows_()};
+        }
+        case nvme_rewrite_phase_t::heal_k: {
+            std::size_t const nodes = targets_[unit].view.size();
+            return {0, nodes, nodes, nodes};
+        }
+        default: return {};
+        }
     }
 
-    /** Starts the plan in its first phase with steps. */
-    status_t start_() noexcept {
-        phase_ = nvme_rewrite_phase_t::route_k;
-        if (status_t const entered = enter_(); failed(entered)) return entered;
-        if (steps_.empty()) [[maybe_unused]]
-            bool const more = advance();
-        return failure_;
+    /** The rows of target part @p part the re-select phase re-selects. */
+    iota_view<std::size_t> selected_of_(std::size_t part) const noexcept {
+        std::size_t placed = 0;
+        for (std::size_t earlier = 0; earlier != part; ++earlier) placed += targets_[earlier].view.size();
+        std::size_t const low = max_of(selected_.first, placed);
+        std::size_t const high = min_of(selected_.bound, placed + targets_[part].view.size());
+        return low < high ? iota_view<std::size_t> {low - placed, high - placed} : iota_view<std::size_t> {};
+    }
+
+    /** The first spill bucket of target part @p part, past every bucket of the parts before it. */
+    std::size_t bucket_base_(std::size_t part) const noexcept {
+        std::size_t base = 0;
+        for (std::size_t earlier = 0; earlier != part; ++earlier)
+            base += divide_round_up(targets_[earlier].view.size(), bucket_rows_());
+        return base;
     }
 
 #pragma endregion Opening
 
 #pragma region Sizes
 
-    std::size_t neighbors_row_bytes_() const noexcept { return connectivity_ * sizeof(node_id_t); }
-    std::size_t candidate_slots_() const noexcept { return expansion_factor_ + connectivity_; }
-    std::size_t selection_bytes_() const noexcept { return connectivity_ * (sizeof(u32_t) + sizeof(vector_norms_t)); }
+    /** The first source part, whose geometry every source part and every target part shares. */
+    nvme_part_t const& shape_() const noexcept { return sources_[0].view->parts_[sources_[0].part]; }
+    std::size_t dimensions_() const noexcept { return shape_().dimensions; }
+    std::size_t connectivity_() const noexcept { return shape_().connectivity; }
+    std::size_t value_row_bytes_() const noexcept { return shape_().value_row_bytes; }
+
+    /** The distance kind of every source, which the targets name and their selections rank by. */
+    nk_kernel_kind_t kernel_() const noexcept { return sources_[0].view->kernel(); }
+
+    /** Bytes of one norms row, zero when the kernel reads no norms and the targets carry no
+     *  column. */
+    std::size_t norms_bytes_() const noexcept { return sources_[0].view->stores_norms() ? sizeof(vector_norms_t) : 0; }
+
+    std::size_t expansion_factor_() const noexcept {
+        return config_.expansion_factor ? config_.expansion_factor : default_expansion_factor(connectivity_());
+    }
+
+    /** Rows one copy step covers: what the workspace holds past the routing table of a split by
+     *  keys. */
+    std::size_t copy_rows_() const noexcept {
+        std::size_t routing = 0;
+        if (!fences_.empty())
+            for (source_t const& source : sources_)
+                routing = max_of(routing, source.rows + divide_round_up(source.rows, route_block_k) *
+                                                            (fences_.size() + 1) * sizeof(u32_t));
+        std::size_t const reserved = routing + copy_slices_() * default_alignment_k;
+        return workspace_.size() > reserved ? (workspace_.size() - reserved) / copy_row_bytes_() : 0;
+    }
+
+    /** Rows one re-select step covers. */
+    std::size_t reselect_rows_() const noexcept {
+        std::size_t const reserved = reselect_slices_k * default_alignment_k;
+        return workspace_.size() > reserved ? (workspace_.size() - reserved) / reselect_row_bytes_() : 0;
+    }
+
+    /** Rows one spill bucket covers: as many as half the workspace holds proposals for. */
+    std::size_t bucket_rows_() const noexcept {
+        return workspace_.size() / 2 / (sizeof(u32_t) + connectivity_() * sizeof(scored_node_t));
+    }
+
+    /** Rows one build step covers, the largest block the workspace fits; none unless the plan
+     *  builds over the views it opened. */
+    std::size_t build_rows_() const noexcept {
+        if (opened_.empty()) return 0;
+        std::size_t rows = 0;
+        for (source_t const& source : sources_) rows += source.rows;
+        return fitting_block_rows_(rows);
+    }
+
+    std::size_t neighbors_row_bytes_() const noexcept { return connectivity_() * sizeof(node_id_t); }
+    std::size_t candidate_slots_() const noexcept { return expansion_factor_() + connectivity_(); }
+    std::size_t selection_bytes_() const noexcept { return connectivity_() * (sizeof(u32_t) + sizeof(vector_norms_t)); }
 
     /** Bytes a copy step stages per row: every column, and a second copy of them when key ranges
      *  scatter the rows. */
     std::size_t copy_row_bytes_() const noexcept {
-        std::size_t const row = sizeof(key_t) + value_row_bytes_ + norms_bytes_ + neighbors_row_bytes_();
+        std::size_t const row = sizeof(key_t) + value_row_bytes_() + norms_bytes_() + neighbors_row_bytes_();
         return fences_.empty() ? row : row * 2;
     }
 
@@ -3125,18 +2959,18 @@ struct [[nodiscard]] nvme_rewrite_plan {
      *  current neighbors. */
     std::size_t reselect_row_bytes_() const noexcept {
         std::size_t const slots = candidate_slots_();
-        return value_row_bytes_ + 2 * neighbors_row_bytes_() + sizeof(u32_t) +
-               slots * (sizeof(scored_node_t) + value_row_bytes_ + sizeof(u32_t)) + selection_bytes_() +
-               connectivity_ * (sizeof(proposal_t) + sizeof(u32_t));
+        return value_row_bytes_() + 2 * neighbors_row_bytes_() + sizeof(u32_t) +
+               slots * (sizeof(scored_node_t) + value_row_bytes_() + sizeof(u32_t)) + selection_bytes_() +
+               connectivity_() * (sizeof(proposal_t) + sizeof(u32_t));
     }
 
     /** Bytes a back-link batch carves per target row: the row in and out, its own value row,
      *  candidates numbering twice the connectivity with their rows, the selection scratch and the
      *  reads. */
     std::size_t back_link_row_bytes_() const noexcept {
-        std::size_t const slots = connectivity_ * 2;
-        return neighbors_row_bytes_() + value_row_bytes_ + sizeof(u32_t) +
-               slots * (sizeof(scored_node_t) + value_row_bytes_ + sizeof(u32_t)) + selection_bytes_() +
+        std::size_t const slots = connectivity_() * 2;
+        return neighbors_row_bytes_() + value_row_bytes_() + sizeof(u32_t) +
+               slots * (sizeof(scored_node_t) + value_row_bytes_() + sizeof(u32_t)) + selection_bytes_() +
                (slots + 1) * sizeof(u32_t);
     }
 
@@ -3157,13 +2991,14 @@ struct [[nodiscard]] nvme_rewrite_plan {
     std::size_t ram_bytes_(std::size_t rows) const noexcept {
         using schedule_t = typename ram_index_t::chunk_schedule_t;
         std::size_t const chunks = schedule_t::chunks_for(rows);
-        typename ram_index_t::geometry_t const geometry {dimensions_, static_cast<connectivity_t>(connectivity_)};
-        std::size_t const row_bytes = ram_index_t::padded_row_values(geometry) * sizeof(scalar_t) + norms_bytes_ +
+        typename ram_index_t::geometry_t const geometry {dimensions_(), static_cast<connectivity_t>(connectivity_())};
+        std::size_t const row_bytes = ram_index_t::padded_row_values(geometry) * sizeof(scalar_t) + norms_bytes_() +
                                       neighbors_row_bytes_();
         // A chunk without norms allocates only its values and neighbors.
-        std::size_t const chunk_slices = norms_bytes_ ? 3 : 2;
+        std::size_t const chunk_slices = norms_bytes_() ? 3 : 2;
+        // The block's heal audits it on the same allocator.
         return sizeof(ram_index_t) + (chunks * chunk_slices + 1) * default_alignment_k +
-               schedule_t::rows_before(chunks) * row_bytes;
+               schedule_t::rows_before(chunks) * row_bytes + ram_index_t::audit_memory_usage(rows);
     }
 
     /** Whether a RAM index of @p rows rows fits the workspace beside @p staging bytes carved as
@@ -3175,7 +3010,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** Rows of the largest block a build fits: the RAM index, and per row its value row, its two ID
      *  maps and its neighbors row on the way out. */
     std::size_t fitting_block_rows_(std::size_t rows) const noexcept {
-        std::size_t const staging = value_row_bytes_ + 2 * sizeof(node_id_t) + neighbors_row_bytes_();
+        std::size_t const staging = value_row_bytes_() + 2 * sizeof(node_id_t) + neighbors_row_bytes_();
         std::size_t low = 0, high = rows;
         while (low < high) {
             std::size_t const middle = high - (high - low) / 2;
@@ -3206,10 +3041,19 @@ struct [[nodiscard]] nvme_rewrite_plan {
     }
 
     /** Scans rows [first, first + count) of every column of @p columns in part @p part of @p view
-     *  into their staging, as runs of whole rows. */
+     *  into their staging, as runs of whole rows, in a call of its own. */
     status_t scan_rows_(indexes_t const& view, u32_t part, std::size_t first, std::size_t count,
                         std::span<staged_column_t const> columns, executor_t& executor) noexcept {
         if (!count || columns.empty()) return status_t::success_k;
+        auto [call, call_status] = view.begin_scans_(executor, 1);
+        if (failed(call_status)) return call_status;
+        return land_rows_(view, part, first, count, columns, executor);
+    }
+
+    /** The @ref scan_rows_ of a step whose call is already open, a scan's worth of slots
+     *  begun. */
+    status_t land_rows_(indexes_t const& view, u32_t part, std::size_t first, std::size_t count,
+                        std::span<staged_column_t const> columns, executor_t& executor) noexcept {
         auto run_rows_of = [&](staged_column_t const& column) noexcept {
             return min_of(view.scan_run_rows_(part, column.row_bytes), count);
         };
@@ -3239,8 +3083,6 @@ struct [[nodiscard]] nvme_rewrite_plan {
             std::memcpy(column.staging + run * run_rows_of(column) * column.row_bytes, landed[0],
                         static_cast<std::size_t>(extents[0].bytes));
         };
-        auto [call, call_status] = view.begin_scans_(executor, 1);
-        if (failed(call_status)) return call_status;
         auto const [reads, status] = view.scan_reads_(executor, tasks, describe, consume);
         result_.scan_reads += reads;
         return status;
@@ -3328,17 +3170,17 @@ struct [[nodiscard]] nvme_rewrite_plan {
 
     /** The norms the kernel reads of the row whose bytes start at @p bytes, or none. */
     vector_norms_t norms_of_(byte_t const* bytes) const noexcept {
-        return norms_bytes_ ? dense::norms<typename indexes_t::quads_kit_t>(view_of_(bytes)) : vector_norms_t {};
+        return norms_bytes_() ? dense::norms<typename indexes_t::quads_kit_t>(view_of_(bytes)) : vector_norms_t {};
     }
     vector_view_t view_of_(byte_t const* bytes) const noexcept {
-        return vector_view_t {reinterpret_cast<scalar_t const*>(bytes), dimensions_};
+        return vector_view_t {reinterpret_cast<scalar_t const*>(bytes), dimensions_()};
     }
 
     /** The exact distance between two rows. */
     f32_t distance_(byte_t const* first, vector_norms_t first_norms, byte_t const* second,
                     vector_norms_t second_norms) const noexcept {
-        return dense::distance<typename indexes_t::quads_kit_t>(kernel_, view_of_(first), first_norms, view_of_(second),
-                                                                second_norms);
+        return dense::distance<typename indexes_t::quads_kit_t>(kernel_(), view_of_(first), first_norms,
+                                                                view_of_(second), second_norms);
     }
 
     /**
@@ -3391,7 +3233,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
      *  the batch. */
     selection_t selection_of_(u32_t* orders, u32_t* kept_slots, vector_norms_t* norms, std::size_t row,
                               std::size_t slots) const noexcept {
-        return {orders + row * slots, kept_slots + row * connectivity_, norms + row * connectivity_};
+        return {orders + row * slots, kept_slots + row * connectivity_(), norms + row * connectivity_()};
     }
 
     /** Whether the sentinel-padded row @p row holds @p node. */
@@ -3409,16 +3251,17 @@ struct [[nodiscard]] nvme_rewrite_plan {
             return first.target < second.target;
         });
         paths_t name {allocator_};
+        std::size_t const base = bucket_base_(part);
         for (std::size_t first = 0; first != proposals.size();) {
             if (proposals[first].target == sentinel_k) break;
-            std::size_t const bucket = proposals[first].target / bucket_rows_;
+            std::size_t const bucket = proposals[first].target / bucket_rows_();
             std::size_t bound = first + 1;
             while (bound != proposals.size() && proposals[bound].target != sentinel_k &&
-                   proposals[bound].target / bucket_rows_ == bucket)
+                   proposals[bound].target / bucket_rows_() == bucket)
                 ++bound;
-            bucket_t& spill = buckets_[bucket_bases_[part] + bucket];
+            bucket_t& spill = buckets_[base + bucket];
             if (!spill.file) {
-                if (status_t const named = spill_path_(name, bucket_bases_[part] + bucket); failed(named)) return named;
+                if (status_t const named = spill_path_(name, base + bucket); failed(named)) return named;
                 auto [file, open_status] = seekable_file_t::open(path_of_(name), file_mode_t::write_k, allocator_);
                 if (failed(open_status)) return open_status;
                 spill.file = std::move(file);
@@ -3478,22 +3321,25 @@ struct [[nodiscard]] nvme_rewrite_plan {
         return static_cast<std::size_t>(lower_bound(fences_, key, not_above) - fences_.data());
     }
 
-    /** Counts the rows of source part @p step.part every key range takes. */
-    status_t route_(step_t const& step, executor_t& executor) noexcept {
+    /** Counts the rows of every source part each key range takes, scanning their key columns over
+     *  @p executor while a split plans, then opens one target part per non-empty range and turns
+     *  the counts into every source part's first target row per range. */
+    status_t route_(executor_t& executor) noexcept {
         std::size_t const ranges = fences_.size() + 1;
-        std::size_t* const counts = routes_.data() + step.part * ranges;
-        std::memset(counts, 0, ranges * sizeof(std::size_t));
-        return scan_keys_(sources_[step.part], executor, [&](std::size_t, key_t const& key) noexcept {
-            std::atomic_ref<std::size_t>(counts[tag_of_(key)]).fetch_add(1, std::memory_order_relaxed);
-        });
-    }
-
-    /** Opens one target part per non-empty key range, and turns the routed counts into every source
-     *  part's first target row per range. */
-    status_t open_routed_targets_() noexcept {
-        std::size_t const ranges = fences_.size() + 1;
+        if (failed(routes_.resize(sources_.size() * ranges)) || failed(range_targets_.resize(ranges)))
+            return status_t::bad_alloc_k;
+        for (std::size_t source = 0; source != sources_.size(); ++source) {
+            std::size_t* const counts = routes_.data() + source * ranges;
+            if (status_t const scanned = scan_keys_(
+                    sources_[source], executor,
+                    [&](std::size_t, key_t const& key) noexcept {
+                        std::atomic_ref<std::size_t>(counts[tag_of_(key)]).fetch_add(1, std::memory_order_relaxed);
+                    });
+                failed(scanned))
+                return scanned;
+        }
         growing_buffer<std::size_t, forkunion_allocator_t> rows {allocator_};
-        if (failed(rows.reserve_exactly(ranges)) || failed(range_targets_.resize(ranges))) return status_t::bad_alloc_k;
+        if (failed(rows.reserve_exactly(ranges))) return status_t::bad_alloc_k;
         for (std::size_t range = 0; range != ranges; ++range) {
             std::size_t total = 0;
             for (std::size_t source = 0; source != sources_.size(); ++source) {
@@ -3505,15 +3351,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
             range_targets_[range] = total ? rows.size() : ~std::size_t {0};
             if (total) rows.push_back_reserved(total);
         }
-        if (status_t const opened = open_targets_(to_span(rows)); failed(opened)) return opened;
-        return selected_whole_();
-    }
-
-    /** Marks every row of every target part for selection. */
-    status_t selected_whole_() noexcept {
-        if (failed(selected_.reserve_exactly(targets_.size()))) return status_t::bad_alloc_k;
-        for (target_t const& target : targets_) selected_.push_back_reserved({0, target.view.size()});
-        return status_t::success_k;
+        return open_targets_(to_span(rows));
     }
 
     /** The routing of source part @p index carved off the front of @p space: a key range per row,
@@ -3559,14 +3397,14 @@ struct [[nodiscard]] nvme_rewrite_plan {
         std::size_t const low = max_of(source.kept.first, range * source.stride);
         std::size_t const high = min_of(source.kept.bound, (range + 1) * source.stride);
         std::size_t kept = 0, cut = 0;
-        for (std::size_t slot = 0; slot != connectivity_; ++slot) {
+        for (std::size_t slot = 0; slot != connectivity_(); ++slot) {
             std::size_t const neighbor = neighbors[slot];
             if (neighbor == row) continue;
             if (neighbor >= low && neighbor < high)
                 neighbors[kept++] = static_cast<node_id_t>(source.base + neighbor - range * source.stride);
             else cut += !source.kept.empty() && neighbor < source.rows;
         }
-        for (std::size_t slot = kept; slot != connectivity_; ++slot) neighbors[slot] = sentinel_k;
+        for (std::size_t slot = kept; slot != connectivity_(); ++slot) neighbors[slot] = sentinel_k;
         return cut;
     }
 
@@ -3575,14 +3413,14 @@ struct [[nodiscard]] nvme_rewrite_plan {
                                 u32_t const* directory) const noexcept {
         source_t const& source = sources_[index];
         std::size_t kept = 0, cut = 0;
-        for (std::size_t slot = 0; slot != connectivity_; ++slot) {
+        for (std::size_t slot = 0; slot != connectivity_(); ++slot) {
             std::size_t const neighbor = neighbors[slot];
             if (neighbor >= source.rows || neighbor == row) continue;
             if (tags[neighbor] == tags[row])
                 neighbors[kept++] = static_cast<node_id_t>(routed_row_(index, neighbor, tags, directory));
             else ++cut;
         }
-        for (std::size_t slot = kept; slot != connectivity_; ++slot) neighbors[slot] = sentinel_k;
+        for (std::size_t slot = kept; slot != connectivity_(); ++slot) neighbors[slot] = sentinel_k;
         return cut;
     }
 
@@ -3594,7 +3432,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
         source_t const& source = sources_[index];
         nvme_part_t const& part = source.view->parts_[source.part];
         std::size_t const count = step.nodes.size(), first = step.nodes.first;
-        std::size_t const value_bytes = value_row_bytes_, neighbor_bytes = neighbors_row_bytes_();
+        std::size_t const value_bytes = value_row_bytes_(), neighbor_bytes = neighbors_row_bytes_();
         bytes_span_t space = workspace_;
         u8_t* tags = nullptr;
         u32_t* directory = nullptr;
@@ -3603,8 +3441,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
                 return routed;
         auto* const keys = carve_<byte_t>(space, count * sizeof(key_t));
         auto* const values = carve_<byte_t>(space, count * value_bytes);
-        auto* const norms = carve_<byte_t>(space, count * norms_bytes_);
-        auto* const neighbors = carve_<node_id_t>(space, count * connectivity_);
+        auto* const norms = carve_<byte_t>(space, count * norms_bytes_());
+        auto* const neighbors = carve_<node_id_t>(space, count * connectivity_());
         if (!keys || !values || !norms || !neighbors) return status_t::bad_alloc_k;
 
         std::array<staged_column_t, 3> columns {
@@ -3620,11 +3458,11 @@ struct [[nodiscard]] nvme_rewrite_plan {
 
         std::size_t cut = 0;
         status_t const prepared = fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
-            if (norms_bytes_) {
+            if (norms_bytes_()) {
                 vector_norms_t const derived = norms_of_(values + row * value_bytes);
-                std::memcpy(norms + row * norms_bytes_, &derived, norms_bytes_);
+                std::memcpy(norms + row * norms_bytes_(), &derived, norms_bytes_());
             }
-            node_id_t* const row_neighbors = neighbors + row * connectivity_;
+            node_id_t* const row_neighbors = neighbors + row * connectivity_();
             std::size_t row_cut = 0;
             if (!fences_.empty()) row_cut = rewire_by_keys_(index, first + row, row_neighbors, tags, directory);
             else if (!source.kept.empty()) row_cut = rewire_(source, first + row, row_neighbors);
@@ -3640,7 +3478,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
             std::size_t const landed = source.base + first - range * source.stride;
             status_t wrote = write_rows_(target, written.keys_begin, sizeof(key_t), landed, count, keys);
             if (succeeded(wrote)) wrote = write_rows_(target, written.values_begin, value_bytes, landed, count, values);
-            if (succeeded(wrote)) wrote = write_rows_(target, norms_begin_(target), norms_bytes_, landed, count, norms);
+            if (succeeded(wrote))
+                wrote = write_rows_(target, norms_begin_(target), norms_bytes_(), landed, count, norms);
             // A block build writes every row's neighbors itself.
             if (succeeded(wrote) && !source.kept.empty())
                 wrote = write_rows_(target, written.neighbors_begin, neighbor_bytes, landed, count,
@@ -3656,11 +3495,11 @@ struct [[nodiscard]] nvme_rewrite_plan {
                               u32_t const* directory, byte_t const* keys, byte_t const* values, byte_t const* norms,
                               node_id_t const* neighbors) noexcept {
         std::size_t const count = step.nodes.size(), first = step.nodes.first, ranges = fences_.size() + 1;
-        std::size_t const value_bytes = value_row_bytes_, neighbor_bytes = neighbors_row_bytes_();
+        std::size_t const value_bytes = value_row_bytes_(), neighbor_bytes = neighbors_row_bytes_();
         auto* const gathered_keys = carve_<byte_t>(space, count * sizeof(key_t));
         auto* const gathered_values = carve_<byte_t>(space, count * value_bytes);
-        auto* const gathered_norms = carve_<byte_t>(space, count * norms_bytes_);
-        auto* const gathered_neighbors = carve_<node_id_t>(space, count * connectivity_);
+        auto* const gathered_norms = carve_<byte_t>(space, count * norms_bytes_());
+        auto* const gathered_neighbors = carve_<node_id_t>(space, count * connectivity_());
         if (!gathered_keys || !gathered_values || !gathered_norms || !gathered_neighbors) return status_t::bad_alloc_k;
         std::array<std::size_t, max_key_ranges_k + 1> offsets {};
         for (std::size_t row = 0; row != count; ++row) ++offsets[tags[first + row] + 1];
@@ -3671,8 +3510,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
             std::size_t const to = cursors[tags[first + row]]++;
             std::memcpy(gathered_keys + to * sizeof(key_t), keys + row * sizeof(key_t), sizeof(key_t));
             std::memcpy(gathered_values + to * value_bytes, values + row * value_bytes, value_bytes);
-            std::memcpy(gathered_norms + to * norms_bytes_, norms + row * norms_bytes_, norms_bytes_);
-            std::memcpy(gathered_neighbors + to * connectivity_, neighbors + row * connectivity_, neighbor_bytes);
+            std::memcpy(gathered_norms + to * norms_bytes_(), norms + row * norms_bytes_(), norms_bytes_());
+            std::memcpy(gathered_neighbors + to * connectivity_(), neighbors + row * connectivity_(), neighbor_bytes);
         }
         for (std::size_t range = 0; range != ranges; ++range) {
             std::size_t const rows = offsets[range + 1] - offsets[range];
@@ -3690,11 +3529,11 @@ struct [[nodiscard]] nvme_rewrite_plan {
                 wrote = write_rows_(target, written.values_begin, value_bytes, landed, rows,
                                     gathered_values + from * value_bytes);
             if (succeeded(wrote))
-                wrote = write_rows_(target, norms_begin_(target), norms_bytes_, landed, rows,
-                                    gathered_norms + from * norms_bytes_);
+                wrote = write_rows_(target, norms_begin_(target), norms_bytes_(), landed, rows,
+                                    gathered_norms + from * norms_bytes_());
             if (succeeded(wrote))
                 wrote = write_rows_(target, written.neighbors_begin, neighbor_bytes, landed, rows,
-                                    reinterpret_cast<byte_t const*>(gathered_neighbors + from * connectivity_));
+                                    reinterpret_cast<byte_t const*>(gathered_neighbors + from * connectivity_()));
             if (failed(wrote)) return wrote;
         }
         return status_t::success_k;
@@ -3705,11 +3544,9 @@ struct [[nodiscard]] nvme_rewrite_plan {
 #pragma region RAM Blocks
 
     /** One traversal per executor thread over its own arena, sized for @p index, listed in the
-     *  first arena; runs under the caller's claim and rewinds the arenas first. */
+     *  first arena; runs inside the call its step began, which rewound the arenas. */
     status_t traversals_(ram_index_t& index, executor_t& executor, traversals_t& traversals) noexcept {
-        typename ram_index_t::insert_config_t const config {static_cast<u32_t>(expansion_factor_)};
-        if (status_t const sized = executor.reserve(index.traversal_memory_usage(config), 0, 0); failed(sized))
-            return sized;
+        typename ram_index_t::insert_config_t const config {static_cast<u32_t>(expansion_factor_())};
         if (failed(traversals.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
         for (std::size_t thread = 0; thread != executor.size(); ++thread) {
             traversals.push_back_reserved(
@@ -3740,7 +3577,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
                              bytes_span_t space, executor_t& executor, node_of_type_&& node_of,
                              target_of_type_&& target_of) noexcept {
         std::size_t const run_rows = min_of(rows, carvable_(space, neighbors_row_bytes_()));
-        auto* const staged = carve_<node_id_t>(space, run_rows * connectivity_);
+        auto* const staged = carve_<node_id_t>(space, run_rows * connectivity_());
         if (!run_rows || !staged) return status_t::bad_alloc_k;
         ram_cursor_t cursor {index};
         if (status_t const reserved = cursor.reserve(arena_allocator<byte_t, forkunion_allocator_t>(executor.arena(0)));
@@ -3749,11 +3586,11 @@ struct [[nodiscard]] nvme_rewrite_plan {
         for (std::size_t run = 0; run < rows; run += run_rows) {
             std::size_t const run_count = min_of(run_rows, rows - run);
             for (std::size_t row = 0; row != run_count; ++row) {
-                node_id_t* const out = staged + row * connectivity_;
+                node_id_t* const out = staged + row * connectivity_();
                 std::size_t written = 0;
                 if (succeeded(cursor.seek(node_of(run + row))))
                     for (node_id_t const neighbor : cursor.neighbors()) out[written++] = target_of(neighbor);
-                for (; written != connectivity_; ++written) out[written] = sentinel_k;
+                for (; written != connectivity_(); ++written) out[written] = sentinel_k;
             }
             if (status_t const wrote = write_rows_(target, part_of_(target).neighbors_begin, neighbors_row_bytes_(),
                                                    first + run, run_count, reinterpret_cast<byte_t const*>(staged));
@@ -3769,29 +3606,30 @@ struct [[nodiscard]] nvme_rewrite_plan {
         target_t& target = targets_[step.part];
         std::size_t const count = step.nodes.size(), first = step.nodes.first;
         bytes_span_t space = workspace_;
-        auto* const values = carve_<byte_t>(space, count * value_row_bytes_);
+        auto* const values = carve_<byte_t>(space, count * value_row_bytes_());
         auto* const nodes = carve_<node_id_t>(space, count);
         auto* const rows = carve_<node_id_t>(space, count);
-        auto* const staging = carve_<node_id_t>(space, count * connectivity_);
+        auto* const staging = carve_<node_id_t>(space, count * connectivity_());
         if (!values || !nodes || !rows || !staging) return status_t::bad_alloc_k;
-        std::array<staged_column_t, 1> const columns {{{part_of_(target).values_begin, value_row_bytes_, values}}};
-        if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
-            return read;
-
         ram_index_t* const index_bytes = carve_<ram_index_t>(space, 1);
         if (!index_bytes) return status_t::bad_alloc_k;
-        ram_index_ptr_t const index_ptr {new (index_bytes) ram_index_t(kernel_, nvme_workspace_allocator<byte_t>(space),
-                                                                       nvme_workspace_allocator<byte_t>(space))};
+        ram_index_ptr_t const index_ptr {new (index_bytes) ram_index_t(
+            kernel_(), nvme_workspace_allocator<byte_t>(space), nvme_workspace_allocator<byte_t>(space))};
         ram_index_t& index = *index_ptr;
         if (status_t const reserved =
-                index.reserve({count, static_cast<connectivity_t>(connectivity_), dimensions_}).status;
+                index.reserve({count, static_cast<connectivity_t>(connectivity_()), dimensions_()}).status;
             failed(reserved))
             return reserved;
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return claim_status;
+
+        // One call holds the executor for the block's scan, its inserts, its heal and its writes.
+        typename ram_index_t::insert_config_t const config {static_cast<u32_t>(expansion_factor_())};
+        auto [call, call_status] = target.view.begin_scans_(executor, 1, index.traversal_memory_usage(config));
+        if (failed(call_status)) return call_status;
+        std::array<staged_column_t, 1> const columns {{{part_of_(target).values_begin, value_row_bytes_(), values}}};
+        if (status_t const read = land_rows_(target.view, 0, first, count, columns, executor); failed(read))
+            return read;
         traversals_t traversals {scratch_allocator_t {executor.arena(0)}};
         if (status_t const ready = traversals_(index, executor, traversals); failed(ready)) return ready;
-        typename ram_index_t::insert_config_t const config {static_cast<u32_t>(expansion_factor_)};
         status_t refusal = status_t::success_k;
         auto refuse = [&](status_t status) noexcept {
             status_t unset = status_t::success_k;
@@ -3800,8 +3638,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
         };
         // One row per task, as a RAM group inserts, so the threads interleave from the first row.
         auto insert = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
-            vectors_view_t const inserted_row {reinterpret_cast<scalar_t const*>(values + row * value_row_bytes_),
-                                               std::size_t {1}, dimensions_};
+            vectors_view_t const inserted_row {reinterpret_cast<scalar_t const*>(values + row * value_row_bytes_()),
+                                               std::size_t {1}, dimensions_()};
             refuse(index
                        .insert(inserted_row, typename ram_index_t::node_ids_span_t {nodes + row, std::size_t {1}},
                                traversals[thread], config)
@@ -3811,7 +3649,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
         if (failed(refusal)) return refusal;
         // In RAM a block's orphan clusters cost DRAM sweeps to find; once written, only `health`
         // finds them.
-        auto [healing, heal_status] = index.plan_refine({}, traversals[0], {static_cast<u32_t>(expansion_factor_)});
+        auto [healing, heal_status] = index.plan_refine({}, {static_cast<u32_t>(expansion_factor_())});
         if (failed(heal_status)) return heal_status;
         do {
             auto const steps = healing.steps();
@@ -3852,15 +3690,18 @@ struct [[nodiscard]] nvme_rewrite_plan {
         bytes_span_t space = workspace_;
         ram_index_t* const index_bytes = carve_<ram_index_t>(space, 1);
         if (!index_bytes) return status_t::bad_alloc_k;
-        ram_index_ptr_t const index_ptr {new (index_bytes) ram_index_t(kernel_, nvme_workspace_allocator<byte_t>(space),
-                                                                       nvme_workspace_allocator<byte_t>(space))};
+        ram_index_ptr_t const index_ptr {new (index_bytes) ram_index_t(
+            kernel_(), nvme_workspace_allocator<byte_t>(space), nvme_workspace_allocator<byte_t>(space))};
         ram_index_t& index = *index_ptr;
         if (status_t const reserved =
-                index.reserve({nodes, static_cast<connectivity_t>(connectivity_), dimensions_}).status;
+                index.reserve({nodes, static_cast<connectivity_t>(connectivity_()), dimensions_()}).status;
             failed(reserved))
             return reserved;
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return claim_status;
+        // One call holds the executor for the load, the refine and the writes; it reads no medium.
+        typename ram_index_t::insert_config_t const sizing {static_cast<u32_t>(expansion_factor_())};
+        auto [call, call_status] = nvme_begin_call(executor, std::span<medium_t const> {},
+                                                   index.traversal_memory_usage(sizing), 0, 0);
+        if (failed(call_status)) return call_status;
         traversals_t traversals {scratch_allocator_t {executor.arena(0)}};
         if (status_t const ready = traversals_(index, executor, traversals); failed(ready)) return ready;
         status_t refusal = status_t::success_k;
@@ -3870,19 +3711,22 @@ struct [[nodiscard]] nvme_rewrite_plan {
                 std::atomic_ref<status_t>(refusal).compare_exchange_strong(unset, status, std::memory_order_relaxed);
         };
         {
-            auto [load, load_status] = index.plan_load(columns, nodes, {0, static_cast<node_id_t>(nodes)});
+            auto [load, load_status] = index.plan_load(nodes);
             if (failed(load_status)) return load_status;
             auto const steps = load.steps();
+            iota_view<node_id_t> const source_range {0, static_cast<node_id_t>(nodes)};
             if (status_t const fanned = executor.for_tasks(
-                    steps.size(), [&](std::size_t position, std::size_t,
-                                      std::size_t) noexcept { refuse(load.load(steps[position])); });
+                    steps.size(),
+                    [&](std::size_t position, std::size_t, std::size_t) noexcept {
+                        refuse(load.load(steps[position], columns, source_range));
+                    });
                 failed(fanned))
                 return fanned;
             if (failed(refusal)) return refusal;
             if (status_t const loaded = load.finish(); failed(loaded)) return loaded;
         }
-        typename ram_index_t::refine_config_t const config {static_cast<u32_t>(expansion_factor_)};
-        auto [refining, refine_status] = index.plan_refine({0, static_cast<node_id_t>(nodes)}, traversals[0], config);
+        typename ram_index_t::refine_config_t const config {static_cast<u32_t>(expansion_factor_())};
+        auto [refining, refine_status] = index.plan_refine({0, static_cast<node_id_t>(nodes)}, config);
         if (failed(refine_status)) return refine_status;
         do {
             auto const steps = refining.steps();
@@ -3927,15 +3771,15 @@ struct [[nodiscard]] nvme_rewrite_plan {
         std::size_t const nodes = target.view.size(), count = step.nodes.size(), first = step.nodes.first;
         if (count == nodes && ram_fits_(nodes, neighbors_row_bytes_(), refine_slices_k))
             return refine_in_ram_(step.part, executor);
-        std::size_t const slots = candidate_slots_(), connectivity = connectivity_;
+        std::size_t const slots = candidate_slots_(), connectivity = connectivity_();
         nvme_part_t const& part = part_of_(target);
         bytes_span_t space = workspace_;
-        auto* const queries = carve_<byte_t>(space, count * value_row_bytes_);
+        auto* const queries = carve_<byte_t>(space, count * value_row_bytes_());
         auto* const neighbors = carve_<node_id_t>(space, count * connectivity);
         auto* const previous_neighbors = carve_<node_id_t>(space, count * connectivity);
         auto* const counts = carve_<u32_t>(space, count);
         auto* const entries = carve_<scored_node_t>(space, count * slots);
-        auto* const vectors = carve_<byte_t>(space, count * slots * value_row_bytes_);
+        auto* const vectors = carve_<byte_t>(space, count * slots * value_row_bytes_());
         auto* const orders = carve_<u32_t>(space, count * slots);
         auto* const kept_slots = carve_<u32_t>(space, count * connectivity);
         auto* const kept_norms = carve_<vector_norms_t>(space, count * connectivity);
@@ -3945,19 +3789,19 @@ struct [[nodiscard]] nvme_rewrite_plan {
             !kept_slots || !kept_norms || !proposals || !points)
             return status_t::bad_alloc_k;
         std::array<staged_column_t, 2> const columns {
-            {{part.values_begin, value_row_bytes_, queries},
+            {{part.values_begin, value_row_bytes_(), queries},
              {part.neighbors_begin, neighbors_row_bytes_(), reinterpret_cast<byte_t*>(neighbors)}}};
         if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
             return read;
 
-        candidates_t const candidates {entries, vectors, counts, slots, value_row_bytes_};
+        candidates_t const candidates {entries, vectors, counts, slots, value_row_bytes_()};
         std::memset(counts, 0, count * sizeof(u32_t));
         using row_t = reselect_row_t;
         typename row_t::inputs_t const inputs {
-            vectors_view_t {reinterpret_cast<scalar_t const*>(queries), count, dimensions_}, candidates,
-            static_cast<node_id_t>(first), expansion_factor_};
+            vectors_view_t {reinterpret_cast<scalar_t const*>(queries), count, dimensions_()}, candidates,
+            static_cast<node_id_t>(first), expansion_factor_()};
         search_config_t config {};
-        config.expansion_factor = static_cast<decltype(config.expansion_factor)>(expansion_factor_);
+        config.expansion_factor = static_cast<typename indexes_t::index_t::small_size_t>(expansion_factor_());
         // Appended rows first walk across into the resident part alone, since no resident row links
         // to them yet: the part read as ending at the appended base draws and expands nothing past
         // it, and both walks fill the same candidates.
@@ -3986,17 +3830,17 @@ struct [[nodiscard]] nvme_rewrite_plan {
                 if (taken != slots) points[current++] = static_cast<u32_t>(row * slots + taken);
             }
         if (status_t const read = read_points_(
-                target.view, part.values_begin, value_row_bytes_, current,
+                target.view, part.values_begin, value_row_bytes_(), current,
                 [&](std::size_t task) noexcept { return entries[points[task]].node_id; },
-                [&](std::size_t task) noexcept { return vectors + std::size_t(points[task]) * value_row_bytes_; },
+                [&](std::size_t task) noexcept { return vectors + std::size_t(points[task]) * value_row_bytes_(); },
                 executor, result_.value_reads);
             failed(read))
             return read;
 
         status_t const scored = fan_out_(executor, current, [&](std::size_t point, std::size_t, std::size_t) noexcept {
             std::size_t const position = points[point];
-            byte_t const* const query = queries + position / slots * value_row_bytes_;
-            byte_t const* const candidate = vectors + position * value_row_bytes_;
+            byte_t const* const query = queries + position / slots * value_row_bytes_();
+            byte_t const* const candidate = vectors + position * value_row_bytes_();
             entries[position].distance = distance_(query, norms_of_(query), candidate, norms_of_(candidate));
         });
         if (failed(scored)) return scored;
@@ -4042,13 +3886,14 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** Applies one bucket of back-links to target rows @p step.nodes: every row keeps its closest
      *  distinct proposals, then in batches the workspace holds, a touched row re-selects among its
      *  current neighbors and those proposals, every candidate's value row read, and the batch's
-     *  rows write back in one run. */
+     *  rows write back in one run. A bucket nothing spilled into has nothing to apply. */
     status_t back_link_(step_t const& step, executor_t& executor) noexcept {
         target_t& target = targets_[step.part];
         nvme_part_t const& part = part_of_(target);
-        std::size_t const nodes = target.view.size(), connectivity = connectivity_, rows = step.nodes.size();
+        std::size_t const nodes = target.view.size(), connectivity = connectivity_(), rows = step.nodes.size();
         std::size_t const lowest = step.nodes.first, slots = connectivity * 2;
-        bucket_t& bucket = buckets_[bucket_bases_[step.part] + lowest / bucket_rows_];
+        bucket_t& bucket = buckets_[bucket_base_(step.part) + lowest / bucket_rows_()];
+        if (!bucket.bytes) return status_t::success_k;
         bytes_span_t space = workspace_;
         auto* const proposed_counts = carve_<u32_t>(space, rows);
         auto* const proposed = carve_<scored_node_t>(space, rows * connectivity);
@@ -4086,10 +3931,10 @@ struct [[nodiscard]] nvme_rewrite_plan {
             std::size_t const count = min_of(batch_rows, rows - batch_first), first = lowest + batch_first;
             bytes_span_t carving = batch_space;
             auto* const neighbors = carve_<node_id_t>(carving, count * connectivity);
-            auto* const owns = carve_<byte_t>(carving, count * value_row_bytes_);
+            auto* const owns = carve_<byte_t>(carving, count * value_row_bytes_());
             auto* const counts = carve_<u32_t>(carving, count);
             auto* const entries = carve_<scored_node_t>(carving, count * slots);
-            auto* const vectors = carve_<byte_t>(carving, count * slots * value_row_bytes_);
+            auto* const vectors = carve_<byte_t>(carving, count * slots * value_row_bytes_());
             auto* const orders = carve_<u32_t>(carving, count * slots);
             auto* const kept_slots = carve_<u32_t>(carving, count * connectivity);
             auto* const kept_norms = carve_<vector_norms_t>(carving, count * connectivity);
@@ -4104,7 +3949,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
 
             // Point `p` below `count` reads the batch row itself, every later one a candidate slot
             // of some row.
-            candidates_t const candidates {entries, vectors, counts, slots, value_row_bytes_};
+            candidates_t const candidates {entries, vectors, counts, slots, value_row_bytes_()};
             std::size_t reads = 0;
             for (std::size_t row = 0; row != count; ++row) {
                 counts[row] = 0;
@@ -4123,15 +3968,15 @@ struct [[nodiscard]] nvme_rewrite_plan {
                     points[reads++] = static_cast<u32_t>(count + row * slots + slot);
             }
             if (status_t const read = read_points_(
-                    target.view, part.values_begin, value_row_bytes_, reads,
+                    target.view, part.values_begin, value_row_bytes_(), reads,
                     [&](std::size_t task) noexcept {
                         std::size_t const point = points[task];
                         return point < count ? static_cast<node_id_t>(first + point) : entries[point - count].node_id;
                     },
                     [&](std::size_t task) noexcept {
                         std::size_t const point = points[task];
-                        return point < count ? owns + point * value_row_bytes_
-                                             : vectors + (point - count) * value_row_bytes_;
+                        return point < count ? owns + point * value_row_bytes_()
+                                             : vectors + (point - count) * value_row_bytes_();
                     },
                     executor, result_.value_reads);
                 failed(read))
@@ -4141,7 +3986,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
             status_t const selected = fan_out_(
                 executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
                     if (!counts[row]) return;
-                    byte_t const* const own = owns + row * value_row_bytes_;
+                    byte_t const* const own = owns + row * value_row_bytes_();
                     vector_norms_t const own_norms = norms_of_(own);
                     for (std::size_t slot = 0; slot != counts[row]; ++slot) {
                         byte_t const* const candidate = candidates.vector_of(row, slot);
@@ -4176,7 +4021,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
     status_t heal_(step_t const& step, executor_t& executor) noexcept {
         target_t& target = targets_[step.part];
         nvme_part_t const& part = part_of_(target);
-        std::size_t const nodes = target.view.size(), connectivity = connectivity_, row_bytes = neighbors_row_bytes_();
+        std::size_t const nodes = target.view.size(), connectivity = connectivity_(),
+                          row_bytes = neighbors_row_bytes_();
         std::size_t const run_rows = target.view.scan_run_rows_(0, row_bytes);
         std::size_t const seeds = min_of<std::size_t>(connectivity, nodes), spread = heal_spread(connectivity);
         std::size_t const words = divide_round_up<std::size_t>(nodes, 32);
@@ -4294,18 +4140,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** The memory every step carves its blocks, batches and tables from. */
     bytes_span_t workspace_;
 
-    std::size_t alignment_ = safegraphs_alignment_default_k;
-    std::size_t expansion_factor_ = 0;
-    std::size_t dimensions_ = 0;
-    std::size_t connectivity_ = 0;
-    std::size_t value_row_bytes_ = 0;
-
-    /** The distance kind of every source, which the targets name and their selections rank by. */
-    nk_kernel_kind_t kernel_ = nk_kernel_unknown_k;
-
-    /** Bytes of one norms row, zero when the kernel reads no norms and the targets carry no
-     *  column. */
-    std::size_t norms_bytes_ = 0;
+    /** The caller's configuration, its provenance borrowed until the plan finishes. */
+    nvme_rewrite_config_t config_;
 
     /** The custom fields every target header carries. */
     growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t> fields_ {allocator_};
@@ -4323,8 +4159,9 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** Every target part, in manifest order. */
     growing_buffer<target_t, forkunion_allocator_t> targets_ {allocator_};
 
-    /** The target rows the re-select phase re-selects, per target part. */
-    growing_buffer<iota_view<std::size_t>, forkunion_allocator_t> selected_ {allocator_};
+    /** The target rows the re-select phase re-selects, in placement order across the target
+     *  parts. */
+    iota_view<std::size_t> selected_;
 
     /** The first row of the appended part of a merge or a build, every row below it resident and
      *  linking to no appended row yet; zero for every other rewrite. */
@@ -4342,26 +4179,12 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** The source part whose routing table the workspace holds, all ones for none. */
     std::size_t routed_ = ~std::size_t {0};
 
-    /** Every spill bucket, those of target part @c p from @c bucket_bases_[p] on. */
+    /** Every spill bucket, those of each target part after every earlier part's. */
     growing_buffer<bucket_t, forkunion_allocator_t> buckets_ {allocator_};
-    growing_buffer<std::size_t, forkunion_allocator_t> bucket_bases_ {allocator_};
-
-    /** Rows one bucket, one copy step, one re-select step and one build step cover, all derived
-     *  from the workspace; no build steps at zero. */
-    std::size_t bucket_rows_ = 0;
-    std::size_t copy_rows_ = 0;
-    std::size_t reselect_rows_ = 0;
-    std::size_t build_rows_ = 0;
 
     nvme_rewrite_phase_t phase_ = nvme_rewrite_phase_t::finish_k;
 
-    /** The current phase's steps. */
-    growing_buffer<step_t, forkunion_allocator_t> steps_ {allocator_};
-
     result_t result_;
-
-    /** A barrier's refusal, which every later call answers. */
-    status_t failure_ = status_t::success_k;
 };
 
 template <typename indexes_type_>
@@ -4374,7 +4197,8 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_type_ co
     if (status_t const opened = plan.open_(target, workspace, config, *sources[0]); failed(opened))
         return {std::move(plan), opened};
     for (indexes_type_ const* source : sources)
-        if (status_t const added = source ? plan.add_sources_(*source) : status_t::invalid_argument_k; failed(added))
+        if (status_t const added = source ? plan.add_sources_(*source, *sources[0]) : status_t::invalid_argument_k;
+            failed(added))
             return {std::move(plan), added};
     if (plan.sources_.empty()) return {std::move(plan), status_t::uninitialized_k};
 
@@ -4392,19 +4216,20 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_type_ co
         plan.sources_[part].base = base;
         plan.sources_[part].kept = {0, plan.sources_[part].rows};
     }
-    if (status_t const sized = plan.size_steps_(0); failed(sized)) return {std::move(plan), sized};
+    if (status_t const sized = plan.size_steps_(); failed(sized)) return {std::move(plan), sized};
     std::array<std::size_t, 1> const target_rows {rows};
     if (status_t const created = plan.open_targets_(target_rows); failed(created)) return {std::move(plan), created};
-    if (failed(plan.selected_.push_back(iota_view<std::size_t> {plan.sources_[0].rows, rows})))
-        return {std::move(plan), status_t::bad_alloc_k};
     plan.appended_base_ = plan.sources_[0].rows;
-    status_t const started = plan.start_();
-    return {std::move(plan), started};
+    plan.selected_ = {plan.appended_base_, rows};
+    plan.phase_ = nvme_rewrite_phase_t::copy_k;
+    return {std::move(plan), status_t::success_k};
 }
 
 template <typename indexes_type_, typename split_type_>
 expected<nvme_rewrite_plan<indexes_type_>> plan_split(indexes_type_ const& source, split_type_ const& policy,
-                                                      std::string_view target, bytes_span_t workspace,
+                                                      std::string_view target,
+                                                      typename indexes_type_::executor_t& executor,
+                                                      bytes_span_t workspace,
                                                       nvme_rewrite_config_t const& config) noexcept {
     using plan_t = nvme_rewrite_plan<indexes_type_>;
     using key_t = typename indexes_type_::key_t;
@@ -4414,7 +4239,7 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_split(indexes_type_ const& sourc
     if (!source.shards_count()) return {std::move(plan), status_t::uninitialized_k};
     if (status_t const opened = plan.open_(target, workspace, config, source); failed(opened))
         return {std::move(plan), opened};
-    if (status_t const added = plan.add_sources_(source); failed(added)) return {std::move(plan), added};
+    if (status_t const added = plan.add_sources_(source, source); failed(added)) return {std::move(plan), added};
     if (plan.sources_.empty()) return {std::move(plan), status_t::uninitialized_k};
 
     if constexpr (by_rows_k) {
@@ -4428,28 +4253,23 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_split(indexes_type_ const& sourc
                 if (failed(rows.push_back(min_of(policy.rows, part.rows - first))))
                     return {std::move(plan), status_t::bad_alloc_k};
         }
-        if (status_t const sized = plan.size_steps_(0); failed(sized)) return {std::move(plan), sized};
+        if (status_t const sized = plan.size_steps_(); failed(sized)) return {std::move(plan), sized};
         if (status_t const created = plan.open_targets_(to_span(rows)); failed(created))
             return {std::move(plan), created};
-        if (status_t const marked = plan.selected_whole_(); failed(marked)) return {std::move(plan), marked};
     }
     else {
         if (policy.fences.size() >= plan_t::max_key_ranges_k) return {std::move(plan), status_t::invalid_argument_k};
         for (std::size_t fence = 1; fence < policy.fences.size(); ++fence)
             if (policy.fences[fence] < policy.fences[fence - 1]) return {std::move(plan), status_t::invalid_argument_k};
         plan.fences_ = policy.fences;
-        std::size_t const ranges = policy.fences.size() + 1;
-        std::size_t routing = 0;
-        for (auto& part : plan.sources_) {
-            part.kept = {0, part.rows};
-            routing = max_of(routing, part.rows + divide_round_up<std::size_t>(part.rows, plan_t::route_block_k) *
-                                                      ranges * sizeof(u32_t));
-        }
-        if (failed(plan.routes_.resize(plan.sources_.size() * ranges))) return {std::move(plan), status_t::bad_alloc_k};
-        if (status_t const sized = plan.size_steps_(routing); failed(sized)) return {std::move(plan), sized};
+        for (auto& part : plan.sources_) part.kept = {0, part.rows};
+        if (status_t const sized = plan.size_steps_(); failed(sized)) return {std::move(plan), sized};
+        if (status_t const routed = plan.route_(executor); failed(routed)) return {std::move(plan), routed};
     }
-    status_t const started = plan.start_();
-    return {std::move(plan), started};
+    // Every row of every target part re-selects.
+    plan.selected_ = {0, source.size()};
+    plan.phase_ = nvme_rewrite_phase_t::copy_k;
+    return {std::move(plan), status_t::success_k};
 }
 
 template <typename indexes_type_>
@@ -4461,30 +4281,24 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_refine(indexes_type_ const& sour
     if (!source.shards_count()) return {std::move(plan), status_t::uninitialized_k};
     if (status_t const opened = plan.open_(target, workspace, config, source); failed(opened))
         return {std::move(plan), opened};
-    if (status_t const added = plan.add_sources_(source); failed(added)) return {std::move(plan), added};
+    if (status_t const added = plan.add_sources_(source, source); failed(added)) return {std::move(plan), added};
     if (plan.sources_.empty()) return {std::move(plan), status_t::uninitialized_k};
     growing_buffer<std::size_t, forkunion_allocator_t> part_rows {forkunion_allocator_t {}};
-    if (failed(part_rows.reserve_exactly(plan.sources_.size())) ||
-        failed(plan.selected_.reserve_exactly(plan.sources_.size())))
-        return {std::move(plan), status_t::bad_alloc_k};
-    // The range runs in placement order across the parts, so each part re-selects its own slice of
-    // it.
-    std::size_t placed = 0;
+    if (failed(part_rows.reserve_exactly(plan.sources_.size()))) return {std::move(plan), status_t::bad_alloc_k};
     for (std::size_t part = 0; part != plan.sources_.size(); ++part) {
         auto& one = plan.sources_[part];
         one.target = part;
         one.kept = {0, one.rows};
         part_rows.push_back_reserved(one.rows);
-        std::size_t const low = max_of(rows.first, placed), high = min_of(rows.bound, placed + one.rows);
-        plan.selected_.push_back_reserved(low < high ? iota_view<std::size_t> {low - placed, high - placed}
-                                                     : iota_view<std::size_t> {});
-        placed += one.rows;
     }
-    if (status_t const sized = plan.size_steps_(0); failed(sized)) return {std::move(plan), sized};
+    if (status_t const sized = plan.size_steps_(); failed(sized)) return {std::move(plan), sized};
     if (status_t const created = plan.open_targets_(to_span(part_rows)); failed(created))
         return {std::move(plan), created};
-    status_t const started = plan.start_();
-    return {std::move(plan), started};
+    // The range runs in placement order across the parts, so each part re-selects its own slice of
+    // it.
+    plan.selected_ = rows;
+    plan.phase_ = nvme_rewrite_phase_t::copy_k;
+    return {std::move(plan), status_t::success_k};
 }
 
 template <typename indexes_type_>
@@ -4502,23 +4316,23 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::string_view
     if (status_t const opened = plan.open_(target, workspace, config, plan.opened_[0]); failed(opened))
         return {std::move(plan), opened};
     for (indexes_type_ const& view : plan.opened_)
-        if (status_t const added = plan.add_sources_(view); failed(added)) return {std::move(plan), added};
+        if (status_t const added = plan.add_sources_(view, plan.opened_[0]); failed(added))
+            return {std::move(plan), added};
     std::size_t rows = 0;
     for (auto& part : plan.sources_) part.base = rows, rows += part.rows;
     if (!rows) return {std::move(plan), status_t::uninitialized_k};
     if (rows >= node_id_unknown_k) return {std::move(plan), status_t::overflow_k};
-    plan.build_rows_ = plan.fitting_block_rows_(rows);
-    if (!plan.build_rows_) return {std::move(plan), status_t::bad_alloc_k};
-    if (status_t const sized = plan.size_steps_(0); failed(sized)) return {std::move(plan), sized};
+    std::size_t const block_rows = plan.build_rows_();
+    if (!block_rows) return {std::move(plan), status_t::bad_alloc_k};
+    if (status_t const sized = plan.size_steps_(); failed(sized)) return {std::move(plan), sized};
     std::array<std::size_t, 1> const target_rows {rows};
     if (status_t const created = plan.open_targets_(target_rows); failed(created)) return {std::move(plan), created};
     // The first block stays resident, and every later block links in by walks across as a merge's
     // appended part does.
-    if (failed(plan.selected_.push_back(iota_view<std::size_t> {min_of(plan.build_rows_, rows), rows})))
-        return {std::move(plan), status_t::bad_alloc_k};
-    plan.appended_base_ = min_of(plan.build_rows_, rows);
-    status_t const started = plan.start_();
-    return {std::move(plan), started};
+    plan.appended_base_ = min_of(block_rows, rows);
+    plan.selected_ = {plan.appended_base_, rows};
+    plan.phase_ = nvme_rewrite_phase_t::copy_k;
+    return {std::move(plan), status_t::success_k};
 }
 
 /** Drains @p planned over @p executor: every step of every phase in order, then the commit. */
@@ -4547,7 +4361,7 @@ template <typename indexes_type_, typename split_type_>
 expected<nvme_rewrite_result_t> split(indexes_type_ const& source, split_type_ const& policy, std::string_view target,
                                       typename indexes_type_::executor_t& executor, bytes_span_t workspace,
                                       nvme_rewrite_config_t const& config = {}) noexcept {
-    return nvme_rewrite_drain_(plan_split(source, policy, target, workspace, config), executor);
+    return nvme_rewrite_drain_(plan_split(source, policy, target, executor, workspace, config), executor);
 }
 
 /** The one-shot @ref plan_refine, drained over @p executor. */

@@ -144,14 +144,16 @@ struct nvme_rankings {
         : wanted(wanted), keys(queries_count * wanted), distances(queries_count * wanted), counts(queries_count) {}
 
     /** Ranks @p queries on @p indexes through @p executor, each walk @p expansion_factor wide, zero
-     *  meaning the index's default. */
-    template <typename indexes_type_, typename executor_type_>
+     *  meaning the index's default; a RAM group also takes its @p traversals, one per thread. */
+    template <typename indexes_type_, typename executor_type_, typename... traversals_types_>
     expected<typename indexes_type_::search_result_t> search(indexes_type_& indexes,
                                                              typename nvme_type_::vectors_view_t queries,
-                                                             executor_type_& executor, std::size_t expansion_factor) {
+                                                             executor_type_& executor, std::size_t expansion_factor,
+                                                             traversals_types_... traversals) {
         typename indexes_type_::search_config_t config {};
         config.expansion_factor = static_cast<decltype(config.expansion_factor)>(expansion_factor);
-        return indexes.search(queries, executor, config, keys_span(), distances_span(), std::span {counts});
+        return indexes.search(queries, executor, traversals..., config, keys_span(), distances_span(),
+                              std::span {counts});
     }
 
     nk::matrix_span<key_t> keys_span() noexcept { return {keys.data(), counts.size(), wanted}; }
@@ -215,7 +217,9 @@ struct nvme_reference {
      *  row. */
     nvme_rankings<nvme_t> exhaustive_rankings(typename nvme_t::vectors_view_t queries, std::size_t wanted) {
         nvme_rankings<nvme_t> ranked {queries.extent(0), wanted};
-        failures += expect(succeeded(ranked.search(built, queries, builder.executor, vectors.extent(0)).status));
+        failures += expect(succeeded(
+            ranked.search(built, queries, builder.executor, vectors.extent(0), to_writable_span(builder.traversals))
+                .status));
         return ranked;
     }
 
@@ -305,13 +309,13 @@ std::size_t test_nvme_indexes_search(u64_t seed) {
 
 /** Expects @p index to rank @p queries under one gathering predicate per thread of @p executor,
  *  each carrying @p payload_type_ and admitting what @p per_key admits, as under @p per_key asked a
- *  quad at a time. */
+ *  quad at a time; a RAM group also takes its @p traversals, one per thread. */
 template <typename payload_type_, typename reference_type_, typename index_type_, typename executor_type_,
-          typename per_key_type_>
+          typename per_key_type_, typename... traversals_types_>
 std::size_t nvme_expect_gathered(reference_type_ const& reference, index_type_& index, executor_type_& executor,
                                  typename index_type_::search_config_t config,
                                  typename reference_type_::nvme_t::vectors_view_t queries, per_key_type_ per_key,
-                                 std::size_t wanted) {
+                                 std::size_t wanted, traversals_types_... traversals) {
     using nvme_t = typename reference_type_::nvme_t;
     std::size_t const queries_count = queries.extent(0);
     nvme_rankings<nvme_t> immediate {queries_count, wanted}, gathered {queries_count, wanted};
@@ -319,11 +323,11 @@ std::size_t nvme_expect_gathered(reference_type_ const& reference, index_type_& 
     std::size_t failures = 0;
     failures += expect(
         succeeded(index
-                      .search_if(queries, executor, config, immediate.keys_span(), immediate.distances_span(),
-                                 std::span {immediate.counts}, quad_predicate(per_key))
+                      .search_if(queries, executor, traversals..., config, immediate.keys_span(),
+                                 immediate.distances_span(), std::span {immediate.counts}, quad_predicate(per_key))
                       .status));
     failures += expect(succeeded(index
-                                     .search_if(queries, executor, config, gathered.keys_span(),
+                                     .search_if(queries, executor, traversals..., config, gathered.keys_span(),
                                                 gathered.distances_span(), std::span {gathered.counts}, family)
                                      .status));
     failures += expect(gathered.counts == immediate.counts);
@@ -359,8 +363,9 @@ std::size_t test_nvme_indexes_filtered(u64_t seed) {
     nvme_rankings<nvme_type_> ram {queries_count, wanted}, nvme {queries_count, wanted};
     failures += expect(
         succeeded(reference.built
-                      .search_if(queries, reference.builder.executor, {static_cast<small_size_t>(rows_count)},
-                                 ram.keys_span(), ram.distances_span(), std::span {ram.counts}, odd)
+                      .search_if(queries, reference.builder.executor, to_writable_span(reference.builder.traversals),
+                                 {static_cast<small_size_t>(rows_count)}, ram.keys_span(), ram.distances_span(),
+                                 std::span {ram.counts}, odd)
                       .status));
     failures += expect(succeeded(viewed
                                      .search_if(queries, driver.executor, {static_cast<small_size_t>(rows_count)},
@@ -376,12 +381,14 @@ std::size_t test_nvme_indexes_filtered(u64_t seed) {
     typename ram_t::search_config_t ram_config {static_cast<small_size_t>(rows_count)};
     typename nvme_type_::search_config_t nvme_config {static_cast<small_size_t>(rows_count)};
     failures += nvme_expect_gathered<typename ram_t::walk_payload_t>(
-        reference, reference.built, reference.builder.executor, ram_config, queries, is_odd, wanted);
+        reference, reference.built, reference.builder.executor, ram_config, queries, is_odd, wanted,
+        to_writable_span(reference.builder.traversals));
     failures += nvme_expect_gathered<typename nvme_type_::walk_payload_t>(reference, viewed, driver.executor,
                                                                           nvme_config, queries, is_odd, wanted);
     ram_config.traversal = traversal_t::scan_k, nvme_config.traversal = traversal_t::scan_k;
     failures += nvme_expect_gathered<typename ram_t::scan_payload_t>(
-        reference, reference.built, reference.builder.executor, ram_config, queries, is_odd, wanted);
+        reference, reference.built, reference.builder.executor, ram_config, queries, is_odd, wanted,
+        to_writable_span(reference.builder.traversals));
     failures += nvme_expect_gathered<typename nvme_type_::scan_payload_t>(reference, viewed, driver.executor,
                                                                           nvme_config, queries, is_odd, wanted);
 
@@ -1240,11 +1247,13 @@ struct rewrite_fixture {
     }
 
     /** The share of the results @p indexes ranks for every query, through @p executor under the
-     *  default walk, that lie within the query's exact k-th distance. */
-    template <typename indexes_type_, typename executor_type_>
-    f64_t recall(indexes_type_& indexes, executor_type_& executor) {
+     *  default walk, that lie within the query's exact k-th distance; a RAM group also takes its
+     *  @p traversals, one per thread. */
+    template <typename indexes_type_, typename executor_type_, typename... traversals_types_>
+    f64_t recall(indexes_type_& indexes, executor_type_& executor, traversals_types_... traversals) {
         nvme_rankings<nvme_t> ranked {rewrite_queries_k, rewrite_wanted_k};
-        failures += expect_eq(ranked.search(indexes, queries.view(), executor, 0).status, status_t::success_k);
+        failures += expect_eq(ranked.search(indexes, queries.view(), executor, 0, traversals...).status,
+                              status_t::success_k);
         std::size_t hits = 0;
         for (std::size_t query = 0; query != rewrite_queries_k; ++query)
             for (key_t const key : ranked.keys_of(query)) {
@@ -1259,7 +1268,7 @@ struct rewrite_fixture {
     f64_t fresh_recall(std::size_t shards) {
         ram_t fresh {kernel, forkunion_allocator_t {no_memory_domain_k}};
         build(fresh, 0, keys.size(), shards);
-        return recall(fresh, builder.executor);
+        return recall(fresh, builder.executor, to_writable_span(builder.traversals));
     }
 
     /** Views @p path as an NVMe index, which must open. */
@@ -1610,7 +1619,9 @@ std::size_t test_nvme_rewrites_build(u64_t seed) {
     fixture.failures += expect(built.graph.visited_nodes >= rows_count);
     nvme_type_ viewed = fixture.view(target.manifest.data());
     fixture.expect_keys(viewed);
-    fixture.expect_recall(viewed, "in blocks", fixture.recall(group, fixture.builder.executor));
+    fixture.expect_recall(
+        viewed, "in blocks",
+        fixture.recall(group, fixture.builder.executor, to_writable_span(fixture.builder.traversals)));
     fixture.expect_self_recall(viewed, 0, rewrite_queries_k, "first block");
     fixture.expect_self_recall(viewed, rows_count - rewrite_queries_k, rewrite_queries_k, "last block");
     return fixture.failures;

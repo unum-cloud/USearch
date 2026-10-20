@@ -611,6 +611,9 @@ struct nvme_index {
         auto [call, call_status] = nvme_begin_call(executor, media, shape.scratch_bytes, shape.buffers,
                                                    shape.buffer_bytes);
         if (failed(call_status)) return {{}, call_status};
+        if constexpr (row_type_::admitting_k)
+            if (status_t const opened = open_predicate(*inputs.predicate, executor); failed(opened))
+                return {{}, opened};
         return row_walker<nvme_index, row_type_>::run_walks(media, parts, executor, shape, inputs, counts, latencies);
     }
 
