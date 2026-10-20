@@ -195,12 +195,68 @@ Nothing is dropped past a capacity: excess candidates fold in rounds, and a fail
 Graph walks have no hop budgets, thresholds or upper bounds that end them early.
 A walk runs until it converges, and a fixed device structure that fills up grows or falls back to a counted re-score.
 
+A batch width is written once, where the batch is born.
+A quad is `quad_lanes_k` lanes, the candidates one NumKong finalize scores together, and `quad<T>` in `include/usearch/utilities/types.hpp` spells one.
+A producer dispatches a round's shorter tail to its own static extent once, through `with_static_extent`, so callbacks only ever see static extents.
+A consumer sizes its buffers from the span it is handed, as `std::array<admission_t, extent_>`, and never names the width again.
+A width restated in a second place drifts from the first the day either one changes.
+
 ### No Tuning Knobs
 
 Every behavior follows from the inputs, the index's own geometry and the hardware it runs on, never from a hyper-parameter someone tuned.
 Don't add a flag, a constant or a heuristic whose value was searched until a benchmark looked good: such values fit one dataset and one machine, and they multiply into combinations nobody can test.
 When a choice has no derivation yet, derive it before landing it, from a cost model, a hardware property or a bound the algorithm guarantees, and state that derivation where the value is defined.
 A value that can only be measured, like an empirical wave width, says so in its docstring, names what was measured, and lives in one definition every backend reads.
+
+### Numeric Precision
+
+Every score, distance and accumulator type comes from NumKong's per-input result types in `numkong/types.hpp`, read off the stored scalar or the kit wrapping it.
+The dense tier stores `bf16`, `u1`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4`, `u4`, `e3m2` and `e2m3`, whose inner products answer in `f32`, `i32` or `u32` through `dot_result_t`.
+A sum over many of those products follows NumKong's reductions through `reduce_moments_sum_t`: `f32` for the floating formats, saturating `i64` and `u64` for the integers.
+No dense computation needs `f64`, and widening to the largest type to be safe moves twice the bytes through every hot buffer.
+The C interface's `double` `usearch_distance_t` is where scores land, never what they are computed in.
+
+### Hot Entries
+
+Every struct a thread keeps or carries along a hot path is flat and 8, 16 or 32 bytes, like `scored_node_t`, `nvme_flight` and `nvme_walk_payload`.
+Lay its fields out directly rather than nesting structs, whose padding compounds, and pin its size with a `static_assert` beside the definition.
+A would-be 24-byte entry shrinks first, through 32-bit node IDs or the kernel's own result type, and otherwise grows to 32 by a field that earns its place.
+
+### Predicates
+
+A predicate carries its cost, `usearch_predicate_cost_t` in `c/usearch/types.h`, and the engines ask it accordingly.
+A cheap one is asked as candidates arrive, a full quad or a round's shorter tail at a static extent, with nothing buffered.
+An expensive one gathers each thread's candidates beside the engine's payloads and answers them in one call per traversal round or scan run.
+Those per-thread buffers are the only buffers a predicate ever holds, and an engine reserves them after rewinding its own arenas.
+
+### Planned Operations
+
+A long or multi-phase operation starts as a plan, like `plan_refine` or `plan_insert`, and its blocking verb is only a loop driving that plan.
+`steps()` lists the current phase's steps, `run(step, context)` runs any of them on the calling thread, `advance()` is the barrier answering whether another phase follows, and `finish()` publishes and releases.
+Planning claims and reserves everything a step writes, so a step never fails for lack of memory and a plan stopped between steps leaves the index correct.
+Per-thread state lives in the traversal context `run` is handed, in buffers it already holds where they fit, as attention keeps its softmax states past the queries in `staged_queries`.
+
+### Components
+
+Logic is never shared through inheritance: no base classes, CRTP or mixins.
+Each residency and each GPU vendor is a dedicated tower with its own customizable logic.
+Code two towers genuinely share becomes a component each tower owns as a member, or a free function each tower calls.
+Host and device towers never fuse, since a RAM walk is a much finer-grained processing mode than a device batch.
+A tower never takes a lock to make a shared design fit; it redesigns the protocol instead.
+
+### CPU Classes
+
+Engines never reach for the standard library's waits or yields, and never hard-code a waiter.
+Each template in `include/` takes its kits, cache hints, waiter and atomic reference as template arguments, and `src/` picks them per CPU class, as [Dispatch over Capability Kits](src/README.md#dispatch-over-capability-kits) describes.
+An engine that needs richer behavior, like prefetching whole objects, wraps the primitive it was handed.
+No template names a CPU class, an ISA instruction or a topology query, and capability masks stay in `src/`, where rungs are chosen.
+
+### Spelling Types
+
+New code never names or sizes a type through `decltype`, `decltype(auto)` included.
+Spell the type, or export it as a member alias where it is defined and read it from there, as `typename codec_t::view_t` names what a codec's `view` returns.
+A `decltype` makes every reader evaluate an expression to learn a type its author already knew.
+Templates carry no `_t` or `_k` suffix, whether class, alias or variable templates or concepts, while concrete types end in `_t` and constants in `_k`.
 
 ### Cross Compilation
 

@@ -7,3 +7,10 @@
 # These are Windows script files and should use crlf
 *.bat           text eol=crlf
 
+# GitHub's Linguist doesn't properly classify many languages
+# https://github.com/github-linguist/linguist/blob/main/docs/overrides.md
+*.h linguist-language=C
+*.c linguist-language=C
+*.hpp linguist-language=C++
+*.cpp linguist-language=C++
+*.cuh linguist-language=CUDA

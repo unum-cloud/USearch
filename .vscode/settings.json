@@ -142,6 +142,7 @@
   "files.associations": {
     "*.cu": "cuda-cpp",
     "*.cuh": "cuda-cpp",
+    "*.hip": "cuda-cpp",
     "*.metal": "cpp",
     "*.tcc": "cpp",
     "__availability": "cpp",
