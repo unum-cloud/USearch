@@ -1275,6 +1275,21 @@ inline status_t reserve_predicate(predicate_type_& predicate, std::size_t candid
     return predicate.reserve(candidates);
 }
 
+/** Opens nothing for a predicate every thread shares. */
+template <typename predicate_type_, typename executor_type_>
+inline status_t open_predicate(predicate_type_&, executor_type_&) noexcept {
+    return status_t::success_k;
+}
+
+/** Opens a per-thread family on @p executor 's scratch, right after the call's rewind. */
+template <typename predicate_type_, typename executor_type_>
+    requires requires(predicate_type_& predicate, executor_type_& executor) {
+        { predicate.open(executor) } -> std::same_as<status_t>;
+    }
+inline status_t open_predicate(predicate_type_& predicate, executor_type_& executor) noexcept {
+    return predicate.open(executor);
+}
+
 /** The predicate executor thread @p thread asks: @p predicate itself, which every thread shares. */
 template <typename predicate_type_>
 inline predicate_type_& thread_predicate(predicate_type_& predicate, std::size_t) noexcept {

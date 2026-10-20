@@ -603,7 +603,7 @@ class shapes_metric {
         queries_.clear(), query_bounds_.clear(), queries_max_points_ = 0;
         last_status_ = queries_.reserve(queries.size());
         if (succeeded(last_status_)) last_status_ = query_bounds_.reserve(queries.size());
-        if (succeeded(last_status_)) last_status_ = scored_.reserve(queries.size() * staged_.capacity());
+        if (succeeded(last_status_)) last_status_ = scored_.resize_uninitialized(queries.size() * staged_.capacity());
         for (std::size_t query = 0; succeeded(last_status_) && query != queries.size(); ++query) {
             if (queries[query].size() != 1) {
                 last_status_ = status_t::shape_mismatch_k;
@@ -751,10 +751,11 @@ class shapes_metric {
             procrustes ? kit_t::wassersteinprocrustes_workspace_size(queries_max_points_, staged_max_points_, &bytes)
                        : kit_t::gromovwassersteins_workspace_size(queries_max_points_, staged_max_points_, &bytes);
         if (sized != nk_success_k) return status_of(sized);
-        // Grows only past the widest pair seen, and doubles when it does.
-        if (status_t const grown = workspace_.reserve(bytes + nk_default_alignment_k); failed(grown)) return grown;
+        // Grows only past the widest pair seen.
+        if (status_t const grown = workspace_.resize_uninitialized(bytes + nk_default_alignment_k); failed(grown))
+            return grown;
         void* workspace = workspace_.data();
-        std::size_t workspace_bytes = workspace_.capacity();
+        std::size_t workspace_bytes = workspace_.size();
         std::align(nk_default_alignment_k, bytes, workspace, workspace_bytes);
         return status_of(procrustes ? kit_t::wassersteinprocrustes(queries, queries_count, candidates, count, results,
                                                                    stride, nullptr, workspace, workspace_bytes, nullptr)

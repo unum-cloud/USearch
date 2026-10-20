@@ -194,16 +194,16 @@ using made_metric = typename std::invoke_result_t<make_metric_type_&, thread_all
  *  capacity every metric stages, the most candidates one round hands a predicate. */
 template <typename index_type_, typename metric_type_>
 struct thread_scratch {
-    using context_t = typename index_type_::template traversal_context_over<thread_allocator_t>;
+    using traversal_context_t = typename index_type_::template traversal_context_over<thread_allocator_t>;
 
-    growing_buffer<context_t, thread_allocator_t> contexts;
+    growing_buffer<traversal_context_t, thread_allocator_t> traversals;
     growing_buffer<metric_type_, thread_allocator_t> metrics;
     std::size_t round_capacity = 0;
 
     /** Places the per-thread objects in the first arena of @p executor, which @ref prepare
      *  rewinds before it builds them. */
     explicit thread_scratch(forkunion_executor_t& executor) noexcept
-        : contexts(thread_allocator_t {executor.arena(0)}), metrics(thread_allocator_t {executor.arena(0)}) {}
+        : traversals(thread_allocator_t {executor.arena(0)}), metrics(thread_allocator_t {executor.arena(0)}) {}
 
     /** Rewinds every arena, keeping the high-water mark of earlier calls, and builds one context
      *  sized for @p connectivity and @p expansion plus one metric from @p make_metric per
@@ -213,14 +213,14 @@ struct thread_scratch {
                      make_metric_type_&& make_metric) noexcept {
         if (status_t const rewound = executor.reserve(0); failed(rewound)) return rewound;
         std::size_t const threads = executor.size();
-        if (failed(contexts.reserve_exactly(threads)) || failed(metrics.reserve_exactly(threads)))
+        if (failed(traversals.reserve_exactly(threads)) || failed(metrics.reserve_exactly(threads)))
             return status_t::bad_alloc_k;
         typename index_type_::insert_config_t const walk {expansion};
         round_capacity = index_type_::round_capacity(connectivity, walk);
         for (std::size_t thread = 0; thread != threads; ++thread) {
             thread_allocator_t const allocator {executor.arena(thread)};
-            contexts.push_back_reserved(context_t {seed + thread, allocator});
-            if (status_t const sized = index_type_::reserve_traversal(contexts[thread], connectivity, walk);
+            traversals.push_back_reserved(traversal_context_t {seed + thread, allocator});
+            if (status_t const sized = index_type_::reserve_traversal(traversals[thread], connectivity, walk);
                 failed(sized))
                 return sized;
             auto [metric, make_status] = make_metric(allocator, round_capacity);
@@ -233,7 +233,7 @@ struct thread_scratch {
     /** The counters every thread's walks accumulated. */
     traversal_telemetry_t telemetry() const noexcept {
         traversal_telemetry_t total;
-        for (context_t const& context : contexts) {
+        for (traversal_context_t const& context : traversals) {
             total.computed_distances += context.telemetry.computed_distances;
             total.visited_members += context.telemetry.visited_members;
             total.restarts += context.telemetry.restarts;
@@ -250,7 +250,7 @@ struct thread_scratch {
  *      the values from the index's allocator, then one plan lands them on every thread and
  *      publishes once.
  *
- *  Everything fallible runs before the plan dispenses: the keys and values, the contexts and the
+ *  Everything fallible runs before the plan dispenses: the keys and values, the traversals and the
  *  metrics. A refused build frees every value built so far and leaves the index untouched. Once the
  *  plan dispensed, every position lands and the progress handler can no longer cancel.
  */
@@ -291,7 +291,7 @@ expected<traversal_telemetry_t> insert_entries(index_type_& index, usearch_keys_
     drain_in_order<index_type_::template atomic_ref>(
         executor, count, [&](std::size_t row, std::size_t thread) noexcept {
             plan.insert(row, to_writable_span(values).subspan(row, 1), to_span(identities).subspan(row, 1),
-                        scratch.metrics[thread], scratch.contexts[thread], selector, config);
+                        scratch.metrics[thread], scratch.traversals[thread], selector, config);
             [[maybe_unused]] continuation_t const heard = ticks(row);
         });
     if (status_t const finished = plan.finish(); failed(finished)) return {{}, finished};
@@ -338,8 +338,8 @@ status_t drive_refinement(typename index_type_::refine_plan_t& plan, thread_scra
                 std::size_t const position = next.fetch_add(1, std::memory_order_relaxed);
                 if (position >= steps.size()) break;
                 auto const step = steps[position];
-                [[maybe_unused]] status_t const ran = plan.run(step, scratch.metrics[thread], scratch.contexts[thread],
-                                                               selector);
+                [[maybe_unused]] status_t const ran = plan.run(step, scratch.metrics[thread],
+                                                               scratch.traversals[thread], selector);
                 if (!reselecting) continue;
                 std::size_t const done = standard_atomic_ref<std::size_t>(ticked).fetch_add(step.nodes.size(),
                                                                                             std::memory_order_relaxed) +
@@ -392,9 +392,13 @@ status_t with_node_predicates(index_type_ const& index, usearch_predicate_t pred
         body([&](std::size_t) noexcept { return node_predicate {cheap, key_of}; });
         return status_t::success_k;
     }
-    expensive_predicates<typename index_type_::scored_node_t> expensive;
-    if (status_t const prepared = expensive.prepare(predicate, executor, round_capacity); failed(prepared))
-        return prepared;
+    // The basic RAM verbs take one thread's predicate, so this drives the family as an engine
+    // would, after the rewind the call's scratch took.
+    expensive_predicates<typename index_type_::scored_node_t> expensive {predicate};
+    if (status_t const opened = open_predicate(expensive, executor); failed(opened)) return opened;
+    for (std::size_t thread = 0; thread != executor.size(); ++thread)
+        if (status_t const reserved = reserve_predicate(expensive.of_thread(thread), round_capacity); failed(reserved))
+            return reserved;
     body([&](std::size_t thread) noexcept { return node_predicate {expensive.of_thread(thread), key_of}; });
     return status_t::success_k;
 }
@@ -442,7 +446,7 @@ expected<traversal_telemetry_t> search_entries(index_type_& index, std::size_t c
         failed(prepared))
         return {{}, prepared};
     typename index_type_::search_config_t const config {breadth};
-    using context_t = typename thread_scratch<index_type_, metric_t>::context_t;
+    using traversal_context_t = typename thread_scratch<index_type_, metric_t>::traversal_context_t;
     bool const scanning = traversal == usearch_traversal_scan_k;
     status_t searched = status_t::success_k;
     status_t const asked = with_node_predicates(
@@ -450,7 +454,7 @@ expected<traversal_telemetry_t> search_entries(index_type_& index, std::size_t c
             drain_in_order<index_type_::template atomic_ref>(
                 executor, count, [&](std::size_t row, std::size_t thread) noexcept {
                     if (failed(standard_atomic_ref<status_t>(searched).load(std::memory_order_relaxed))) return;
-                    context_t& context = scratch.contexts[thread];
+                    traversal_context_t& context = scratch.traversals[thread];
                     metric_t& metric = scratch.metrics[thread];
                     auto admits = admits_of(thread);
                     status_t const answered = query_of(row, thread, [&](auto const& query) noexcept {
@@ -547,20 +551,16 @@ expected<traversal_telemetry_t> rank_nvme_queries(index_type_& index, std::size_
         if (!predicate.callback) ranked = rank(unfiltered);
         else if (predicate.cost != usearch_predicate_cost_expensive_k) ranked = rank(cheap);
         else if (scanning) {
-            // Every call rewinds the executor's arenas, so each step builds its own family, and the
-            // traversal reserves its buffers for the widest batch it settles.
-            expensive_predicates<typename index_type_::scan_payload_t> expensive;
-            status_t const prepared = expensive.prepare(predicate, executor, 0);
-            ranked = failed(prepared) ? expected<search_result_t> {{}, prepared}
-                                      : index.scan(taking, make_metric, step_query_of, executor, keys, scores, counts,
-                                                   expensive, relation);
+            // The scan opens the family after its rewind and reserves it for the widest batch it
+            // settles.
+            expensive_predicates<typename index_type_::scan_payload_t> expensive {predicate};
+            ranked = index.scan(taking, make_metric, step_query_of, executor, keys, scores, counts, expensive,
+                                relation);
         }
         else {
-            expensive_predicates<typename index_type_::walk_payload_t> expensive;
-            status_t const prepared = expensive.prepare(predicate, executor, 0);
-            ranked = failed(prepared) ? expected<search_result_t> {{}, prepared}
-                                      : index.search(taking, make_metric, step_query_of, executor, config, keys, scores,
-                                                     counts, expensive, relation);
+            expensive_predicates<typename index_type_::walk_payload_t> expensive {predicate};
+            ranked = index.search(taking, make_metric, step_query_of, executor, config, keys, scores, counts, expensive,
+                                  relation);
         }
         if (failed(ranked.status)) return {telemetry, ranked.status};
         telemetry.computed_distances += ranked.value.computed_distances;

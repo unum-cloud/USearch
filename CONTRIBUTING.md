@@ -201,6 +201,10 @@ A producer dispatches a round's shorter tail to its own static extent once, thro
 A consumer sizes its buffers from the span it is handed, as `std::array<admission_t, extent_>`, and never names the width again.
 A width restated in a second place drifts from the first the day either one changes.
 
+A hot verb allocates nothing once warm.
+Its traversal contexts come from the executor's per-thread arenas, which keep their widest chunk between calls, so a call only bumps pointers, and only a call wider than every earlier one grows them.
+A buffer every step writes before reading is carved without a fill, a resize within capacity keeps its memory, and `reset` is the one verb that releases it.
+
 ### No Tuning Knobs
 
 Every behavior follows from the inputs, the index's own geometry and the hardware it runs on, never from a hyper-parameter someone tuned.
@@ -227,7 +231,7 @@ A would-be 24-byte entry shrinks first, through 32-bit node IDs or the kernel's 
 A predicate carries its cost, `usearch_predicate_cost_t` in `c/usearch/types.h`, and the engines ask it accordingly.
 A cheap one is asked as candidates arrive, a full quad or a round's shorter tail at a static extent, with nothing buffered.
 An expensive one gathers each thread's candidates beside the engine's payloads and answers them in one call per traversal round or scan run.
-Those per-thread buffers are the only buffers a predicate ever holds, and an engine reserves them after rewinding its own arenas.
+Those per-thread buffers are the only buffers a predicate ever holds, and an engine opens a per-thread family and reserves its buffers in the executor's arenas right after the call's rewind.
 
 ### Planned Operations
 
@@ -235,6 +239,9 @@ A long or multi-phase operation starts as a plan, like `plan_refine` or `plan_in
 `steps()` lists the current phase's steps, `run(step, context)` runs any of them on the calling thread, `advance()` is the barrier answering whether another phase follows, and `finish()` publishes and releases.
 Planning claims and reserves everything a step writes, so a step never fails for lack of memory and a plan stopped between steps leaves the index correct.
 Per-thread state lives in the traversal context `run` is handed, in buffers it already holds where they fit, as attention keeps its softmax states past the queries in `staged_queries`.
+An operation is a plan only when its work crosses a barrier between phases, runs long enough to stop and resume, or writes the index; a pass whose threads each finish their own share, like `search`, `multiply`, `attend` or MaxSim, is a direct verb over the caller's contexts.
+A plan owns only what crosses its barriers: scratch belongs to the context, results land in the caller's outputs, named at planning, and whatever follows from other members is computed rather than stored.
+`run`, `advance` and `finish` never allocate.
 
 ### Components
 

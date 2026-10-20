@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include <cassert> // `assert` - a per-thread family is opened before it is asked
 #include <cstddef> // `std::size_t`
 
 #include <array>              // `std::array` - the predicate's batch
@@ -224,26 +225,30 @@ struct expensive_predicate {
 
 /** One expensive predicate per executor thread, for engines that drive their own threads: each
  *  thread gathers into its own buffers on its own arena and calls the handler once per round it
- *  settles. */
+ *  settles. The engine opens the family right after rewinding its arenas, building the array in
+ *  the first one, so a warm call allocates nothing. */
 template <typename payload_type_>
 struct expensive_predicates {
     using thread_predicate_t = expensive_predicate<payload_type_>;
 
-    growing_buffer<thread_predicate_t, forkunion_allocator_t> threads {forkunion_allocator_t {}};
+    usearch_predicate_t predicate;
+    growing_buffer<thread_predicate_t, thread_allocator_t> threads {thread_allocator_t {}};
 
-    /** Builds one predicate per thread of @p executor, each reserved for rounds of
-     *  @p round_capacity candidates. */
+    /** Builds one predicate per thread of @p executor over that thread's arena, the array in the
+     *  first; the engine reserves each for its rounds. */
     template <typename executor_type_>
-    status_t prepare(usearch_predicate_t predicate, executor_type_& executor, std::size_t round_capacity) noexcept {
+    status_t open(executor_type_& executor) noexcept {
+        threads = growing_buffer<thread_predicate_t, thread_allocator_t> {thread_allocator_t {executor.arena(0)}};
         if (failed(threads.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
-        for (std::size_t thread = 0; thread != executor.size(); ++thread) {
+        for (std::size_t thread = 0; thread != executor.size(); ++thread)
             threads.push_back_reserved(thread_predicate_t {predicate, thread_allocator_t {executor.arena(thread)}});
-            if (failed(threads[thread].reserve(round_capacity))) return status_t::bad_alloc_k;
-        }
         return status_t::success_k;
     }
 
-    thread_predicate_t& of_thread(std::size_t thread) noexcept { return threads[thread]; }
+    thread_predicate_t& of_thread(std::size_t thread) noexcept {
+        assert(thread < threads.size() && "Engines open a per-thread family before asking it");
+        return threads[thread];
+    }
 };
 
 /** One call's reports: the C handler, serialized for the executor's threads, which the contract

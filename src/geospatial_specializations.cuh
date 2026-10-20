@@ -549,7 +549,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::insert(usear
     drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
         executor, count, [&](std::size_t row, std::size_t thread) noexcept {
             plan.insert(row, to_writable_span(values).subspan(row, 1), to_span(identities).subspan(row, 1),
-                        scratch.metrics[thread], scratch.contexts[thread], selector, config);
+                        scratch.metrics[thread], scratch.traversals[thread], selector, config);
             [[maybe_unused]] continuation_t const heard = ticks(row);
         });
     auto const range = plan.range;
@@ -573,7 +573,7 @@ status_t geospatial_ram_variant<cpu_class_>::draw_long_links_(iota_view<node_id_
             node_id_t const node = static_cast<node_id_t>(nodes.first + position);
             splitmix64_t generator {mix_bits(static_cast<u64_t>(node))};
             keep_first_failure(linked, us::geospatial::draw_long_links(index, node, draws, scratch.metrics[thread],
-                                                                       scratch.contexts[thread], generator));
+                                                                       scratch.traversals[thread], generator));
         });
     return linked;
 }
@@ -612,7 +612,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::search(usear
     growing_buffer<line_of_sight_buffers_t, thread_allocator_t> sights {thread_allocator_t {executor.arena(0)}};
     if (status_t const prepared = this->prepare_sights_(sights, executor); failed(prepared)) return {{}, prepared};
     typename index_t::search_config_t const config {breadth};
-    using context_t = typename thread_scratch<index_t, metric_t>::context_t;
+    using traversal_context_t = typename thread_scratch<index_t, metric_t>::traversal_context_t;
     status_t searched = status_t::success_k;
     bool const scanning = arguments.traversal == usearch_traversal_scan_k;
     status_t const asked = with_node_predicates(
@@ -623,7 +623,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::search(usear
                     line_of_sight_buffers_t& sight = sights[thread];
                     value_t const query = us::geospatial::to_earth_observation(
                         geodetic_of(queries[row]), this->ground_metres_(queries[row], sight));
-                    context_t& context = scratch.contexts[thread];
+                    traversal_context_t& context = scratch.traversals[thread];
                     metric_t& metric = scratch.metrics[thread];
                     relation_predicate_t const related {*this, relation, tolerance, query, sight};
                     auto admits = admits_of(thread);
@@ -656,7 +656,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::within(
     growing_arena<forkunion_allocator_t>& staging, usearch_matches_tape_view_t& matches, std::size_t& written,
     progress_ticks_t& ticks, executor_t& executor) noexcept {
     using distance_t = typename index_t::distance_t;
-    using context_t = typename thread_scratch<index_t, metric_t>::context_t;
+    using traversal_context_t = typename thread_scratch<index_t, metric_t>::traversal_context_t;
     using ball_t = growing_buffer<scored_node_t, thread_allocator_t>;
 
     // Collects every scanned row within `reach_squared`, the containment a scan reports.
@@ -702,7 +702,7 @@ expected<traversal_telemetry_t> geospatial_ram_variant<cpu_class_>::within(
                                                        largest_deviation * largest_deviation);
                     i64_t const reach = static_cast<i64_t>(
                         std::ceil((tolerance.metres + 3 * deviations) * us::geospatial::centimetres_per_metre_k));
-                    context_t& context = scratch.contexts[thread];
+                    traversal_context_t& context = scratch.traversals[thread];
                     // A walk leaves the ball at the front of the candidates; a scan collects it
                     // from every row.
                     std::span<scored_node_t const> ball;

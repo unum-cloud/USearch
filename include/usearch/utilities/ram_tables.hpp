@@ -120,8 +120,9 @@ class growing_hash_set {
     explicit operator bool() const noexcept { return slots_; }
     std::size_t size() const noexcept { return count_; }
 
+    /** Empties the set; one already empty, as @c reserve leaves a fresh table, is left as it is. */
     void clear() noexcept {
-        if (slots_) std::memset((void*)slots_, 0xFF, capacity_ * sizeof(element_t));
+        if (count_) std::memset((void*)slots_, 0xFF, capacity_ * sizeof(element_t));
         count_ = 0;
     }
 

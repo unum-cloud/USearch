@@ -464,7 +464,7 @@ class levenshtein_metric {
         prepared_.clear();
         queries_.clear();
         last_status_ = queries_.reserve(queries.size());
-        if (succeeded(last_status_)) last_status_ = swept_.reserve(queries.size() * staged_.capacity());
+        if (succeeded(last_status_)) last_status_ = swept_.resize_uninitialized(queries.size() * staged_.capacity());
         if (failed(last_status_)) return;
         for (query_type_ const& query : queries) queries_.push_back_reserved(as_string_view(query));
         prepare_(to_span(queries_));
@@ -592,8 +592,9 @@ class overlap_metric {
      *  @c prepared_, or a batched @ref reset's views. */
     growing_buffer<sz_string_view_t, allocator_t> queries_;
 
-    /** The widths windows are taken at, all sharing one B-tree. */
-    growing_buffer<sz_size_t, allocator_t> window_widths_;
+    /** The widths windows are taken at, all sharing one B-tree, borrowed from @ref init's
+     *  caller. */
+    std::span<std::size_t const> window_widths_;
 
     /** The round's @b [queries,candidates,widths] match counts, a staged candidate's row by its
      *  push slot. */
@@ -604,8 +605,7 @@ class overlap_metric {
 
   public:
     overlap_metric(allocator_t const& allocator = {}) noexcept
-        : arena_(allocator), staged_(allocator), prepared_(allocator), queries_(allocator), window_widths_(allocator),
-          matches_(allocator) {}
+        : arena_(allocator), staged_(allocator), prepared_(allocator), queries_(allocator), matches_(allocator) {}
     overlap_metric(overlap_metric const&) = delete;
     overlap_metric& operator=(overlap_metric const&) = delete;
     overlap_metric(overlap_metric&&) noexcept = default;
@@ -617,21 +617,18 @@ class overlap_metric {
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at least the
      *      index's round capacity, @c max(fan_out × connectivity, connectivity + 1), or rounds saturate rather
      *      than fail.
-     *  @param[in] window_widths Window widths in bytes, all sharing one B-tree; a width past a text
-     *      contributes nothing.
+     *  @param[in] window_widths Window widths in bytes, all sharing one B-tree, borrowed until the
+     *      metric dies; a width past a text contributes nothing.
      */
     status_t init(std::size_t staging_limit, std::span<std::size_t const> window_widths) noexcept {
         if (!staging_limit || window_widths.empty()) return status_t::config_mismatch_k;
         for (std::size_t const width : window_widths)
             if (!width || width > (std::numeric_limits<u32_t>::max)()) return status_t::config_mismatch_k;
         if (status_t const staged = staged_.reserve_exactly(staging_limit); failed(staged)) return staged;
-        if (status_t const sized = window_widths_.resize_uninitialized(window_widths.size()); failed(sized))
-            return sized;
         if (status_t const sized = matches_.resize_uninitialized(staged_.capacity() * window_widths.size());
             failed(sized))
             return sized;
-        for (std::size_t index = 0; index != window_widths.size(); ++index)
-            window_widths_[index] = window_widths[index];
+        window_widths_ = window_widths;
         last_status_ = status_t::success_k;
         return last_status_;
     }
@@ -674,7 +671,7 @@ class overlap_metric {
         queries_.clear();
         last_status_ = queries_.reserve(queries.size());
         if (succeeded(last_status_))
-            last_status_ = matches_.reserve(queries.size() * staged_.capacity() * window_widths_.size());
+            last_status_ = matches_.resize_uninitialized(queries.size() * staged_.capacity() * window_widths_.size());
         if (failed(last_status_)) return;
         for (query_type_ const& query : queries) queries_.push_back_reserved(as_string_view(query));
         prepare_();

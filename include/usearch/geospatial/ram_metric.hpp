@@ -276,7 +276,7 @@ class chord_metric {
         query_coordinates_.clear();
         staged_count_ = 0;
         if (failed(query_coordinates_.reserve(queries.size() * 3)) ||
-            failed(squares_.reserve(queries.size() * staging_limit_)))
+            failed(squares_.resize_uninitialized(queries.size() * staging_limit_)))
             return;
         for (query_type_ const& query : queries) append_query_(fixed_of_(query));
         if (!queries.empty()) query_ = fixed_of_(queries.front());

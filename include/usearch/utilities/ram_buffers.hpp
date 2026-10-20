@@ -19,13 +19,14 @@
 #include <cstdint> // `SIZE_MAX`, `std::uint8_t`
 #include <cstring> // `std::memcpy`, `std::memset` - a fresh chunk starts zeroed
 
-#include <array>       // `std::array` - batch-of-four overloads, the chunk directories
+#include <array>       // `std::array` - batch-of-four overloads, the chunk directories, the arena's runs
 #include <atomic>      // `std::memory_order` - publishing a chunk to its readers
 #include <bit>         // `std::bit_width`, `std::bit_floor` - the closed-form chunk location
 #include <concepts>    // `std::same_as` - the buffer-allocator concept
 #include <span>        // `std::span` - the sorted-batch insert argument
 #include <functional>  // `std::less`
-#include <memory>      // `std::allocator`, `std::unique_ptr` - the arena's chunk chain, `std::destroy_n` - built rows
+#include <limits>      // `std::numeric_limits` - the arena's chunk bound
+#include <memory>      // `std::allocator`, `std::destroy_n` - built rows
 #include <new>         // `new (ptr) element_t(value)` for "placement-new"
 #include <type_traits> // `std::is_trivially_destructible`, `std::is_trivially_copyable`, `std::is_nothrow_*`
 #include <utility>     // `std::swap`, `std::move`, `std::forward`
@@ -903,10 +904,11 @@ class growing_buffer {
         return status_t::success_k;
     }
 
-    /** Reallocates to exactly @p count value-initialized elements, discarding any prior
-     *  contents - the sized-once form. Trivial elements are zero-filled in one @c memset. */
+    /** Sizes to exactly @p count value-initialized elements, discarding any prior contents and
+     *  growing past the current capacity only. Trivial elements are zero-filled in one
+     *  @c memset. */
     status_t resize(std::size_t count) noexcept {
-        reset();
+        clear();
         if (count == 0) return status_t::success_k;
         if (status_t const sized = reserve_exactly(count); failed(sized)) return sized;
         annotate_container(elements_, elements_ + capacity_, elements_ + size_, elements_ + count);
@@ -924,7 +926,7 @@ class growing_buffer {
      *      written before it is read.
      */
     status_t resize_uninitialized(std::size_t count) noexcept {
-        reset();
+        clear();
         if (count == 0) return status_t::success_k;
         if (status_t const sized = reserve_exactly(count); failed(sized)) return sized;
         extend_uninitialized(count);
@@ -1277,14 +1279,16 @@ class growing_arena {
     using upstream_t = typename std::allocator_traits<upstream_allocator_>::template rebind_alloc<std::byte>;
     using run_t = growing_buffer<std::byte, upstream_t>;
 
-    /** One chunk: its run, and the chunk it outgrew. */
-    struct chunk_t {
-        run_t run;
-        std::unique_ptr<chunk_t> previous;
-    };
+    /** Each chunk at least doubles the one it outgrew, so no more are alive at once than a byte
+     *  count has bits. */
+    static constexpr std::size_t max_chunks_k = std::numeric_limits<std::size_t>::digits;
 
-    /** The newest chunk, the one reservations bump; null before the first reservation. */
-    std::unique_ptr<chunk_t> newest_;
+    /** The live chunks, oldest first, the last of the first @c chunks_ being the newest, the one
+     *  reservations bump; the rest hold nothing, so no chunk takes a record from any heap. */
+    std::array<run_t, max_chunks_k> runs_;
+
+    /** How many of @c runs_ hold a chunk. */
+    std::size_t chunks_ = 0;
 
     /** Places every run - the thread's memory domain. */
     upstream_t upstream_;
@@ -1298,67 +1302,84 @@ class growing_arena {
     explicit growing_arena(global_allocator_t) noexcept
         requires std::default_initializable<upstream_t>
         : growing_arena(upstream_t {}) {}
-    explicit growing_arena(upstream_t upstream) noexcept : upstream_(upstream) {}
+    explicit growing_arena(upstream_t upstream) noexcept
+        : runs_(empty_runs_(upstream, std::make_index_sequence<max_chunks_k> {})), upstream_(upstream) {}
 
     /** The allocator every chunk of this arena comes from. */
     upstream_t const& upstream() const noexcept { return upstream_; }
-    growing_arena(growing_arena&&) noexcept = default;
-    growing_arena& operator=(growing_arena&&) noexcept = default;
+    growing_arena(growing_arena&& other) noexcept
+        : runs_(std::move(other.runs_)), chunks_(utilities::exchange(other.chunks_, 0)), upstream_(other.upstream_) {}
+    growing_arena& operator=(growing_arena&& other) noexcept {
+        std::swap(runs_, other.runs_);
+        std::swap(chunks_, other.chunks_);
+        std::swap(upstream_, other.upstream_);
+        return *this;
+    }
 
     /** Bytes across chunks. */
     std::size_t capacity() const noexcept {
         std::size_t bytes = 0;
-        for (chunk_t const* chunk = newest_.get(); chunk; chunk = chunk->previous.get()) bytes += chunk->run.capacity();
+        for (std::size_t chunk = 0; chunk != chunks_; ++chunk) bytes += runs_[chunk].capacity();
         return bytes;
     }
 
     /** Opens the seed chunk at @p bytes, the width every later chunk doubles from; a
      *  seeded arena answers in one compare. */
     status_t reserve_exactly(std::size_t bytes) noexcept {
-        if (newest_) return status_t::success_k;
+        if (chunks_) return status_t::success_k;
         return grow_(bytes);
     }
 
     /** Hands out @p bytes on an @p alignment boundary from the newest chunk, growing by one
      *  at least twice as wide when it cannot fit them; null when the upstream refuses. */
     std::byte* allocate(std::size_t bytes, std::size_t alignment) noexcept {
-        if (newest_)
-            if (std::byte* const slice = slice_(newest_->run, bytes, alignment)) return slice;
-        std::size_t const last_width = newest_ ? newest_->run.capacity() : 0;
+        if (chunks_)
+            if (std::byte* const slice = slice_(runs_[chunks_ - 1], bytes, alignment)) return slice;
+        std::size_t const last_width = chunks_ ? runs_[chunks_ - 1].capacity() : 0;
         if (failed(grow_(max_of(last_width * 2u, bytes + alignment)))) return nullptr;
-        return slice_(newest_->run, bytes, alignment);
+        return slice_(runs_[chunks_ - 1], bytes, alignment);
     }
 
     /** Rewinds the newest chunk and drops the ones it outgrew, so the next call starts at
      *  the high-water mark. */
     void clear() noexcept {
-        if (!newest_) return;
-        newest_->previous.reset();
-        newest_->run.clear();
+        if (!chunks_) return;
+        if (chunks_ > 1) std::swap(runs_[0], runs_[chunks_ - 1]);
+        for (std::size_t chunk = 1; chunk != chunks_; ++chunk) runs_[chunk].reset();
+        chunks_ = 1;
+        runs_[0].clear();
     }
 
     /** Releases every chunk. */
-    void reset() noexcept { newest_.reset(); }
+    void reset() noexcept {
+        for (std::size_t chunk = 0; chunk != chunks_; ++chunk) runs_[chunk].reset();
+        chunks_ = 0;
+    }
 
     /** Whether @p pointer lies inside any chunk, which the next rewind reuses or frees. */
     bool contains(void const* pointer) const noexcept {
         std::uintptr_t const address = reinterpret_cast<std::uintptr_t>(pointer);
-        for (chunk_t const* chunk = newest_.get(); chunk; chunk = chunk->previous.get()) {
-            std::uintptr_t const first = reinterpret_cast<std::uintptr_t>(chunk->run.data());
-            if (address >= first && address < first + chunk->run.capacity()) return true;
+        for (std::size_t chunk = 0; chunk != chunks_; ++chunk) {
+            std::uintptr_t const first = reinterpret_cast<std::uintptr_t>(runs_[chunk].data());
+            if (address >= first && address < first + runs_[chunk].capacity()) return true;
         }
         return false;
     }
 
   private:
 
-    /** Grows by a chunk of @p width bytes, the newest from now on, the old one chained behind. */
+    /** Every run empty over @p upstream, one per index. */
+    template <std::size_t... indices_>
+    static std::array<run_t, max_chunks_k> empty_runs_(upstream_t const& upstream,
+                                                       std::index_sequence<indices_...>) noexcept {
+        return {{(static_cast<void>(indices_), run_t {upstream})...}};
+    }
+
+    /** Grows by a chunk of @p width bytes, the newest from now on, the old ones kept behind. */
     status_t grow_(std::size_t width) noexcept {
-        std::unique_ptr<chunk_t> grown {new (std::nothrow) chunk_t {run_t {upstream_}, nullptr}};
-        if (!grown) return status_t::bad_alloc_k;
-        if (status_t const sized = grown->run.reserve_exactly(width); failed(sized)) return sized;
-        grown->previous = std::move(newest_);
-        newest_ = std::move(grown);
+        if (chunks_ == max_chunks_k) return status_t::bad_alloc_k;
+        if (status_t const sized = runs_[chunks_].reserve_exactly(width); failed(sized)) return sized;
+        ++chunks_;
         return status_t::success_k;
     }
 
