@@ -31,6 +31,7 @@ inline constexpr nk_capability_t dense_amd_capabilities_k = nk_cap_rocm_k | nk_c
 /** The suite's own code object, carrying every cell's kernels and the attends over its value
  *  lookups; @c vram_amd.hip defines @c bytes beside the bytes it embeds. */
 struct dense_amd_code_object_t {
+    inline static constexpr nk_capability_t capability_k = dense_amd_capabilities_k;
     static bytes_view_t bytes() noexcept;
 };
 
@@ -39,9 +40,9 @@ struct dense_amd_code_object_t {
  *  in @c vram_amd.hip instead of the shared composers. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::amd_k, dtype_, kernel_> {
-    using index_t = vram_amd_index<dtype_, dense_amd_capabilities_k, dense_amd_code_object_t, counting_hip_allocator_t,
+    using index_t = vram_amd_index<dtype_, dense_amd_code_object_t, dummy_cache_hints_t, counting_hip_allocator_t,
                                    counting_hip_allocator_t, hip_device_allocator_t>;
-    using indexes_t = vram_amd_indexes<u32_t, dtype_, dense_amd_capabilities_k, dense_amd_code_object_t>;
+    using indexes_t = vram_amd_indexes<u32_t, dtype_, dense_amd_code_object_t>;
     inline static constexpr char const* vendor_prefix_k = "rocm";
     inline static constexpr bool attends_k = true;
 

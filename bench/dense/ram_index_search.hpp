@@ -145,7 +145,8 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fu_memory_domain_id_t const domain = bench.settings.memory_domains.empty() //
                                              ? fu_memory_domain_id_t {-1}
                                              : bench.settings.memory_domains.front();
-    bench.index = std::make_unique<index_t>(bench.kernel, allocator_t {domain}, allocator_t {domain});
+    bench.index = std::make_unique<index_t>(bench.kernel, allocator_t {domain}, allocator_t {domain},
+                                            machine_cache_line_bytes());
     streamed.id_to_row.resize(rows);
 
     // Reserving first freezes the CLI geometry a checkpoint then has to agree with.
@@ -264,10 +265,10 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
     if (bench.settings.skip_vectors.value) fmt::println("  topping: {} loaded rows", bench.settings.skip_vectors.value);
     fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(), nk_kernel_name(bench.kernel),
-                 bit_name(compute_choices_k, index_t::picked_quads_capability_k, "serial"));
+                 bit_name(compute_choices_k, index_t::quads_kit_t::capability_k, "serial"));
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-    if (index_t::picked_quads_capability_k == nk_cap_serial_k &&
+    if (index_t::quads_kit_t::capability_k == nk_cap_serial_k &&
         (bench.settings.max_compute & available & ~nk_cap_serial_k))
         fmt::println("  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric");
     std::size_t reported_threads = 0;
@@ -511,7 +512,11 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_kind_t kernel,
                   workload_type_ const& workload) {
     using allocator_t = forkunion_allocator<std::byte>;
-    using index_t = ram_index<stored_dtype_, capability_, wait_type_, fu::preferred_atomic_ref,
+    using index_t = ram_index<typename quads_ladder<typename nk::type_for<stored_dtype_>::type, capability_>::kit_t,
+                              typename tiles_ladder<typename nk::type_for<stored_dtype_>::type, capability_>::kit_t,
+                              typename elementwise_ladder<capability_>::kit_t,
+                              typename rmscast_ladder<typename nk::type_for<stored_dtype_>::type, capability_>::kit_t,
+                              typename visits_hash_set_ladder<capability_>::kit_t, wait_type_, fu::preferred_atomic_ref,
                               fu::preferred_cache_hints_t, allocator_t, allocator_t, allocator_t>;
     using bench_context_type_ = bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;

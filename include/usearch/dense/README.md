@@ -17,7 +17,9 @@ The RAM residency is the portable default every platform owns; the VRAM and NVMe
 
 The plural follows the sibling idiom - `ram_indexes.hpp` reads as "many `ram_index` viewed as one":
 
-- `sharded_indexes.hpp` - the base every plural but the NVMe one shares: same-geometry shards, rotation-balanced routing, key resolution and SafeGraphs checkpoints.
+- `sharded_indexes.hpp` - the shard table every plural but the NVMe one owns: same-geometry shards, their key columns and locator map, rotation-balanced routing, and the commit word a reader spanning the shards snapshots by.
+- `shard_checkpoints.hpp` - the SafeGraphs save and load plans those plurals open over their shard set, one monolith or a manifest of parts, with what differs per residency handed in as a policy object.
+- `vram_shard_fanout.hpp` - one batched read over NVIDIA or AMD shards: the executor's claim, one context per shard, one snapshot of the visible rows, and the host-landed merge.
 - `ram_indexes.hpp` - typed multi-shard views with compute-domain routing and merged cross-shard search, one shard per memory domain.
 - `vram_nvidia_indexes.hpp` and `vram_amd_indexes.hpp` - typed multi-shard groups with round-robin ingestion and merged cross-shard search, any number of shards per device.
 - `vram_apple_indexes.hpp` - the Apple twin over its one device, so one shard.

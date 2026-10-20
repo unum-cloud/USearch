@@ -90,6 +90,14 @@ std::size_t check_multimap_duplicate_keys() noexcept {
     auto const [one_of, one_of_status] = multimap.find(7);
     failures += expect(succeeded(one_of_status));
     failures += expect(one_of < multiplicity_k);
+
+    // The first insert leads its probe chain, so every lookup stops on it.
+    for (std::size_t lookup = 0; lookup != 2; ++lookup) {
+        auto const [first, first_status] = multimap.find_first(7);
+        failures += expect(succeeded(first_status));
+        failures += expect_eq(first, 0u);
+    }
+    failures += expect_eq(multimap.find_first(9).status, status_t::malformed_k);
     return failures;
 }
 

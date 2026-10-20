@@ -34,8 +34,7 @@
 namespace unum::usearch::dense {
 
 // Every dispensable ID fits a scored node's ID field, the sentinel the claim word closes on aside.
-static_assert(vram_nvidia_index<nk_i8_k, nk_cap_cuda_k | nk_cap_ampere_k, void>::max_node_count_k <=
-              vram_scored_node<node_id_t>::id_capacity_k);
+static_assert(vram_nvidia_index<nk_i8_k, void>::max_node_count_k <= vram_scored_node<node_id_t>::id_capacity_k);
 
 /** Shared memory a walking warp keeps for the rows @p schedule_ gathers, at its widest window; none
  *  where it gathers none. */
@@ -72,36 +71,41 @@ constexpr u32_t cuda_gather_window_bytes() noexcept {
     return window;
 }
 
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename kernels_type_,
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
           typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
-bool vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vectors_allocator_type_, neighbors_allocator_type_,
-                       traversals_allocator_type_>::walk_scratch_fits(std::size_t fold_bytes) const noexcept {
-    using kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
-    using schedule_t = typename schedule_ladder<capability_>::schedule_t;
+bool vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
+                         neighbors_allocator_type_,
+                         traversals_allocator_type_>::walk_scratch_fits(core_t const& core,
+                                                                        std::size_t fold_bytes) const noexcept {
+    using kit_t = typename quads_ladder<scalar_t, capability_k>::kit_t;
+    using schedule_t = typename schedule_ladder<capability_k>::schedule_t;
     using warp_t = typename schedule_t::warp_t;
     static_assert(std::is_same_v<typename kit_t::norms_t, norms_t> &&
-                  sizeof(typename kit_t::fragment_t) == sizeof(fragment_t));
-    return std::size_t {vram_warps_per_block_k} * (row_bytes() + fold_bytes + sizeof(vram_gathered<kit_t, warp_t>) +
-                                                   cuda_gather_bytes_per_warp<schedule_t>()) <=
-           device_.shared_memory_per_block_bytes;
+                  sizeof(typename kit_t::fragment_t) == sizeof(fragment_t) &&
+                  sizeof(fragment_t) == core_t::fragment_bytes_k);
+    return std::size_t {vram_warps_per_block_k} *
+               (core.row_bytes() + fold_bytes + sizeof(vram_gathered<kit_t, warp_t>) +
+                cuda_gather_bytes_per_warp<schedule_t>()) <=
+           core.device_.shared_memory_per_block_bytes;
 }
 
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename kernels_type_,
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
           typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
-cuda_rows_map_t vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vectors_allocator_type_,
-                                  neighbors_allocator_type_, traversals_allocator_type_>::rows_map_() noexcept {
-    using schedule_t = typename schedule_ladder<capability_>::schedule_t;
-    constexpr u32_t window_bytes = cuda_gather_window_bytes<schedule_t, capability_, vector_dtype_>();
+cuda_rows_map_t
+vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_, neighbors_allocator_type_,
+                    traversals_allocator_type_>::rows_map_(core_t& core) noexcept {
+    using schedule_t = typename schedule_ladder<capability_k>::schedule_t;
+    constexpr u32_t window_bytes = cuda_gather_window_bytes<schedule_t, capability_k, vector_dtype_>();
     if constexpr (window_bytes == 0) return {};
     else {
         standard_atomic_ref<u32_t> state {rows_map_state_};
         if (state.load(std::memory_order_acquire) == 2) return rows_map_kept_;
         // The signed tensor coordinates reach 2^31 - 1 rows at most.
-        std::size_t const ceiling_rows = this->vectors_matrix_.reserved_bytes() / row_bytes() - 1;
+        std::size_t const ceiling_rows = core.vectors_matrix_.reserved_bytes() / core.row_bytes() - 1;
         u32_t const rows = static_cast<u32_t>(min_of<std::size_t>(ceiling_rows, 0x7FFFFFFFu));
-        u32_t const vector_row_bytes = static_cast<u32_t>(row_bytes());
-        cuda_rows_map_t const map = cuda_set_device(device_.ordinal) == cuda_success_k
-                                        ? cuda_encode_rows_map(storage().vectors, vector_row_bytes, rows,
+        u32_t const vector_row_bytes = static_cast<u32_t>(core.row_bytes());
+        cuda_rows_map_t const map = cuda_set_device(core.device_.ordinal) == cuda_success_k
+                                        ? cuda_encode_rows_map(core.storage().vectors, vector_row_bytes, rows,
                                                                min_of(vector_row_bytes, window_bytes))
                                         : cuda_rows_map_t {};
         u32_t idle = 0;
@@ -113,12 +117,14 @@ cuda_rows_map_t vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vec
     }
 }
 
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename kernels_type_,
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
           typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
-bool vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vectors_allocator_type_, neighbors_allocator_type_,
-                       traversals_allocator_type_>::build_scratch_fits(u32_t scratch_bytes_per_warp) const noexcept {
-    using kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
-    using schedule_t = typename schedule_ladder<capability_>::schedule_t;
+bool vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
+                         neighbors_allocator_type_,
+                         traversals_allocator_type_>::build_scratch_fits(core_t const& core,
+                                                                         u32_t scratch_bytes_per_warp) const noexcept {
+    using kit_t = typename quads_ladder<scalar_t, capability_k>::kit_t;
+    using schedule_t = typename schedule_ladder<capability_k>::schedule_t;
     std::size_t const statics = std::size_t {vram_warps_per_block_k} *
                                 (sizeof(vram_gathered<kit_t, typename schedule_t::warp_t>) +
                                  sizeof(typename schedule_t::shared_t) + cuda_gather_bytes_per_warp<schedule_t>());
@@ -128,9 +134,9 @@ bool vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vectors_alloca
     // grid and arena were sized for.
     std::size_t const resident_blocks = max_of(resident_blocks_(vram_kernel_t::insert_k, 0),
                                                resident_blocks_(vram_kernel_t::refine_k, 0));
-    return block_bytes <= device_.shared_memory_per_block_bytes &&
-           resident_blocks * (block_bytes + device_.reserved_shared_memory_per_block_bytes) <=
-               device_.shared_memory_per_multiprocessor_bytes;
+    return block_bytes <= core.device_.shared_memory_per_block_bytes &&
+           resident_blocks * (block_bytes + core.device_.reserved_shared_memory_per_block_bytes) <=
+               core.device_.shared_memory_per_multiprocessor_bytes;
 }
 
 /** Post-drain structural audit of the neighbors matrix: every row published, every ID in range,
@@ -497,11 +503,12 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
 template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_, u32_t lookup_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
                                   cuda_resident_blocks<capability_, dtype_>(kernel_, slots_))
-    cuda_kernel(const __grid_constant__ cuda_arguments_t arguments) {
+    cuda_kernel(const __grid_constant__ cuda_arguments_t launch) {
     using kit_t = typename quads_ladder<typename nk::type_for<dtype_>::type, capability_>::kit_t;
     using schedule_t = typename schedule_ladder<capability_>::schedule_t;
     using warp_t = typename schedule_t::warp_t;
     constexpr u32_t resident_blocks = cuda_resident_blocks<capability_, dtype_>(kernel_, slots_);
+    vram_arguments_t const& arguments = launch.records;
     vram_graph_t const& graph = arguments.graph;
     // Launched overlapping its predecessor's drain, so nothing is read before that predecessor
     // lands; the successor's blocks may then start as this grid's blocks retire.
@@ -510,7 +517,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     if constexpr (cuda_gathers_rows(kernel_) && requires(cuda_rows_map_t const& rows_map) {
                       schedule_t::template bind<resident_blocks>(rows_map, 0u);
                   })
-        schedule_t::template bind<resident_blocks>(arguments.rows_map, threadIdx.x % warp_t::width_k);
+        schedule_t::template bind<resident_blocks>(launch.rows_map, threadIdx.x % warp_t::width_k);
     if constexpr (kernel_ == vram_kernel_t::insert_k)
         vram_insert<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.build));
     else if constexpr (kernel_ == vram_kernel_t::back_link_k)

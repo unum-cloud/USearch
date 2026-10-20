@@ -18,10 +18,9 @@
 #include <cstring> // `std::memcpy` - an attend's value lookup travels as bytes
 
 #include <bit>         // `std::bit_ceil` - the lanes sharing a row
-#include <limits>      // `std::numeric_limits` - the unit-RMS import's epsilon
 #include <numbers>     // `std::numbers::log2e_v` - the base-2 softmax
 #include <type_traits> // `std::is_same_v` - which heads a walk stages
-#include <utility>     // `std::move` - the loaded module
+#include <utility>     // `std::move` - the loaded module, `std::forward` - a forwarded lookup
 
 #include <numkong/capabilities.h> // `nk_kernel_kind_t` & the kernel-kind constants
 #include <numkong/cast/serial.h>  // `nk_cast_plan_serial_` - the device casts' plans
@@ -176,153 +175,96 @@ constexpr bool cuda_gathers_rows(vram_kernel_t kernel) noexcept {
 
 /** The one argument every NVIDIA dense kernel takes: the records every vendor's kernels read, and
  *  the vectors matrix as the tensor map a walk may gather its rows through. */
-struct cuda_arguments_t : vram_arguments_t {
+struct cuda_arguments_t {
+    vram_arguments_t records;
     cuda_rows_map_t rows_map;
 };
 
 #pragma endregion Kernels
 
-/**
- *  @brief Vector Search index for a single uniform latency memory space on NVIDIA GPUs.
- *
- *  Everything but the kernels is @c vram_index; see @ref dense_vram_nvidia_index_concurrency for
- *  how a batch's rows publish on the device. The kernels come from the fatbin @p kernels_type_
- *  hands out through its static @c bytes, compiled under @p capability_.
- */
-template <                                                                      //
-    nk_dtype_t vector_dtype_,                                                   //
-    nk_capability_t capability_,                                                //
-    typename kernels_type_,                                                     //
-    typename vectors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>,   //
-    typename neighbors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>, //
-    typename traversals_allocator_type_ = cuda_arena_allocator_t>               //
-struct vram_nvidia_index
-    : vram_index<vram_nvidia_index<vector_dtype_, capability_, kernels_type_, vectors_allocator_type_,
-                                   neighbors_allocator_type_, traversals_allocator_type_>,
-                 cuda_vendor_t, vector_dtype_, vectors_allocator_type_, neighbors_allocator_type_,
-                 traversals_allocator_type_> {
+/** The NVIDIA dense shard's kernels: the loaded fatbin and the hooks its @c vram_shard_core
+ *  calls to load, launch and stage them, each reading the core it is handed. */
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
+          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
+struct vram_nvidia_kernels {
 
-    using base_t = vram_index<vram_nvidia_index, cuda_vendor_t, vector_dtype_, vectors_allocator_type_,
-                              neighbors_allocator_type_, traversals_allocator_type_>;
-    using base_t::arena_shape_for;
-    using base_t::base_t;
-    using base_t::build_scratch_bytes_per_warp;
-    using base_t::connectivity;
-    using base_t::dimensions;
-    using base_t::non_zero_expansion_factor;
-    using base_t::packed_row_bytes;
-    using base_t::row_bytes;
-    using base_t::row_fragments;
-    using base_t::size;
-    using base_t::status;
-    using base_t::storage;
-    using base_t::traversal_memory_usage;
-    using typename base_t::distance_t;
-    using typename base_t::dot_result_t;
-    using typename base_t::dot_t;
-    using typename base_t::frontier_kind_t;
-    using typename base_t::node_id_t;
-    using typename base_t::norms_t;
-    using typename base_t::refine_config_t;
-    using typename base_t::scalar_t;
-    using typename base_t::search_config_t;
-    using typename base_t::search_result_t;
-    using typename base_t::traversal_context_t;
+    /** The capabilities the kernels compiled under, as the binary holding them states. */
+    inline static constexpr nk_capability_t capability_k = kernels_type_::capability_k;
+
+    using core_t = vram_shard_core<cuda_vendor_t, vram_nvidia_kernels, vector_dtype_, cache_hints_type_,
+                                   vectors_allocator_type_, neighbors_allocator_type_, traversals_allocator_type_>;
+    using scalar_t = typename nk::type_for<vector_dtype_>::type;
+    using dot_result_t = typename scalar_t::dot_result_t;
+    using dot_t = typename dot_result_t::raw_t;
+    using norms_t = vector_norms<dot_t>;
+    using traversal_context_t = cuda_vendor_t::traversal_context<traversals_allocator_type_>;
+    using refine_scratch_t = vram_refine_scratch<traversal_context_t>;
+    using frontier_kind_t = vram_frontier_kind_t;
+    using search_config_t = vram_search_config_t;
+    using search_result_t = vram_search_result_t;
+    using refine_config_t = vram_refine_config_t;
+    using attend_heads_t = vram_attend_heads_t;
+    using audit_landing_t = vram_audit_landing_t;
 
     /** Sixteen bytes every NVIDIA kit loads at once - the host's spelling of the kernels' @c uint4,
      *  which only the CUDA SDK declares. */
     struct alignas(16) fragment_t {
         u32_t x, y, z, w;
     };
-    static_assert(sizeof(fragment_t) == base_t::fragment_bytes_k);
-
-    /** The capability of the quads kit the ladder picked under @c capability_, surfaced in the
-     *  bench reports; read only where the NVIDIA kits are visible, as its initializer is. */
-    inline static constexpr nk_capability_t picked_quads_capability_k = quads_ladder<scalar_t, capability_>::picked_k;
 
     /** Lanes of an NVIDIA warp, which the register ladder's rungs count ranks in. */
     static constexpr u32_t wave_lanes() noexcept { return 32; }
 
     /** Lanes cooperating on one row: the smallest power of two covering its fragments, at most one
      *  per gather in flight, past which a wider row costs reductions where it could cost steps. */
-    u32_t lanes_per_row() const noexcept {
-        return min_of(std::bit_ceil(row_fragments()), vram_max_gathers_in_flight_k);
+    u32_t lanes_per_row(core_t const& core) const noexcept {
+        return min_of(std::bit_ceil(core.row_fragments()), vram_max_gathers_in_flight_k);
     }
 
     /** Whether a search, multiply or attend launch fits on this device: per warp, the query span
      *  and the @p fold_bytes an attend keeps past it, beside the static batch buffers. Defined in
      *  @c vram_nvidia_index.cuh, where the kits are visible. */
-    bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept;
+    bool walk_scratch_fits(core_t const& core, std::size_t fold_bytes = 0) const noexcept;
 
     /** Whether a builder launch fits @p scratch_bytes_per_warp of per-warp scratch in shared
      *  memory beside the batch buffers and schedule state, on every block a multiprocessor keeps
      *  resident; when it cannot, the warp's arena slice keeps it, as Apple's always does. Defined
      *  in @c vram_nvidia_index.cuh. */
-    bool build_scratch_fits(u32_t scratch_bytes_per_warp) const noexcept;
+    bool build_scratch_fits(core_t const& core, u32_t scratch_bytes_per_warp) const noexcept;
 
     /** The bytes an executor's run must hold before a context carved over it can search or multiply
      *  @p rows rows under @p config, landing @c config.count columns per row, one aligned term per
      *  carve the verb makes. */
-    std::size_t traversal_memory_usage(std::size_t rows, search_config_t config) const noexcept {
+    std::size_t traversal_memory_usage(core_t const& core, std::size_t rows, search_config_t config) const noexcept {
         static_assert(sizeof(dot_t) == sizeof(distance_t));
-        if (!dimensions() || !device_.multiprocessor_count) return 0;
+        if (!core.dimensions() || !core.device_.multiprocessor_count) return 0;
         auto aligned = [](std::size_t bytes) noexcept {
             return divide_round_up<std::size_t>(bytes, default_alignment_k) * default_alignment_k;
         };
         // Search widens the candidates to cover its count while multiply walks the bare factor, so
         // the wider one sizes.
         u32_t const expansion = max_of<u32_t>(gpu_walk_breadth(config.expansion_factor, config.count),
-                                              non_zero_expansion_factor(config));
+                                              core.non_zero_expansion_factor(config));
         bool const wide = expansion > vram_widest_candidate_slots_k * 32;
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
-        u32_t const candidate_slots = candidate_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
-        gpu_arena_shape_t const arena_shape = arena_shape_for(
-            walk_selection_rows_(expansion, candidate_slots),
+        u32_t const candidate_slots = core.candidate_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
+        gpu_arena_shape_t const arena_shape = core.arena_shape_for(
+            core.walk_selection_rows_(expansion, candidate_slots),
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
         // A scan walks no arena, and keeps its matches past the outputs on a fragment boundary; the
         // walks keep as many blocks resident as a search on the same rung, an attend no more.
         bool const scans = config.traversal == traversal_t::scan_k;
         u32_t const resident_blocks = resident_blocks_(vram_kernel_t::search_k, wide ? 0 : candidate_slots);
         std::size_t const arena_warps =
-            scans ? 0 : std::size_t {walk_blocks_(rows, resident_blocks)} * vram_warps_per_block_k;
+            scans ? 0 : std::size_t {core.walk_blocks_(rows, resident_blocks)} * vram_warps_per_block_k;
         std::size_t const scan_bytes =
-            scans ? sizeof(fragment_t) + scan_scratch_bytes_(rows, config.count, base_t::max_node_count_k) : 0;
-        std::size_t const staging_bytes = rows * row_bytes() + import_bytes_(rows, nk_f64_k) +
+            scans ? sizeof(fragment_t) + scan_scratch_bytes_(core, rows, config.count, core_t::max_node_count_k) : 0;
+        std::size_t const staging_bytes = rows * core.row_bytes() + core.import_bytes_(rows, nk_f64_k) +
                                           rows * config.count * (sizeof(node_id_t) + sizeof(distance_t)) +
                                           rows * sizeof(u32_t) + scan_bytes;
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
                aligned(arena_warps * arena_shape.slice_bytes<node_id_t>()) + aligned(staging_bytes);
     }
-
-  private:
-    friend base_t;
-
-    /** The sharded index walks its shards under one snapshot of their watermarks, merges their
-     *  attends on its first device, and publishes or fails their batches together. */
-    template <typename, nk_dtype_t, nk_capability_t, typename, typename>
-    friend struct vram_nvidia_indexes;
-    template <typename, typename, typename, typename, typename, template <typename> class>
-    friend struct sharded_indexes;
-
-    using base_t::build_arena_shape_;
-    using base_t::builder_scratch_bytes_per_warp_;
-    using base_t::candidate_slots_for_;
-    using base_t::device_;
-    using base_t::fail_;
-    using base_t::import_bytes_;
-    using base_t::import_rows_;
-    using base_t::kernel_;
-    using base_t::land_counters_;
-    using base_t::neighbor_rows_;
-    using base_t::neighbors_matrix_;
-    using base_t::reselection_rows_;
-    using base_t::rows_refusal_;
-    using base_t::vectors_matrix_;
-    using base_t::walk_blocks_;
-    using base_t::walk_selection_rows_;
-    using typename base_t::attend_heads_t;
-    using typename base_t::audit_landing_t;
-    using typename base_t::refine_scratch_t;
 
 #pragma region Search
 
@@ -380,26 +322,26 @@ struct vram_nvidia_index
      *  its sink, bound below the @p visible rows. Until the context drains, the queries, the heads
      *  and the context stay live. */
     template <typename heads_type_>
-    expected<walk_launch_t> stage_walk_(rows_view_t queries, [[maybe_unused]] heads_type_ const& heads,
+    expected<walk_launch_t> stage_walk_(core_t& core, rows_view_t queries, [[maybe_unused]] heads_type_ const& heads,
                                         traversal_context_t& context, traversal_t traversal, u32_t expansion,
                                         u32_t minimum_slots, std::size_t outputs_bytes, std::size_t visible) noexcept {
         constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         constexpr bool attend_k = std::is_same_v<heads_type_, attend_heads_t>;
         std::size_t const queries_count = queries.rows;
-        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
-        if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
+        if (!core.vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
+        if (context.device() != core.device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
         // Validated with the rest: past here a refusal would already have burned epoch space.
-        if (status_t const refusal = rows_refusal_(queries); failed(refusal)) return {{}, refusal};
+        if (status_t const refusal = core.rows_refusal_(queries); failed(refusal)) return {{}, refusal};
         std::size_t heads_rows = 0;
         if constexpr (indexer_k) {
             heads_rows = heads.heads.extent(0);
             if (heads.weights.extent(0) != queries_count || heads_rows != queries_count * heads.weights.extent(1))
                 return {{}, status_t::config_mismatch_k};
-            if (status_t const refusal = rows_refusal_(heads.heads); failed(refusal)) return {{}, refusal};
+            if (status_t const refusal = core.rows_refusal_(heads.heads); failed(refusal)) return {{}, refusal};
         }
         if constexpr (attend_k) {
             heads_rows = heads.rows.rows;
-            if (status_t const refusal = rows_refusal_(heads.rows); failed(refusal)) return {{}, refusal};
+            if (status_t const refusal = core.rows_refusal_(heads.rows); failed(refusal)) return {{}, refusal};
         }
         cuda_stream_handle_t const stream = context.stream();
 
@@ -407,17 +349,17 @@ struct vram_nvidia_index
         frontier_kind_t const frontier = expansion > vram_widest_candidate_slots_k * 32
                                              ? frontier_kind_t::wide_arena_k
                                              : frontier_kind_t::register_ladder_k;
-        u32_t const candidate_slots = candidate_slots_for_(expansion, minimum_slots);
-        gpu_arena_shape_t const arena_shape = arena_shape_for(walk_selection_rows_(expansion, candidate_slots),
-                                                              frontier);
+        u32_t const candidate_slots = core.candidate_slots_for_(expansion, minimum_slots);
+        gpu_arena_shape_t const arena_shape = core.arena_shape_for(
+            core.walk_selection_rows_(expansion, candidate_slots), frontier);
         // A scan walks nothing, so it neither sizes nor zeroes an arena; a search, an indexed
         // search and a multiply keep as many blocks resident on one rung.
         bool const walks = traversal == traversal_t::walk_k;
         u32_t const resident_blocks = resident_blocks_(attend_k ? vram_kernel_t::attend_k : vram_kernel_t::search_k,
                                                        frontier == frontier_kind_t::wide_arena_k ? 0 : candidate_slots);
-        u32_t const concurrent_walks = device_.multiprocessor_count * resident_blocks * vram_warps_per_block_k;
-        u32_t const filling = filling_rows<u32_t>(expansion, static_cast<u32_t>(connectivity()));
-        std::size_t const arena_warps = std::size_t {walk_blocks_(queries_count, resident_blocks)} *
+        u32_t const concurrent_walks = core.device_.multiprocessor_count * resident_blocks * vram_warps_per_block_k;
+        u32_t const filling = filling_rows<u32_t>(expansion, static_cast<u32_t>(core.connectivity()));
+        std::size_t const arena_warps = std::size_t {core.walk_blocks_(queries_count, resident_blocks)} *
                                         vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = walks ? context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>())
@@ -426,8 +368,8 @@ struct vram_nvidia_index
         // The staging holds the query rows and any head rows first, since they carry the widest
         // alignment, then the window importing them, the heads' weights, then the outputs; stream
         // order serializes its reuse across calls.
-        std::size_t const rows_bytes = (queries_count + heads_rows) * row_bytes();
-        std::size_t const import_bytes = import_bytes_(attend_k ? heads_rows : queries_count, queries.dtype);
+        std::size_t const rows_bytes = (queries_count + heads_rows) * core.row_bytes();
+        std::size_t const import_bytes = core.import_bytes_(attend_k ? heads_rows : queries_count, queries.dtype);
         std::size_t const weights_bytes = indexer_k ? heads_rows * sizeof(f32_t) : 0;
         byte_t* const staging = context.ensure_staging(rows_bytes + import_bytes + weights_bytes + outputs_bytes);
         if (!staging) return {{}, status_t::bad_alloc_k};
@@ -445,17 +387,17 @@ struct vram_nvidia_index
             return {{}, status_t::device_error_k};
         // Pitched uploads: device rows pad to whole fragments, and the pad bytes must be zero for
         // the zero-tail distance identity to hold.
-        if ((import_bytes || packed_row_bytes() != row_bytes()) &&
+        if ((import_bytes || core.packed_row_bytes() != core.row_bytes()) &&
             cuda_fill_async(staging, 0, rows_bytes + import_bytes, stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
-        if (status_t const imported = import_rows_(staging, queries, window, stream); failed(imported))
+        if (status_t const imported = core.import_rows_(staging, queries, window, stream); failed(imported))
             return {{}, imported};
 
         walk_launch_t walk;
         walk.queries = reinterpret_cast<fragment_t const*>(staging);
         walk.queries_count = static_cast<u32_t>(queries_count);
         walk.visible = static_cast<u32_t>(visible);
-        walk.scratch_bytes_per_warp = static_cast<u32_t>(row_bytes());
+        walk.scratch_bytes_per_warp = static_cast<u32_t>(core.row_bytes());
         walk.expansion = expansion;
         walk.arena = arena;
         walk.arena_shape = arena_shape;
@@ -466,10 +408,10 @@ struct vram_nvidia_index
         walk.frontier = frontier;
         walk.outputs = staging + rows_bytes + import_bytes + weights_bytes;
         if constexpr (indexer_k) {
-            byte_t* const staged_heads = staging + queries_count * row_bytes();
+            byte_t* const staged_heads = staging + queries_count * core.row_bytes();
             byte_t* const staged_weights = staging + rows_bytes + import_bytes;
             std::size_t const weights_row_bytes = heads.weights.extent(1) * sizeof(f32_t);
-            if (failed(import_rows_(staged_heads, heads.heads, window, stream)) ||
+            if (failed(core.import_rows_(staged_heads, heads.heads, window, stream)) ||
                 cuda_copy_2d_async(staged_weights, weights_row_bytes, heads.weights.byte_data(),
                                    heads.weights.stride_bytes(0), weights_row_bytes, queries_count,
                                    stream) != cuda_success_k)
@@ -479,8 +421,8 @@ struct vram_nvidia_index
             walk.heads_count = static_cast<u32_t>(heads.weights.extent(1));
         }
         if constexpr (attend_k) {
-            byte_t* const staged_heads = staging + queries_count * row_bytes();
-            if (status_t const imported = import_rows_(staged_heads, heads.rows, window, stream); failed(imported))
+            byte_t* const staged_heads = staging + queries_count * core.row_bytes();
+            if (status_t const imported = core.import_rows_(staged_heads, heads.rows, window, stream); failed(imported))
                 return {{}, imported};
             walk.heads = reinterpret_cast<fragment_t const*>(staged_heads);
             walk.heads_count = static_cast<u32_t>(heads.head_count);
@@ -493,7 +435,7 @@ struct vram_nvidia_index
      *  the context drains, the queries, the heads, both outputs and the context stay live; across
      *  contexts they must not share a buffer at all. */
     template <typename heads_type_ = dummy_heads_t>
-    expected<search_result_t> submit_search_(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
+    expected<search_result_t> submit_search_(core_t& core, rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
                                              nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                              search_config_t config, std::size_t visible,
                                              heads_type_ const& heads = {}) noexcept {
@@ -524,9 +466,9 @@ struct vram_nvidia_index
         std::size_t const scratch_offset = round_up_to_multiple<std::size_t>(ids_bytes + distances_bytes,
                                                                              sizeof(fragment_t));
         std::size_t const outputs_bytes = scans ? scratch_offset +
-                                                      scan_scratch_bytes_(queries_count, config.count, visible)
+                                                      scan_scratch_bytes_(core, queries_count, config.count, visible)
                                                 : ids_bytes + distances_bytes;
-        auto const staged = stage_walk_(queries, heads, context, config.traversal, expansion,
+        auto const staged = stage_walk_(core, queries, heads, context, config.traversal, expansion,
                                         count_slots > 2 ? count_slots : 2, outputs_bytes, visible);
         if (!staged) return {{}, staged.status};
         node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
@@ -534,9 +476,9 @@ struct vram_nvidia_index
                                                  ? reinterpret_cast<distance_t*>(staged.value.outputs + ids_bytes)
                                                  : nullptr;
         cuda_stream_handle_t const stream = context.stream();
-        status_t const launched = scans ? launch_scan_(staged.value, staged.value.outputs + scratch_offset, device_ids,
-                                                       device_distances, config.count, context)
-                                        : launch_search_(staged.value, device_ids, device_distances, config.count,
+        status_t const launched = scans ? launch_scan_(core, staged.value, staged.value.outputs + scratch_offset,
+                                                       device_ids, device_distances, config.count, context)
+                                        : launch_search_(core, staged.value, device_ids, device_distances, config.count,
                                                          context);
         if (failed(launched)) return {{}, launched};
         // The landing may be wider than the count, so a multi-index can hand every shard its own
@@ -555,7 +497,7 @@ struct vram_nvidia_index
 
     /** The submission half of @c multiply: stages the rows, launches walks over the @p visible
      *  rows, and queues the writeback of the kept pairs and the scored counts. */
-    expected<search_result_t> submit_multiply_(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
+    expected<search_result_t> submit_multiply_(core_t& core, rows_view_t left, nk::matrix_span<node_id_t> node_ids,
                                                nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
                                                traversal_context_t& context, search_config_t config,
                                                std::size_t visible) noexcept {
@@ -571,15 +513,15 @@ struct vram_nvidia_index
             return {{}, status_t::unsupported_layout_k};
         std::size_t const ids_bytes = rows_count * wanted * sizeof(node_id_t);
         std::size_t const products_bytes = rows_count * wanted * sizeof(dot_t);
-        auto const staged = stage_walk_(left, dummy_heads_t {}, context, config.traversal,
-                                        non_zero_expansion_factor(config), 2,
+        auto const staged = stage_walk_(core, left, dummy_heads_t {}, context, config.traversal,
+                                        core.non_zero_expansion_factor(config), 2,
                                         ids_bytes + products_bytes + rows_count * sizeof(u32_t), visible);
         if (!staged) return {{}, staged.status};
         node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
         dot_t* const device_products = reinterpret_cast<dot_t*>(staged.value.outputs + ids_bytes);
         u32_t* const device_counts = reinterpret_cast<u32_t*>(staged.value.outputs + ids_bytes + products_bytes);
         cuda_stream_handle_t const stream = context.stream();
-        if (status_t const launched = launch_multiply_(staged.value, device_ids, device_products, device_counts,
+        if (status_t const launched = launch_multiply_(core, staged.value, device_ids, device_products, device_counts,
                                                        static_cast<u32_t>(wanted), context);
             failed(launched))
             return {{}, launched};
@@ -600,20 +542,21 @@ struct vram_nvidia_index
      *  device-resident, with @p exported_bytes more past them for the rows cast on their way out;
      *  the sharded index gathers its other shards' into the rest. */
     template <typename value_lookup_type_>
-    expected<f32_t*> submit_attend_(rows_view_t queries, std::size_t head_count, value_lookup_type_ const& value_lookup,
-                                    f32_t score_scale, traversal_context_t& context, search_config_t config,
-                                    std::size_t blocks, std::size_t exported_bytes, std::size_t visible) noexcept {
+    expected<f32_t*> submit_attend_(core_t& core, rows_view_t queries, std::size_t head_count,
+                                    value_lookup_type_ const& value_lookup, f32_t score_scale,
+                                    traversal_context_t& context, search_config_t config, std::size_t blocks,
+                                    std::size_t exported_bytes, std::size_t visible) noexcept {
         std::size_t const rows_count = queries.rows;
         if (config.traversal != traversal_t::walk_k) return {nullptr, status_t::unsupported_k};
         if (!head_count || rows_count % head_count) return {nullptr, status_t::shape_mismatch_k};
         if (!rows_count) return {nullptr, status_t::success_k};
-        std::size_t const scratch_bytes = vram_attend_scratch_bytes(head_count, dimensions(), wave_lanes());
-        if (!walk_scratch_fits(scratch_bytes)) return {nullptr, status_t::config_mismatch_k};
-        std::size_t const outputs_bytes = rows_count * dimensions() * sizeof(f32_t);
+        std::size_t const scratch_bytes = vram_attend_scratch_bytes(head_count, core.dimensions(), wave_lanes());
+        if (!walk_scratch_fits(core, scratch_bytes)) return {nullptr, status_t::config_mismatch_k};
+        std::size_t const outputs_bytes = rows_count * core.dimensions() * sizeof(f32_t);
         rows_view_t const first_heads {queries.data, rows_count / head_count, queries.columns,
                                        queries.stride * head_count, queries.dtype};
-        auto staged = stage_walk_(first_heads, attend_heads_t {queries, head_count}, context, config.traversal,
-                                  non_zero_expansion_factor(config), 2,
+        auto staged = stage_walk_(core, first_heads, attend_heads_t {queries, head_count}, context, config.traversal,
+                                  core.non_zero_expansion_factor(config), 2,
                                   blocks * (outputs_bytes + rows_count * sizeof(softmax_state_t)) + exported_bytes,
                                   visible);
         if (!staged) return {nullptr, staged.status};
@@ -622,7 +565,7 @@ struct vram_nvidia_index
             return {nullptr, status_t::device_error_k};
         f32_t* const device_outputs = reinterpret_cast<f32_t*>(staged.value.outputs);
         if (status_t const launched = launch_attend_(
-                staged.value, value_lookup, device_outputs,
+                core, staged.value, value_lookup, device_outputs,
                 reinterpret_cast<softmax_state_t*>(staged.value.outputs + outputs_bytes),
                 score_scale * std::numbers::log2e_v<f32_t>, context);
             failed(launched))
@@ -684,11 +627,11 @@ struct vram_nvidia_index
      *  group in round @p round when @p parts parts are given; the back-link passes re-select the
      *  walked rows and the rows they pick, and leave every other row as it was. Nothing waits: the
      *  landing queued after it checks its claims. */
-    status_t refine_pass_(traversal_context_t& context, refine_scratch_t const& scratch, refine_config_t config,
-                          iota_view<node_id_t> nodes, std::span<u32_t const> node_ids, u32_t parts = 0,
-                          u32_t round = 0) noexcept {
-        if (status_t const kept = status(); failed(kept)) return kept;
-        std::size_t const nodes_count = size();
+    status_t refine_pass_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
+                          refine_config_t config, iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
+                          u32_t parts = 0, u32_t round = 0) noexcept {
+        if (status_t const kept = core.status(); failed(kept)) return kept;
+        std::size_t const nodes_count = core.size();
         std::size_t const walk_count = nodes.size();
         cuda_stream_handle_t const stream = context.stream();
         // The claims, the reverse buckets' counters and the bitset of rows the merge re-selects lie
@@ -699,12 +642,12 @@ struct vram_nvidia_index
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the candidate sizes
         // the kernel carries, or walked exactly past them.
-        u32_t const expansion = non_zero_expansion_factor(config);
-        u32_t const candidate_slots = candidate_slots_for_(expansion, 4);
+        u32_t const expansion = core.non_zero_expansion_factor(config);
+        u32_t const candidate_slots = core.candidate_slots_for_(expansion, 4);
         // Walking across makes two walks into one visited set, so the slice is shaped for both.
         u32_t const walks = parts > 1 ? 2 : 1;
-        gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, candidate_slots, walks);
-        std::size_t const arena_warps = device_.multiprocessor_count *
+        gpu_arena_shape_t const arena_shape = core.build_arena_shape_(expansion, candidate_slots, walks);
+        std::size_t const arena_warps = core.device_.multiprocessor_count *
                                         resident_blocks_(vram_kernel_t::refine_k, candidate_slots) *
                                         vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
@@ -722,7 +665,7 @@ struct vram_nvidia_index
         launch.bucket_counts = scratch.bucket_counts;
         launch.touched = scratch.touched;
         launch.claims = scratch.claims;
-        launch.bucket_width = static_cast<u32_t>(connectivity());
+        launch.bucket_width = static_cast<u32_t>(core.connectivity());
         launch.arena = arena;
         launch.arena_shape = arena_shape;
         launch.expansion = expansion;
@@ -736,25 +679,25 @@ struct vram_nvidia_index
         // neighbors with the new reverse links; islands scatter nothing, so only their own rows
         // merge.
         if (node_ids.empty() && walk_count != nodes_count)
-            if (cuda_copy_async(scratch.shadow_neighbors, neighbors_matrix_.base(),
-                                nodes_count * connectivity() * sizeof(u32_t), stream) != cuda_success_k)
+            if (cuda_copy_async(scratch.shadow_neighbors, core.neighbors_matrix_.base(),
+                                nodes_count * core.connectivity() * sizeof(u32_t), stream) != cuda_success_k)
                 return status_t::device_error_k;
-        if (status_t const launched = launch_refine_(launch, context); failed(launched)) return launched;
+        if (status_t const launched = launch_refine_(core, launch, context); failed(launched)) return launched;
 
         // Scatter the walked rows' shadow neighbors in reverse, then merge each touched node's
         // forward & reverse candidates into its final live row. A heal round over island IDs
         // re-selects the islands' own rows alone: re-judging the rows they pick would drop the
         // links that reconnected earlier islands.
-        return launch_refine_back_links_(launch, context);
+        return launch_refine_back_links_(core, launch, context);
     }
 
     /** Queues a reachability audit from as many stride-spread landmarks as one search draws - the
      *  connectivity - and its first sweep, through @ref queue_sweeps_. Nothing waits; the caller
      *  reads @p landing once its event fired, and queues further sweeps from sweep 2 while the last
      *  one still expanded. */
-    status_t queue_audit_(traversal_context_t& context, refine_scratch_t const& scratch,
+    status_t queue_audit_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
                           audit_landing_t* landing) noexcept {
-        std::size_t const rows = size();
+        std::size_t const rows = core.size();
         cuda_stream_handle_t const stream = context.stream();
         // The bitsets, the levels, the sweeps' expanded counters and the unreached counter lie back
         // to back.
@@ -762,19 +705,19 @@ struct vram_nvidia_index
             cuda_success_k)
             return status_t::device_error_k;
         if (status_t const launched = launch_audit_landmarks_(scratch.reached, scratch.frontier, rows,
-                                                              min_of<std::size_t>(connectivity(), rows), stream);
+                                                              min_of<std::size_t>(core.connectivity(), rows), stream);
             failed(launched))
             return launched;
-        return queue_sweeps_(context, scratch, landing, 1);
+        return queue_sweeps_(core, context, scratch, landing, 1);
     }
 
     /** Queues the audit's sweeps from @p first_sweep up to twice it, so the batches double until
      *  one ends past convergence, then a count of the rows no sweep reached so far, collecting
      *  their IDs when @p scratch has room for them, then the landing of every counter, the last
      *  sweep's expanded count among them. */
-    status_t queue_sweeps_(traversal_context_t& context, refine_scratch_t const& scratch, audit_landing_t* landing,
-                           u32_t first_sweep) noexcept {
-        std::size_t const rows = size();
+    status_t queue_sweeps_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
+                           audit_landing_t* landing, u32_t first_sweep) noexcept {
+        std::size_t const rows = core.size();
         cuda_stream_handle_t const stream = context.stream();
         // A sweep queued past convergence finds the one before it expanded nothing and leaves at
         // entry; odd sweeps grow the first frontier, even ones the second.
@@ -787,7 +730,7 @@ struct vram_nvidia_index
             if (cuda_fill_async(next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k ||
                 cuda_fill_async(expanded, 0, sizeof(u32_t), stream) != cuda_success_k)
                 return status_t::device_error_k;
-            if (status_t const launched = launch_audit_sweep_(scratch.reached, frontier, next_frontier, expanded,
+            if (status_t const launched = launch_audit_sweep_(core, scratch.reached, frontier, next_frontier, expanded,
                                                               expanded_before, scratch.levels, rows, stream);
                 failed(launched))
                 return launched;
@@ -798,30 +741,30 @@ struct vram_nvidia_index
                                                             scratch.unreached, stream);
             failed(launched))
             return launched;
-        return land_counters_(scratch, landing, 2 * first_sweep - 1, stream);
+        return core.land_counters_(scratch, landing, 2 * first_sweep - 1, stream);
     }
 
     /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected
      *  over @p rows rows: the reached in-links first, so no reconnection takes the last link a
      *  reached node is found through, then each island into a reached pick or its landmark. */
-    status_t queue_reconnect_(refine_scratch_t const& scratch, u32_t islands, std::size_t rows,
+    status_t queue_reconnect_(core_t& core, refine_scratch_t const& scratch, u32_t islands, std::size_t rows,
                               cuda_stream_handle_t stream) noexcept {
         if (cuda_fill_async(scratch.in_links, 0, rows * sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
         vram_arguments_t arguments {};
         vram_graph_t& graph = arguments.graph;
-        graph.neighbors = neighbor_rows_();
+        graph.neighbors = core.neighbor_rows_();
         graph.rows_count = static_cast<u32_t>(rows);
-        graph.connectivity = static_cast<u32_t>(connectivity());
+        graph.connectivity = static_cast<u32_t>(core.connectivity());
         graph.reached = scratch.reached;
         graph.in_links = scratch.in_links;
         graph.island_ids = scratch.island_ids;
         graph.islands_count = islands;
-        graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(connectivity(), rows));
+        graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(core.connectivity(), rows));
         graph.reconnected = scratch.reconnected;
         if (status_t const counted = launch_(
                 kernel_function_(vram_kernel_t::reached_in_links_k, 0),
-                device_.multiprocessor_count * resident_blocks_(vram_kernel_t::reached_in_links_k, 0), 0, stream,
+                core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::reached_in_links_k, 0), 0, stream,
                 arguments);
             failed(counted))
             return counted;
@@ -833,23 +776,21 @@ struct vram_nvidia_index
 
 #pragma region Launches
 
-    /** The kernels the base names when it sizes an arena for their grid. */
-    using kernel_t = vram_kernel_t;
-
     /** Blocks of @p kernel on its @p slots rung resident per multiprocessor, as its launch bounds
      *  read them; every grid and the arena behind it are sized by it. */
     static constexpr u32_t resident_blocks_(vram_kernel_t kernel, u32_t slots) noexcept {
-        return cuda_resident_blocks<capability_, vector_dtype_>(kernel, slots);
+        return cuda_resident_blocks<capability_k, vector_dtype_>(kernel, slots);
     }
 
     /** Bytes of a scan's scratch over @p queries queries keeping @p count matches apiece among
      *  @p visible rows: every block of queries' count of finished ranges, then each query's matches
      *  in every range @ref cuda_scan_ranges splits the rows into. */
-    std::size_t scan_scratch_bytes_(std::size_t queries, std::size_t count, std::size_t visible) const noexcept {
+    std::size_t scan_scratch_bytes_(core_t const& core, std::size_t queries, std::size_t count,
+                                    std::size_t visible) const noexcept {
         u32_t const blocks = divide_round_up<u32_t>(static_cast<u32_t>(queries), cuda_scan_tile_k);
         u32_t const resident_blocks = resident_blocks_(vram_kernel_t::scan_k, 0);
-        u32_t const ranges = cuda_scan_ranges(device_.multiprocessor_count * resident_blocks, resident_blocks, blocks,
-                                              static_cast<u32_t>(visible));
+        u32_t const ranges = cuda_scan_ranges(core.device_.multiprocessor_count * resident_blocks, resident_blocks,
+                                              blocks, static_cast<u32_t>(visible));
         return round_up_to_multiple<std::size_t>(blocks, 4) * sizeof(u32_t) +
                queries * ranges * count * gpu_scored_node_bytes<node_id_t>;
     }
@@ -859,13 +800,13 @@ struct vram_nvidia_index
 
     /** Loads the fatbin of @p kernels_type_ onto the device and finds every kernel this dtype
      *  exports bar the attends, by the symbol @ref vram_kernel_symbol spells. */
-    status_t load_kernels_() noexcept {
-        auto [module, status] = cuda_module_t::load(device_.ordinal, kernels_type_::bytes());
+    status_t load_kernels_(core_t& core) noexcept {
+        auto [module, status] = cuda_module_t::load(core.device_.ordinal, kernels_type_::bytes());
         if (failed(status)) return status;
         module_ = std::move(module);
         vram_kernel_symbol_t symbol;
         for (cuda_rung_t const rung : cuda_rungs) {
-            vram_kernel_symbol(symbol, "dense", "cuda_kernel", "cuda_arguments_t", rung.kernel, capability_,
+            vram_kernel_symbol(symbol, "dense", "cuda_kernel", "cuda_arguments_t", rung.kernel, capability_k,
                                vector_dtype_, rung.slots, u32_t {0});
             cuda_function_handle_t& function = kernels_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)];
             if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
@@ -886,22 +827,29 @@ struct vram_nvidia_index
                             cuda_rows_map_t const& rows_map = {}) noexcept {
         return cuda_launch(
             function, blocks, block_threads_k, shared_bytes, stream,
-            cuda_overlaps_launches(capability_) ? cuda_overlap_t::overlapping_k : cuda_overlap_t::serialized_k,
+            cuda_overlaps_launches(capability_k) ? cuda_overlap_t::overlapping_k : cuda_overlap_t::serialized_k,
             cuda_arguments_t {arguments, rows_map});
+    }
+
+    /** Launches the loaded @p kernel on its @p slots rung, as the core's own launches name it. */
+    status_t launch_(vram_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes, cuda_stream_handle_t stream,
+                     vram_arguments_t const& arguments) const noexcept {
+        return launch_(kernel_function_(kernel, slots), blocks, shared_bytes, stream, arguments);
     }
 
     /** The vectors matrix as the tensor map the walks gather rows through, spanning the ceiling the
      *  first reservation froze, so the storage grows under it: encoded by the first walk launch and
      *  kept, while launches racing it use their own. Zeroed where the schedule gathers no rows or
      *  the driver cannot encode the map. Defined in @c vram_nvidia_index.cuh. */
-    cuda_rows_map_t rows_map_() noexcept;
+    cuda_rows_map_t rows_map_(core_t& core) noexcept;
 
     /** Launches the rows of @p build in waves, each queued behind the last and as wide as the IDs
      *  below it, never narrower than @c vram_admission_ramp_floor_k, so every ID a wave admits
      *  walks rows already published, and each followed by the back-link launch that links its
      *  newcomers from the nodes they picked. A wave failing after an earlier one launched keeps
      *  the failure, since those rows can no longer be un-claimed. */
-    status_t launch_insert_(vram_build_t const& build, u32_t candidate_slots, traversal_context_t& context) noexcept {
+    status_t launch_insert_(core_t& core, vram_build_t const& build, u32_t candidate_slots,
+                            traversal_context_t& context) noexcept {
         vram_arguments_t arguments {};
         cuda_stream_handle_t const stream = context.stream();
         cuda_function_handle_t const insert = kernel_function_(vram_kernel_t::insert_k, candidate_slots);
@@ -909,18 +857,20 @@ struct vram_nvidia_index
         // Both launches carve their warps' slices from the one arena, sized for the insert's grid,
         // which the back-link's resident count matches.
         static_assert(resident_blocks_(vram_kernel_t::back_link_k, 0) == resident_blocks_(vram_kernel_t::insert_k, 0));
-        u32_t const blocks = device_.multiprocessor_count * resident_blocks_(vram_kernel_t::insert_k, candidate_slots);
-        u32_t const back_link_rows = reselection_rows_();
-        u32_t const back_link_scratch = build.arena_shape.scratch_bytes ? 0u
-                                                                        : build_scratch_bytes_per_warp(back_link_rows);
-        cuda_rows_map_t const rows_map = rows_map_();
+        u32_t const blocks = core.device_.multiprocessor_count *
+                             resident_blocks_(vram_kernel_t::insert_k, candidate_slots);
+        u32_t const back_link_rows = core.reselection_rows_();
+        u32_t const back_link_scratch = build.arena_shape.scratch_bytes
+                                            ? 0u
+                                            : core.build_scratch_bytes_per_warp(back_link_rows);
+        cuda_rows_map_t const rows_map = rows_map_(core);
         auto zeroed = [&](u32_t* counters, u32_t count) noexcept {
             return cuda_fill_async(counters, 0, count * sizeof(u32_t), stream) == cuda_success_k;
         };
         // Overlapping launches claim from three counters a wave, the insert's, the back-link's and
         // the touched count, which one fill zeroes ahead of the waves they serve, so no fill sits
         // between two launches and keeps the later one from overlapping the earlier one's drain.
-        constexpr bool chained_k = cuda_overlaps_launches(capability_);
+        constexpr bool chained_k = cuda_overlaps_launches(capability_k);
         constexpr u32_t chained_waves_k = cuda_claim_counters_k / 3;
         for (u32_t wave_first = build.first_id, wave = 0; wave_first != build.end_id; ++wave) {
             u32_t const wave_end = static_cast<u32_t>(
@@ -929,7 +879,7 @@ struct vram_nvidia_index
             u32_t const slot = wave % chained_waves_k;
             u32_t* const counters = build.assigned_rows + (chained_k ? 3 * slot : 0);
             arguments.build = build;
-            arguments.build.staging = build.staging + std::size_t {offset} * row_bytes();
+            arguments.build.staging = build.staging + std::size_t {offset} * core.row_bytes();
             arguments.build.first_id = wave_first;
             arguments.build.end_id = wave_end;
             arguments.build.epoch_base = build.epoch_base + offset;
@@ -941,29 +891,29 @@ struct vram_nvidia_index
             if (succeeded(launched))
                 launched = launch_(insert, blocks, vram_warps_per_block_k * build.scratch_bytes_per_warp, stream,
                                    arguments, rows_map);
-            if (failed(launched)) return offset ? fail_(launched) : launched;
+            if (failed(launched)) return offset ? core.fail_(launched) : launched;
             // The wave's rows are queued now, so a failure past here can no longer be un-claimed.
             arguments.build.scratch_bytes_per_warp = back_link_scratch;
             arguments.build.selection_rows = back_link_rows;
             if constexpr (chained_k) arguments.build.assigned_rows = counters + 1;
-            else if (!zeroed(build.assigned_rows, 1)) return fail_(status_t::device_error_k);
+            else if (!zeroed(build.assigned_rows, 1)) return core.fail_(status_t::device_error_k);
             if (status_t const linked = launch_(back_link, blocks, vram_warps_per_block_k * back_link_scratch, stream,
                                                 arguments);
                 failed(linked))
-                return fail_(linked);
+                return core.fail_(linked);
             wave_first = wave_end;
         }
         return status_t::success_k;
     }
 
     /** Walks the rows of @p launch, landing their re-selected neighbors in its shadow matrix. */
-    status_t launch_refine_(refine_launch_t const& launch, traversal_context_t& context) noexcept {
+    status_t launch_refine_(core_t& core, refine_launch_t const& launch, traversal_context_t& context) noexcept {
         vram_arguments_t arguments {};
-        u32_t const selection_rows = walk_selection_rows_(launch.expansion, launch.candidate_slots);
-        arguments.refine = {storage(), //
+        u32_t const selection_rows = core.walk_selection_rows_(launch.expansion, launch.candidate_slots);
+        arguments.refine = {core.storage(), //
                             launch.shadow_neighbors,
                             launch.nodes.bound,
-                            launch.arena_shape.scratch_bytes ? 0u : build_scratch_bytes_per_warp(selection_rows),
+                            launch.arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(selection_rows),
                             selection_rows,
                             launch.nodes.first,
                             launch.arena,
@@ -977,21 +927,23 @@ struct vram_nvidia_index
                             launch.part_bases,
                             launch.parts,
                             launch.round};
-        return launch_(kernel_function_(vram_kernel_t::refine_k, launch.candidate_slots),
-                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.candidate_slots),
-                       vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments,
-                       rows_map_());
+        return launch_(
+            kernel_function_(vram_kernel_t::refine_k, launch.candidate_slots),
+            core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.candidate_slots),
+            vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments,
+            rows_map_(core));
     }
 
     /** Scatters the walked rows' shadow neighbors into the reverse buckets, then merges every
      *  touched row's forward and reverse candidates into its live neighbors. */
-    status_t launch_refine_back_links_(refine_launch_t const& launch, traversal_context_t& context) noexcept {
+    status_t launch_refine_back_links_(core_t& core, refine_launch_t const& launch,
+                                       traversal_context_t& context) noexcept {
         cuda_stream_handle_t const stream = context.stream();
         vram_arguments_t arguments {};
         vram_graph_t& graph = arguments.graph;
         graph.neighbors = launch.shadow_neighbors;
         graph.rows_count = launch.nodes_count;
-        graph.connectivity = static_cast<u32_t>(connectivity());
+        graph.connectivity = static_cast<u32_t>(core.connectivity());
         graph.first_id = launch.nodes.first;
         graph.walk_count = static_cast<u32_t>(launch.nodes.size());
         graph.node_ids = launch.node_ids;
@@ -1001,7 +953,7 @@ struct vram_nvidia_index
         graph.touched = launch.touched;
         if (status_t const launched = launch_(
                 kernel_function_(vram_kernel_t::scatter_back_links_k, 0),
-                device_.multiprocessor_count * resident_blocks_(vram_kernel_t::scatter_back_links_k, 0), 0, stream,
+                core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::scatter_back_links_k, 0), 0, stream,
                 arguments);
             failed(launched))
             return launched;
@@ -1009,29 +961,32 @@ struct vram_nvidia_index
         // carving its slices from the arena sized for the refine's grid, so it launches that grid.
         static_assert(resident_blocks_(vram_kernel_t::merge_back_links_k, 0) ==
                       resident_blocks_(vram_kernel_t::refine_k, 0));
-        arguments.refine = {storage(),
-                            launch.shadow_neighbors,
-                            launch.nodes_count,
-                            launch.arena_shape.scratch_bytes ? 0u : build_scratch_bytes_per_warp(reselection_rows_()),
-                            reselection_rows_(),
-                            0,
-                            launch.arena,
-                            launch.arena_shape,
-                            launch.expansion,
-                            launch.epoch_base,
-                            context.telemetry_.get(),
-                            launch.claims + 1,
-                            nullptr,
-                            launch.nodes_count,
-                            0};
-        return launch_(kernel_function_(vram_kernel_t::merge_back_links_k, 0),
-                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.candidate_slots),
-                       vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, stream, arguments);
+        arguments.refine = {
+            core.storage(),
+            launch.shadow_neighbors,
+            launch.nodes_count,
+            launch.arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(core.reselection_rows_()),
+            core.reselection_rows_(),
+            0,
+            launch.arena,
+            launch.arena_shape,
+            launch.expansion,
+            launch.epoch_base,
+            context.telemetry_.get(),
+            launch.claims + 1,
+            nullptr,
+            launch.nodes_count,
+            0};
+        return launch_(
+            kernel_function_(vram_kernel_t::merge_back_links_k, 0),
+            core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.candidate_slots),
+            vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, stream, arguments);
     }
 
     /** The search view every walking verb launches over. */
-    vram_search_t search_view_(walk_launch_t const& walk, traversal_context_t& context) const noexcept {
-        return {storage(),
+    vram_search_t search_view_(core_t const& core, walk_launch_t const& walk,
+                               traversal_context_t& context) const noexcept {
+        return {core.storage(),
                 reinterpret_cast<byte_t const*>(walk.queries),
                 walk.queries_count,
                 walk.visible,
@@ -1054,115 +1009,90 @@ struct vram_nvidia_index
 
     /** Launches one walk per query of @p walk through @p function, the @p kernel on the walk's
      *  rung, over @p arguments, and reports the launch's own verdict. */
-    status_t launch_walk_(vram_kernel_t kernel, cuda_function_handle_t function, walk_launch_t const& walk,
-                          vram_arguments_t const& arguments, traversal_context_t& context) noexcept {
-        return launch_(function, walk_blocks_(walk.queries_count, resident_blocks_(kernel, walk_slots_(walk))),
-                       vram_warps_per_block_k * walk.scratch_bytes_per_warp, context.stream(), arguments, rows_map_());
+    status_t launch_walk_(core_t& core, vram_kernel_t kernel, cuda_function_handle_t function,
+                          walk_launch_t const& walk, vram_arguments_t const& arguments,
+                          traversal_context_t& context) noexcept {
+        return launch_(function, core.walk_blocks_(walk.queries_count, resident_blocks_(kernel, walk_slots_(walk))),
+                       vram_warps_per_block_k * walk.scratch_bytes_per_warp, context.stream(), arguments,
+                       rows_map_(core));
     }
 
     /** Walks every query of @p walk, landing its nearest @p count IDs and, unless null, their
      *  distances; staged indexer weights pick the indexer-rescored walk. */
-    status_t launch_search_(walk_launch_t const& walk, node_id_t* ids, distance_t* distances, u32_t count,
+    status_t launch_search_(core_t& core, walk_launch_t const& walk, node_id_t* ids, distance_t* distances, u32_t count,
                             traversal_context_t& context) noexcept {
         vram_arguments_t arguments {};
-        arguments.search = search_view_(walk, context);
-        arguments.search_sink = {ids, distances, count, kernel_};
+        arguments.search = search_view_(core, walk, context);
+        arguments.search_sink = {ids, distances, count, core.kernel_};
         vram_kernel_t kernel = vram_kernel_t::search_k;
         // Only the floating dtypes take indexer heads, so only they rescore.
         if constexpr (floating_scalar<scalar_t>)
             if (walk.weights) {
                 arguments.rescoring = {reinterpret_cast<byte_t const*>(walk.heads), walk.weights, walk.heads_count,
-                                       row_fragments()};
+                                       core.row_fragments()};
                 kernel = vram_kernel_t::search_indexer_k;
             }
-        return launch_walk_(kernel, kernel_function_(kernel, walk_slots_(walk)), walk, arguments, context);
+        return launch_walk_(core, kernel, kernel_function_(kernel, walk_slots_(walk)), walk, arguments, context);
     }
 
     /** Scans every query of @p walk against every visible row on a persistent grid of every block
      *  the device keeps resident, claiming the work items @ref cuda_scan_ranges splits it into and
      *  keeping their matches in @p scratch, and lands each query's nearest @p count IDs and, unless
      *  null, their distances. */
-    status_t launch_scan_(walk_launch_t const& walk, byte_t* scratch, node_id_t* ids, distance_t* distances,
-                          u32_t count, traversal_context_t& context) noexcept {
+    status_t launch_scan_(core_t& core, walk_launch_t const& walk, byte_t* scratch, node_id_t* ids,
+                          distance_t* distances, u32_t count, traversal_context_t& context) noexcept {
         u32_t const blocks = divide_round_up<u32_t>(walk.queries_count, cuda_scan_tile_k);
         // The finished counts start at zero, so the last range of each block to finish merges it.
         if (cuda_fill_async(scratch, 0, round_up_to_multiple<std::size_t>(blocks, 4) * sizeof(u32_t),
                             context.stream()) != cuda_success_k)
             return status_t::device_error_k;
         vram_arguments_t arguments {};
-        arguments.search = search_view_(walk, context);
+        arguments.search = search_view_(core, walk, context);
         arguments.search.arena = scratch;
-        arguments.search_sink = {ids, distances, count, kernel_};
+        arguments.search_sink = {ids, distances, count, core.kernel_};
         return launch_(kernel_function_(vram_kernel_t::scan_k, 0),
-                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::scan_k, 0),
+                       core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::scan_k, 0),
                        cuda_scan_staged_bytes_k, context.stream(), arguments);
     }
 
     /** Walks every row of @p walk, landing up to @p wanted kept pairs per row and the pairs each
      *  scored. */
-    status_t launch_multiply_(walk_launch_t const& walk, node_id_t* ids, dot_t* products, u32_t* counts, u32_t wanted,
-                              traversal_context_t& context) noexcept {
+    status_t launch_multiply_(core_t& core, walk_launch_t const& walk, node_id_t* ids, dot_t* products, u32_t* counts,
+                              u32_t wanted, traversal_context_t& context) noexcept {
         vram_arguments_t arguments {};
-        arguments.search = search_view_(walk, context);
+        arguments.search = search_view_(core, walk, context);
         arguments.multiply_sink = {ids, reinterpret_cast<byte_t*>(products), counts, wanted};
-        return launch_walk_(vram_kernel_t::multiply_k, kernel_function_(vram_kernel_t::multiply_k, walk_slots_(walk)),
-                            walk, arguments, context);
+        return launch_walk_(core, vram_kernel_t::multiply_k,
+                            kernel_function_(vram_kernel_t::multiply_k, walk_slots_(walk)), walk, arguments, context);
     }
 
     /** Walks every token of @p walk under its staged heads, folding the value rows @p value_lookup
      *  resolves into the normalized @p outputs and their @p states; the lookup travels as bytes to
      *  the attend kernel its @c device_lookup_k names, found in the fatbin by name. */
     template <typename value_lookup_type_>
-    status_t launch_attend_(walk_launch_t const& walk, value_lookup_type_ const& value_lookup, f32_t* outputs,
-                            softmax_state_t* states, f32_t logit_scale, traversal_context_t& context) noexcept {
+    status_t launch_attend_(core_t& core, walk_launch_t const& walk, value_lookup_type_ const& value_lookup,
+                            f32_t* outputs, softmax_state_t* states, f32_t logit_scale,
+                            traversal_context_t& context) noexcept {
         static_assert(std::is_trivially_copyable_v<value_lookup_type_> &&
                           sizeof(value_lookup_type_) <= vram_value_lookup_capacity_k &&
                           alignof(value_lookup_type_) <= 16,
                       "A device value lookup travels to the kernels as its own bytes");
         vram_arguments_t arguments {};
-        arguments.search = search_view_(walk, context);
-        arguments.rescoring = {reinterpret_cast<byte_t const*>(walk.heads), nullptr, walk.heads_count, row_fragments()};
+        arguments.search = search_view_(core, walk, context);
+        arguments.rescoring = {reinterpret_cast<byte_t const*>(walk.heads), nullptr, walk.heads_count,
+                               core.row_fragments()};
         vram_attend_t& attend = arguments.attend;
         attend.outputs = outputs;
         attend.states = states;
         attend.missed = context.missed_.get();
         attend.logit_scale = logit_scale;
         attend.heads_count = walk.heads_count;
-        attend.columns = static_cast<u32_t>(dimensions());
+        attend.columns = static_cast<u32_t>(core.dimensions());
         std::memcpy(attend.value_lookup, &value_lookup, sizeof(value_lookup));
         vram_kernel_symbol_t symbol;
-        vram_kernel_symbol(symbol, "dense", "cuda_kernel", "cuda_arguments_t", vram_kernel_t::attend_k, capability_,
+        vram_kernel_symbol(symbol, "dense", "cuda_kernel", "cuda_arguments_t", vram_kernel_t::attend_k, capability_k,
                            vector_dtype_, walk_slots_(walk), u32_t {value_lookup_type_::device_lookup_k});
-        return launch_walk_(vram_kernel_t::attend_k, module_.function(symbol.text), walk, arguments, context);
-    }
-
-    /** Rebuilds the norms of rows @b [first_row,first_row+rows) from their vectors. */
-    status_t launch_derive_norms_(std::size_t first_row, std::size_t rows, cuda_stream_handle_t stream) noexcept {
-        vram_arguments_t arguments {};
-        arguments.graph.storage = storage();
-        arguments.graph.first_id = static_cast<u32_t>(first_row);
-        arguments.graph.rows_count = static_cast<u32_t>(rows);
-        return launch_(kernel_function_(vram_kernel_t::derive_norms_k, 0),
-                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::derive_norms_k, 0), 0, stream,
-                       arguments);
-    }
-
-    /** Rebases rows @p rows of the neighbors matrix from @p source_range onto the IDs from @p shift
-     *  and compacts them, as a load through the bounce does on the host. */
-    status_t launch_rebase_links_(iota_view<node_id_t> rows, iota_view<node_id_t> source_range, node_id_t shift,
-                                  cuda_stream_handle_t stream) noexcept {
-        vram_arguments_t arguments {};
-        vram_graph_t& graph = arguments.graph;
-        graph.neighbors = neighbor_rows_();
-        graph.connectivity = static_cast<u32_t>(connectivity());
-        graph.first_id = rows.first;
-        graph.rows_count = static_cast<u32_t>(rows.size());
-        graph.source_first = source_range.first;
-        graph.source_bound = source_range.bound;
-        graph.shift = shift;
-        return launch_(kernel_function_(vram_kernel_t::rebase_links_k, 0),
-                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::rebase_links_k, 0), 0, stream,
-                       arguments);
+        return launch_walk_(core, vram_kernel_t::attend_k, module_.function(symbol.text), walk, arguments, context);
     }
 
     /** Marks the audit's stride-spread landmarks over @p rows rows reached and in @p frontier. */
@@ -1180,14 +1110,14 @@ struct vram_nvidia_index
     /** Expands one level of reachability from @p frontier into @p next_frontier, counting the rows
      *  it expanded in @p expanded and the level in @p levels; a level whose @p expanded_before
      *  reads zero leaves at entry. */
-    status_t launch_audit_sweep_(vram_bitset_t reached, vram_bitset_t frontier, vram_bitset_t next_frontier,
-                                 u32_t* expanded, u32_t const* expanded_before, u32_t* levels, std::size_t rows,
-                                 cuda_stream_handle_t stream) noexcept {
+    status_t launch_audit_sweep_(core_t& core, vram_bitset_t reached, vram_bitset_t frontier,
+                                 vram_bitset_t next_frontier, u32_t* expanded, u32_t const* expanded_before,
+                                 u32_t* levels, std::size_t rows, cuda_stream_handle_t stream) noexcept {
         vram_arguments_t arguments {};
         vram_graph_t& graph = arguments.graph;
-        graph.neighbors = neighbor_rows_();
+        graph.neighbors = core.neighbor_rows_();
         graph.rows_count = static_cast<u32_t>(rows);
-        graph.connectivity = static_cast<u32_t>(connectivity());
+        graph.connectivity = static_cast<u32_t>(core.connectivity());
         graph.reached = reached;
         graph.frontier = frontier;
         graph.next_frontier = next_frontier;
@@ -1195,7 +1125,7 @@ struct vram_nvidia_index
         graph.previous_counter = expanded_before;
         graph.levels = levels;
         return launch_(kernel_function_(vram_kernel_t::reachability_sweep_k, 0),
-                       device_.multiprocessor_count * resident_blocks_(vram_kernel_t::reachability_sweep_k, 0), 0,
+                       core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::reachability_sweep_k, 0), 0,
                        stream, arguments);
     }
 
@@ -1212,55 +1142,10 @@ struct vram_nvidia_index
                        divide_round_up<u32_t>(static_cast<u32_t>(rows), block_threads_k), 0, stream, arguments);
     }
 
-    /** Merges the attended rows and carries of @p shards walks into the first's on @p stream - the
-     *  sharded attend's gather. */
-    status_t launch_merge_attention_(byte_t* blocks, u32_t rows, u32_t columns, u32_t shards,
-                                     cuda_stream_handle_t stream) noexcept {
-        vram_arguments_t arguments {};
-        arguments.attend.outputs = reinterpret_cast<f32_t*>(blocks);
-        arguments.attend.rows = rows;
-        arguments.attend.columns = columns;
-        arguments.attend.shards = shards;
-        return launch_(kernel_function_(vram_kernel_t::merge_attention_k, 0),
-                       divide_round_up<u32_t>(rows, vram_warps_per_block_k), 0, stream, arguments);
-    }
-
-    /** Resolves the @p walked matches per query of @p queries_count at @p ids and @p distances
-     *  through the device @p keys column into @p ranking on @p stream - a sharded search's own
-     *  ranking, gathered or landed as is. */
-    status_t launch_resolve_matches_(node_id_t const* ids, distance_t const* distances, u32_t walked,
-                                     byte_t const* keys, vram_ranking_t const& ranking, u32_t queries_count,
-                                     cuda_stream_handle_t stream) const noexcept {
-        vram_arguments_t arguments {};
-        arguments.matches.ids = ids;
-        arguments.matches.distances = distances;
-        arguments.matches.keys = keys;
-        arguments.matches.ranking = ranking;
-        arguments.matches.walked = walked;
-        arguments.matches.queries_count = queries_count;
-        return launch_(kernel_function_(vram_kernel_t::resolve_matches_k, 0),
-                       divide_round_up<u32_t>(queries_count, vram_warps_per_block_k), 0, stream, arguments);
-    }
-
-    /** Merges @p shards rankings of @p queries_count queries, gathered @p block_bytes apart from
-     *  @p gathered, into @p ranking on @p stream - the sharded search's device gather. */
-    status_t launch_merge_matches_(vram_ranking_t const& gathered, std::size_t block_bytes, u32_t shards,
-                                   vram_ranking_t const& ranking, u32_t queries_count,
-                                   cuda_stream_handle_t stream) const noexcept {
-        vram_arguments_t arguments {};
-        arguments.matches.gathered = gathered;
-        arguments.matches.ranking = ranking;
-        arguments.matches.block_bytes = block_bytes;
-        arguments.matches.queries_count = queries_count;
-        arguments.matches.shards = shards;
-        return launch_(kernel_function_(vram_kernel_t::merge_matches_k, 0),
-                       divide_round_up<u32_t>(queries_count, vram_warps_per_block_k), 0, stream, arguments);
-    }
-
     /** Casts @p count values at @p from in @p from_dtype into @p to in @p to_dtype on @p stream,
      *  through NumKong's plan and its per-unit device conversions. */
-    status_t launch_cast_(void const* from, nk_dtype_t from_dtype, void* to, nk_dtype_t to_dtype, std::size_t count,
-                          cuda_stream_handle_t stream) const noexcept {
+    status_t launch_cast_(core_t const& core, void const* from, nk_dtype_t from_dtype, void* to, nk_dtype_t to_dtype,
+                          std::size_t count, cuda_stream_handle_t stream) const noexcept {
         vram_arguments_t arguments {};
         arguments.cast.from = static_cast<unsigned char const*>(from);
         arguments.cast.to = static_cast<unsigned char*>(to);
@@ -1269,30 +1154,13 @@ struct vram_nvidia_index
             return status_t::unsupported_k;
         u32_t const blocks = static_cast<u32_t>(
             min_of<std::size_t>(divide_round_up<std::size_t>(arguments.cast.plan.units, block_threads_k),
-                                device_.multiprocessor_count * resident_blocks_(vram_kernel_t::cast_k, 0)));
+                                core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::cast_k, 0)));
         return launch_(kernel_function_(vram_kernel_t::cast_k, 0), blocks, 0, stream, arguments);
     }
 
-    /** Narrows @p rows rows of the index's columns at @p from, @p from_stride bytes apart, into
-     *  @p to at the vectors matrix pitch at unit RMS on @p stream, one block per row. */
-    status_t launch_rmscast_(f32_t const* from, std::size_t from_stride, byte_t* to, std::size_t rows,
-                             cuda_stream_handle_t stream) const noexcept {
-        vram_arguments_t arguments {};
-        nk_each_rmsnorm_arguments_t& rmscast = arguments.rmscast;
-        rmscast.x = reinterpret_cast<unsigned char const*>(from);
-        rmscast.y = reinterpret_cast<unsigned char*>(to);
-        rmscast.groups = 1;
-        rmscast.columns = dimensions();
-        rmscast.vectors = rows;
-        rmscast.x_stride = from_stride;
-        rmscast.y_stride = row_bytes();
-        rmscast.epsilon = std::numeric_limits<f32_t>::min();
-        u32_t const blocks = static_cast<u32_t>(
-            min_of<std::size_t>(rows, device_.multiprocessor_count * resident_blocks_(vram_kernel_t::rmscast_k, 0)));
-        return launch_(kernel_function_(vram_kernel_t::rmscast_k, 0), blocks, 0, stream, arguments);
-    }
-
 #pragma endregion Launches
+
+  private:
 
     /** This ceiling's fatbin on this device, and its kernels in @ref vram_kernel_t order, the
      *  attends left to their launches. */
@@ -1305,6 +1173,301 @@ struct vram_nvidia_index
     /** Zero until a launch claims the map's encoding, one while it writes @ref rows_map_kept_, and
      *  two once published, read and written through atomic references. */
     u32_t rows_map_state_ = 0;
+};
+
+/**
+ *  @brief Vector Search index for a single uniform latency memory space on NVIDIA GPUs.
+ *
+ *  Owns the @c vram_shard_core that holds everything but the kernels, and forwards to it; see
+ *  @ref dense_vram_nvidia_index_concurrency for how a batch's rows publish on the device. The
+ *  kernels come from the fatbin @p kernels_type_ hands out through its static @c bytes, compiled
+ *  under its @c capability_k, and a checkpoint load's bounce halves demote through
+ *  @p cache_hints_type_.
+ */
+template <                                                                      //
+    nk_dtype_t vector_dtype_,                                                   //
+    typename kernels_type_,                                                     //
+    typename cache_hints_type_ = dummy_cache_hints_t,                           //
+    typename vectors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>,   //
+    typename neighbors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>, //
+    typename traversals_allocator_type_ = cuda_arena_allocator_t>               //
+struct vram_nvidia_index {
+
+    using kernels_t = vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
+                                          neighbors_allocator_type_, traversals_allocator_type_>;
+    using core_t = typename kernels_t::core_t;
+    using vendor_t = typename core_t::vendor_t;
+    using vectors_allocator_t = typename core_t::vectors_allocator_t;
+    using neighbors_allocator_t = typename core_t::neighbors_allocator_t;
+    using traversals_allocator_t = typename core_t::traversals_allocator_t;
+    using stream_handle_t = typename core_t::stream_handle_t;
+    using event_t = typename core_t::event_t;
+    using executor_t = typename core_t::executor_t;
+    using device_specs_t = typename core_t::device_specs_t;
+    using scalar_t = typename core_t::scalar_t;
+    using dot_result_t = typename core_t::dot_result_t;
+    using dot_t = typename core_t::dot_t;
+    using norms_t = typename core_t::norms_t;
+    using vectors_view_t = typename core_t::vectors_view_t;
+    using vector_view_t = typename core_t::vector_view_t;
+    using node_id_t = typename core_t::node_id_t;
+    using node_ids_span_t = typename core_t::node_ids_span_t;
+    using distance_t = typename core_t::distance_t;
+    using small_size_t = typename core_t::small_size_t;
+    using traversal_context_t = typename core_t::traversal_context_t;
+    using saved_shape_t = typename core_t::saved_shape_t;
+    using columns_t = typename core_t::columns_t;
+    using columns_view_t = typename core_t::columns_view_t;
+    using reserve_capacity_t = typename core_t::reserve_capacity_t;
+    using insert_config_t = typename core_t::insert_config_t;
+    using insert_result_t = typename core_t::insert_result_t;
+    using search_config_t = typename core_t::search_config_t;
+    using search_result_t = typename core_t::search_result_t;
+    using refine_config_t = typename core_t::refine_config_t;
+    using refine_result_t = typename core_t::refine_result_t;
+    using health_result_t = typename core_t::health_result_t;
+    using refine_plan_t = typename core_t::refine_plan_t;
+    using save_plan_t = typename core_t::save_plan_t;
+    using load_plan_t = typename core_t::load_plan_t;
+
+    inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
+    inline static constexpr std::size_t batch_rows_log2_k = core_t::batch_rows_log2_k;
+    inline static constexpr std::size_t max_node_count_k = core_t::max_node_count_k;
+    inline static constexpr synchronization_t synchronization_ceiling_k = core_t::synchronization_ceiling_k;
+
+    /** The capability of the quads kit the ladder picked under the fatbin's, surfaced in the
+     *  bench reports; read only where the NVIDIA kits are visible, as its initializer is. */
+    inline static constexpr nk_capability_t picked_quads_capability_k =
+        quads_ladder<scalar_t, kernels_t::capability_k>::picked_k;
+
+    explicit vram_nvidia_index(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
+                               neighbors_allocator_t const& neighbors_allocator = {}) noexcept
+        : core_(kernel, vectors_allocator, neighbors_allocator) {}
+
+    std::size_t size() const noexcept { return core_.size(); }
+    status_t status() const noexcept { return core_.status(); }
+    std::size_t capacity() const noexcept { return core_.capacity(); }
+    std::size_t connectivity() const noexcept { return core_.connectivity(); }
+    std::size_t dimensions() const noexcept { return core_.dimensions(); }
+    device_specs_t const& device_specs() const noexcept { return core_.device_specs(); }
+    nk_kernel_kind_t kernel() const noexcept { return core_.kernel(); }
+    bool stores_norms() const noexcept { return core_.stores_norms(); }
+    std::size_t row_bytes() const noexcept { return core_.row_bytes(); }
+    saved_shape_t saved_shape() const noexcept { return core_.saved_shape(); }
+    std::size_t memory_usage() const noexcept { return core_.memory_usage(); }
+
+    template <typename config_type_>
+    small_size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
+        return core_.non_zero_expansion_factor(config);
+    }
+
+    u32_t build_scratch_bytes_per_warp(u32_t selection_rows) const noexcept {
+        return core_.build_scratch_bytes_per_warp(selection_rows);
+    }
+
+    bool build_scratch_fits(u32_t scratch_bytes_per_warp) const noexcept {
+        return core_.kernels().build_scratch_fits(core_, scratch_bytes_per_warp);
+    }
+
+    status_t vector(node_id_t node, nk::vector_span<scalar_t> destination, stream_handle_t stream) const noexcept {
+        return core_.vector(node, destination, stream);
+    }
+
+    expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return core_.reserve(config); }
+
+    std::size_t traversal_memory_usage(std::size_t rows, insert_config_t config = {}) const noexcept {
+        return core_.traversal_memory_usage(rows, config);
+    }
+
+    std::size_t traversal_memory_usage(std::size_t rows, search_config_t config) const noexcept {
+        return core_.kernels().traversal_memory_usage(core_, rows, config);
+    }
+
+    std::size_t traversal_memory_usage(std::size_t rows, search_config_t config,
+                                       indexer_heads<scalar_t> const& heads) const noexcept {
+        return core_.traversal_memory_usage(rows, config, heads);
+    }
+
+    std::size_t traversal_memory_usage(std::size_t rows, search_config_t config, std::size_t head_count,
+                                       std::size_t shards = 1) const noexcept {
+        return core_.traversal_memory_usage(rows, config, head_count, shards);
+    }
+
+    std::size_t traversal_memory_usage(refine_config_t config, u32_t walks = 1) const noexcept {
+        return core_.traversal_memory_usage(config, walks);
+    }
+
+    expected<insert_result_t> insert(rows_view_t new_rows, node_ids_span_t assigned_ids, traversal_context_t& context,
+                                     insert_config_t config = {}) noexcept {
+        return core_.insert(new_rows, assigned_ids, context, config);
+    }
+
+    expected<search_result_t> search(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
+                                     nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                     search_config_t config = {},
+                                     completion_t completion = completion_t::blocking_k) noexcept {
+        return core_.search(queries, result_ids, result_distances, context, config, completion);
+    }
+
+    expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads,
+                                     nk::matrix_span<node_id_t> result_ids,
+                                     nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                     search_config_t config = {},
+                                     completion_t completion = completion_t::blocking_k) noexcept
+        requires floating_scalar<scalar_t>
+    {
+        return core_.search(queries, heads, result_ids, result_distances, context, config, completion);
+    }
+
+    expected<search_result_t> search(vector_view_t query_vector, traversal_context_t& context,
+                                     search_config_t config = {}) noexcept {
+        return core_.search(query_vector, context, config);
+    }
+
+    template <typename predicate_type_>
+    expected<search_result_t> search_if(vector_view_t query_vector, predicate_type_&& predicate,
+                                        traversal_context_t& context, search_config_t config = {}) noexcept {
+        return core_.search_if(query_vector, std::forward<predicate_type_>(predicate), context, config);
+    }
+
+    expected<search_result_t> multiply(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
+                                       nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
+                                       traversal_context_t& context, search_config_t config = {},
+                                       completion_t completion = completion_t::blocking_k) noexcept {
+        return core_.multiply(left, node_ids, products, counts, context, config, completion);
+    }
+
+    template <typename value_lookup_type_>
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
+                                     f32_t score_scale, rows_span_t outputs, std::span<softmax_state_t> carry,
+                                     traversal_context_t& context, search_config_t config = {},
+                                     completion_t completion = completion_t::blocking_k) noexcept {
+        return core_.attend(queries, head_count, std::forward<value_lookup_type_>(value_lookup), score_scale, outputs,
+                            carry, context, config, completion);
+    }
+
+    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
+                                        refine_config_t config = {},
+                                        std::span<node_id_t const> part_bases = {}) noexcept {
+        return core_.plan_refine(nodes, context, config, part_bases);
+    }
+
+    expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
+                                     refine_config_t config = {}, std::span<node_id_t const> part_bases = {}) noexcept {
+        return core_.refine(nodes, context, config, part_bases);
+    }
+
+    expected<refine_plan_t> plan_split(std::span<vram_nvidia_index*> receivers, traversal_context_t& context,
+                                       refine_config_t config = {}, u64_t seed = 0) noexcept {
+        return core_.plan_split(receivers, context, config, seed);
+    }
+
+    expected<health_result_t> health(traversal_context_t& context) noexcept { return core_.health(context); }
+
+    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
+                                    typename executor_t::stream_t const& stream,
+                                    node_id_t id_shift = 0) const noexcept {
+        return core_.plan_save(columns, synchronization, stream, id_shift);
+    }
+
+    status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
+                  typename executor_t::stream_t const& stream) const noexcept {
+        return core_.save(columns, synchronization, scratch, stream);
+    }
+
+    expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
+                                    typename executor_t::stream_t const& stream) noexcept {
+        return core_.plan_load(columns, rows, source_range, stream);
+    }
+
+    expected<load_plan_t> plan_load(std::size_t rows, typename executor_t::stream_t const& stream) noexcept {
+        return core_.plan_load(rows, stream);
+    }
+
+    status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
+                  typename executor_t::stream_t const& stream) noexcept {
+        return core_.load(columns, rows, source_range, stream);
+    }
+
+    /** The core, through which a load plan reads another shard's rows. */
+    core_t const& core() const noexcept { return core_; }
+
+  private:
+
+    /** The sharded index walks its shards under one snapshot of their watermarks, merges their
+     *  attends on its first device, and publishes or fails their batches together. */
+    template <typename, nk_dtype_t, typename, typename, typename, typename>
+    friend struct vram_nvidia_indexes;
+    template <typename, typename, typename, template <typename> class, typename>
+    friend struct shard_set;
+    template <typename, typename>
+    friend struct vram_shard_fanout;
+
+    expected<node_id_t> claim_(std::size_t rows) noexcept { return core_.claim_(rows); }
+    void unclaim_(std::size_t first, std::size_t rows) noexcept { core_.unclaim_(first, rows); }
+    status_t publish_(std::size_t first, std::size_t rows) noexcept { return core_.publish_(first, rows); }
+    status_t fail_(status_t failure) noexcept { return core_.fail_(failure); }
+    status_t close_() noexcept { return core_.close_(); }
+    void reopen_() noexcept { core_.reopen_(); }
+    std::size_t exported_bytes_(rows_span_t outputs) const noexcept { return core_.exported_bytes_(outputs); }
+
+    expected<insert_result_t> submit_insert_(rows_view_t new_rows, node_id_t first_id, node_ids_span_t assigned_ids,
+                                             traversal_context_t& context, insert_config_t config) noexcept {
+        return core_.submit_insert_(new_rows, first_id, assigned_ids, context, config);
+    }
+
+    template <typename heads_type_ = dummy_heads_t>
+    expected<search_result_t> submit_search_(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
+                                             nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                             search_config_t config, std::size_t visible,
+                                             heads_type_ const& heads = {}) noexcept {
+        return core_.kernels().submit_search_(core_, queries, result_ids, result_distances, context, config, visible,
+                                              heads);
+    }
+
+    expected<search_result_t> submit_multiply_(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
+                                               nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
+                                               traversal_context_t& context, search_config_t config,
+                                               std::size_t visible) noexcept {
+        return core_.kernels().submit_multiply_(core_, left, node_ids, products, counts, context, config, visible);
+    }
+
+    template <typename value_lookup_type_>
+    expected<f32_t*> submit_attend_(rows_view_t queries, std::size_t head_count, value_lookup_type_ const& value_lookup,
+                                    f32_t score_scale, traversal_context_t& context, search_config_t config,
+                                    std::size_t blocks, std::size_t exported_bytes, std::size_t visible) noexcept {
+        return core_.kernels().submit_attend_(core_, queries, head_count, value_lookup, score_scale, context, config,
+                                              blocks, exported_bytes, visible);
+    }
+
+    status_t launch_resolve_matches_(node_id_t const* ids, distance_t const* distances, u32_t walked,
+                                     byte_t const* keys, vram_ranking_t const& ranking, u32_t queries_count,
+                                     stream_handle_t stream) const noexcept {
+        return core_.launch_resolve_matches_(ids, distances, walked, keys, ranking, queries_count, stream);
+    }
+
+    status_t launch_merge_matches_(vram_ranking_t const& gathered, std::size_t block_bytes, u32_t shards,
+                                   vram_ranking_t const& ranking, u32_t queries_count,
+                                   stream_handle_t stream) const noexcept {
+        return core_.launch_merge_matches_(gathered, block_bytes, shards, ranking, queries_count, stream);
+    }
+
+    status_t launch_merge_attention_(byte_t* blocks, u32_t rows, u32_t columns, u32_t shards,
+                                     stream_handle_t stream) noexcept {
+        return core_.launch_merge_attention_(blocks, rows, columns, shards, stream);
+    }
+
+    status_t landing_refusal_(std::size_t rows, rows_span_t outputs,
+                              std::span<softmax_state_t const> carry) const noexcept {
+        return core_.landing_refusal_(rows, outputs, carry);
+    }
+
+    status_t land_attended_(f32_t* landed, std::size_t blocks, rows_span_t outputs, std::span<softmax_state_t> carry,
+                            stream_handle_t stream) const noexcept {
+        return core_.land_attended_(landed, blocks, outputs, carry, stream);
+    }
+
+    core_t core_;
 };
 
 } // namespace unum::usearch::dense

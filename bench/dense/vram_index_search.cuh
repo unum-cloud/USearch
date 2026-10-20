@@ -15,7 +15,7 @@
  *
  *  Every unit compiles host-only through Clang's CUDA mode, and each binary's entry unit once more
  *  with NVCC device-only, into the binary's own fatbin of every ceiling's kernels, which every
- *  unit's indexes find through @c cuda_bench_fatbin_t.
+ *  unit's indexes find through @c cuda_bench_fatbin.
  */
 #pragma once
 
@@ -59,8 +59,11 @@ constexpr nk_capability_t cuda_ceiling_of(nk_capability_t generation) noexcept {
     return generation == nk_cap_ampere_k ? ampere : ampere | nk_cap_ada_k | generation;
 }
 
-/** The binary's fatbin, which carries every ceiling's kernels. */
-struct cuda_bench_fatbin_t {
+/** The binary's fatbin, which carries every ceiling's kernels, named under the ceiling
+ *  @p capability_ a benchmarked index runs. */
+template <nk_capability_t capability_>
+struct cuda_bench_fatbin {
+    inline static constexpr nk_capability_t capability_k = capability_;
     static bytes_view_t bytes() noexcept {
         return {bench_vram_nvidia_bundle_start,
                 static_cast<std::size_t>(bench_vram_nvidia_bundle_end - bench_vram_nvidia_bundle_start)};
@@ -547,8 +550,8 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability
           typename storage_allocator_, typename workload_type_>
 int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                   int device, nk_kernel_kind_t kernel, workload_type_ const& workload) {
-    using index_t = vram_nvidia_index<stored_dtype_, capability_, cuda_bench_fatbin_t, storage_allocator_,
-                                      storage_allocator_, cuda_device_allocator_t>;
+    using index_t = vram_nvidia_index<stored_dtype_, cuda_bench_fatbin<capability_>, dummy_cache_hints_t,
+                                      storage_allocator_, storage_allocator_, cuda_device_allocator_t>;
     cuda_bench_context<index_t> bench {settings, device, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare(streamed) && run_insertion(streamed) && run_refinement(streamed) &&

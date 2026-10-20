@@ -427,7 +427,12 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability
     requires quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
 int view_and_run(bench_launch<dataset_scalar_type_> const& launch, nvme_settings_t const& nvme,
                  workload_type_ const& workload) {
-    using nvme_t = nvme_indexes<typename workload_type_::key_t, stored_dtype_, capability_>;
+    using nvme_t = nvme_indexes<typename workload_type_::key_t,
+                                typename quads_ladder<typename nk::type_for<stored_dtype_>::type, capability_>::kit_t,
+                                typename tiles_ladder<typename nk::type_for<stored_dtype_>::type, capability_>::kit_t,
+                                typename elementwise_ladder<capability_>::kit_t,
+                                typename rmscast_ladder<typename nk::type_for<stored_dtype_>::type, capability_>::kit_t,
+                                typename visits_hash_set_ladder<capability_>::kit_t>;
     using context_t = nvme_context<nvme_t>;
     using vectors_t = nk::matrix_view<dataset_scalar_type_>;
     utilities::persisted_dataset<dataset_scalar_type_> const& dataset = launch.dataset;

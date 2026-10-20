@@ -82,28 +82,27 @@ namespace unum::usearch::dense {
  *  several hops in flight, expanding the next closest frontier nodes inside its candidates' radius
  *  before earlier hops land, so a full batch walks hop by hop and a lone query takes the queue.
  */
-template <                                          //
-    nk_dtype_t vector_dtype_ = nk_bf16_k,           //
-    nk_capability_t capability_ = nk_cap_icelake_k, //
-    typename engine_type_ = default_io_engine_t     //
+template <                                                    //
+    typename quads_kit_type_ = bf16_serial_quads_kit_t,       //
+    typename visits_kit_type_ = serial_visits_hash_set_kit_t, //
+    typename engine_type_ = default_io_engine_t               //
     >
 struct nvme_index {
 
     // The sharded index walks every part of a row on one thread, through the walk machinery below.
-    template <typename, nk_dtype_t, nk_capability_t, typename>
+    template <typename, typename, typename, typename, typename, typename, typename>
     friend struct nvme_indexes;
-    template <typename, typename>
+    template <typename, typename, typename>
     friend class utilities::row_walker;
 
-    inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
-    inline static constexpr nk_capability_t capability_k = capability_;
+    using scalar_t = typename quads_kit_type_::scalar_t;
+    inline static constexpr nk_dtype_t vector_dtype_k = scalar_t::dtype();
 
     using engine_t = engine_type_;
     using executor_t = nvme_executor<engine_t>;
     using medium_t = typename engine_t::medium_t;
     using arena_t = typename executor_t::arena_t;
 
-    using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using dot_result_t = typename scalar_t::dot_result_t;
     using distance_t = f32_t;
 
@@ -113,16 +112,15 @@ struct nvme_index {
     /** Node identifier within this part, the class-local spelling of @c dense::node_id_t. */
     using node_id_t = dense::node_id_t;
 
+    /** What a walk hands an aggregating predicate beside each key it gathers. */
+    using walk_payload_t = nvme_walk_payload<node_id_t, distance_t>;
+
     using vector_view_t = nk::vector_view<scalar_t>;
     using vectors_view_t = nk::matrix_view<scalar_t>;
     using vector_norms_t = vector_norms<dot_result_t>;
 
-    /** The capability bit of the distance kit the ladder actually picked, lower than @c capability_
-     *  when no SIMD kit is adapted for this dtype yet. */
-    inline static constexpr nk_capability_t picked_quads_capability_k = quads_ladder<scalar_t, capability_>::picked_k;
-
-    /** The distance kit the ladder picked. */
-    using quads_kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
+    /** The distance kit @c src/ picked. */
+    using quads_kit_t = quads_kit_type_;
 
     /** The strongest @c synchronization_t contract this design honors: the payload is immutable, so
      *  arbitrary readers share one instance with no fences at all. */
@@ -266,8 +264,7 @@ struct nvme_index {
 
     /** 8-ary: eight 8-byte scored nodes fill one cache line per level scan. */
     using frontier_queue_t = max_heap_dary<8, scored_node_t, further_scored_node_t, candidates_allocator_t>;
-    using visited_set_t = growing_hash_set<node_id_t, std::hash<node_id_t>, scratch_allocator_t,
-                                           typename visits_hash_set_ladder<capability_>::kit_t>;
+    using visited_set_t = growing_hash_set<node_id_t, std::hash<node_id_t>, scratch_allocator_t, visits_kit_type_>;
 
     /** Where a part keeps its columns: every row of a column as wide as the next. */
     using part_t = nvme_part_t;
@@ -303,7 +300,7 @@ struct nvme_index {
     /** The norms of @p row that @p kernel reads, or none, so a plain dot never sums a landed
      *  row. */
     static vector_norms_t norms_(nk_kernel_kind_t kernel, vector_view_t row) noexcept {
-        return stores_norms_(kernel) ? dense::norms<capability_, scalar_t>(row) : vector_norms_t {};
+        return stores_norms_(kernel) ? dense::norms<quads_kit_t>(row) : vector_norms_t {};
     }
 
 #pragma region Opening
@@ -385,12 +382,15 @@ struct nvme_index {
 
 #pragma region Walks
 
-    /** One walk of one row over one shard: its candidates, its visited set, and the flights it
-     *  waits on. */
+    /** One walk of one row over one shard: its candidates, its admitted set, its visited set, and
+     *  the flights it waits on. */
     struct walk_t {
 
         /** Nodes scored so far, the best ascending. */
         results_array_t results;
+
+        /** Nodes its row admitted so far, the best ascending; empty unless the row admits. */
+        results_array_t admitted;
 
         /** Nodes worth expanding next. */
         frontier_queue_t frontier;
@@ -399,7 +399,7 @@ struct nvme_index {
         visited_set_t visited;
 
         /** Landed score flights awaiting the next quad. */
-        fu::limited_array<u32_t, 4> staged;
+        fu::limited_array<u32_t, quad_lanes_k> staged;
 
         /** Draws this walk's landmarks. */
         splitmix64_t random_generator;
@@ -414,8 +414,8 @@ struct nvme_index {
         nvme_walk_stage_t stage = nvme_walk_stage_t::finished_k;
 
         explicit walk_t(scratch_allocator_t allocator) noexcept
-            : results(candidates_allocator_t(allocator)), frontier(candidates_allocator_t(allocator)),
-              visited(allocator) {}
+            : results(candidates_allocator_t(allocator)), admitted(candidates_allocator_t(allocator)),
+              frontier(candidates_allocator_t(allocator)), visited(allocator) {}
     };
 
     /** The sizes and shared words every thread of one call reads. */
@@ -516,7 +516,9 @@ struct nvme_index {
         std::size_t const flights = walks * shape.walk_flights;
         shape.buffers = flights * shape.buffers_per_flight;
         // What `row_walker::reserve` carves, slice by slice, after padding to the first boundary.
-        std::size_t const per_walk = slice_t::reserved_bytes(results_array_t::memory_usage(shape.queue_sizes.results)) +
+        std::size_t const results_bytes = slice_t::reserved_bytes(
+            results_array_t::memory_usage(shape.queue_sizes.results));
+        std::size_t const per_walk = results_bytes + (row_type_::admitting_k ? results_bytes : 0) +
                                      slice_t::reserved_bytes(
                                          frontier_queue_t::memory_usage(shape.queue_sizes.frontier)) +
                                      slice_t::reserved_bytes(visited_set_t::memory_usage(shape.queue_sizes.visited));
@@ -539,9 +541,9 @@ struct nvme_index {
         row.query_norms = norms_(shape.kernel, row.query);
     }
 
-    /** Scores the staged flights of @p walk as one quad, rescores and folds them through its row,
-     *  and merges them into its candidates through @p walker; short tails replicate lane zero, and
-     *  only real lanes reach the candidates or the telemetry. */
+    /** Scores the staged flights of @p walk as one quad, rescores them through its row, lets an
+     *  admitting row test them, folds them, and merges them into its candidates through @p walker;
+     *  short tails replicate lane zero, and only real lanes reach the candidates or telemetry. */
     template <typename walker_type_>
     [[gnu::always_inline]] static void score_staged_(walker_type_& walker, walk_t& walk) noexcept {
         using row_t = typename walker_type_::row_t;
@@ -550,10 +552,10 @@ struct nvme_index {
         constexpr bool keyed = row_t::key_reads_k == nvme_key_reads_t::scored_k;
         row_t& row = walker.rows_[walk.row_slot];
         nvme_part_t const& part = walker.parts_[walk.shard];
-        std::array<node_id_t, 4> ids;
-        std::array<vector_view_t, 4> vectors;
-        std::array<vector_norms_t, 4> norms;
-        std::array<key_t, 4> keys {};
+        quad<node_id_t> ids;
+        quad<vector_view_t> vectors;
+        quad<vector_norms_t> norms;
+        quad<key_t> keys {};
         for (std::size_t lane = 0; lane != 4; ++lane) {
             u32_t const source = walk.staged[min_of<std::size_t>(lane, fill - 1)];
             ids[lane] = walker.flights_[source].node;
@@ -561,24 +563,20 @@ struct nvme_index {
                 reinterpret_cast<scalar_t const*>(walker.landed_row_(source, nvme_purpose_t::score_k, source)),
                 part.dimensions};
             norms[lane] = norms_(walker.shape_.kernel, vectors[lane]);
-            if constexpr (keyed)
-                keys[lane] = safegraphs_widened_key<key_t>(
-                    walker.landed_row_(source, nvme_purpose_t::key_k, walker.key_buffer_(source)), part.key_dtype);
+            if constexpr (keyed) keys[lane] = walker.landed_key_(source);
         }
         std::span<key_t const> const lane_keys = std::span<key_t const>(keys).first(keyed ? fill : 0);
-        scores_result<dot_result_t, 4> scores = dense::scores<capability_, scalar_t>(walker.shape_.kernel, row.query,
-                                                                                     row.query_norms, vectors, norms);
-        row.rescore(ids, vectors, norms, scores, fill, lane_keys);
+        scores_result<dot_result_t> scores = dense::scores<quads_kit_t>(walker.shape_.kernel, row.query,
+                                                                        row.query_norms, vectors, norms);
+        row.rescore_quad(ids, vectors, norms, scores, fill, lane_keys);
         walker.telemetry_.computed_distances += fill;
-        std::array<scored_node_t, 4> scored_batch;
+        quad<scored_node_t> scored_batch;
         for (std::size_t lane = 0; lane != fill; ++lane)
             scored_batch[lane] = scored_node_t {ids[lane], scores.distances[lane]};
         std::span<scored_node_t> const scored = std::span(scored_batch).first(fill);
         std::span<dot_result_t const> const dots = std::span<dot_result_t const>(scores.dots).first(fill);
-        auto&& fold = row.fold(walk);
-        walk_demand_t demand = walk_demand_t::continue_k;
-        if constexpr (keyed) demand = fold.absorb(scored, dots, lane_keys);
-        else demand = fold.absorb(scored, dots);
+        if constexpr (row_t::admitting_k) walker.admit_scored_(walk, scored);
+        walk_demand_t const demand = row.fold_of_walk(walk).absorb(scored, dots);
         for (u32_t const flight : walk.staged) walker.release_flight_(flight);
         walk.staged.clear();
         if (demand == walk_demand_t::sated_k) {
@@ -587,6 +585,13 @@ struct nvme_index {
         }
         network_sort(scored, closer_scored_node_t {});
         walker.rank_(walk, scored);
+    }
+
+    /** A dense row relates nothing, so every contender goes on to its predicate. */
+    template <typename walker_type_, std::size_t extent_>
+    static void ask_relation_(walker_type_&, walk_t const&, std::span<u32_t const, extent_>,
+                              std::span<admission_t, extent_> related) noexcept {
+        for (admission_t& admission : related) admission = admission_t::admit_k;
     }
 
     /** The batch @ref row_walker::run_walks walks, inside a call of its own: @p rows_count rows
@@ -619,6 +624,7 @@ struct nvme_index {
         using key_t = node_id_t;
         using fold_t = dummy_fold_t;
         inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
+        inline static constexpr bool admitting_k = false;
 
         /** The batch every row of the call reads and writes. */
         struct inputs_t {
@@ -637,18 +643,18 @@ struct nvme_index {
         node_search_row(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
         status_t reserve(std::size_t, std::size_t) noexcept { return status_t::success_k; }
 
-        void prime(std::size_t new_row) noexcept {
+        void prime_row(std::size_t new_row) noexcept {
             row = new_row;
             query = inputs.queries.row(row).as_vector();
             inputs.counts[row] = 0;
         }
-        void rescore(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& vectors,
-                     std::array<vector_norms_t, 4> const& norms, scores_result<dot_result_t, 4>& scores,
-                     std::size_t count, std::span<key_t const>) const noexcept {
+        void rescore_quad(quad<node_id_t> const& ids, quad<vector_view_t> const& vectors,
+                          quad<vector_norms_t> const& norms, scores_result<dot_result_t>& scores, std::size_t count,
+                          std::span<key_t const>) const noexcept {
             if constexpr (!std::is_same_v<heads_type_, dummy_heads_t>)
-                indexer_rescoring<capability_, scalar_t> {inputs.heads->row(row)}(ids, vectors, norms, scores, count);
+                indexer_rescoring<quads_kit_t> {inputs.heads->row(row)}(ids, vectors, norms, scores, count);
         }
-        fold_t fold(walk_t const&) const noexcept { return {}; }
+        fold_t fold_of_walk(walk_t const&) const noexcept { return {}; }
         results_array_t const& stopping_candidates(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const& walk) noexcept {
             std::size_t const kept = min_of(walk.results.size(), inputs.node_ids.extent(1));
@@ -658,10 +664,10 @@ struct nvme_index {
             }
             inputs.counts[row] = kept;
         }
-        std::size_t outputs() const noexcept { return 0; }
-        nvme_locator<u32_t> locator(std::size_t) const noexcept { return {}; }
-        void resolve(std::size_t, key_t const&) noexcept {}
-        status_t finish() noexcept { return status_t::success_k; }
+        std::size_t output_count() const noexcept { return 0; }
+        nvme_locator<u32_t> output_locator(std::size_t) const noexcept { return {}; }
+        void resolve_output_key(std::size_t, key_t const&) noexcept {}
+        status_t finish_row() noexcept { return status_t::success_k; }
     };
 
     /** The batched @ref search under @p heads, or as the kit scores under @c dummy_heads_t. */

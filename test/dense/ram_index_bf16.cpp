@@ -16,7 +16,7 @@ std::size_t test::dense::check_ram_index_bf16(settings_t const& settings) {
     failures_count += test_ram_index_configuration<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>("bf16+angular+flaky",
                                                                                                    settings.seed);
     failures_count +=
-        test_ram_index_configuration<nk_bf16_k, nk_kernel_angular_k, dummy_waiter_t, nk_cap_neonbfdot_k>( //
+        test_ram_index_configuration<nk_bf16_k, nk_kernel_angular_k, fu::standard_yield_t, nk_cap_neonbfdot_k>( //
             "bf16+angular+neonbfdot", settings.seed);
     // The always-built dtype carries a starved cell too, so one-dtype trees still check atomicity.
     failures_count += test_starved_configuration<nk_bf16_k, nk_kernel_angular_k>("bf16+angular+starved", settings.seed);

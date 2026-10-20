@@ -622,7 +622,7 @@ struct vram_apple_index {
                 tally_ += index_->land_pass_(
                     *context_, walked_, phase_ == phase_t::heal_k ? to_span(audit.islands) : std::span<u32_t const> {});
             if (phase_ == phase_t::reselect_k) {
-                if (!stopped_ && ++round_ != rounds_) return true;
+                if (++round_ < rounds_) return true;
                 phase_ = phase_t::audit_k;
                 return true;
             }
@@ -648,7 +648,7 @@ struct vram_apple_index {
         /** Stops the re-selection after the round that landed last, so the next phase audits and
          *  heals; a no-op in any other phase. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k) stopped_ = true, phase_ = phase_t::audit_k;
+            if (phase_ == phase_t::reselect_k) rounds_ = 0, phase_ = phase_t::audit_k;
         }
 
         /** Whether the current phase re-selects the planned range - the phase a caller's
@@ -684,7 +684,6 @@ struct vram_apple_index {
         u32_t parts_ = 0;
         u32_t rounds_ = 1;
         u32_t round_ = 0;
-        bool stopped_ = false;
         phase_t phase_ = phase_t::done_k;
         status_t status_ = status_t::success_k;
         refine_result_t tally_;
@@ -1098,10 +1097,10 @@ struct vram_apple_index {
 
     /** The sharded twin publishes and fails its shard's batches, and walks under its own
      *  snapshot. */
-    template <typename, nk_dtype_t, nk_capability_t, typename>
+    template <typename, nk_dtype_t, nk_capability_t, typename, typename>
     friend struct vram_apple_indexes;
-    template <typename, typename, typename, typename, typename, template <typename> class>
-    friend struct sharded_indexes;
+    template <typename, typename, typename, template <typename> class, typename>
+    friend struct shard_set;
 
   private:
 
@@ -1290,7 +1289,8 @@ struct vram_apple_index {
             byte_t* const landing = staging + row * row_bytes();
             // Zeroed whole, not past the packed bytes, as packed casts write whole bytes only.
             std::memset(landing, 0, row_bytes());
-            import_row<import_capability_k>(
+            import_row<typename elementwise_ladder<import_capability_k>::kit_t,
+                       typename rmscast_ladder<scalar_t, import_capability_k>::kit_t>(
                 rows, row, kernel_, nk::vector_span<scalar_t> {reinterpret_cast<scalar_t*>(landing), dimensions()},
                 widened_row);
         }
@@ -1600,8 +1600,9 @@ struct vram_apple_index {
         std::size_t const rows_bytes = rows_count * row_bytes();
         std::size_t const ids_bytes = rows_count * wanted * sizeof(node_id_t);
         std::size_t const products_bytes = rows_count * wanted * sizeof(dot_t);
+        std::size_t const counts_bytes = rows_count * sizeof(u32_t);
         auto staged = stage_walk_(left, context, expansion, candidate_slots,
-                                  rows_bytes + ids_bytes + products_bytes + rows_count * 4, visible);
+                                  rows_bytes + ids_bytes + products_bytes + counts_bytes, visible);
         if (!staged) return {{}, staged.status};
         metal_arguments_t arguments = staged.value;
         arguments.count = static_cast<u32_t>(wanted);

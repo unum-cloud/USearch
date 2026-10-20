@@ -33,7 +33,7 @@
 #include <optional>    // `std::optional` - a column's prefix sums, present or absent
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
-#include <utility>     // `std::forward`
+#include <utility>     // `std::forward`, `std::move`
 #include <variant>     // `std::variant` - the interchange's three row shapes
 
 #include <yyjson.h> // The JSON reader & writer - exceptions-free C
@@ -1007,6 +1007,111 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(std::string_view path,
         std::memcmp(monolith.data(), safegraphs_prefix_t::magic_k.data(), safegraphs_prefix_t::magic_k.size()) == 0)
         return safegraphs_read_metadata(monolith, allocator);
     return safegraphs_read_manifest(path, allocator);
+}
+
+/** One monolith of a checkpoint a load lists: where it is, what its header says, and the metric
+ *  token its metadata carries. */
+struct safegraphs_catalog_part_t {
+
+    /** The relative path's characters inside the catalog's paths; empty names the checkpoint path
+     *  itself. */
+    iota_view<std::size_t> path;
+
+    /** The part's whole bytes: a mapping's view, or the caller's own buffer. */
+    bytes_view_t monolith;
+
+    /** Rows the monolith holds, per its own header and columns. */
+    std::size_t nodes = 0;
+
+    /** The monolith's header. */
+    safegraphs_header_t header;
+
+    /** The metric token the monolith recorded; empty when it omitted one. */
+    safegraphs_name_t metric;
+};
+
+/** Copies @p path into @p buffer, so a plan outlives the caller's view of it. */
+template <typename allocator_type_>
+status_t safegraphs_keep_path(growing_buffer<char, allocator_type_>& buffer, std::string_view path) noexcept {
+    if (failed(buffer.reserve_exactly(path.size()))) return status_t::bad_alloc_k;
+    for (char const character : path) buffer.push_back_reserved(character);
+    return status_t::success_k;
+}
+
+/** Reads @p part 's header and metric token out of the bytes it carries, parsing on
+ *  @p allocator. */
+template <typename allocator_type_>
+status_t safegraphs_describe_part(safegraphs_catalog_part_t& part, allocator_type_ allocator) noexcept {
+    auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
+        if (field.key == "metric") part.metric = safegraphs_name_t {field.value};
+    };
+    auto const [header, status] = safegraphs_read_header(part.monolith, allocator, per_custom_field);
+    if (failed(status)) return status;
+    if (header.monolith_bytes() > part.monolith.size()) return status_t::malformed_k;
+    part.header = header;
+    part.nodes = header.nodes();
+    return status_t::success_k;
+}
+
+/** Lists @p monolith as a checkpoint's only part. */
+template <typename allocator_type_>
+status_t safegraphs_catalog_monolith(bytes_view_t monolith,
+                                     growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
+                                     allocator_type_ allocator) noexcept {
+    safegraphs_catalog_part_t part;
+    part.monolith = monolith;
+    if (status_t const described = safegraphs_describe_part(part, allocator); failed(described)) return described;
+    return parts.push_back(part);
+}
+
+/**
+ *  @brief Lists the parts of the checkpoint at @p path: the magic makes a lone monolith, anything
+ *      else a manifest whose every part is mapped and its header read now, so no entry is taken on
+ *      trust.
+ *
+ *  The mappings land in @p mappings, which must outlive every read of the parts.
+ */
+template <typename allocator_type_>
+status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t, allocator_type_>& mappings,
+                            growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
+                            allocator_type_ allocator) noexcept {
+    auto [mapping, mapping_status] = mapped_file_t::read(path);
+    if (failed(mapping_status)) return mapping_status;
+    bytes_view_t const checkpoint = mapping.view();
+    if (checkpoint.size() >= safegraphs_prefix_t::magic_k.size() &&
+        std::memcmp(checkpoint.data(), safegraphs_prefix_t::magic_k.data(), safegraphs_prefix_t::magic_k.size()) == 0) {
+        if (status_t const listed = safegraphs_catalog_monolith(checkpoint, parts, allocator); failed(listed))
+            return listed;
+        return mappings.push_back(std::move(mapping));
+    }
+
+    growing_buffer<char, allocator_type_> paths_arena {allocator};
+    status_t kept = status_t::success_k;
+    auto per_part = [&](safegraphs_part_t entry) noexcept {
+        std::size_t const offset = paths_arena.size();
+        for (char const character : entry.path)
+            if (failed(paths_arena.push_back(character))) return kept = status_t::bad_alloc_k, void();
+        safegraphs_catalog_part_t part;
+        part.path = {offset, paths_arena.size()};
+        if (failed(parts.push_back(part))) kept = status_t::bad_alloc_k;
+    };
+    auto const [summary, summary_status] = safegraphs_read_manifest(path, allocator, per_part);
+    if (failed(summary_status)) return summary_status;
+    if (failed(kept)) return kept;
+    if (parts.empty()) return status_t::malformed_k;
+    if (failed(mappings.reserve_exactly(parts.size()))) return status_t::bad_alloc_k;
+    growing_buffer<char, allocator_type_> part_path {allocator};
+    for (safegraphs_catalog_part_t& part : parts) {
+        auto const [sibling, sibling_status] = safegraphs_sibling_path(
+            part_path, path, to_string_view(paths_arena).substr(part.path.first, part.path.size()));
+        if (failed(sibling_status)) return sibling_status;
+        auto [part_mapping, part_mapping_status] = mapped_file_t::read(sibling);
+        if (failed(part_mapping_status)) return part_mapping_status;
+        part.monolith = part_mapping.view();
+        if (status_t const described = safegraphs_describe_part(part, allocator); failed(described)) return described;
+        mappings.push_back_reserved(std::move(part_mapping));
+    }
+    return status_t::success_k;
 }
 
 #pragma endregion Parts

@@ -385,6 +385,21 @@ struct rows_span_t {
     }
 };
 
+/** One candidate a MaxSim query ranks: its position among the plan's candidates and the sum of its
+ *  per-query-row maxima, in NumKong's aggregation type for the stored scalar. */
+template <typename total_type_>
+struct maxsim_ranked {
+
+    /** The candidate's position among the plan's candidates. */
+    u32_t candidate = 0;
+
+    /** Its summed maxima. */
+    total_type_ total {};
+};
+
+static_assert(sizeof(maxsim_ranked<nk::f32_t>) == 8 && sizeof(maxsim_ranked<nk::i64_t>) == 16 &&
+              sizeof(maxsim_ranked<nk::u64_t>) == 16);
+
 /** One ranked hit while @c maxsim_reducer folds a query, then one document's summed maxima. */
 template <typename key_type_>
 struct maxsim_entry {
@@ -434,13 +449,15 @@ class maxsim_reducer {
      *  @param[in] row_distances Distances of the same rankings, parallel to @p row_keys.
      *  @param[in] row_counts Hits ranked per row.
      *  @param[out] keys The best keys of each query, one query per row, as many as its width.
-     *  @param[out] scores Their summed maxima, largest first, parallel to @p keys.
+     *  @param[out] scores Their summed maxima as @p score_type_, largest first, parallel to
+     *      @p keys.
      *  @param[out] counts Keys written per query, one per query.
      *  @return The keys written over every query.
      */
+    template <typename score_type_>
     std::size_t operator()(nk::matrix_view<key_t> row_keys, nk::matrix_view<distance_t> row_distances,
                            std::span<std::size_t const> row_counts, nk::matrix_span<key_t> keys,
-                           nk::matrix_span<f64_t> scores, std::span<std::size_t> counts) noexcept {
+                           nk::matrix_span<score_type_> scores, std::span<std::size_t> counts) noexcept {
         entry_t* const staged = staged_.data();
         std::size_t written = 0;
         for (std::size_t query = 0; query != counts.size(); ++query) {
@@ -468,7 +485,8 @@ class maxsim_reducer {
             std::size_t const kept = min_of(keys.extent(1), unique);
             partial_sort(to_writable_span(staged_).first(unique), kept, better_);
             for (std::size_t rank = 0; rank != kept; ++rank)
-                keys(query, rank) = staged[rank].key, scores(query, rank) = staged[rank].score;
+                keys(query, rank) = staged[rank].key,
+                            scores(query, rank) = static_cast<score_type_>(staged[rank].score);
             counts[query] = kept;
             written += kept;
         }

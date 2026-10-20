@@ -89,6 +89,14 @@ constexpr std::size_t dense_reader_minimal_searches_k = 16;
 
 #pragma region Shared Helpers
 
+/** The capability ceiling an oracle's kernels match @p index_type_ bit for bit under: the CPU
+ *  shard's own quads kit's, or the serial floor for a device shard, whose kernels agree with it. */
+template <typename index_type_>
+constexpr nk_capability_t dense_oracle_capability() noexcept {
+    if constexpr (requires { typename index_type_::quads_kit_t; }) return index_type_::quads_kit_t::capability_k;
+    else return nk_cap_serial_k;
+}
+
 /** Gate: a cell's kit is compiled once its requested ceiling is a bit some ladder actually
  *  picked - a build without the kit must not pass its serial floor under a SIMD name. */
 template <nk_dtype_t dtype_, nk_capability_t caps_>
@@ -567,20 +575,20 @@ std::size_t test_dense_growth_and_recall(make_index_type_ const& make_index, u64
 /**
  *  @brief The predicated search contract, audited against an exact oracle.
  *
- *  The oracle scans every stored vector through the same free kernels the index picked -
- *  @c picked_quads_capability_k - so its distances are bit-identical to the traversal's and
- *  the checks can be exact where approximation permits: a trivially-true predicate must
- *  reproduce @c search verbatim; every reported ID must satisfy its predicate and carry the
- *  oracle's distance for that ID, bit-for-bit; the per-node and batched callable shapes must
- *  agree; excluded self-matches must never surface; recall of the true filtered nearest is
- *  held to the same bar as the unfiltered suite across three selectivity decades - every
- *  other node, one in 16, and one in 64; and an impossible predicate drains legally.
+ *  The oracle scans every stored vector through the same free kernels the index picked - its quads
+ *  kit - so its distances are bit-identical to the traversal's and the checks can be exact where
+ *  approximation permits: a trivially-true predicate must reproduce @c search verbatim; every
+ *  reported ID must satisfy its predicate and carry the oracle's distance for that ID, bit-for-bit;
+ *  the per-node and batched callable shapes must agree; excluded self-matches must never surface;
+ *  recall of the true filtered nearest is held to the same bar as the unfiltered suite across three
+ *  selectivity decades - every other node, one in 16, and one in 64; and an impossible predicate
+ *  drains legally.
  */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, allocation_ledger_t& ledger,
                                            u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
-    constexpr nk_capability_t caps_k = index_type_::picked_quads_capability_k;
+    using oracle_kit_t = typename index_type_::quads_kit_t;
     std::size_t failures = 0;
     std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
     index_type_& index = *index_ptr;
@@ -600,10 +608,10 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
     auto oracle_distance = [&](std::size_t query_row, node_id_t node_id) noexcept {
         auto query_view = vectors.view().row(query_row).as_vector();
         auto node_view = vectors.view().row(node_id).as_vector();
-        auto node_norms = norms<caps_k, scalar_t>(node_view);
-        auto lane_distances = distances<caps_k, scalar_t>(kernel_, query_view, norms<caps_k, scalar_t>(query_view),
-                                                          {node_view, node_view, node_view, node_view},
-                                                          {node_norms, node_norms, node_norms, node_norms});
+        auto node_norms = norms<oracle_kit_t>(node_view);
+        auto lane_distances = distances<oracle_kit_t>(kernel_, query_view, norms<oracle_kit_t>(query_view),
+                                                      {node_view, node_view, node_view, node_view},
+                                                      {node_norms, node_norms, node_norms, node_norms});
         return lane_distances[0];
     };
     // The stochastic landmark seeding rides the context's persistent generator, so exact
@@ -616,7 +624,7 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
     scored_node_t const* reference = unfiltered_context.results.data();
 
     // The trivially-true predicate walks and reports exactly like the unfiltered sibling.
-    auto all_pass = [](node_id_t) noexcept { return admission_t::admit_k; };
+    auto all_pass = quad_predicate([](node_id_t) noexcept { return admission_t::admit_k; });
     typename index_type_::traversal_context_t all_pass_context {{}};
     auto const [with_true, with_true_status] = index.search_if(query, all_pass, all_pass_context);
     failures += expect(with_true_status == status_t::success_k);
@@ -627,14 +635,11 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
     }
 
     // The batched shape must agree with the per-node shape on the same walk.
-    auto even_only = [](node_id_t node_id) noexcept {
-        return node_id % 2 == 0 ? admission_t::admit_k : admission_t::reject_k;
-    };
-    auto even_batched = [](std::span<scored_node_t const> scored, auto& admitted) noexcept {
-        for (scored_node_t const candidate : scored)
-            if (candidate.node_id % 2 == 0) {
-                [[maybe_unused]] fu::status_t const kept = admitted.push_back(candidate);
-            }
+    auto even_only = quad_predicate(
+        [](node_id_t node_id) noexcept { return node_id % 2 == 0 ? admission_t::admit_k : admission_t::reject_k; });
+    auto even_batched = [](std::span<node_id_t const> nodes, std::span<admission_t> admissions) noexcept {
+        for (std::size_t lane = 0; lane != nodes.size(); ++lane)
+            admissions[lane] = nodes[lane] % 2 == 0 ? admission_t::admit_k : admission_t::reject_k;
     };
     typename index_type_::traversal_context_t scalar_context {{}}, batched_context {{}};
     auto const [with_scalar, with_scalar_status] = index.search_if(query, even_only, scalar_context);
@@ -655,9 +660,9 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
     std::size_t const moduli[] = {2, 16, 64};
     std::size_t hits = 0, recall_samples = 0;
     for (std::size_t modulus : moduli) {
-        auto matches = [modulus](node_id_t node_id) noexcept {
+        auto matches = quad_predicate([modulus](node_id_t node_id) noexcept {
             return node_id % modulus == 0 ? admission_t::admit_k : admission_t::reject_k;
-        };
+        });
         for (std::size_t sample = 0; sample != 8; ++sample) {
             std::size_t sampled_row = ((sample * 641 + modulus) % dense_growth_nodes_k) / modulus * modulus;
             if (sample % 2) sampled_row += 1; // An excluded neighbor of a matching row.
@@ -665,11 +670,10 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
             auto const [sampled_result, sampled_status] = index.search_if(vectors.view().row(sampled_row).as_vector(),
                                                                           matches, sampled_context);
             bool const self_matches = sampled_row % modulus == 0;
-            // The sparsest decade may legally drain empty on excluded-row queries: until the
-            // admitted candidates fill, the navigation radius bounds the walk, and no match needs
-            // to fall inside it. A matching self is always near enough to admit.
+            // The walk routes on until its matches fill the breadth or none is left unvisited.
             failures += expect(sampled_status == status_t::success_k);
-            failures += expect(sampled_result.count > 0 || (modulus == 64 && !self_matches));
+            failures += expect_eq(sampled_result.count, min_of(default_expansion_factor(connectivity_16_k),
+                                                               divide_round_up(dense_growth_nodes_k, modulus)));
             scored_node_t const* results = sampled_context.results.data();
             bool self_found = false;
             for (std::size_t match = 0; match != sampled_result.count; ++match) {
@@ -688,7 +692,7 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
         failures += expect(hits * 100 >= recall_samples * dense_minimal_recall_percent_k);
 
     // An impossible predicate drains legally: empty result set, successful status.
-    auto none_pass = [](node_id_t) noexcept { return admission_t::reject_k; };
+    auto none_pass = quad_predicate([](node_id_t) noexcept { return admission_t::reject_k; });
     typename index_type_::traversal_context_t none_context {{}};
     auto const [with_none, with_none_status] = index.search_if(query, none_pass, none_context);
     failures += expect(with_none_status == status_t::success_k);
@@ -715,7 +719,7 @@ std::size_t dense_expect_scan(make_index_type_ const& make_index, allocation_led
     using search_config_t = typename index_type_::search_config_t;
     using small_size_t = typename index_type_::small_size_t;
     constexpr bool device_k = requires { make_index.context(); };
-    constexpr nk_capability_t caps_k = device_k ? nk_cap_serial_k : index_type_::picked_quads_capability_k;
+    using oracle_kit_t = typename quads_ladder<scalar_t, dense_oracle_capability<index_type_>()>::kit_t;
     constexpr std::size_t rows_count = dense_growth_nodes_k, wanted = 10, wide = rows_count + 5;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
@@ -731,25 +735,24 @@ std::size_t dense_expect_scan(make_index_type_ const& make_index, allocation_led
 
     auto all = [](node_id_t) noexcept { return true; };
     auto even = [](node_id_t node) noexcept { return node % 2 == 0; };
-    auto admit_even = [&](node_id_t node) noexcept {
-        return even(node) ? admission_t::admit_k : admission_t::reject_k;
-    };
-    auto admit_even_batched = [&](std::span<scored_node_t const> scored, auto& admitted) noexcept {
-        for (scored_node_t const candidate : scored)
-            if (even(candidate.node_id)) { [[maybe_unused]] fu::status_t const kept = admitted.push_back(candidate); }
+    auto admit_even = quad_predicate(
+        [&](node_id_t node) noexcept { return even(node) ? admission_t::admit_k : admission_t::reject_k; });
+    auto admit_even_batched = [&](std::span<node_id_t const> nodes, std::span<admission_t> admissions) noexcept {
+        for (std::size_t lane = 0; lane != nodes.size(); ++lane)
+            admissions[lane] = even(nodes[lane]) ? admission_t::admit_k : admission_t::reject_k;
     };
     // The ranking left in `context.results` against the oracle's, over the nodes `admits` admits.
     auto expect_ranking = [&](vector_view_t query, std::size_t breadth, auto admits) {
-        auto const query_norms = norms<caps_k, scalar_t>(query);
+        auto const query_norms = norms<oracle_kit_t>(query);
         auto oracle = [&](node_id_t node) noexcept {
             vector_view_t const row = vectors.view().row(row_of_node[node]).as_vector();
             // The serial kits have no squared Euclidean, so the oracle squares their Euclidean.
             if constexpr (kernel_ == nk_kernel_sqeuclidean_k) {
-                distance_t const root = distance<caps_k, scalar_t>(nk_kernel_euclidean_k, query, query_norms, row,
-                                                                   norms<caps_k, scalar_t>(row));
+                distance_t const root = distance<oracle_kit_t>(nk_kernel_euclidean_k, query, query_norms, row,
+                                                               norms<oracle_kit_t>(row));
                 return root * root;
             }
-            else return distance<caps_k, scalar_t>(kernel_, query, query_norms, row, norms<caps_k, scalar_t>(row));
+            else return distance<oracle_kit_t>(kernel_, query, query_norms, row, norms<oracle_kit_t>(row));
         };
         std::vector<distance_t> admitted;
         for (node_id_t node = 0; node != rows_count; ++node)
@@ -1016,11 +1019,12 @@ std::size_t test_dense_indexes_indexer_search(u64_t seed) {
 /**
  *  @brief Sharded scans against a one-to-one oracle over every stored row.
  *
- *  Two shards hold more rows than one first chunk, and the queries outnumber one packed block, so
- *  the scan crosses both seams. Each query - a stored row - ranks its true nearest at their own
- *  distances, a NaN for a self-match included; a predicate narrows the same ranking to the keys it
- *  admits where the residency takes one; and a request wider than the store returns every row. The
- *  serial kit judges a device's ranking.
+ *  Two shards hold more rows than one first chunk, and one of two threads' share of the queries
+ *  outnumbers one packed block, so the scan crosses both seams. Each query - a stored row - ranks
+ *  its true nearest at their own distances, a NaN for a self-match included; a predicate narrows
+ *  the same ranking to the keys it admits where the residency takes one; rows streamed in blocks
+ *  of one kit step, where a cache size blocks them, rank alike; and a request wider than the store
+ *  returns every row. The serial kit judges a device's ranking.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) {
@@ -1028,8 +1032,9 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
     using key_t = typename indexes_type_::key_t;
     using distance_t = typename indexes_type_::distance_t;
     constexpr bool device_k = !ram_collection<indexes_type_>;
-    constexpr nk_capability_t caps_k = device_k ? nk_cap_serial_k : indexes_type_::index_t::picked_quads_capability_k;
-    constexpr std::size_t rows_count = 2100, queries_count = 260, wanted = 10, wide_queries_count = 3;
+    using oracle_kit_t =
+        typename quads_ladder<scalar_t, dense_oracle_capability<typename indexes_type_::index_t>()>::kit_t;
+    constexpr std::size_t rows_count = 2100, queries_count = 520, wanted = 10, wide_queries_count = 3;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
 
@@ -1051,11 +1056,11 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
     auto oracle = nk::matrix<distance_t>::zeros({queries_count, rows_count}).value;
     for (std::size_t query = 0; query != queries_count; ++query) {
         auto const query_vector = queries.row(query).as_vector();
-        auto const query_norms = norms<caps_k, scalar_t>(query_vector);
+        auto const query_norms = norms<oracle_kit_t>(query_vector);
         for (std::size_t row = 0; row != rows_count; ++row) {
             auto const row_vector = vectors.view().row(row).as_vector();
-            oracle(query, row) = distance<caps_k, scalar_t>(kernel_, query_vector, query_norms, row_vector,
-                                                            norms<caps_k, scalar_t>(row_vector));
+            oracle(query, row) = distance<oracle_kit_t>(kernel_, query_vector, query_norms, row_vector,
+                                                        norms<oracle_kit_t>(row_vector));
         }
     }
 
@@ -1066,7 +1071,8 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
     std::vector<std::size_t> counts(queries_count);
     auto all = [](key_t) noexcept { return true; };
     auto even = [](key_t key) noexcept { return static_cast<std::size_t>(key) % 2 == 0; };
-    auto admit_even = [&](key_t key) noexcept { return even(key) ? admission_t::admit_k : admission_t::reject_k; };
+    auto admit_even = quad_predicate(
+        [&](key_t key) noexcept { return even(key) ? admission_t::admit_k : admission_t::reject_k; });
     // One query's found ranking against the oracle's, sorted over the keys `admits` lets through.
     auto expect_ranking = [&](nk::matrix_view<key_t> ranked_keys, nk::matrix_view<distance_t> ranked_distances,
                               std::size_t query, auto admits) {
@@ -1101,6 +1107,17 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
         failures += expect(succeeded(filtered_status));
         for (std::size_t query = 0; query != queries_count; ++query)
             failures += expect_ranking(found_keys.view(), found_distances.view(), query, even);
+    }
+    // A cache smaller than one pack leaves blocks of a single kit step.
+    if constexpr (requires { scan.cache_bytes; }) {
+        typename indexes_type_::search_config_t const blocked {.traversal = traversal_t::scan_k, .cache_bytes = 1};
+        auto const blocked_status = indexes
+                                        .search(queries, driver.executor, blocked, found_keys.span(),
+                                                found_distances.span(), std::span {counts})
+                                        .status;
+        failures += expect(succeeded(blocked_status));
+        for (std::size_t query = 0; query != queries_count; ++query)
+            failures += expect_ranking(found_keys.view(), found_distances.view(), query, all);
     }
 
     auto const wide_queries = vectors(nk::range(std::size_t {0}, wide_queries_count), nk::slice);
@@ -2068,10 +2085,10 @@ std::size_t dense_expect_attention_bounds(nk::matrix_view<scalar_type_> keys, nk
 template <typename scalar_type_>
 typename scalar_type_::dot_result_t dense_native_dot(nk::vector_view<scalar_type_> left,
                                                      nk::vector_view<scalar_type_> right) noexcept {
-    auto const right_norms = norms<nk_cap_serial_k, scalar_type_>(right);
-    return scores<nk_cap_serial_k, scalar_type_>(nk_kernel_dot_k, left, norms<nk_cap_serial_k, scalar_type_>(left),
-                                                 {right, right, right, right},
-                                                 {right_norms, right_norms, right_norms, right_norms})
+    using serial_kit_t = typename quads_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
+    auto const right_norms = norms<serial_kit_t>(right);
+    return scores<serial_kit_t>(nk_kernel_dot_k, left, norms<serial_kit_t>(left), {right, right, right, right},
+                                {right_norms, right_norms, right_norms, right_norms})
         .dots[0];
 }
 
@@ -2307,9 +2324,11 @@ std::size_t test_dense_indexes_products(u64_t seed, placement_types_&... placeme
     else return dense_expect_indexes_products<indexes_type_>(seed, placement...);
 }
 
-/** Sharded MaxSim against the native dots: 64 documents of 4 token rows share their keys, a walk as wide as
- *  the index ranks exactly the oracle's best documents at their exact scores, a default one never scores a
- *  key above its own, and a ragged batch refuses. */
+/** Sharded MaxSim against the native dots: 64 documents of 4 token rows share their keys, a walk
+ *  as wide as the index ranks exactly the oracle's best documents at their exact scores, a default
+ *  one never scores a key above its own, and a ragged batch refuses. Towers taking query offsets
+ *  also score every key a default walk nominates exactly, rank a scan exactly, and cut queries of
+ *  3 and 5 rows from one batch. */
 template <typename indexes_type_, typename... placement_types_>
 std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placement) {
     using scalar_t = typename indexes_type_::scalar_t;
@@ -2318,6 +2337,7 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
     constexpr std::size_t rows_count = dense_thread_nodes_k, tokens_per_document = 4;
     constexpr std::size_t documents_count = rows_count / tokens_per_document;
     constexpr std::size_t rows_per_query = 4, queries_count = 3, wanted = 5;
+    using exact_scores_t = std::array<std::array<f64_t, documents_count>, queries_count>;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
 
@@ -2332,62 +2352,114 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
     failures += expect(
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
 
-    // Each document's exact score per query: every query row's best dot among its tokens, summed. Test rows
-    // are non-negative, so every dot is too, and a row that misses a document only lowers its score.
+    // A document's exact score over query rows [first, end): every row's best dot among its
+    // tokens, summed. Test rows are non-negative, so every dot is too, and a row that misses a
+    // document only lowers its score.
     auto const queries = vectors(nk::range(std::size_t {0}, queries_count * rows_per_query), nk::slice);
-    std::array<std::array<f64_t, documents_count>, queries_count> exact {};
-    for (std::size_t row = 0; row != queries_count * rows_per_query; ++row)
-        for (std::size_t document = 0; document != documents_count; ++document) {
+    auto exact_of = [&](std::size_t first, std::size_t end, std::size_t document) noexcept {
+        f64_t total = 0;
+        for (std::size_t row = first; row != end; ++row) {
             f64_t best = 0;
             for (std::size_t token = 0; token != tokens_per_document; ++token)
                 best = max_of(best, static_cast<f64_t>(dense_native_dot(
                                         queries.row(row).as_vector(),
                                         vectors.view().row(document * tokens_per_document + token).as_vector())));
-            exact[row / rows_per_query][document] += best;
+            total += best;
         }
+        return total;
+    };
+    exact_scores_t exact {};
+    for (std::size_t query = 0; query != queries_count; ++query)
+        for (std::size_t document = 0; document != documents_count; ++document)
+            exact[query][document] = exact_of(query * rows_per_query, (query + 1) * rows_per_query, document);
 
     auto found_keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
     auto found_scores = nk::matrix<f64_t>::zeros({queries_count, wanted}).value;
     std::array<std::size_t, queries_count> counts;
+    // Towers that take query offsets read the same uniform batch through them.
+    constexpr bool uniform_k = requires(nk::matrix_view<scalar_t> rows, search_config_t config) {
+        indexes.maxsim(rows, rows_per_query, driver.executor, config, found_keys.span(), found_scores.span(),
+                       std::span {counts});
+    };
+    std::array<std::size_t, queries_count + 1> uniform_offsets;
+    for (std::size_t query = 0; query != uniform_offsets.size(); ++query)
+        uniform_offsets[query] = query * rows_per_query;
+    auto maxsim_cut = [&](nk::matrix_view<scalar_t> rows, std::span<std::size_t const> offsets,
+                          search_config_t config) noexcept {
+        nk::range_t const landed = nk::range(std::size_t {0}, offsets.size() - 1);
+        if constexpr (uniform_k)
+            return indexes.maxsim(rows, rows_per_query, driver.executor, config, found_keys.span(), found_scores.span(),
+                                  std::span {counts});
+        else
+            return indexes.maxsim(rows, offsets, driver.executor, config, found_keys(landed, nk::slice),
+                                  found_scores(landed, nk::slice),
+                                  std::span<std::size_t>(counts.data(), offsets.size() - 1));
+    };
     auto maxsim = [&](nk::matrix_view<scalar_t> rows, search_config_t config) noexcept {
-        return indexes.maxsim(rows, rows_per_query, driver.executor, config, found_keys.span(), found_scores.span(),
-                              std::span {counts});
+        return maxsim_cut(rows, std::span<std::size_t const> {uniform_offsets}, config);
     };
     auto document_of = [&](std::size_t query, std::size_t rank) noexcept {
         return static_cast<std::size_t>(found_keys(query, rank)) - 1;
     };
 
-    // A walk as wide as the index ranks every token, so the best documents land at their exact scores, up to the
-    // rounding of a device that sums its dots in another order.
+    // Every landed query ranks the best documents of `expected_scores` at their exact scores, up
+    // to the rounding of a device that sums its dots in another order.
+    auto expect_ranked = [&](exact_scores_t const& expected_scores, std::size_t landed) noexcept {
+        std::size_t missed = 0;
+        for (std::size_t query = 0; query != landed; ++query) {
+            std::array<f64_t, documents_count> ranked = expected_scores[query];
+            std::sort(ranked.rbegin(), ranked.rend());
+            missed += expect_eq(counts[query], wanted);
+            for (std::size_t rank = 0; rank != counts[query]; ++rank) {
+                std::size_t const document = document_of(query, rank);
+                missed += expect(document < documents_count);
+                if (document >= documents_count) continue;
+                missed += expect_near(found_scores(query, rank), ranked[rank]) +
+                          expect_near(found_scores(query, rank), expected_scores[query][document]);
+            }
+        }
+        return missed;
+    };
+
+    // A walk as wide as the index ranks every token, so the best documents land at their exact
+    // scores.
     search_config_t const exhaustive {static_cast<typename indexes_type_::index_t::small_size_t>(rows_count)};
     failures += expect(succeeded(maxsim(queries, exhaustive).status));
-    for (std::size_t query = 0; query != queries_count; ++query) {
-        std::array<f64_t, documents_count> ranked = exact[query];
-        std::sort(ranked.rbegin(), ranked.rend());
-        failures += expect_eq(counts[query], wanted);
-        for (std::size_t rank = 0; rank != counts[query]; ++rank) {
-            std::size_t const document = document_of(query, rank);
-            failures += expect(document < documents_count);
-            if (document >= documents_count) continue;
-            failures += expect_near(found_scores(query, rank), ranked[rank]) +
-                        expect_near(found_scores(query, rank), exact[query][document]);
-        }
-    }
+    failures += expect_ranked(exact, queries_count);
 
-    // A default walk may miss a row's best token, so no document scores above its exact value.
+    // A default walk may miss a document, but every document it nominates scores exactly once
+    // its rows reduce; a reducer of walk rankings stays only below the exact value.
     failures += expect(succeeded(maxsim(queries, {}).status));
     for (std::size_t query = 0; query != queries_count; ++query)
         for (std::size_t rank = 0; rank != counts[query]; ++rank) {
             std::size_t const document = document_of(query, rank);
             failures += expect(document < documents_count);
             if (document >= documents_count) continue;
-            // Above its exact value only by rounding.
-            if (found_scores(query, rank) > exact[query][document])
+            if (!uniform_k || found_scores(query, rank) > exact[query][document])
                 failures += expect_near(found_scores(query, rank), exact[query][document]);
         }
 
+    if constexpr (!uniform_k) {
+        // A scan nominates every document, so it ranks as exactly as the widest walk.
+        search_config_t scan;
+        scan.traversal = traversal_t::scan_k;
+        failures += expect(succeeded(maxsim(queries, scan).status));
+        failures += expect_ranked(exact, queries_count);
+
+        // Queries of 3 and 5 rows cut from one batch rank as their own rows dictate.
+        std::array<std::size_t, 3> const ragged_offsets {0, 3, 8};
+        exact_scores_t ragged_exact {};
+        for (std::size_t query = 0; query + 1 != ragged_offsets.size(); ++query)
+            for (std::size_t document = 0; document != documents_count; ++document)
+                ragged_exact[query][document] = exact_of(ragged_offsets[query], ragged_offsets[query + 1], document);
+        failures += expect(
+            succeeded(maxsim_cut(queries, std::span<std::size_t const> {ragged_offsets}, exhaustive).status));
+        failures += expect_ranked(ragged_exact, ragged_offsets.size() - 1);
+    }
+
+    // Offsets past the rows refuse their layout, and rows no uniform query divides their shape.
     failures += expect(maxsim(queries(nk::range(std::size_t {0}, rows_per_query + 1), nk::slice), {}).status ==
-                       status_t::shape_mismatch_k);
+                       (uniform_k ? status_t::shape_mismatch_k : status_t::config_mismatch_k));
     return failures;
 }
 
@@ -2598,9 +2670,8 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
         // Every other step runs the predicated sibling under the same race: all the
         // unfiltered invariants must hold, plus admission purity - no ID the predicate
         // rejects may ever surface, no matter how the writers interleave.
-        auto odd_only = [](node_id_t node_id) noexcept {
-            return node_id % 2 == 1 ? admission_t::admit_k : admission_t::reject_k;
-        };
+        auto odd_only = quad_predicate(
+            [](node_id_t node_id) noexcept { return node_id % 2 == 1 ? admission_t::admit_k : admission_t::reject_k; });
         // A device index answers the predicated sibling with `device_error_k`, its walk running no
         // host predicate, and takes the unfiltered steps alone.
         bool const predicable =
@@ -2858,7 +2929,8 @@ std::size_t test_dense_indexes_arena_growth(u64_t seed) {
     // shard, so all eight surface - narrower candidates could promise only that what surfaces is
     // admitted and ranked.
     typename index_t::search_config_t const exhaustive {static_cast<typename index_t::small_size_t>(rows)};
-    auto sparse = [](key_t key) noexcept { return key % 128 == 0 ? admission_t::admit_k : admission_t::reject_k; };
+    auto sparse = quad_predicate(
+        [](key_t key) noexcept { return key % 128 == 0 ? admission_t::admit_k : admission_t::reject_k; });
     auto found_keys = nk::matrix<key_t>::zeros({queries, wanted}).value;
     auto found_distances = nk::matrix<typename indexes_type_::distance_t>::zeros({queries, wanted}).value;
     std::vector<std::size_t> counts(queries);
@@ -3224,7 +3296,8 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
     using key_t = typename indexes_type_::key_t;
     using distance_t = typename indexes_type_::distance_t;
     constexpr bool device_k = !ram_collection<indexes_type_>;
-    constexpr nk_capability_t caps_k = device_k ? nk_cap_serial_k : indexes_type_::index_t::picked_quads_capability_k;
+    using oracle_kit_t =
+        typename quads_ladder<scalar_t, dense_oracle_capability<typename indexes_type_::index_t>()>::kit_t;
     constexpr std::size_t samples_k = 32, wanted_k = 10, noise_percent_k = 10;
     constexpr nk_kernel_kind_t other_kernel_k = kernel_ == nk_kernel_euclidean_k ? nk_kernel_angular_k
                                                                                  : nk_kernel_euclidean_k;
@@ -3242,11 +3315,11 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
     auto oracle = nk::matrix<distance_t>::zeros({samples_k, rows}).value;
     for (std::size_t query = 0; query != samples_k; ++query) {
         auto const query_vector = queries.view().row(query).as_vector();
-        auto const query_norms = norms<caps_k, scalar_t>(query_vector);
+        auto const query_norms = norms<oracle_kit_t>(query_vector);
         for (std::size_t row = 0; row != rows; ++row) {
             auto const row_vector = vectors.view().row(row).as_vector();
-            oracle(query, row) = distance<caps_k, scalar_t>(kernel_, query_vector, query_norms, row_vector,
-                                                            norms<caps_k, scalar_t>(row_vector));
+            oracle(query, row) = distance<oracle_kit_t>(kernel_, query_vector, query_norms, row_vector,
+                                                        norms<oracle_kit_t>(row_vector));
         }
     }
     // Of the ten nearest rows `indexes` holds by the oracle, how many its walks return; a match

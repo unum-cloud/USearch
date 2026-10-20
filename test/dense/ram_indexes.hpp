@@ -22,12 +22,22 @@
 
 namespace unum::usearch::test::dense {
 
+/** The sharded RAM index over the kits the ladders pick for @p dtype_ under @p caps_, as @c src/
+ *  spells them for a CPU class. */
+template <nk_dtype_t dtype_, nk_capability_t caps_, typename waiter_type_ = fu::standard_yield_t,
+          template <typename> class atomic_ref_ = fu::standard_atomic_ref>
+using ram_indexes_for = ram_indexes<u32_t, typename quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+                                    typename tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+                                    typename elementwise_ladder<caps_>::kit_t,
+                                    typename rmscast_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+                                    typename visits_hash_set_ladder<caps_>::kit_t, waiter_type_, atomic_ref_>;
+
 /** No-op sibling picked when the cell cannot be compiled on this target: its serial
  *  kernels are not adapted yet, or the requested kit is absent from the build. */
-template <                                       //
-    nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
-    typename waiter_type_ = dummy_waiter_t,      //
-    nk_capability_t caps_ = nk_cap_serial_k,     //
+template <                                        //
+    nk_dtype_t dtype_, nk_kernel_kind_t kernel_,  //
+    typename waiter_type_ = fu::standard_yield_t, //
+    nk_capability_t caps_ = nk_cap_serial_k,      //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
 static std::size_t test_ram_indexes_configuration(char const* name, u64_t) {
     if constexpr (!quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
@@ -127,15 +137,148 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
     return failures;
 }
 
-template <                                       //
-    nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
-    typename waiter_type_ = dummy_waiter_t,      //
-    nk_capability_t caps_ = nk_cap_serial_k,     //
+/** A batch planned and dropped before its first step gives back the executor and every shard's
+ *  claim, so planning the same batch again grows no shard and the rows then land. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+static std::size_t test_ram_indexes_abandoned_plan(u64_t seed) {
+    using scalar_t = typename indexes_type_::index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    std::size_t failures = 0;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({dense_thread_nodes_k, connectivity_16_k, dimensions}).status));
+
+    // A whole number of rows per shard, so every rotation deals each shard the same share.
+    std::size_t const rows = indexes.capacity() / indexes.shards_count() * indexes.shards_count();
+    std::size_t const capacity = indexes.capacity();
+    for (std::size_t attempt = 0; attempt != 2; ++attempt) {
+        auto [abandoned, abandoned_status] = indexes.plan_insert(rows, driver.executor);
+        failures += expect(succeeded(abandoned_status));
+    }
+    failures += expect_eq(indexes.capacity(), capacity);
+
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_abandoned_plan"));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    failures += expect(succeeded(indexes.insert(keys, vectors.view(), driver.executor).status));
+    failures += expect_eq(indexes.size(), rows);
+    failures += expect_eq(indexes.capacity(), capacity);
+    return failures;
+}
+
+/** The filtered algebra verbs keep only what their predicate admits: products name even documents
+ *  alone and refuse a scan, MaxSim ranks even documents at their exact scores under a walk and a
+ *  scan alike, and attention folds no key a predicate rejects. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using vector_view_t = typename index_t::vector_view_t;
+    using search_config_t = typename indexes_type_::search_config_t;
+    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
+    else {
+        constexpr std::size_t rows_count = dense_thread_nodes_k, tokens_per_document = 4;
+        constexpr std::size_t documents_count = rows_count / tokens_per_document;
+        constexpr std::size_t rows_per_query = 4, queries_count = 2, wanted = 5;
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        std::size_t failures = 0;
+        dense_indexes_executor<indexes_type_> driver;
+        if (failed(driver.status)) return failures + expect(false);
+        indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+        failures += expect(succeeded(place_shards(indexes)));
+        failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+        auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "filtered_algebra"));
+        std::array<key_t, rows_count> keys;
+        for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(row / tokens_per_document);
+        failures += expect(
+            succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
+        auto const admit_even = quad_predicate(
+            [](key_t key) noexcept { return key % 2 ? admission_t::reject_k : admission_t::admit_k; });
+        search_config_t const exhaustive {static_cast<typename index_t::small_size_t>(rows_count)};
+
+        auto const left = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
+        auto product_keys = nk::matrix<key_t>::zeros({queries_count, rows_count}).value;
+        auto products = nk::matrix<typename indexes_type_::dot_result_t>::zeros({queries_count, rows_count}).value;
+        std::array<std::size_t, queries_count> counts;
+        failures += expect(succeeded(indexes
+                                         .multiply_if(left, driver.executor, exhaustive, product_keys.span(),
+                                                      products.span(), std::span {counts}, admit_even)
+                                         .status));
+        for (std::size_t row = 0; row != queries_count; ++row) {
+            failures += expect(counts[row] > 0 && counts[row] <= rows_count / 2);
+            for (std::size_t pair = 0; pair != min_of(counts[row], rows_count); ++pair)
+                failures += expect(product_keys(row, pair) % 2 == 0);
+        }
+        // No exact product scan exists, so a scan refuses rather than walk.
+        search_config_t scan;
+        scan.traversal = traversal_t::scan_k;
+        failures += expect(indexes
+                               .multiply_if(left, driver.executor, scan, product_keys.span(), products.span(),
+                                            std::span {counts}, admit_even)
+                               .status == status_t::unsupported_k);
+
+        // Every even document's exact score: each query row's best dot among its tokens, summed.
+        auto const queries = vectors(nk::range(std::size_t {0}, queries_count * rows_per_query), nk::slice);
+        std::array<std::array<f64_t, documents_count>, queries_count> exact {};
+        for (std::size_t row = 0; row != queries_count * rows_per_query; ++row)
+            for (std::size_t document = 0; document != documents_count; ++document) {
+                f64_t best = 0;
+                for (std::size_t token = 0; token != tokens_per_document; ++token)
+                    best = max_of(best, static_cast<f64_t>(dense_native_dot(
+                                            queries.row(row).as_vector(),
+                                            vectors.view().row(document * tokens_per_document + token).as_vector())));
+                exact[row / rows_per_query][document] += best;
+            }
+        auto found_keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
+        auto found_scores = nk::matrix<f64_t>::zeros({queries_count, wanted}).value;
+        std::array<std::size_t, queries_count + 1> query_offsets;
+        for (std::size_t query = 0; query != query_offsets.size(); ++query)
+            query_offsets[query] = query * rows_per_query;
+        // An exhaustive walk and a scan nominate every even document alike.
+        for (search_config_t const config : {exhaustive, scan}) {
+            failures += expect(
+                succeeded(indexes
+                              .maxsim_if(queries, std::span<std::size_t const> {query_offsets}, driver.executor, config,
+                                         found_keys.span(), found_scores.span(), std::span {counts}, admit_even)
+                              .status));
+            for (std::size_t query = 0; query != queries_count; ++query) {
+                failures += expect_eq(counts[query], wanted);
+                for (std::size_t rank = 0; rank != counts[query]; ++rank) {
+                    std::size_t const document = static_cast<std::size_t>(found_keys(query, rank));
+                    failures += expect(document < documents_count && document % 2 == 0);
+                    if (document < documents_count)
+                        failures += expect_near(found_scores(query, rank), exact[query][document]);
+                }
+            }
+        }
+
+        // A lookup that never resolves would refuse any key that folds.
+        auto const no_rows = [](std::span<key_t const>, std::span<vector_view_t>) noexcept {};
+        auto const reject_all = quad_predicate([](key_t) noexcept { return admission_t::reject_k; });
+        auto outputs = nk::matrix<f32_t>::zeros({queries_count, dimensions}).value;
+        std::array<softmax_state_t, queries_count> carry;
+        failures += expect(succeeded(indexes
+                                         .attend_if(left, 1, no_rows, 1.0f, outputs.span(), std::span {carry},
+                                                    driver.executor, exhaustive, reject_all)
+                                         .status));
+        for (softmax_state_t const& state : carry) failures += expect_eq(state.partition, 0.0f);
+        return failures;
+    }
+}
+
+template <                                        //
+    nk_dtype_t dtype_, nk_kernel_kind_t kernel_,  //
+    typename waiter_type_ = fu::standard_yield_t, //
+    nk_capability_t caps_ = nk_cap_serial_k,      //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
     requires dense_cell_testable<dtype_, kernel_, caps_>
 static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) {
 
-    using indexes_t = ram_indexes<u32_t, dtype_, caps_, waiter_type_, atomic_ref_>;
+    using indexes_t = ram_indexes_for<dtype_, caps_, waiter_type_, atomic_ref_>;
     if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
 
     // The suite is composed here, not reflected: every call below is a capability claim
@@ -156,13 +299,25 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     failures_count += test_dense_indexes_absorb<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_absorb_many<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_absorb_refusals<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_abandoned_plan<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_split<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_growth<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_indexer_search<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_attend<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_filtered_algebra<indexes_t, kernel_>(seed);
     return report(name, failures_count);
+}
+
+/** The exact scan alone over shards a matrix engine streams under @p caps_, skipped where the build
+ *  lacks the kit or the host its capabilities. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, nk_capability_t caps_>
+std::size_t test_ram_scan_configuration(char const* name, u64_t seed) {
+    if constexpr (!dense_cell_testable<dtype_, kernel_, caps_>) return report(name, "kit not compiled for this target");
+    else if (!dense_cell_admitted<caps_, fu::standard_atomic_ref>())
+        return report(name, "capabilities missing at runtime");
+    else return report(name, test_dense_indexes_scan<ram_indexes_for<dtype_, caps_>, kernel_>(seed));
 }
 
 /** The sharded-index suite entry its translation unit defines and @c dense.cpp

@@ -425,7 +425,7 @@ struct indexes_search_workload_t {
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
 int stage_indexes_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                           std::span<int const> devices, nk_kernel_kind_t kernel, workload_type_ const& workload) {
-    cuda_indexes_context<vram_nvidia_indexes<u32_t, stored_dtype_, capability_, cuda_bench_fatbin_t>> bench {
+    cuda_indexes_context<vram_nvidia_indexes<u32_t, stored_dtype_, cuda_bench_fatbin<capability_>>> bench {
         settings, devices, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare_indexes(streamed) && run_indexes_insertion(streamed) && run_indexes_merge(streamed) &&

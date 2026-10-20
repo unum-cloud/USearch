@@ -33,7 +33,8 @@
 #include <fmt/ranges.h> // `fmt::join`
 
 #include <forkunion.h>
-#include <forkunion/capabilities.hpp>
+#include <forkunion/capabilities.hpp> // `fu::preferred_cache_hints_t` - the engines' line hints
+#include <forkunion/topology.hpp>     // `fu::cache_line_bytes` - the line they step by
 #include <numkong/numkong.h>
 #include <numkong/numkong.hpp>
 #include <stringzilla/stringzilla.hpp>
@@ -152,6 +153,13 @@ inline std::size_t index_of_name(capability_choice<capability_type_> const (&cho
  *  @c fu_capabilities_t C-enum arithmetic is re-typed, so its callers never re-cast. */
 inline fu_capabilities_t effective_schedule(fu_capabilities_t allow) noexcept {
     return static_cast<fu_capabilities_t>(allow & fu_runtime_capabilities());
+}
+
+/** The line the benchmarked engines prefetch by, as `src/` hands it them: this machine's cache
+ *  line, or the default alignment where no platform source names one. */
+inline std::size_t machine_cache_line_bytes() noexcept {
+    std::size_t const machine_line_bytes = fu::cache_line_bytes();
+    return machine_line_bytes ? machine_line_bytes : default_alignment_k;
 }
 
 /** Every schedule bit except the waiter hints - the floor a `--max-schedule` ceiling builds on,

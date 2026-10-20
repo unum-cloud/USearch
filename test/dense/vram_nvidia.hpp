@@ -35,6 +35,7 @@ inline constexpr nk_capability_t dense_nvidia_capabilities_k = nk_cap_cuda_k | n
 /** The suite's own fatbin, carrying every cell's kernels and the attends over its value lookups;
  *  @c vram_nvidia.cu defines @c bytes beside the bytes it embeds. */
 struct dense_nvidia_fatbin_t {
+    inline static constexpr nk_capability_t capability_k = dense_nvidia_capabilities_k;
     static bytes_view_t bytes() noexcept;
 };
 
@@ -43,9 +44,9 @@ struct dense_nvidia_fatbin_t {
  *  runs in @c vram_nvidia.cu instead of the shared composers. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::nvidia_k, dtype_, kernel_> {
-    using index_t = vram_nvidia_index<dtype_, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t,
-                                      counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
-    using indexes_t = vram_nvidia_indexes<u32_t, dtype_, dense_nvidia_capabilities_k, dense_nvidia_fatbin_t>;
+    using index_t = vram_nvidia_index<dtype_, dense_nvidia_fatbin_t, dummy_cache_hints_t, counting_cuda_allocator_t,
+                                      counting_cuda_allocator_t, cuda_device_allocator_t>;
+    using indexes_t = vram_nvidia_indexes<u32_t, dtype_, dense_nvidia_fatbin_t>;
     inline static constexpr char const* vendor_prefix_k = "cuda";
     inline static constexpr bool attends_k = true;
 

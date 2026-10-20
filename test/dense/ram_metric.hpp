@@ -122,6 +122,7 @@ static int check_quads(std::size_t dim) noexcept {
     static_assert(
         quads_ladder<scalar_, caps_>::picked_k == caps_ || quads_ladder<scalar_, caps_>::picked_k == nk_cap_serial_k,
         "Capability cascade selected a tier that was never requested");
+    using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
 
     auto query = nk::vector<scalar_>::zeros(dim).value;
     auto first_candidate = nk::vector<scalar_>::zeros(dim).value;
@@ -140,29 +141,29 @@ static int check_quads(std::size_t dim) noexcept {
     auto third_candidate_view = third_candidate.view();
     auto fourth_candidate_view = fourth_candidate.view();
 
-    auto query_norms = norms<caps_>(query_view);
-    auto first_candidate_norms = norms<caps_>(first_candidate_view);
-    auto second_candidate_norms = norms<caps_>(second_candidate_view);
-    auto third_candidate_norms = norms<caps_>(third_candidate_view);
-    auto fourth_candidate_norms = norms<caps_>(fourth_candidate_view);
+    auto query_norms = norms<quads_kit_t>(query_view);
+    auto first_candidate_norms = norms<quads_kit_t>(first_candidate_view);
+    auto second_candidate_norms = norms<quads_kit_t>(second_candidate_view);
+    auto third_candidate_norms = norms<quads_kit_t>(third_candidate_view);
+    auto fourth_candidate_norms = norms<quads_kit_t>(fourth_candidate_view);
 
     f32_t const first_reference = reference_distance<kernel_>(query_view, first_candidate_view);
     f32_t const second_reference = reference_distance<kernel_>(query_view, second_candidate_view);
     f32_t const third_reference = reference_distance<kernel_>(query_view, third_candidate_view);
     f32_t const fourth_reference = reference_distance<kernel_>(query_view, fourth_candidate_view);
 
-    f32_t const first_measured = distance<caps_>(kernel_, query_view, query_norms,
-                                                 first_candidate_view, //
-                                                 first_candidate_norms);
-    f32_t const second_measured = distance<caps_>(kernel_, query_view, query_norms,
-                                                  second_candidate_view, //
-                                                  second_candidate_norms);
-    f32_t const third_measured = distance<caps_>(kernel_, query_view, query_norms,
-                                                 third_candidate_view, //
-                                                 third_candidate_norms);
-    f32_t const fourth_measured = distance<caps_>(kernel_, query_view, query_norms,
-                                                  fourth_candidate_view, //
-                                                  fourth_candidate_norms);
+    f32_t const first_measured = distance<quads_kit_t>(kernel_, query_view, query_norms,
+                                                       first_candidate_view, //
+                                                       first_candidate_norms);
+    f32_t const second_measured = distance<quads_kit_t>(kernel_, query_view, query_norms,
+                                                        second_candidate_view, //
+                                                        second_candidate_norms);
+    f32_t const third_measured = distance<quads_kit_t>(kernel_, query_view, query_norms,
+                                                       third_candidate_view, //
+                                                       third_candidate_norms);
+    f32_t const fourth_measured = distance<quads_kit_t>(kernel_, query_view, query_norms,
+                                                        fourth_candidate_view, //
+                                                        fourth_candidate_norms);
 
     std::size_t failures = 0;
     failures += expect_near(first_measured, first_reference);
@@ -170,7 +171,7 @@ static int check_quads(std::size_t dim) noexcept {
     failures += expect_near(third_measured, third_reference);
     failures += expect_near(fourth_measured, fourth_reference);
 
-    auto distances_array = distances<caps_>(
+    auto distances_array = distances<quads_kit_t>(
         kernel_, query_view, query_norms,
         {first_candidate_view, second_candidate_view, third_candidate_view, fourth_candidate_view},
         {first_candidate_norms, second_candidate_norms, third_candidate_norms, fourth_candidate_norms});
@@ -210,7 +211,7 @@ static int check_tiles() noexcept {
     std::size_t const stride = static_cast<std::size_t>(queries.stride_bytes(0));
     std::array<typename scalar_::dot_result_t, queries_k> query_sumsqs;
     for (std::size_t query = 0; query != queries_k; ++query)
-        query_sumsqs[query] = norms<caps_>(queries.row(query).as_vector()).sumsq;
+        query_sumsqs[query] = norms<quads_kit_t>(queries.row(query).as_vector()).sumsq;
 
     nk_size_t packed_bytes = 0;
     int failures = expect(tiles_kit_t::pack_size(queries_k, dimensions_k, &packed_bytes) == nk_success_k);
@@ -224,7 +225,7 @@ static int check_tiles() noexcept {
 
     for (std::size_t row = 0; row != rows_k; ++row) {
         auto const row_vector = rows.row(row).as_vector();
-        auto const row_norms = norms<caps_>(row_vector);
+        auto const row_norms = norms<quads_kit_t>(row_vector);
         std::span<raw_dot_t const> const row_dots = to_span(dots.row(row).as_vector());
         for (std::size_t first = 0; first < queries_k; first += 4) {
             std::size_t const lanes = min_of<std::size_t>(4, queries_k - first);
@@ -235,8 +236,8 @@ static int check_tiles() noexcept {
                                                                                  lane_sumsqs);
             for (std::size_t lane = 0; lane != lanes; ++lane) {
                 auto const query_vector = queries.row(first + lane).as_vector();
-                failures += expect_near(tiled[lane], distance<caps_>(kernel_, row_vector, row_norms, query_vector,
-                                                                     norms<caps_>(query_vector)));
+                failures += expect_near(tiled[lane], distance<quads_kit_t>(kernel_, row_vector, row_norms, query_vector,
+                                                                           norms<quads_kit_t>(query_vector)));
             }
         }
     }

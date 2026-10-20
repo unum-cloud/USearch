@@ -18,7 +18,7 @@
 #include <type_traits> // `std::has_unique_object_representations_v`
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref`
-#include <forkunion/types.hpp>   // `fu::standard_yield_t`, `fu::standard_cache_hints_t`
+#include <forkunion/types.hpp>   // `fu::standard_yield_t`
 #include <numkong/tensor.hpp>
 
 #include "usearch/utilities/types.hpp"
@@ -78,120 +78,80 @@ struct ram_cursor;
  *  insertions instead of re-padding one huge matrix. Compatible with CXL-backed allocators.
  */
 template <                                                                    //
-    nk_dtype_t vector_dtype_ = nk_bf16_k,                                     //
-    nk_capability_t capability_ = nk_cap_icelake_k,                           //
+    typename quads_kit_type_ = bf16_serial_quads_kit_t,                       //
+    typename tiles_kit_type_ = no_tiles_kit_t,                                //
+    typename elementwise_kit_type_ = serial_elementwise_kit_t,                //
+    typename rmscast_kit_type_ = no_rmscast_kit_t,                            //
+    typename visits_kit_type_ = serial_visits_hash_set_kit_t,                 //
     typename wait_type_ = fu::standard_yield_t,                               //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
-    typename cache_hints_type_ = fu::standard_cache_hints_t,                  //
+    typename cache_hints_type_ = dummy_cache_hints_t,                         //
     typename vectors_allocator_type_ = std::allocator<byte_t>,                //
     typename neighbors_allocator_type_ = std::allocator<byte_t>,              //
     typename traversals_allocator_type_ = std::allocator<byte_t>              //
     >
 struct ram_index;
 
-/** One quad's worth of predicate-admitted candidates - the buffer handed to batched
- *  @c search_if predicates, bounded by the distance kernels' fan-out. */
-using admissions_t = fu::limited_array<scored_node_t, 4>;
-
 /**
- *  @brief Runs @p predicate over one scored quad, filling @p admissions with what it admits.
+ *  @brief A filtered walk's fold: each scored quad's contenders, the nodes that could still enter
+ *      @c admitted, are asked of @c predicate at their own static extent, and what it admits joins
+ *      @c admitted, at most @c breadth, while the walk routes through all.
  *
- *  Two shapes, detected by signature: a batched functor takes the whole @p scored span and
- *  pushes what it admits, a per-node @c admission_t(node_id_t) functor is walked lane by
- *  lane. @c dummy_predicate_t never reaches here - its callers compile out whole.
+ *  The predicate takes node IDs, usually a @c node_predicate over a key column. An aggregating one
+ *  only gathers the scored nodes, answered at @ref settle.
  */
-template <typename predicate_type_>
-inline void invoke_admission(predicate_type_& predicate, std::span<scored_node_t const> scored,
-                             admissions_t& admissions) noexcept {
-    if constexpr (requires { predicate(scored, admissions); }) predicate(scored, admissions);
-    else
-        for (scored_node_t const candidate : scored)
-            if (predicate(candidate.node_id) == admission_t::admit_k) {
-                // One quad in, four slots of capacity - the buffer cannot refuse.
-                [[maybe_unused]] fu::status_t const admitted = admissions.push_back(candidate);
-            }
-}
-
-/** A predicate over keys lifted onto node IDs through a @p keys_type_ column: a walk's quad is
- *  judged in one call, a scan's row as a span of one. */
-template <typename predicate_type_, typename keys_type_>
-struct keyed_admission {
-    using key_t = typename keys_type_::value_t;
+template <typename predicate_type_, typename ranking_type_>
+struct predicate_fold {
 
     predicate_type_& predicate;
-    keys_type_ const& keys;
-
-    void operator()(std::span<scored_node_t const> scored, admissions_t& admissions) noexcept {
-        std::array<key_t, 4> quad;
-        std::array<admission_t, 4> verdicts;
-        for (std::size_t lane = 0; lane != scored.size(); ++lane) quad[lane] = keys[scored[lane].node_id];
-        judge_keys(predicate, std::span(quad).first(scored.size()), std::span(verdicts).first(scored.size()));
-        for (std::size_t lane = 0; lane != scored.size(); ++lane)
-            if (verdicts[lane] == admission_t::admit_k) {
-                // One quad in, four slots of capacity - the buffer cannot refuse.
-                [[maybe_unused]] fu::status_t const admitted = admissions.push_back(scored[lane]);
-            }
-    }
-
-    admission_t operator()(node_id_t node) noexcept { return judge_key(predicate, keys[node]); }
-};
-
-/** Filtered search as a fold: each quad's matches merge into the admitted candidates, while the
- *  walk keeps routing through whatever the predicate rejects. */
-template <typename predicate_type_, typename candidates_type_>
-struct filtering_fold {
-
-    /** The caller's filter, per-node or batched - see @c invoke_admission. */
-    predicate_type_& predicate;
-
-    /** The candidates matches merge into, ascending by distance. */
-    candidates_type_& admitted;
-
-    /** The breadth @c admitted is capped at. */
-    std::size_t expansion_factor;
-
-    /** Whether @p candidate could still enter @c admitted: always until it fills, then unless its
-     *  worst match is closer, so the predicate never sees a lane the candidates would drop; a tie
-     *  still merges in. */
-    bool contends(scored_node_t const& candidate) const noexcept {
-        return admitted.size() < expansion_factor || !closer_scored_node_t {}(admitted.top(), candidate);
-    }
+    ranking_type_& admitted;
+    std::size_t breadth;
 
     template <typename dot_result_type_>
     walk_demand_t absorb(std::span<scored_node_t const> scored_nodes, std::span<dot_result_type_ const>) noexcept {
-        admissions_t contenders, admissions;
-        for (scored_node_t const candidate : scored_nodes)
-            if (contends(candidate)) {
-                // One quad in, four slots of capacity, so the buffer cannot refuse.
-                [[maybe_unused]] fu::status_t const pushed = contenders.push_back(candidate);
-            }
-        invoke_admission(predicate, std::span<scored_node_t const>(contenders), admissions);
-        network_sort(std::span(admissions), closer_scored_node_t {});
-        admitted.insert(std::span(admissions), expansion_factor);
+        quad<node_id_t> ids;
+        quad<scored_node_t> contenders;
+        std::size_t count = 0;
+        for (scored_node_t const candidate : scored_nodes) {
+            if (!contends_(candidate)) continue;
+            ids[count] = candidate.node_id;
+            contenders[count] = candidate;
+            ++count;
+        }
+        ask_contenders_(ids, contenders, count);
         return walk_demand_t::continue_k;
     }
 
-    /** The keyed form: @p keys hold each lane's key, so a predicate over keys filters a walk that
-     *  has no key column to resolve node IDs through, judging the quad's contenders in one call. */
-    template <typename dot_result_type_, typename key_type_>
-    walk_demand_t absorb(std::span<scored_node_t const> scored_nodes, std::span<dot_result_type_ const>,
-                         std::span<key_type_ const> keys) noexcept {
-        std::array<key_type_, 4> contenders;
-        std::array<std::size_t, 4> lanes;
-        std::array<admission_t, 4> verdicts;
-        std::size_t count = 0;
-        for (std::size_t lane = 0; lane != scored_nodes.size(); ++lane)
-            if (contends(scored_nodes[lane])) contenders[count] = keys[lane], lanes[count++] = lane;
-        judge_keys(predicate, std::span(contenders).first(count), std::span(verdicts).first(count));
-        admissions_t admissions;
-        for (std::size_t index = 0; index != count; ++index)
-            if (verdicts[index] == admission_t::admit_k) {
-                // One quad in, four slots of capacity, so the buffer cannot refuse.
-                [[maybe_unused]] fu::status_t const pushed = admissions.push_back(scored_nodes[lanes[index]]);
-            }
-        network_sort(std::span(admissions), closer_scored_node_t {});
-        admitted.insert(std::span(admissions), expansion_factor);
-        return walk_demand_t::continue_k;
+    /** Answers what an aggregating predicate gathered since the last settle; an immediate one has
+     *  nothing left. */
+    void settle() noexcept {
+        settle_predicate(predicate, [this](scored_node_t const& match) noexcept {
+            [[maybe_unused]] bool const inserted = admitted.insert(scored_node_t {match}, breadth);
+        });
+    }
+
+  private:
+    /** Whether @p candidate could still enter @c admitted: always until it fills, then unless its
+     *  worst match is closer, so the predicate never sees a lane the candidates would drop; a tie
+     *  still merges in. */
+    bool contends_(scored_node_t const& candidate) const noexcept {
+        return admitted.size() < breadth || !closer_scored_node_t {}(admitted.top(), candidate);
+    }
+
+    /** Asks about the @p count leading contenders and merges what an immediate predicate admits as
+     *  one ascending quad, as the walk merges its candidates, so ties rank alike in both. */
+    void ask_contenders_(quad<node_id_t> const& ids, quad<scored_node_t> const& contenders,
+                         std::size_t count) noexcept {
+        quad<scored_node_t> matches;
+        std::size_t matched = 0;
+        auto const gather_match = [&](scored_node_t const& match) noexcept { matches[matched++] = match; };
+        with_static_extent<quad_lanes_k>(count, [&]<std::size_t extent_>() noexcept {
+            ask_quad(predicate, std::span<node_id_t const, extent_>(ids.data(), extent_),
+                     std::span<scored_node_t const, extent_>(contenders.data(), extent_), gather_match);
+        });
+        std::span<scored_node_t> const admitted_quad = std::span(matches).first(matched);
+        network_sort(admitted_quad, closer_scored_node_t {});
+        admitted.insert(admitted_quad, breadth);
     }
 };
 
@@ -203,9 +163,11 @@ concept fold = requires(fold_type_& fold, std::span<scored_node_t const> scored_
     { fold.absorb(scored_nodes, dots) } noexcept -> std::same_as<walk_demand_t>;
 };
 
-/** Graph products of one left-hand row as a fold: each scored pair appends its resolved ID and
- *  its dot as @p product_type_ until the row is full, while @c scored keeps counting past it. */
-template <typename id_type_, typename product_type_, typename resolve_type_ = std::identity>
+/** Graph products of one left-hand row as a fold: each scored pair whose resolved ID the predicate
+ *  admits appends that ID and its dot as @p product_type_ until the row is full, while @c scored
+ *  keeps counting past it. */
+template <typename id_type_, typename product_type_, typename resolve_type_ = std::identity,
+          typename predicate_type_ = dummy_predicate_t>
 struct multiply_fold {
 
     /** The row's ID output. */
@@ -217,14 +179,36 @@ struct multiply_fold {
     /** Maps a walked node ID to the ID the row reports. */
     resolve_type_ resolve = {};
 
+    /** Asked about a quad of resolved IDs; a rejected pair is neither written nor counted. */
+    predicate_type_ predicate = {};
+
     /** Pairs written so far. */
     std::size_t written = 0;
 
-    /** Pairs scored, written or not - above the row's width when it was truncated. */
+    /** Pairs admitted, written or not - above the row's width when it was truncated. */
     std::size_t scored = 0;
 
     template <typename dot_result_type_>
     walk_demand_t absorb(std::span<scored_node_t const> scored_nodes, std::span<dot_result_type_ const> dots) noexcept {
+        with_static_extent<quad_lanes_k>(scored_nodes.size(), [&]<std::size_t extent_>() noexcept {
+            std::array<id_type_, extent_> lane_ids;
+            std::array<admission_t, extent_> admissions;
+            for (std::size_t lane = 0; lane != extent_; ++lane) lane_ids[lane] = resolve(scored_nodes[lane].node_id);
+            predicate(std::span<id_type_ const, extent_>(lane_ids), std::span<admission_t, extent_>(admissions));
+            for (std::size_t lane = 0; lane != extent_; ++lane) {
+                if (admissions[lane] != admission_t::admit_k) continue;
+                if (written != ids.size())
+                    ids[written] = lane_ids[lane], products[written++] = static_cast<product_type_>(dots[lane]);
+                ++scored;
+            }
+        });
+        return walk_demand_t::continue_k;
+    }
+
+    template <typename dot_result_type_>
+    walk_demand_t absorb(std::span<scored_node_t const> scored_nodes, std::span<dot_result_type_ const> dots) noexcept
+        requires std::same_as<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>
+    {
         std::size_t const writable = min_of<std::size_t>(scored_nodes.size(), ids.size() - written);
         for (std::size_t lane = 0; lane != writable; ++lane) {
             ids[written + lane] = resolve(scored_nodes[lane].node_id);
@@ -236,12 +220,19 @@ struct multiply_fold {
     }
 };
 
-/** Whether @p admits lets @p node into an exact scan's matches - always, under the dummy
- *  predicate. */
-template <typename admits_type_>
-bool admitted(admits_type_& admits, node_id_t node) noexcept {
-    if constexpr (std::is_same_v<std::decay_t<admits_type_>, dummy_predicate_t>) return true;
-    else return admits(node) == admission_t::admit_k;
+/** What an exact scan hands an aggregating predicate beside each node it gathers: the row within
+ *  the rows one call scores. */
+using scan_payload_t = u32_t;
+
+/** Asks @p admits about the @p filled leading @p nodes of a quad at their own static extent,
+ *  handing @p keep_row the payload of each one it admits. */
+template <typename admits_type_, typename keep_row_type_>
+void ask_contenders(admits_type_& admits, quad<node_id_t> const& nodes, quad<scan_payload_t> const& payloads,
+                    std::size_t filled, keep_row_type_& keep_row) noexcept {
+    with_static_extent<quad_lanes_k>(filled, [&]<std::size_t extent_>() noexcept {
+        ask_quad(admits, std::span<node_id_t const, extent_>(nodes.data(), extent_),
+                 std::span<scan_payload_t const, extent_>(payloads.data(), extent_), keep_row);
+    });
 }
 
 /**
@@ -253,7 +244,9 @@ bool admitted(admits_type_& admits, node_id_t node) noexcept {
  *  finalizes against four queries at a time through @p quads_kit_type_, so the distances match a
  *  walk's; @p query_sumsqs and every row of @p dots are read in whole quads past the last query.
  *  @p row_sumsq maps a row of @p rows to its stored sum of squares, @p land takes a query's column
- *  and the scored node, and answers that query's new threshold.
+ *  and the scored node, and answers that query's new threshold. @p admits hears each row beating
+ *  some threshold once, a quad of them at a time, or gathered until the step's end when it
+ *  aggregates, while the step's dots still hold its distances.
  */
 template <typename tiles_kit_type_, typename quads_kit_type_, typename row_sumsq_type_, typename admits_type_,
           typename land_type_>
@@ -265,9 +258,9 @@ void scan_tiles(nk_kernel_kind_t kernel, nk::matrix_view<typename quads_kit_type
     using dot_result_t = typename quads_kit_type_::scalar_t::dot_result_t;
     using raw_dot_t = typename dot_result_t::raw_t;
     using finalized_vec_t = typename quads_kit_type_::finalized_vec_t;
+    using row_distances_t = std::array<f32_t, tiles_kit_type_::pack_columns_k>;
     static_assert(sizeof(finalized_vec_t) == 4 * sizeof(raw_dot_t), "A finalizer takes four dot lanes");
     std::size_t const rows_count = rows.extent(0), dimensions = rows.extent(1), columns = thresholds.size();
-    std::array<f32_t, tiles_kit_type_::pack_columns_k> row_distances;
     for (std::size_t offset = 0; offset < rows_count; offset += tiles_kit_type_::stream_rows_k) {
         std::size_t const step_rows = min_of(tiles_kit_type_::stream_rows_k, rows_count - offset);
         nk::matrix_view<typename quads_kit_type_::scalar_t> const step = rows(nk::range(offset, offset + step_rows),
@@ -277,48 +270,73 @@ void scan_tiles(nk_kernel_kind_t kernel, nk::matrix_view<typename quads_kit_type
             static_cast<std::size_t>(step.stride_bytes(0)), static_cast<std::size_t>(dots.stride_bytes(0)), nullptr, 0,
             nullptr);
         assert(scored == nk_success_k && "A matrix engine scores any call");
-        for (std::size_t row = 0; row != step_rows; ++row) {
+        auto distances_of = [&](std::size_t row) noexcept {
             // The finalizer's seats are symmetric, so the stored row takes the query's against four
             // queries.
-            std::span<raw_dot_t const> const row_dots = to_span(dots.row(row).as_vector());
-            dot_result_t const sumsq = row_sumsq(offset + row);
-            for (std::size_t column = 0; column < columns; column += 4) {
-                std::array<f32_t, 4> const quad = convert_to_distances<quads_kit_type_>(
+            row_distances_t row_distances;
+            std::span<raw_dot_t const> const row_dots = to_span(dots.row(row - offset).as_vector());
+            dot_result_t const sumsq = row_sumsq(row);
+            for (std::size_t column = 0; column < columns; column += quad_lanes_k) {
+                quad<f32_t> const column_distances = convert_to_distances<quads_kit_type_>(
                     kernel, *reinterpret_cast<finalized_vec_t const*>(&row_dots[column]), sumsq,
                     *reinterpret_cast<finalized_vec_t const*>(&query_sumsqs[column]));
-                std::memcpy(&row_distances[column], quad.data(), sizeof(quad));
+                std::memcpy(&row_distances[column], column_distances.data(), sizeof(column_distances));
             }
-            bool closer = false;
-            for (std::size_t column = 0; column != columns; ++column)
-                closer |= row_distances[column] < thresholds[column];
-            node_id_t const node = static_cast<node_id_t>(first + offset + row);
-            if (!closer || !admitted(admits, node)) continue;
+            return row_distances;
+        };
+        auto keep_row = [&](scan_payload_t row) noexcept {
+            row_distances_t const row_distances = distances_of(row);
+            node_id_t const node = static_cast<node_id_t>(first + row);
             for (std::size_t column = 0; column != columns; ++column)
                 if (row_distances[column] < thresholds[column])
                     thresholds[column] = land(column, scored_node_t {node, row_distances[column]});
+        };
+        quad<node_id_t> nodes;
+        quad<scan_payload_t> payloads;
+        std::size_t filled = 0;
+        for (std::size_t row = offset; row != offset + step_rows; ++row) {
+            row_distances_t const row_distances = distances_of(row);
+            bool closer = false;
+            for (std::size_t column = 0; column != columns; ++column)
+                closer |= row_distances[column] < thresholds[column];
+            if (!closer) continue;
+            nodes[filled] = static_cast<node_id_t>(first + row), payloads[filled] = static_cast<scan_payload_t>(row);
+            if (++filled != quad_lanes_k) continue;
+            ask_contenders(admits, nodes, payloads, filled, keep_row);
+            filled = 0;
         }
+        ask_contenders(admits, nodes, payloads, filled, keep_row);
+        settle_predicate(admits, keep_row);
     }
+}
+
+/** The most rows an exact scan asks an aggregating predicate between two settles: one streamed step
+ *  of @p tiles_kit_type_ where it is a matrix engine, one quad otherwise. */
+template <typename tiles_kit_type_>
+constexpr std::size_t scan_round_capacity() noexcept {
+    if constexpr (std::is_same_v<tiles_kit_type_, no_tiles_kit_t>) return quad_lanes_k;
+    else return max_of<std::size_t>(tiles_kit_type_::stream_rows_k, quad_lanes_k);
 }
 
 #pragma region Rescorings
 
 /** Indexer heads as a walk's rescoring: each scored dot becomes Σₕ wₕ·ReLU(⟨qₕ, k⟩) and its
  *  distance 1 − score. */
-template <nk_capability_t capability_, typename scalar_type_>
+template <typename quads_kit_type_>
 struct indexer_rescoring {
+    using scalar_t = typename quads_kit_type_::scalar_t;
 
     /** The heads of the one query row being walked. */
-    indexer_heads<scalar_type_> heads;
+    indexer_heads<scalar_t> heads;
 
     template <typename dot_type_, std::size_t fan_out_>
-    void operator()(std::array<node_id_t, fan_out_> const&,
-                    std::array<nk::vector_view<scalar_type_>, fan_out_> const& keys,
+    void operator()(std::array<node_id_t, fan_out_> const&, std::array<nk::vector_view<scalar_t>, fan_out_> const& keys,
                     std::array<vector_norms<dot_type_>, fan_out_> const& norms,
                     scores_result<dot_type_, fan_out_>& scores, std::size_t count) const noexcept {
-        static_assert(!nk::is_integral_dtype<scalar_type_>(), "Indexer scoring needs floating-point keys");
+        static_assert(!nk::is_integral_dtype<scalar_t>(), "Indexer scoring needs floating-point keys");
         std::array<dot_type_, fan_out_> indexed {};
         for (std::size_t head = 0; head != heads.heads.extent(0); ++head) {
-            scores_result<dot_type_, fan_out_> const head_scores = dense::scores<capability_, scalar_type_>(
+            scores_result<dot_type_, fan_out_> const head_scores = dense::scores<quads_kit_type_>(
                 nk_kernel_dot_k, heads.heads.row(head).as_vector(), {}, keys, norms);
             dot_type_ const weight = dot_type_(heads.weights(0, head));
             for (std::size_t lane = 0; lane != count; ++lane)
@@ -334,15 +352,18 @@ struct indexer_rescoring {
 /** One token's query heads as the walk's rescoring and its attention fold in one: a node ranks by
  *  its best head as 1 − maxₕ⟨qₕ, k⟩, and every scored batch folds into each head's running softmax,
  *  in base 2 until @c finish. Head zero navigates the walk; a node without a value row fails
- *  @c status. */
-template <nk_capability_t capability_, typename scalar_type_, typename value_lookup_type_>
+ *  @c status. A node the predicate rejects still ranks, so the walk routes through it, but folds
+ *  into no head and resolves no value row. */
+template <typename quads_kit_type_, typename elementwise_kit_type_, typename value_lookup_type_,
+          typename predicate_type_ = dummy_predicate_t>
 struct attention_rescoring {
-    using vector_view_t = nk::vector_view<scalar_type_>;
-    using dot_result_t = typename scalar_type_::dot_result_t;
+    using scalar_t = typename quads_kit_type_::scalar_t;
+    using vector_view_t = nk::vector_view<scalar_t>;
+    using dot_result_t = typename scalar_t::dot_result_t;
     using vector_norms_t = vector_norms<dot_result_t>;
 
     /** The token's heads, one row each. */
-    nk::matrix_view<scalar_type_> queries;
+    nk::matrix_view<scalar_t> queries;
 
     /** Resolves a scored batch to its value rows, as wide as the keys. */
     value_lookup_type_& value_lookup;
@@ -359,6 +380,9 @@ struct attention_rescoring {
     /** The first refusal, which every later batch skips on. */
     status_t& status;
 
+    /** Asked about a scored quad of lookup keys; only the lanes it admits fold. */
+    predicate_type_ predicate = {};
+
     /** Empties every head's row and running state ahead of the token's first walk. */
     void clear() const noexcept {
         std::memset(outputs.data(), 0, outputs.numel() * sizeof(f32_t));
@@ -372,79 +396,113 @@ struct attention_rescoring {
         for (std::size_t head = 0; head != carry.size(); ++head) {
             f32_t const normalizer = carry[head].partition > 0 ? 1 / carry[head].partition : 0, zero = 0;
             f32_t* const row = outputs.row(head).data();
-            [[maybe_unused]] nk_status_t const scaled = elementwise_ladder<capability_>::kit_t::scale(
-                row, columns, &normalizer, &zero, row, nullptr);
+            [[maybe_unused]] nk_status_t const scaled = elementwise_kit_type_::scale(row, columns, &normalizer, &zero,
+                                                                                     row, nullptr);
             assert(scaled == nk_success_k && "The serial tier scales on every CPU");
             carry[head].maximum_score *= std::numbers::ln2_v<f32_t>;
         }
     }
 
     /** Folds one scored batch, its value rows resolved by node ID. */
-    void operator()(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& keys,
-                    std::array<vector_norms_t, 4> const& norms, scores_result<dot_result_t, 4>& scores,
-                    std::size_t count) const noexcept {
+    void operator()(quad<node_id_t> const& ids, quad<vector_view_t> const& keys, quad<vector_norms_t> const& norms,
+                    scores_result<dot_result_t>& scores, std::size_t count) const noexcept {
         (*this)(ids, keys, norms, scores, count, std::span<node_id_t const>(ids).first(count));
     }
 
     /** Folds one scored batch, its value rows resolved by @p lookup_keys: the rows' own keys, read
      *  beside the vectors by a walk that holds no key column to resolve node IDs through. */
     template <typename lookup_key_type_>
-    void operator()(std::array<node_id_t, 4> const&, std::array<vector_view_t, 4> const& keys,
-                    std::array<vector_norms_t, 4> const& norms, scores_result<dot_result_t, 4>& scores,
-                    std::size_t count, std::span<lookup_key_type_ const> lookup_keys) const noexcept {
+    void operator()(quad<node_id_t> const&, quad<vector_view_t> const& keys, quad<vector_norms_t> const& norms,
+                    scores_result<dot_result_t>& scores, std::size_t count,
+                    std::span<lookup_key_type_ const> lookup_keys) const noexcept {
         if (failed(status)) return;
         std::size_t const columns = queries.extent(1), head_count = carry.size();
-        std::array<vector_view_t, 4> rows;
-        std::array<char const*, 4> rows_bytes;
-        value_lookup(lookup_keys.first(count), std::span(rows).first(count));
-        for (std::size_t lane = 0; lane != count; ++lane) {
-            if (rows[lane].size() != columns) {
+        quad<std::size_t> folded_lanes;
+        quad<lookup_key_type_> folded_keys;
+        std::size_t const folded = fold_lanes_(lookup_keys.first(count), folded_lanes, folded_keys);
+        quad<vector_view_t> rows;
+        quad<char const*> rows_bytes;
+        with_static_extent<quad_lanes_k>(folded, [&]<std::size_t extent_>() noexcept {
+            value_lookup(std::span<lookup_key_type_ const, extent_>(folded_keys.data(), extent_),
+                         std::span<vector_view_t, extent_>(rows.data(), extent_));
+        });
+        for (std::size_t position = 0; position != folded; ++position) {
+            if (rows[position].size() != columns) {
                 status = status_t::shape_mismatch_k;
                 return;
             }
-            rows_bytes[lane] = rows[lane].byte_data();
+            rows_bytes[position] = rows[position].byte_data();
         }
         f32_t const logit_scale = score_scale * std::numbers::log2e_v<f32_t>;
         for (std::size_t first = 0; first < head_count; first += 8) {
             std::size_t const group = min_of<std::size_t>(8, head_count - first);
             // One exp2 tile per scored node across the group's heads; the zeros past them
             // exponentiate harmlessly.
-            std::array<std::array<f32_t, 8>, 4> weights {};
+            quad<std::array<f32_t, 8>> weights {};
             std::array<f32_t, 8> corrections {};
             for (std::size_t head = 0; head != group; ++head) {
                 vector_view_t const head_row = queries.row(first + head).as_vector();
                 // A compensated finalize reads the head's own row sum beside the keys' stored ones.
                 vector_norms_t head_norms {};
-                if constexpr (quads_compensated<typename quads_ladder<scalar_type_, capability_>::kit_t>)
-                    if (first + head) head_norms = dense::norms<capability_>(head_row);
-                scores_result<dot_result_t, 4> const head_scores =
-                    first + head
-                        ? dense::scores<capability_, scalar_type_>(nk_kernel_dot_k, head_row, head_norms, keys, norms)
-                        : scores;
+                if constexpr (quads_compensated<quads_kit_type_>)
+                    if (first + head) head_norms = dense::norms<quads_kit_type_>(head_row);
+                scores_result<dot_result_t> const head_scores =
+                    first + head ? dense::scores<quads_kit_type_>(nk_kernel_dot_k, head_row, head_norms, keys, norms)
+                                 : scores;
                 softmax_state_t& state = carry[first + head];
                 f32_t maximum = state.maximum_score;
-                for (std::size_t lane = 0; lane != count; ++lane) {
-                    weights[lane][head] = logit_scale * static_cast<f32_t>(head_scores.dots[lane]);
-                    maximum = max_of(maximum, weights[lane][head]);
-                    scores.dots[lane] = max_of(scores.dots[lane], head_scores.dots[lane]);
+                for (std::size_t position = 0; position != folded; ++position) {
+                    weights[position][head] = logit_scale *
+                                              static_cast<f32_t>(head_scores.dots[folded_lanes[position]]);
+                    maximum = max_of(maximum, weights[position][head]);
                 }
-                for (std::size_t lane = 0; lane != count; ++lane) weights[lane][head] -= maximum;
+                for (std::size_t lane = 0; lane != count; ++lane)
+                    scores.dots[lane] = max_of(scores.dots[lane], head_scores.dots[lane]);
+                for (std::size_t position = 0; position != folded; ++position) weights[position][head] -= maximum;
                 corrections[head] = state.maximum_score - maximum;
                 state.maximum_score = maximum;
             }
-            for (std::size_t lane = 0; lane != count; ++lane)
-                elementwise_ladder<capability_>::kit_t::exp2(weights[lane]);
-            elementwise_ladder<capability_>::kit_t::exp2(corrections);
+            for (std::size_t position = 0; position != folded; ++position)
+                elementwise_kit_type_::exp2(weights[position]);
+            elementwise_kit_type_::exp2(corrections);
             for (std::size_t head = 0; head != group; ++head) {
                 softmax_state_t& state = carry[first + head];
                 state.partition *= corrections[head];
-                for (std::size_t lane = 0; lane != count; ++lane) state.partition += weights[lane][head];
+                for (std::size_t position = 0; position != folded; ++position)
+                    state.partition += weights[position][head];
             }
-            values_step<scalar_type_, capability_>(outputs.row(first).data(), group, columns, rows_bytes.data(),
-                                                   weights.data(), corrections, count);
+            values_step<scalar_t, elementwise_kit_type_>(outputs.row(first).data(), group, columns, rows_bytes.data(),
+                                                         weights.data(), corrections, folded);
         }
         for (std::size_t lane = 0; lane != count; ++lane)
             scores.distances[lane] = 1 - static_cast<distance_t>(scores.dots[lane]);
+    }
+
+  private:
+
+    /** Every lane folds when nothing filters. */
+    template <typename lookup_key_type_>
+    std::size_t fold_lanes_(std::span<lookup_key_type_ const> lane_keys, quad<std::size_t>& lanes,
+                            quad<lookup_key_type_>& keys) const noexcept
+        requires std::same_as<std::remove_cvref_t<predicate_type_>, dummy_predicate_t>
+    {
+        for (std::size_t lane = 0; lane != lane_keys.size(); ++lane) lanes[lane] = lane, keys[lane] = lane_keys[lane];
+        return lane_keys.size();
+    }
+
+    /** The lanes the predicate admits and their keys, packed in lane order. */
+    template <typename lookup_key_type_>
+    std::size_t fold_lanes_(std::span<lookup_key_type_ const> lane_keys, quad<std::size_t>& lanes,
+                            quad<lookup_key_type_>& keys) const noexcept {
+        std::size_t folded = 0;
+        with_static_extent<quad_lanes_k>(lane_keys.size(), [&]<std::size_t extent_>() noexcept {
+            std::array<admission_t, extent_> admissions;
+            predicate(std::span<lookup_key_type_ const, extent_>(lane_keys.data(), extent_),
+                      std::span<admission_t, extent_>(admissions));
+            for (std::size_t lane = 0; lane != extent_; ++lane)
+                if (admissions[lane] == admission_t::admit_k) lanes[folded] = lane, keys[folded++] = lane_keys[lane];
+        });
+        return folded;
     }
 };
 
@@ -460,12 +518,12 @@ inline std::size_t staged_rows_bytes(nk_dtype_t dtype, std::size_t rows, std::si
 
 /** Rows @b [first,first+count) of @p source as @p scalar_type_, through @ref import_rows into
  *  @p staged laid out as @ref staged_rows_bytes counts it. */
-template <nk_capability_t capability_, nk::numeric_dtype scalar_type_>
+template <typename elementwise_kit_type_, typename rmscast_kit_type_, nk::numeric_dtype scalar_type_>
 nk::matrix_view<scalar_type_> import_staged_rows(rows_view_t source, std::size_t first, std::size_t count,
                                                  nk_kernel_kind_t kernel, byte_t* staged) noexcept {
     std::size_t const columns = source.columns;
     byte_t* const rows = staged + staged_rows_bytes(scalar_type_::dtype(), 0, columns);
-    return import_rows<capability_>(
+    return import_rows<elementwise_kit_type_, rmscast_kit_type_>(
         source, first, count, kernel,
         nk::matrix_span<scalar_type_> {reinterpret_cast<char*>(rows), rows_shape_of<scalar_type_>(count, 0, columns)},
         nk::vector_span<f32_t> {reinterpret_cast<f32_t*>(staged), columns});
@@ -473,16 +531,16 @@ nk::matrix_view<scalar_type_> import_staged_rows(rows_view_t source, std::size_t
 
 /** Per-thread traversal scratch: candidate queues, visited set, neighbor selection buffers and
  *  the running telemetry counters - one instance per scanning thread. */
-template <                                          //
-    nk_dtype_t vector_dtype_ = nk_bf16_k,           //
-    nk_capability_t capability_ = nk_cap_icelake_k, //
+template <                                                    //
+    typename quads_kit_type_ = bf16_serial_quads_kit_t,       //
+    typename visits_kit_type_ = serial_visits_hash_set_kit_t, //
     typename allocator_type_ = std::allocator<byte_t>>
 struct traversal_context;
 
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename allocator_type_>
+template <typename quads_kit_type_, typename visits_kit_type_, typename allocator_type_>
 struct traversal_context {
 
-    using scalar_t = typename nk::type_for<vector_dtype_>::type;
+    using scalar_t = typename quads_kit_type_::scalar_t;
     using vector_view_t = nk::vector_view<scalar_t>;
     using vector_norms_t = vector_norms<typename scalar_t::dot_result_t>;
 
@@ -499,10 +557,15 @@ struct traversal_context {
     using views_tensor_t = nk::tensor<vector_view_t, views_allocator_t, 1>;
     using norms_tensor_t = nk::tensor<vector_norms_t, norms_allocator_t, 1>;
 
-    using raw_dot_t = typename scalar_t::dot_result_t::raw_t;
+    using dot_result_t = typename scalar_t::dot_result_t;
+    using raw_dot_t = typename dot_result_t::raw_t;
     using dots_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<raw_dot_t>;
+    using sumsqs_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<dot_result_t>;
+    using distances_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<f32_t>;
     using bytes_tensor_t = nk::tensor<std::byte, visits_allocator_t, 1>;
     using dots_tensor_t = nk::tensor<raw_dot_t, dots_allocator_t, 2>;
+    using sumsqs_tensor_t = nk::tensor<dot_result_t, sumsqs_allocator_t, 2>;
+    using thresholds_tensor_t = nk::tensor<f32_t, distances_allocator_t, 2>;
 
     /** One selection's output: @b [kept] scored nodes. The tensor's live shape is the fill and
      *  @c capacity() the reservation, so no separate count exists. */
@@ -514,10 +577,9 @@ struct traversal_context {
      *  insert-dominated frontier rides the shallower log_8 @c shift_up depth. */
     using frontier_queue_t = max_heap_dary<8, scored_node_t, further_scored_node_t, candidates_allocator_t>;
 
-    /** The visited set walks its slots with the kit the capability mask earns: sixteen at a
-     *  time on the AVX-512 classes, one at a time below them. */
-    using visited_set_t = growing_hash_set<node_id_t, std::hash<node_id_t>, visits_allocator_t,
-                                           typename visits_hash_set_ladder<capability_>::kit_t>;
+    /** The visited set walks its slots with the visits kit: sixteen at a time on the AVX-512
+     *  classes, one at a time below them. */
+    using visited_set_t = growing_hash_set<node_id_t, std::hash<node_id_t>, visits_allocator_t, visits_kit_type_>;
 
     /** Nodes we've already scored, kept ascending as the best results so far. */
     results_array_t results;
@@ -562,6 +624,13 @@ struct traversal_context {
 
     /** The raw dots one step of stored rows scores against a packed block, @b [rows,queries]. */
     dots_tensor_t step_dots;
+
+    /** An exact scan's query sums of squares, @b [packs,queries], zero past each pack's last
+     *  query, since a finalizer reads them a quad at a time. */
+    sumsqs_tensor_t query_sumsqs;
+
+    /** An exact scan's worst kept distance of every query, @b [packs,queries]. */
+    thresholds_tensor_t thresholds;
 
     /** Total one-to-one distance computations, padding lanes excluded. Every counter here runs
      *  across calls: an operation snapshots on entry and reports the difference. */
@@ -627,13 +696,21 @@ struct traversal_context {
         return status_t::success_k;
     }
 
-    /** Sizes the exact scan's @p rows by @p columns dots tile; geometry freezes once, so it
-     *  allocates once per context. */
-    status_t reserve_tiles(std::size_t rows, std::size_t columns) noexcept {
-        if (step_dots.numel() >= rows * columns) return status_t::success_k;
-        auto dots = dots_tensor_t::zeros({rows, columns}, dots_allocator_t(allocator_));
-        if (!dots) return status_t::bad_alloc_k;
-        step_dots = std::move(dots.value);
+    /** Sizes the exact scan's @p rows by @p columns dots tile, and its sums of squares and
+     *  thresholds for @p packs packs of @p columns queries; geometry freezes once, so the tile
+     *  allocates once per context, and the rest grow to the most packs a block holds. */
+    status_t reserve_tiles(std::size_t rows, std::size_t columns, std::size_t packs) noexcept {
+        if (step_dots.numel() < rows * columns) {
+            auto dots = dots_tensor_t::zeros({rows, columns}, dots_allocator_t(allocator_));
+            if (!dots) return status_t::bad_alloc_k;
+            step_dots = std::move(dots.value);
+        }
+        if (query_sumsqs.numel() >= packs * columns) return status_t::success_k;
+        auto sumsqs = sumsqs_tensor_t::zeros({packs, columns}, sumsqs_allocator_t(allocator_));
+        auto limits = thresholds_tensor_t::zeros({packs, columns}, distances_allocator_t(allocator_));
+        if (!sumsqs || !limits) return status_t::bad_alloc_k;
+        query_sumsqs = std::move(sumsqs.value);
+        thresholds = std::move(limits.value);
         return status_t::success_k;
     }
 
@@ -650,25 +727,32 @@ struct traversal_context {
     [[no_unique_address]] allocator_t allocator_;
 };
 
-template <                                                               //
-    nk_dtype_t vector_dtype_, nk_capability_t capability_,               //
-    typename wait_type_, template <typename> class atomic_ref_template_, //
+template <                                                                              //
+    typename quads_kit_type_, typename tiles_kit_type_, typename elementwise_kit_type_, //
+    typename rmscast_kit_type_, typename visits_kit_type_,                              //
+    typename wait_type_, template <typename> class atomic_ref_template_,                //
     typename cache_hints_type_, typename vectors_allocator_type_, typename neighbors_allocator_type_,
     typename traversals_allocator_type_> //
 struct ram_index {
 
-    inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
+    using scalar_t = typename quads_kit_type_::scalar_t;
+    inline static constexpr nk_dtype_t vector_dtype_k = scalar_t::dtype();
 
-    using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using dot_result_t = typename scalar_t::dot_result_t;
     using distance_t = f32_t;
     using candidate_t = scored_node_t;
+
+    /** What a walk hands an aggregating predicate beside each key it gathers. */
+    using walk_payload_t = scored_node_t;
 
     /** Default integer type to use for loops and indexing at sub-index scale. */
     using small_size_t = u32_t;
 
     /** Node identifier within this sub-index - the class-local spelling of @c dense::node_id_t. */
     using node_id_t = dense::node_id_t;
+
+    /** Streams the rows a walk or a scan reaches next toward the core. */
+    using prefetcher_t = object_prefetcher<cache_hints_type_>;
 
     using vectors_allocator_t =
         typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<scalar_t>;
@@ -704,24 +788,32 @@ struct ram_index {
     friend struct ram_cursor;
 
     // The sharded index walks every shard under one token's attention heads, so one running state spans them.
-    template <typename, nk_dtype_t, nk_capability_t, typename, template <typename> class, typename, typename>
+    template <typename, typename, typename, typename, typename, typename, typename, template <typename> class, typename,
+              typename>
     friend struct ram_indexes;
-    template <typename, typename, typename, typename, typename, template <typename> class>
-    friend struct sharded_indexes;
+    template <typename, typename, typename, template <typename> class, typename>
+    friend struct shard_set;
 
-    /** The capability bit of the distance kit the ladder actually picked - lower than
-     *  @c capability_ when no SIMD kit is adapted for this dtype yet. */
-    inline static constexpr nk_capability_t picked_quads_capability_k = quads_ladder<scalar_t, capability_>::picked_k;
+    /** The distance kit @c src/ picked; its step is the row pitch the chunks round to. */
+    using quads_kit_t = quads_kit_type_;
 
-    /** The distance kit the ladder picked; its step is the row pitch the chunks round to. */
-    using quads_kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
-
-    /** The matrix-engine kits an exact scan streams through, @c no_tiles_kit_t where no engine
+    /** The matrix-engine kit an exact scan streams through, @c no_tiles_kit_t where no engine
      *  multiplies the scalar. */
-    using tiles_ladder_t = tiles_ladder<scalar_t, capability_>;
+    using tiles_kit_t = tiles_kit_type_;
+
+    /** Whether a matrix engine multiplies the scalar, so many queries scan through it at once. */
+    inline static constexpr bool has_tiles_k = !std::is_same_v<tiles_kit_t, no_tiles_kit_t>;
+
+    /** The casts, scales and blends rows import and export through, and the unit-RMS narrowing an
+     *  angular import from wide floats takes. */
+    using elementwise_kit_t = elementwise_kit_type_;
+    using rmscast_kit_t = rmscast_kit_type_;
+
+    /** The visited set's kit. */
+    using visits_kit_t = visits_kit_type_;
 
     /** Each thread scanning the graph needs its own object like this. */
-    using traversal_context_t = traversal_context<vector_dtype_, capability_, candidates_allocator_t>;
+    using traversal_context_t = traversal_context<quads_kit_t, visits_kit_t, candidates_allocator_t>;
     using results_array_t = typename traversal_context_t::results_array_t;
     using frontier_queue_t = typename traversal_context_t::frontier_queue_t;
     using visited_set_t = typename traversal_context_t::visited_set_t;
@@ -787,12 +879,14 @@ struct ram_index {
     ram_index& operator=(ram_index&&) noexcept = delete;
 
     /** Constructs an empty index walking by @p kernel, its vectors & norms growing through
-     *  @p vectors_allocator and its neighbors through @p neighbors_allocator; a @p kernel the
-     *  dtype's kits cannot finalize is refused at the first @c reserve. */
+     *  @p vectors_allocator and its neighbors through @p neighbors_allocator, streaming rows ahead
+     *  of the walks @p line_bytes at a time; a @p kernel the dtype's kits cannot finalize is
+     *  refused at the first @c reserve. */
     explicit ram_index(nk_kernel_kind_t kernel, vectors_allocator_type_ const& vectors_allocator = {},
-                       neighbors_allocator_type_ const& neighbors_allocator = {}) noexcept
+                       neighbors_allocator_type_ const& neighbors_allocator = {},
+                       std::size_t line_bytes = default_alignment_k) noexcept
         : vectors_allocator_(vectors_allocator), vectors_(vectors_allocator), norms_(vectors_allocator),
-          neighbors_(neighbors_allocator), kernel_(kernel) {}
+          neighbors_(neighbors_allocator), kernel_(kernel), prefetcher_ {line_bytes} {}
 
 #pragma region Measures
 
@@ -817,6 +911,12 @@ struct ram_index {
 
     /** Neighbor slots per node - the full fixed capacity, none lost to bookkeeping. */
     std::size_t connectivity() const noexcept { return geometry().connectivity(); }
+
+    /** The most candidates a walk asks an aggregating predicate between two settles: one expanded
+     *  row of @p connectivity slots, or one batch of landmarks. */
+    static constexpr std::size_t round_capacity(std::size_t connectivity) noexcept {
+        return max_of<std::size_t>(connectivity, quad_lanes_k);
+    }
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     template <typename config_type_>
@@ -1053,7 +1153,7 @@ struct ram_index {
                             arena_t::reserved_bytes(context_t::frontier_queue_t::memory_usage(sizes.ahead)) +
                             arena_t::reserved_bytes(context_t::visited_set_t::memory_usage(sizes.visited)) +
                             context_t::neighbors_memory_usage(node_connectivity) +
-                            staged_rows_bytes(vector_dtype_, 1, frozen.dimensions());
+                            staged_rows_bytes(vector_dtype_k, 1, frozen.dimensions());
         return bytes;
     }
 
@@ -1078,7 +1178,7 @@ struct ram_index {
             failed(sized))
             return sized;
         if (status_t const sized = context.reserve_neighbors(node_connectivity); failed(sized)) return sized;
-        return context.reserve_queries(staged_rows_bytes(vector_dtype_, 1, frozen.dimensions()));
+        return context.reserve_queries(staged_rows_bytes(vector_dtype_k, 1, frozen.dimensions()));
     }
 
 #pragma endregion Reservation
@@ -1439,7 +1539,7 @@ struct ram_index {
                     else if (!contains_(linked_twice_, target)) insert_(linked_twice_, target);
                 }
             }
-            atomic_ref<std::size_t>(expanded_in_level_).fetch_add(expanded_count, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(expanded_in_level_).add(expanded_count, std::memory_order_relaxed);
             return expanded_count;
         }
 
@@ -1572,17 +1672,16 @@ struct ram_index {
          *  answers with, and what planning fills. */
         refine_plan_t(health_plan_t&& audit, part_bases_allocator_t const& allocator) noexcept
             : audit(std::move(audit)), part_bases_(allocator), receiver_claims_(allocator), receiver_audits_(allocator),
-              part_slots_(allocator), part_members_(allocator), part_sizes_(allocator), part_seams_(allocator) {}
+              part_slots_(allocator), part_members_(allocator), part_extents_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : audit(std::move(other.audit)), index_(std::exchange(other.index_, nullptr)), nodes_(other.nodes_),
               part_bases_(std::move(other.part_bases_)), source_(std::exchange(other.source_, nullptr)),
               receivers_(other.receivers_), receiver_claims_(std::move(other.receiver_claims_)),
               receiver_audits_(std::move(other.receiver_audits_)), part_slots_(std::move(other.part_slots_)),
-              part_members_(std::move(other.part_members_)), part_sizes_(std::move(other.part_sizes_)),
-              part_seams_(std::move(other.part_seams_)), source_rows_(other.source_rows_),
-              part_capacity_(other.part_capacity_), seed_(other.seed_), refined_receivers_(other.refined_receivers_),
-              receivers_health_(other.receivers_health_), receivers_islands_(other.receivers_islands_),
-              rounds_(other.rounds_), round_(other.round_), stopped_(other.stopped_),
+              part_members_(std::move(other.part_members_)), part_extents_(std::move(other.part_extents_)),
+              source_rows_(other.source_rows_), part_capacity_(other.part_capacity_), seed_(other.seed_),
+              refined_receivers_(other.refined_receivers_), receivers_health_(other.receivers_health_),
+              receivers_islands_(other.receivers_islands_), rounds_(other.rounds_), round_(other.round_),
               expansion_factor_(other.expansion_factor_), phase_(other.phase_), swept_after_(other.swept_after_),
               islands_before_(other.islands_before_), tally_(other.tally_) {}
         refine_plan_t(refine_plan_t const&) = delete;
@@ -1652,7 +1751,7 @@ struct ram_index {
                 if (!audit.advance_level()) converge_();
             }
             else if (phase_ != phase_t::done_k) {
-                if (phase_ == phase_t::reselect_k && !stopped_ && ++round_ != rounds_) return true;
+                if (phase_ == phase_t::reselect_k && ++round_ < rounds_) return true;
                 audit.restart_sweep();
                 swept_after_ = phase_;
                 phase_ = phase_t::sweep_k;
@@ -1664,7 +1763,7 @@ struct ram_index {
         /** Stops the re-selection where its steps ran, so the next @ref advance turns to the heal;
          *  a no-op in any other phase, a split's partition and scatter included. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k) stopped_ = true;
+            if (phase_ == phase_t::reselect_k) rounds_ = 0;
         }
 
         /** Whether the current phase moves a split's rows - the phases no stop skips. */
@@ -1693,7 +1792,7 @@ struct ram_index {
         };
 
         static void add_(std::size_t& into, std::size_t value) noexcept {
-            atomic_ref<std::size_t>(into).fetch_add(value, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(into).add(value, std::memory_order_relaxed);
         }
 
         /** Whether the current phase steps over the audit's ranges rather than rows of its own. */
@@ -1726,7 +1825,7 @@ struct ram_index {
 
         /** Places source row @p row last in @p part, its slot naming the part and the position. */
         void enlist_(node_id_t row, std::size_t part) noexcept {
-            std::size_t const position = part_sizes_[part]++;
+            std::size_t const position = part_extents_[part].rows++;
             part_members_[part * part_capacity_ + position] = row;
             part_slots_[row] = static_cast<node_id_t>(part * part_capacity_ + position);
         }
@@ -1735,12 +1834,12 @@ struct ram_index {
          *  the part has room; answers whether the part could expand at all. */
         bool expand_(std::size_t part) noexcept {
             // Until the seams replace them, these count each part's expanded members.
-            std::size_t& expanded = part_seams_[part];
-            if (expanded == part_sizes_[part] || part_sizes_[part] == part_capacity_) return false;
+            node_id_t& expanded = part_extents_[part].seam;
+            if (expanded == part_extents_[part].rows || part_extents_[part].rows == part_capacity_) return false;
             node_id_t const node_id = part_members_[part * part_capacity_ + expanded++];
             for_each_link_(node_id, [&](node_id_t target) noexcept {
                 if (target < source_rows_ && part_slots_[target] == node_id_unknown_k &&
-                    part_sizes_[part] != part_capacity_)
+                    part_extents_[part].rows != part_capacity_)
                     enlist_(target, part);
             });
             return true;
@@ -1766,7 +1865,7 @@ struct ram_index {
         void partition_() noexcept {
             std::size_t const parts = receivers_.size();
             for (node_id_t& slot : part_slots_) slot = node_id_unknown_k;
-            for (std::size_t part = 0; part != parts; ++part) part_sizes_[part] = part_seams_[part] = 0;
+            for (std::size_t part = 0; part != parts; ++part) part_extents_[part] = {};
             for (std::size_t part = 0; part != parts && part != source_rows_; ++part)
                 enlist_(static_cast<node_id_t>(seeded_bijection(part, source_rows_, seed_)), part);
             for (std::size_t expanded = parts; expanded;) {
@@ -1777,18 +1876,18 @@ struct ram_index {
                 if (part_slots_[row] != node_id_unknown_k) continue;
                 std::size_t smallest = 0;
                 for (std::size_t part = 1; part != parts; ++part)
-                    if (part_sizes_[part] < part_sizes_[smallest]) smallest = part;
+                    if (part_extents_[part].rows < part_extents_[smallest].rows) smallest = part;
                 enlist_(row, smallest);
                 while (expand_(smallest)) {}
             }
             for (std::size_t part = 0; part != parts; ++part) {
                 node_id_t* const members = part_members_.data() + part * part_capacity_;
-                std::size_t seams = 0, interior = part_sizes_[part];
+                std::size_t seams = 0, interior = part_extents_[part].rows;
                 while (seams != interior)
                     if (links_across_(members[seams], part)) ++seams;
                     else std::swap(members[seams], members[--interior]);
-                part_seams_[part] = seams;
-                for (std::size_t position = 0; position != part_sizes_[part]; ++position)
+                part_extents_[part].seam = static_cast<node_id_t>(seams);
+                for (std::size_t position = 0; position != part_extents_[part].rows; ++position)
                     part_slots_[members[position]] = static_cast<node_id_t>(part * part_capacity_ + position);
             }
         }
@@ -1826,7 +1925,7 @@ struct ram_index {
         void publish_parts_() noexcept {
             for (std::size_t part = 0; part != receivers_.size(); ++part) {
                 ram_index& into = *receivers_[part];
-                node_id_t const rows = static_cast<node_id_t>(part_sizes_[part]);
+                node_id_t const rows = part_extents_[part].rows;
                 receiver_claims_[part].consume();
                 if (part_capacity_ != rows) into.release_capacity(part_capacity_ - rows);
                 if (!rows) continue;
@@ -1845,14 +1944,14 @@ struct ram_index {
             std::size_t const receiver = refined_receivers_;
             index_ = receivers_[receiver];
             audit = std::move(receiver_audits_[receiver]);
-            audit.visible = static_cast<node_id_t>(part_sizes_[receiver]);
-            audit.seed_count = min_of<std::size_t>(index_->connectivity(), part_sizes_[receiver]);
+            audit.visible = part_extents_[receiver].rows;
+            audit.seed_count = min_of<std::size_t>(index_->connectivity(), part_extents_[receiver].rows);
             audit.restart_sweep();
-            nodes_ = {0, static_cast<node_id_t>(part_seams_[receiver])};
+            nodes_ = {0, part_extents_[receiver].seam};
             round_ = 0;
             swept_after_ = phase_t::reselect_k;
             islands_before_ = 0;
-            phase_ = stopped_ || nodes_.empty() ? phase_t::sweep_k : phase_t::reselect_k;
+            phase_ = !rounds_ || nodes_.empty() ? phase_t::sweep_k : phase_t::reselect_k;
         }
 
         /** Folds a healed receiver's audit and islands into the split's, then binds the next one,
@@ -2000,11 +2099,14 @@ struct ram_index {
         /** Per part, a run of the part capacity: its source rows in receiver order. */
         part_bases_t part_members_;
 
-        /** Rows per part. */
-        growing_buffer<std::size_t, part_bases_allocator_t> part_sizes_;
+        /** One part's rows, and the seam within them: the rows before it lost a link across. */
+        struct part_extent_t {
+            node_id_t rows = 0;
+            node_id_t seam = 0;
+        };
 
-        /** Per part, the seams leading its rows: the ones that lost a link across. */
-        growing_buffer<std::size_t, part_bases_allocator_t> part_seams_;
+        /** Per part, its extent. */
+        growing_buffer<part_extent_t, part_bases_allocator_t> part_extents_;
 
         /** Rows the split's source published at planning. */
         node_id_t source_rows_ = 0;
@@ -2024,14 +2126,11 @@ struct ram_index {
         /** The islands the receivers healed so far found, summed. */
         std::size_t receivers_islands_ = 0;
 
-        /** Rounds of re-selection, one with fewer than three parts. */
+        /** Rounds of re-selection: one with fewer than three parts, none once @ref stop cut it. */
         std::size_t rounds_ = 1;
 
         /** The round the re-selection runs, or, once it left, the rounds it finished. */
         std::size_t round_ = 0;
-
-        /** Whether @ref stop cut the re-selection short. */
-        bool stopped_ = false;
 
         /** Breadth of every re-selection walk. */
         small_size_t expansion_factor_ = 0;
@@ -2166,9 +2265,8 @@ struct ram_index {
         if (parts * capacity > static_cast<std::size_t>(node_id_unknown_k))
             return {std::move(plan), status_t::overflow_k};
         if (failed(plan.receiver_claims_.reserve_exactly(parts)) ||
-            failed(plan.receiver_audits_.reserve_exactly(parts)) || failed(plan.part_sizes_.resize(parts)) ||
-            failed(plan.part_seams_.resize(parts)) || failed(plan.part_slots_.resize(rows)) ||
-            failed(plan.part_members_.resize(parts * capacity)))
+            failed(plan.receiver_audits_.reserve_exactly(parts)) || failed(plan.part_extents_.resize(parts)) ||
+            failed(plan.part_slots_.resize(rows)) || failed(plan.part_members_.resize(parts * capacity)))
             return {std::move(plan), status_t::bad_alloc_k};
         // A full part's rows in every receiver, claimed from its empty watermark, die with the plan
         // unless the scatter publishes them.
@@ -2219,6 +2317,11 @@ struct ram_index {
         /** How rows are reached; @c scan_k scores every published row exactly, keeping the
          *  breadth's nearest, and only @c search and @c search_if implement it. */
         traversal_t traversal = traversal_t::walk_k;
+
+        /** Bytes of cache each executor thread keeps to itself: a scan streams its rows in blocks
+         *  that stay there while every pack of its queries scores them, and zero streams every
+         *  chunk whole. */
+        std::size_t cache_bytes = 0;
     };
 
     /** Telemetry of one @c search() call; matches stay in the caller's context. */
@@ -2280,7 +2383,7 @@ struct ram_index {
         requires floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
-        return walk_(query_vector, dummy_fold_t {}, indexer_rescoring<capability_, scalar_t> {heads}, context, config,
+        return walk_(query_vector, dummy_fold_t {}, indexer_rescoring<quads_kit_t> {heads}, context, config,
                      static_cast<node_id_t>(size()));
     }
 
@@ -2323,14 +2426,7 @@ struct ram_index {
     expected<search_result_t> search_if(vector_view_t query_vector, predicate_type_&& predicate,
                                         traversal_context_t& context, search_config_t config = {}) noexcept {
         if (config.traversal == traversal_t::scan_k) {
-            // A batched predicate meets each row that beats the worst match as a quad of one.
-            auto admits = [&](node_id_t node) noexcept {
-                scored_node_t const candidate {node, 0};
-                admissions_t admissions;
-                invoke_admission(predicate, std::span(&candidate, 1), admissions);
-                return admissions.empty() ? admission_t::reject_k : admission_t::admit_k;
-            };
-            return scan_if_(query_vector, admits, context, config, static_cast<node_id_t>(size()));
+            return scan_if_(query_vector, predicate, context, config, static_cast<node_id_t>(size()));
         }
         return walk_if_(query_vector, predicate, context, config, static_cast<node_id_t>(size()));
     }
@@ -2395,7 +2491,7 @@ struct ram_index {
         status_t status = status_t::success_k;
         search_result_t attended;
         for (std::size_t first = 0; first != rows_count; first += head_count) {
-            attention_rescoring<capability_, scalar_t, value_lookup_type_> const rescoring {
+            attention_rescoring<quads_kit_t, elementwise_kit_t, value_lookup_type_> const rescoring {
                 queries(nk::range(first, first + head_count), nk::slice),
                 value_lookup,
                 score_scale,
@@ -2969,42 +3065,40 @@ struct ram_index {
     /** Trampoline for @c dense::norms with hardened types - zeroed moments, without
      *  touching the vector, when the rows keep none. */
     inline vector_norms_t norms(vector_view_t vec) const noexcept {
-        return stores_norms() ? dense::norms<capability_, scalar_t>(vec) : vector_norms_t {};
+        return stores_norms() ? dense::norms<quads_kit_t>(vec) : vector_norms_t {};
     }
 
     /** Trampoline for @c dense::distances with hardened types. */
-    inline std::array<distance_t, 4> distances(          //
-        vector_view_t query, vector_norms_t query_norms, //
-        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) const noexcept {
-        return dense::distances<capability_, scalar_t>(kernel_, query, query_norms, candidates, candidates_norms);
+    inline quad<distance_t> distances(vector_view_t query, vector_norms_t query_norms, quad<vector_view_t> candidates,
+                                      quad<vector_norms_t> candidates_norms) const noexcept {
+        return dense::distances<quads_kit_t>(kernel_, query, query_norms, candidates, candidates_norms);
     }
 
     /** Trampoline for @c dense::scores with hardened types - the walk's scoring,
      *  whose dots a fold reads. */
-    inline scores_result<dot_result_t, 4> scores(        //
-        vector_view_t query, vector_norms_t query_norms, //
-        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) const noexcept {
-        return dense::scores<capability_, scalar_t>(kernel_, query, query_norms, candidates, candidates_norms);
+    inline scores_result<dot_result_t> scores(vector_view_t query, vector_norms_t query_norms,
+                                              quad<vector_view_t> candidates,
+                                              quad<vector_norms_t> candidates_norms) const noexcept {
+        return dense::scores<quads_kit_t>(kernel_, query, query_norms, candidates, candidates_norms);
     }
 
-    /** As @c scores, streaming @p next_candidates in under this CPU class's cache hints. */
-    inline scores_result<dot_result_t, 4> scores(                                                //
-        vector_view_t query, vector_norms_t query_norms,                                         //
-        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms, //
-        std::array<vector_view_t, 4> next_candidates) const noexcept {
-        return dense::scores<capability_, scalar_t>( //
-            kernel_, query, query_norms, candidates, candidates_norms, next_candidates, cache_hints_type_ {});
+    /** As @c scores, streaming @p next_candidates in through the prefetcher. */
+    inline scores_result<dot_result_t> scores(vector_view_t query, vector_norms_t query_norms,
+                                              quad<vector_view_t> candidates, quad<vector_norms_t> candidates_norms,
+                                              quad<vector_view_t> next_candidates) const noexcept {
+        return dense::scores<quads_kit_t>( //
+            kernel_, query, query_norms, candidates, candidates_norms, next_candidates, prefetcher_);
     }
 
     /** Scores @p query against four consecutive entries of the cached @p vectors & @p norms
      *  arrays starting at @p start; the gather cursor sticks at @p count - 1, so short tails
      *  repeat the last entry and the kernel always streams four valid lanes. */
-    inline std::array<distance_t, 4> distances_via_quads(          //
+    inline quad<distance_t> distances_via_quads(                   //
         vector_view_t query, vector_norms_t query_norms,           //
         vector_view_t const* vectors, vector_norms_t const* norms, //
         small_size_t start, small_size_t count) const noexcept {
-        std::array<vector_view_t, 4> lane_vectors;
-        std::array<vector_norms_t, 4> lane_norms;
+        quad<vector_view_t> lane_vectors;
+        quad<vector_norms_t> lane_norms;
         for (small_size_t lane = 0, source = start; lane != lane_vectors.size(); ++lane) {
             lane_vectors[lane] = vectors[source];
             lane_norms[lane] = norms[source];
@@ -3109,11 +3203,11 @@ struct ram_index {
     /** The vectors behind the four neighbor slots from @p start, for the current quad's scoring to stream in;
      *  the lanes the list leaves short keep @p lane_vectors, the current quad's own. */
     template <typename neighbors_type_>
-    inline std::array<vector_view_t, 4> vectors_quad_of(neighbors_type_ const& neighbors, small_size_t start,
-                                                        node_id_t first_invisible_id,
-                                                        std::array<vector_view_t, 4> lane_vectors) const noexcept {
-        if constexpr (!std::is_same_v<cache_hints_type_, fu::standard_cache_hints_t>) {
-            small_size_t const slots_limit = min_of<small_size_t>(start + 4, neighbors.capacity());
+    inline quad<vector_view_t> vectors_quad_of(neighbors_type_ const& neighbors, small_size_t start,
+                                               node_id_t first_invisible_id,
+                                               quad<vector_view_t> lane_vectors) const noexcept {
+        if constexpr (prefetcher_t::prefetches_k) {
+            small_size_t const slots_limit = min_of<small_size_t>(start + lane_vectors.size(), neighbors.capacity());
             small_size_t lane = 0;
             for (small_size_t slot = start; slot < slots_limit; ++slot) {
                 node_id_t const neighbor_id = neighbors.load_slot(slot);
@@ -3125,12 +3219,14 @@ struct ram_index {
         return lane_vectors;
     }
 
-    /** Streams the neighbor row at @p location toward L2, a hint per line, for a walk holding it a
-     *  hop ahead; nothing under @c fu::standard_cache_hints_t. */
+    /** Streams the neighbor row at @p location toward L2, for a walk holding it a hop ahead. */
     inline void prefetch_neighbors_(location_t const& location) const noexcept {
-        node_id_t const* const row = neighbors_[location];
-        for (std::size_t slot = 0; slot < neighbors_.columns(); slot += fu::default_alignment_k / sizeof(node_id_t))
-            cache_hints_type_ {}(row + slot, fu::prefetch_line_k);
+        prefetcher_.prefetch(neighbors_[location], neighbors_.columns() * sizeof(node_id_t));
+    }
+
+    /** Streams the vector row at @p location toward L2, for a scoring a few draws away. */
+    inline void prefetch_vector_(location_t const& location) const noexcept {
+        prefetcher_.prefetch(vectors_[location], vectors_.columns() * sizeof(scalar_t));
     }
 
     /** Mutable span over the vector slot at @p location - only for the slot's unpublished owner. */
@@ -3321,7 +3417,7 @@ struct ram_index {
             // one. A batch may score past the first violation, still cheaper than four serial.
             small_size_t kept = 0;
             while (kept != kept_count) {
-                std::array<distance_t, 4> const kept_distances = distances_via_quads( //
+                quad<distance_t> const kept_distances = distances_via_quads( //
                     candidate_vector, candidate_norms, kept_vectors, kept_norms, kept, kept_count);
                 small_size_t const lanes_count = min_of<small_size_t>(kept_count - kept, 4u);
                 computed_distances += lanes_count;
@@ -3358,7 +3454,7 @@ struct ram_index {
         refining_candidates.insert(scored_node_t(new_node_id, newcomer_score), candidates_limit);
         std::size_t computed = 0;
         for (small_size_t scored = 0; scored != count;) {
-            std::array<distance_t, 4> const staged_distances = distances_via_quads( //
+            quad<distance_t> const staged_distances = distances_via_quads( //
                 neighbor_vector, neighbor_norms, context.staged_vectors.data(), context.staged_norms.data(), scored,
                 count);
             small_size_t const lanes_count = min_of<small_size_t>(count - scored, 4u);
@@ -3404,6 +3500,11 @@ struct ram_index {
 
             // Lock by exchanging the sentinel in; the displaced slot-0 value is ours to restore.
             node_id_t const first_slot_value = neighbors.lock();
+
+            // The next row's lock word heads here with write intent while this row is edited.
+            if (selected_index + 1 != selected.size())
+                prefetcher_.promote(neighbors_[chunk_schedule_t::locate(selected[selected_index + 1].node_id)],
+                                    sizeof(node_id_t));
 
             // No neighbors is encoded as a self-loop: the node becomes the only neighbor.
             if (first_slot_value == neighbor_id) {
@@ -3478,18 +3579,16 @@ struct ram_index {
         }
     }
 
-    /** Dispenses one range of IDs for every row @p claim holds with one compare-exchange, and
+    /** Dispenses one range of IDs for every row @p claim holds with one bounded add, and
      *  consumes the claim; a batch publishes that range whole. Every ID it hands out must be
      *  published, so nothing after it may fail. A closed dispenser answers @c contended_k and
      *  leaves the claim whole. */
     expected<iota_view<node_id_t>> dispense_(capacity_claim_t&& claim) noexcept {
         node_id_t const rows = static_cast<node_id_t>(claim.rows());
         // The `acq_rel` order chains the hosting chunks' growth through the all-RMW dispenser to this thread.
+        // Claimed capacity keeps an open dispenser under the sentinel; only a closed one refuses.
         atomic_ref<node_id_t> const dispenser {next_dispensed_id_};
-        node_id_t first = dispenser.load(std::memory_order_acquire);
-        while (first != node_id_unknown_k &&
-               !dispenser.compare_exchange_weak(first, static_cast<node_id_t>(first + rows), std::memory_order_acq_rel,
-                                                std::memory_order_acquire)) {}
+        node_id_t const first = dispenser.fetch_add_if_at_most(rows, node_id_unknown_k, std::memory_order_acq_rel);
         if (first == node_id_unknown_k) return {{}, status_t::contended_k};
         claim.consume();
         return {{first, static_cast<node_id_t>(first + rows)}, status_t::success_k};
@@ -3541,7 +3640,7 @@ struct ram_index {
         vector_span_t const owned_vector = vector_span_for(new_location);
         nk::vector_span<f32_t> const widened {reinterpret_cast<f32_t*>(context.staged_queries.data()),
                                               frozen.dimensions()};
-        import_row<capability_>(new_rows, new_row, kernel_, owned_vector, widened);
+        import_row<elementwise_kit_t, rmscast_kit_t>(new_rows, new_row, kernel_, owned_vector, widened);
         vector_norms_t const new_norms = norms(owned_vector);
         if (stores_norms()) norm_ref_for(new_location) = new_norms;
 
@@ -3680,16 +3779,16 @@ struct ram_index {
     std::size_t add_row_candidates_(vector_view_t own_vector, vector_norms_t own_norms, std::span<node_id_t const> row,
                                     node_id_t first_invisible_id, traversal_context_t& context) const noexcept {
         results_array_t& results = context.results;
-        std::array<node_id_t, 4> lane_ids;
-        std::array<vector_view_t, 4> lane_vectors;
-        std::array<vector_norms_t, 4> lane_norms;
+        quad<node_id_t> lane_ids;
+        quad<vector_view_t> lane_vectors;
+        quad<vector_norms_t> lane_norms;
         small_size_t gathered = 0;
         std::size_t computed = 0;
         auto score_gathered = [&]() noexcept {
             // Pad the tail lanes with lane zero; the padded outputs are never consumed.
             for (small_size_t lane = gathered; lane != lane_ids.size(); ++lane)
                 lane_vectors[lane] = lane_vectors[0], lane_norms[lane] = lane_norms[0];
-            std::array<distance_t, 4> const lane_distances = distances(own_vector, own_norms, lane_vectors, lane_norms);
+            quad<distance_t> const lane_distances = distances(own_vector, own_norms, lane_vectors, lane_norms);
             for (small_size_t lane = 0; lane != gathered; ++lane)
                 results.insert(scored_node_t(lane_ids[lane], lane_distances[lane]), results.size() + 1);
             computed += gathered;
@@ -3839,16 +3938,16 @@ struct ram_index {
                                        traversal_context_t& context, search_config_t config,
                                        node_id_t first_invisible_id) noexcept {
         // Matches admit into the re-selection buffer, idle during any search and reserved beside the
-        // the walk's candidates; it bounds the walk once full, then swaps into `context.results`.
+        // the walk's candidates; it stops the walk, then swaps into `context.results`.
         context.refining_candidates.clear();
-        filtering_fold<predicate_type_, results_array_t> filtering {predicate, context.refining_candidates,
-                                                                    non_zero_expansion_factor(config)};
+        predicate_fold<predicate_type_, results_array_t> fold {predicate, context.refining_candidates,
+                                                               non_zero_expansion_factor(config)};
         expected<search_result_t> const result =
             config.synchronization != synchronization_t::concurrent_k
-                ? search_below_<synchronization_t::immutable_k>(query_vector, context, config, filtering,
+                ? search_below_<synchronization_t::immutable_k>(query_vector, context, config, fold,
                                                                 context.refining_candidates, dummy_rescoring_t {},
                                                                 first_invisible_id)
-                : search_below_<synchronization_t::concurrent_k>(query_vector, context, config, filtering,
+                : search_below_<synchronization_t::concurrent_k>(query_vector, context, config, fold,
                                                                  context.refining_candidates, dummy_rescoring_t {},
                                                                  first_invisible_id);
         std::swap(context.results, context.refining_candidates);
@@ -3888,21 +3987,21 @@ struct ram_index {
      *  else imported into @p context 's staged queries, sized for them beforehand. */
     vectors_view_t import_rows_(rows_view_t rows, std::size_t first, std::size_t count,
                                 traversal_context_t& context) const noexcept {
-        assert(context.staged_queries.numel() >= staged_rows_bytes(vector_dtype_, count, rows.columns) &&
+        assert(context.staged_queries.numel() >= staged_rows_bytes(vector_dtype_k, count, rows.columns) &&
                "The staged queries are sized before rows import into them");
-        return import_staged_rows<capability_, scalar_t>(rows, first, count, kernel_, context.staged_queries.data());
+        return import_staged_rows<elementwise_kit_t, rmscast_kit_t, scalar_t>(rows, first, count, kernel_,
+                                                                              context.staged_queries.data());
     }
 
     /** Queries one exact-scan block takes: a whole number of tiles when a matrix engine multiplies
-     *  the scalar and @p queries_count fills one, shared across @p threads up to the kit's pack;
-     *  else one query. */
+     *  the scalar and @p queries_count fills one, an even share across @p threads that may span
+     *  several of the kit's packs; else one query. */
     static constexpr std::size_t scan_width(std::size_t queries_count, std::size_t threads) noexcept {
-        if constexpr (!tiles_ladder_t::has_tiles_k) return 1;
+        if constexpr (!has_tiles_k) return 1;
         else {
-            using tiles_kit_t = typename tiles_ladder_t::kit_t;
             if (queries_count < tiles_kit_t::tile_columns_k) return 1;
             std::size_t const share = divide_round_up(queries_count, max_of<std::size_t>(threads, 1));
-            return min_of(round_up_to_multiple(share, tiles_kit_t::tile_columns_k), tiles_kit_t::pack_columns_k);
+            return round_up_to_multiple(share, tiles_kit_t::tile_columns_k);
         }
     }
 
@@ -3911,27 +4010,30 @@ struct ram_index {
      *      each query of @p block, landing each row that beats a query's worst match through
      *      @p land.
      *
-     *  A block of many queries streams through the matrix engine, a single query through the 4-way
-     *  kits; both finalize through @c quads_kit_t, so the distances match the walk's. @p admits
-     *  sees a row only once it beats some query's worst match, and at most once per block. The
-     *  block imports into @p context 's staged queries first, as cheap beside a scan as its pack.
+     *  A block of many queries streams through the matrix engine a pack at a time, a single query
+     *  through the 4-way kits; both finalize through @c quads_kit_t, so the distances match the
+     *  walk's. @p admits sees a row only once it beats some query's worst match, and at most once
+     *  per pack. The block imports into @p context 's staged queries first, as cheap beside a scan
+     *  as its packs, and @p config names the cache its packs share each block of rows through.
      */
     template <typename admits_type_, typename land_type_>
     status_t scan_(rows_view_t block, admits_type_&& admits, land_type_&& land, traversal_context_t& context,
-                   node_id_t first_invisible_id) noexcept {
+                   search_config_t config, node_id_t first_invisible_id) noexcept {
         if (!first_invisible_id) return status_t::success_k;
         // Every kernel takes its width from the geometry, so a narrower block would be over-read.
         if (block.columns != dimensions()) return status_t::config_mismatch_k;
-        if constexpr (tiles_ladder_t::has_tiles_k)
-            if (block.rows > 1) return scan_tiles_(block, admits, land, context, first_invisible_id);
-        if (failed(context.reserve_queries(staged_rows_bytes(vector_dtype_, 1, block.columns))))
+        if constexpr (has_tiles_k)
+            if (block.rows > 1)
+                return scan_tiles_(block, admits, land, context, config.cache_bytes, first_invisible_id);
+        if (failed(context.reserve_queries(staged_rows_bytes(vector_dtype_k, 1, block.columns))))
             return status_t::bad_alloc_k;
         return scan_quads_(import_rows_(block, 0, 1, context).row(0).as_vector(), admits, land, context,
                            first_invisible_id);
     }
 
     /** One query against every row, four rows per kernel call, each landing as it beats the worst
-     *  match. */
+     *  match; @p admits hears a call's contenders together, and an aggregating one settles them
+     *  before the next call. */
     template <typename admits_type_, typename land_type_>
     status_t scan_quads_(vector_view_t query, admits_type_& admits, land_type_& land, traversal_context_t& context,
                          node_id_t first_invisible_id) noexcept {
@@ -3940,71 +4042,114 @@ struct ram_index {
         for (std::size_t chunk = 0, first = 0; first < first_invisible_id;
              first += chunk_schedule_t::rows_in(chunk++)) {
             std::size_t const rows_count = min_of(chunk_schedule_t::rows_in(chunk), first_invisible_id - first);
-            for (std::size_t row = 0; row < rows_count; row += 4) {
-                std::size_t const lanes = min_of<std::size_t>(4, rows_count - row);
-                std::array<vector_view_t, 4> lane_rows;
-                std::array<vector_norms_t, 4> lane_norms;
-                for (std::size_t lane = 0; lane != 4; ++lane) {
+            for (std::size_t row = 0; row < rows_count; row += quad_lanes_k) {
+                std::size_t const lanes = min_of<std::size_t>(quad_lanes_k, rows_count - row);
+                quad<vector_view_t> lane_rows, next_rows;
+                quad<vector_norms_t> lane_norms;
+                for (std::size_t lane = 0; lane != quad_lanes_k; ++lane) {
                     location_t const location {chunk, row + min_of(lane, lanes - 1)};
                     lane_rows[lane] = vector_for(location);
                     lane_norms[lane] = norm_for(location);
+                    // A chunk's last quad streams its own last row again, already in cache.
+                    next_rows[lane] = vector_for({chunk, min_of(row + lane_rows.size() + lane, rows_count - 1)});
                 }
-                std::array<distance_t, 4> const lane_distances = distances(query, query_norms, lane_rows, lane_norms);
+                quad<distance_t> const lane_distances =
+                    scores(query, query_norms, lane_rows, lane_norms, next_rows).distances;
+                auto keep_row = [&](scan_payload_t contender) noexcept {
+                    distance_t const distance = lane_distances[contender - row];
+                    if (distance < threshold)
+                        threshold = land(0, {static_cast<node_id_t>(first + contender), distance});
+                };
+                quad<node_id_t> nodes;
+                quad<scan_payload_t> payloads;
+                std::size_t filled = 0;
                 for (std::size_t lane = 0; lane != lanes; ++lane) {
-                    node_id_t const node = static_cast<node_id_t>(first + row + lane);
-                    if (lane_distances[lane] < threshold && admitted(admits, node))
-                        threshold = land(0, {node, lane_distances[lane]});
+                    if (!(lane_distances[lane] < threshold)) continue;
+                    nodes[filled] = static_cast<node_id_t>(first + row + lane);
+                    payloads[filled++] = static_cast<scan_payload_t>(row + lane);
                 }
+                ask_contenders(admits, nodes, payloads, filled, keep_row);
+                settle_predicate(admits, keep_row);
             }
         }
         context.computed_distances += first_invisible_id;
         return status_t::success_k;
     }
 
-    /** A block of queries imported and packed once, and every chunk streamed against the pack
-     *  through @c scan_tiles. */
+    /** A block of queries imported once and packed @c tiles_kit_t::pack_columns_k at a time, and
+     *  every chunk streamed through @c scan_tiles in blocks of rows that stay in @p cache_bytes
+     *  beside one pack while every pack scores them; zero bytes stream each chunk whole. */
     template <typename admits_type_, typename land_type_>
     status_t scan_tiles_(rows_view_t block, admits_type_& admits, land_type_& land, traversal_context_t& context,
-                         node_id_t first_invisible_id) noexcept
-        requires tiles_ladder_t::has_tiles_k
+                         std::size_t cache_bytes, node_id_t first_invisible_id) noexcept
+        requires has_tiles_k
     {
-        using tiles_kit_t = typename tiles_ladder_t::kit_t;
         std::size_t const columns = block.rows, dimensions = this->dimensions();
-        // The pack lands past the imported rows, so both are sized before either lands.
-        std::size_t const staged_bytes = staged_rows_bytes(vector_dtype_, columns, dimensions);
+        std::size_t const packs = divide_round_up(columns, tiles_kit_t::pack_columns_k);
+        // The packs land past the imported rows, so both are sized before either lands.
+        std::size_t const staged_bytes = staged_rows_bytes(vector_dtype_k, columns, dimensions);
         nk_size_t packed_bytes = 0;
-        if (tiles_kit_t::pack_size(tiles_kit_t::pack_columns_k, dimensions, &packed_bytes) != nk_success_k ||
-            failed(context.reserve_queries(staged_bytes + packed_bytes)) ||
-            failed(context.reserve_tiles(tiles_kit_t::stream_rows_k, tiles_kit_t::pack_columns_k)))
+        if (tiles_kit_t::pack_size(tiles_kit_t::pack_columns_k, dimensions, &packed_bytes) != nk_success_k)
+            return status_t::bad_alloc_k;
+        std::size_t const pack_stride = round_up_to_multiple<std::size_t>(packed_bytes, default_alignment_k);
+        if (failed(context.reserve_queries(staged_bytes + packs * pack_stride)) ||
+            failed(context.reserve_tiles(tiles_kit_t::stream_rows_k, tiles_kit_t::pack_columns_k, packs)))
             return status_t::bad_alloc_k;
         vectors_view_t const queries = import_rows_(block, 0, columns, context);
         byte_t* const packed = context.staged_queries.data() + staged_bytes;
-        [[maybe_unused]] nk_status_t const packing = tiles_kit_t::pack(
-            queries.raw_values_data(), columns, dimensions, static_cast<std::size_t>(queries.stride_bytes(0)), packed,
-            0, columns, nullptr);
-        assert(packing == nk_success_k && "A matrix engine packs any block");
-
-        alignas(16) std::array<dot_result_t, tiles_kit_t::pack_columns_k> query_sumsqs {};
-        std::array<distance_t, tiles_kit_t::pack_columns_k> thresholds;
-        for (std::size_t column = 0; column != columns; ++column) {
-            query_sumsqs[column] = norms(queries.row(column).as_vector()).sumsq;
-            thresholds[column] = std::numeric_limits<distance_t>::max();
+        for (std::size_t pack = 0; pack != packs; ++pack) {
+            std::size_t const first_column = pack * tiles_kit_t::pack_columns_k;
+            std::size_t const pack_columns = min_of(tiles_kit_t::pack_columns_k, columns - first_column);
+            vectors_view_t const pack_queries = queries(nk::range(first_column, first_column + pack_columns),
+                                                        nk::slice);
+            [[maybe_unused]] nk_status_t const packing = tiles_kit_t::pack(
+                pack_queries.raw_values_data(), pack_columns, dimensions,
+                static_cast<std::size_t>(pack_queries.stride_bytes(0)), packed + pack * pack_stride, 0, pack_columns,
+                nullptr);
+            assert(packing == nk_success_k && "A matrix engine packs any block");
+            std::span<dot_result_t> const sumsqs = to_span(context.query_sumsqs(pack, nk::slice).as_vector());
+            std::span<distance_t> const thresholds = to_span(context.thresholds(pack, nk::slice).as_vector());
+            for (std::size_t column = 0; column != tiles_kit_t::pack_columns_k; ++column) {
+                sumsqs[column] = column < pack_columns ? norms(pack_queries.row(column).as_vector()).sumsq
+                                                       : dot_result_t {};
+                thresholds[column] = std::numeric_limits<distance_t>::max();
+            }
         }
+
+        // A block of rows shares the cache with the one pack scoring it, and never drops below a
+        // kit step.
+        std::size_t const row_bytes = vectors_.columns() * sizeof(scalar_t);
+        std::size_t const block_rows = max_of((cache_bytes - min_of(cache_bytes, pack_stride)) / row_bytes,
+                                              tiles_kit_t::stream_rows_k);
         for (std::size_t chunk = 0, first = 0; first < first_invisible_id;
              first += chunk_schedule_t::rows_in(chunk++)) {
             std::size_t const chunk_rows = min_of(chunk_schedule_t::rows_in(chunk), first_invisible_id - first);
-            // Chunk rows are padded to whole kit steps, while the queries were packed at
-            // the logical width.
-            vectors_view_t const padded {vectors_[location_t {chunk, 0}], chunk_schedule_t::rows_in(chunk),
-                                         vectors_.columns() * nk::dimensions_per_value<scalar_t>()};
-            nk::shape_storage_<2> const logical {{chunk_rows, dimensions},
-                                                 {padded.stride_bytes(0), padded.stride_bytes(1)},
-                                                 2};
-            scan_tiles<tiles_kit_t, quads_kit_t>(
-                kernel_, vectors_view_t {padded.byte_data(), logical}, static_cast<node_id_t>(first), packed,
-                std::span<dot_result_t const>(query_sumsqs).first(columns),
-                std::span<distance_t>(thresholds).first(columns), context.step_dots.span(),
-                [&](std::size_t row) noexcept { return norm_for({chunk, row}).sumsq; }, admits, land);
+            std::size_t const step_rows = cache_bytes ? block_rows : chunk_rows;
+            for (std::size_t block_first = 0; block_first < chunk_rows; block_first += step_rows) {
+                std::size_t const rows = min_of(step_rows, chunk_rows - block_first);
+                // Chunk rows are padded to whole kit steps, while the queries were packed at
+                // the logical width.
+                vectors_view_t const padded {vectors_[location_t {chunk, block_first}], rows,
+                                             vectors_.columns() * nk::dimensions_per_value<scalar_t>()};
+                nk::shape_storage_<2> const logical {{rows, dimensions},
+                                                     {padded.stride_bytes(0), padded.stride_bytes(1)},
+                                                     2};
+                for (std::size_t pack = 0; pack != packs; ++pack) {
+                    std::size_t const first_column = pack * tiles_kit_t::pack_columns_k;
+                    std::size_t const pack_columns = min_of(tiles_kit_t::pack_columns_k, columns - first_column);
+                    auto land_column = [&](std::size_t column, scored_node_t candidate) noexcept {
+                        return land(first_column + column, candidate);
+                    };
+                    scan_tiles<tiles_kit_t, quads_kit_t>(
+                        kernel_, vectors_view_t {padded.byte_data(), logical},
+                        static_cast<node_id_t>(first + block_first), packed + pack * pack_stride,
+                        to_span(context.query_sumsqs(pack, nk::slice).as_vector()).first(pack_columns),
+                        to_span(context.thresholds(pack, nk::slice).as_vector()).first(pack_columns),
+                        context.step_dots.span(),
+                        [&](std::size_t row) noexcept { return norm_for({chunk, block_first + row}).sumsq; }, admits,
+                        land_column);
+                }
+            }
         }
         context.computed_distances += first_invisible_id * columns;
         return status_t::success_k;
@@ -4103,9 +4248,9 @@ struct ram_index {
         frontier_queue_t& frontier = context.frontier;
         visited_set_t& visited = context.visited;
 
-        std::array<node_id_t, 4> landmarks_ids;
-        std::array<vector_view_t, 4> landmarks_vectors;
-        std::array<vector_norms_t, 4> landmarks_norms;
+        quad<node_id_t> landmarks_ids;
+        quad<vector_view_t> landmarks_vectors;
+        quad<vector_norms_t> landmarks_norms;
         small_size_t landmarks_in_batch = 0;
 
         if (status_t const seen = visited.reserve(visited.size() + landmarks_ids.size()); failed(seen))
@@ -4142,6 +4287,7 @@ struct ram_index {
                 }
 
             [[maybe_unused]] membership_t const marked = visited.insert(landmark_node_id);
+            prefetch_vector_(landmark_location);
             landmarks_ids[landmarks_in_batch] = landmark_node_id;
             landmarks_vectors[landmarks_in_batch] = vector_for(landmark_location);
             landmarks_norms[landmarks_in_batch] = norm_for(landmark_location);
@@ -4155,11 +4301,10 @@ struct ram_index {
             landmarks_vectors[lane] = landmarks_vectors[0];
             landmarks_norms[lane] = landmarks_norms[0];
         }
-        scores_result<dot_result_t, 4> landmark_scores = scores( //
-            query, query_norms, landmarks_vectors, landmarks_norms);
+        scores_result<dot_result_t> landmark_scores = scores(query, query_norms, landmarks_vectors, landmarks_norms);
         rescoring(landmarks_ids, landmarks_vectors, landmarks_norms, landmark_scores, landmarks_in_batch);
         context.computed_distances += landmarks_in_batch;
-        std::array<scored_node_t, 4> landmarks_scored;
+        quad<scored_node_t> landmarks_scored;
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
             landmarks_scored[lane] = scored_node_t(landmarks_ids[lane], landmark_scores.distances[lane]);
         std::span const scored = std::span(landmarks_scored).first(landmarks_in_batch);
@@ -4168,6 +4313,7 @@ struct ram_index {
         if (fold.absorb(scored, std::span<dot_result_t const>(landmark_scores.dots).first(landmarks_in_batch)) ==
             walk_demand_t::sated_k)
             return {walk_step_t::sated_k, status_t::success_k};
+        settle_fold(fold);
         network_sort(scored, closer_scored_node_t {});
         results.insert(scored, expansion_factor);
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
@@ -4215,7 +4361,7 @@ struct ram_index {
 
         // As many landmarks as one row holds, a stochastic multi-start drawn in the scoring
         // kernels' 4-way batches, so the last batch may round past the connectivity.
-        small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);
+        small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, quad_lanes_k);
         for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch) {
             auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
                 query, query_norms, admission, expansion_factor, context, seeds, fold, rescoring);
@@ -4247,20 +4393,19 @@ struct ram_index {
             // Rows held ahead come first: popped a hop early, so their reads are already in flight.
             frontier_queue_t& source = context.ahead.empty() ? frontier : context.ahead;
             scored_node_t const candidate = source.top();
-            // The bound governs once it fills, since a filtered walk's radius is the wider one.
-            results_array_t const& candidates = bound.size() == expansion_factor ? bound : results;
-            bool const candidates_full = candidates.size() == expansion_factor;
-            // Past the full candidates' radius nothing deeper improves the answer, and the rows
-            // held ahead are past it too, since it only tightened after they were popped.
-            if (candidates_full && candidate.distance > candidates.top().distance) {
+            // Only a full bound has a radius, so a filtered walk routes on until its matches fill.
+            bool const bound_full = bound.size() == expansion_factor;
+            // Past the full bound's radius nothing deeper improves the answer, and the rows held
+            // ahead are past it too, since it only tightened after they were popped.
+            if (bound_full && candidate.distance > bound.top().distance) {
                 if (&source == &frontier) break;
                 context.ahead.clear();
                 continue;
             }
             // Every other entry past that radius is never popped either: shed them when the coming
             // expansion, at most one node's neighbors, would not fit.
-            if (candidates_full && frontier.capacity() - frontier.size() < node_connectivity)
-                frontier.erase_below(candidates.top());
+            if (bound_full && frontier.capacity() - frontier.size() < node_connectivity)
+                frontier.erase_below(bound.top());
 
             location_t const candidate_location = chunk_schedule_t::locate(candidate.node_id);
             neighbors_ref<synchronization_> const candidate_neighbors = neighbors_for<synchronization_>( //
@@ -4281,7 +4426,7 @@ struct ram_index {
             // Idle threads lend the walk their share of the memory queues: keep `walk_width - 1`
             // rows popped ahead inside the radius, their rows streaming toward L2.
             while (context.ahead.size() + 1 < context.walk_width && !frontier.empty() &&
-                   !(candidates_full && frontier.top().distance > candidates.top().distance)) {
+                   !(bound_full && frontier.top().distance > bound.top().distance)) {
                 prefetch_neighbors_(chunk_schedule_t::locate(frontier.top().node_id));
                 context.ahead.insert_reserved(scored_node_t(frontier.top()));
                 frontier.pop();
@@ -4295,9 +4440,9 @@ struct ram_index {
             bool list_ended = false;
             while (!list_ended && neighbor_slot != slots_count) {
 
-                std::array<node_id_t, 4> gathered_ids;
-                std::array<vector_view_t, 4> gathered_vectors;
-                std::array<vector_norms_t, 4> gathered_norms;
+                quad<node_id_t> gathered_ids;
+                quad<vector_view_t> gathered_vectors;
+                quad<vector_norms_t> gathered_norms;
                 small_size_t gathered_count = 0;
                 for (; gathered_count != gathered_ids.size() && neighbor_slot != slots_count; ++neighbor_slot) {
                     node_id_t const neighbor_id = neighbor_slot ? candidate_neighbors.load_slot(neighbor_slot) //
@@ -4330,7 +4475,7 @@ struct ram_index {
                     gathered_vectors[lane] = gathered_vectors[0];
                     gathered_norms[lane] = gathered_norms[0];
                 }
-                scores_result<dot_result_t, 4> gathered_scores = scores( //
+                scores_result<dot_result_t> gathered_scores = scores( //
                     query, query_norms, gathered_vectors, gathered_norms,
                     // A row's last quad streams in the first quad of the row held next.
                     (!list_ended && neighbor_slot != slots_count) || context.ahead.empty()
@@ -4341,7 +4486,7 @@ struct ram_index {
                               admission.first_invisible_id, gathered_vectors));
                 rescoring(gathered_ids, gathered_vectors, gathered_norms, gathered_scores, gathered_count);
                 context.computed_distances += gathered_count;
-                std::array<scored_node_t, 4> scored_batch;
+                quad<scored_node_t> scored_batch;
                 for (small_size_t lane = 0; lane != gathered_count; ++lane)
                     scored_batch[lane] = scored_node_t(gathered_ids[lane], gathered_scores.distances[lane]);
                 std::span const scored = std::span(scored_batch).first(gathered_count);
@@ -4371,6 +4516,7 @@ struct ram_index {
                     if (status_t const queued = frontier.insert(scored_node_t(scored[lane])); failed(queued))
                         return queued;
             }
+            settle_fold(fold);
         }
         return status_t::success_k;
     }
@@ -4415,6 +4561,9 @@ struct ram_index {
     /** The distance kind every walk ranks by; only the distance epilogue and the norms chunks
      *  read it. */
     nk_kernel_kind_t kernel_;
+
+    /** Streams the rows a walk or a scan reaches next toward the core. */
+    prefetcher_t prefetcher_;
 
     /** Chunks every column covers. Deliberately non-atomic: only the elected grower mutates it,
      *  and successive growers are ordered by the acquire/release pair on @c remaining_capacity_,

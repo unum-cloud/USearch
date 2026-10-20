@@ -268,7 +268,7 @@ std::size_t test_dense_vram_indexes_device_merge(u64_t seed, typename indexes_ty
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed, typename indexes_type_::executor_t& placement) {
     using key_t = typename indexes_type_::key_t;
-    using nvme_t = nvme_indexes<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k, blocking_files_engine<>>;
+    using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k, blocking_files_engine<>>;
     using scalar_t = typename nvme_t::scalar_t;
     std::size_t const rows_count = 2 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);

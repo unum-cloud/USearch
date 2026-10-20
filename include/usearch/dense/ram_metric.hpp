@@ -13,7 +13,7 @@
  *  @section File Organization
  *
  *  @b Norms - @c vector_norms carries per-vector @c sum (DPBUSD compensation) and @c sumsq
- *  (L2 norm, used by angular/euclidean). @c norms<scalar, caps> dispatches to NumKong's
+ *  (L2 norm, used by angular/euclidean). @c norms<kit> dispatches to NumKong's
  *  @c nk_reduce_moments_* family at construction-time of the index.
  *
  *  @b Kits - one struct per @c (scalar,capability), e.g. @c bf16_genoa_quads_kit_t, bundling
@@ -28,6 +28,8 @@
  *  @c capability_k the caps admit, else falls back to serial. A kit the build cannot carry is a
  *  stub in the @c #else of its @c NUMKONG_TARGET_* guard, stating only those two facts.
  *  Unsupported scalars simply have no specialization. Adding an ISA tier is one row and one stub.
+ *  @c src/ climbs every ladder once per dtype and CPU class and hands each dense engine the kits
+ *  they pick, so no engine derives a pick from a capability mask.
  *
  *  @b Trampoline - @c invoke_scores_<fan_out,kit> is the one place the load, update,
  *  finalize, through, prefetch, demote choreography lives. Reads everything it needs -
@@ -37,9 +39,9 @@
  *  hardcoded fan-out-4); for 1-to-1 the bottom three slots are left as register noise
  *  and the resulting lanes 1-3 are dropped at extract time.
  *
- *  @b Entry-points - free function templates @c distance<caps> and @c distances<caps>, with
- *  @c scalar deduced from the @c nk::vector_view inputs and the metric their first argument. Call
- *  sites read @c distance<caps>(nk_kernel_angular_k,...) - no per-spec method, no per-spec class.
+ *  @b Entry-points - free function templates @c distance<kit> and @c distances<kit>, taking the
+ *  quads kit an engine was handed and the metric as their first argument. Call sites read
+ *  @c distance<quads_kit_t>(nk_kernel_angular_k,...) - no per-spec method, no per-spec class.
  *
  *  @b Tiles - a second engine axis over the same capability bitmask, for scans rather than walks.
  *  Each @c tiles_ladder<scalar,caps> names a matrix-engine kit - @c no_tiles_kit_t where the
@@ -102,8 +104,6 @@
 #include <numkong/numkong.h>
 #include <numkong/types.hpp>
 #include <numkong/vector.hpp>
-
-#include <forkunion/types.hpp> // `fu::standard_cache_hints_t`
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_tables.hpp"
@@ -2831,12 +2831,13 @@ struct haswell_elementwise_kit_t {
 
 #if NUMKONG_TARGET_SKYLAKE
 /** Skylake's casts and arithmetic over Haswell's exponentials, as one tile fills a single AVX2 register. */
-struct skylake_elementwise_kit_t : haswell_elementwise_kit_t {
+struct skylake_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_skylake;
     static constexpr auto scale = nk_each_scale_f32_skylake;
     static constexpr auto blend = nk_each_blend_f32_skylake;
+    static constexpr auto exp2 = haswell_elementwise_kit_t::exp2;
 };
 #else
 
@@ -2850,10 +2851,13 @@ struct skylake_elementwise_kit_t {
 
 #if NUMKONG_TARGET_ICELAKE
 /** Icelake's casts over Skylake's arithmetic, which Icelake adds no kernels to. */
-struct icelake_elementwise_kit_t : skylake_elementwise_kit_t {
+struct icelake_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_icelake;
+    static constexpr auto scale = skylake_elementwise_kit_t::scale;
+    static constexpr auto blend = skylake_elementwise_kit_t::blend;
+    static constexpr auto exp2 = skylake_elementwise_kit_t::exp2;
 };
 #else
 
@@ -2867,10 +2871,13 @@ struct icelake_elementwise_kit_t {
 
 #if NUMKONG_TARGET_SAPPHIRE
 /** Sapphire's half-precision casts over Skylake's arithmetic. */
-struct sapphire_elementwise_kit_t : skylake_elementwise_kit_t {
+struct sapphire_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphire_k;
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_sapphire;
+    static constexpr auto scale = skylake_elementwise_kit_t::scale;
+    static constexpr auto blend = skylake_elementwise_kit_t::blend;
+    static constexpr auto exp2 = skylake_elementwise_kit_t::exp2;
 };
 #else
 
@@ -2954,10 +2961,13 @@ struct v128relaxed_elementwise_kit_t {
 #if NUMKONG_TARGET_POWERVSX
 
 /** POWER's casts over the serial arithmetic, which POWER adds no kernels to. */
-struct powervsx_elementwise_kit_t : serial_elementwise_kit_t {
+struct powervsx_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_powervsx;
+    static constexpr auto scale = serial_elementwise_kit_t::scale;
+    static constexpr auto blend = serial_elementwise_kit_t::blend;
+    static constexpr auto exp2 = serial_elementwise_kit_t::exp2;
 };
 #else
 
@@ -2987,10 +2997,20 @@ struct elementwise_ladder {
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-/** The kit narrowing f32 rows at unit RMS into @p scalar_type_, whose dot products land in f32; a
- *  scalar without one has no @c kit_t, and bf16 needs none, as it keeps f32's exponent range. */
+/** The empty rmscast kit: the scalar has no narrowing kit, or keeps f32's exponent range as bf16
+ *  does, so rows cast plainly. */
+struct no_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr bool compiled_k = true;
+};
+
+/** The kit narrowing f32 rows at unit RMS into @p scalar_type_, whose dot products land in f32;
+ *  @c no_rmscast_kit_t for a scalar without one. */
 template <typename scalar_type_, nk_capability_t caps_>
-struct rmscast_ladder {};
+struct rmscast_ladder {
+    using kit_t = no_rmscast_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
 
 struct f16_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
@@ -3119,10 +3139,9 @@ struct rmscast_ladder<nk::e3m2_t, caps_> {
  *  agree, else a cast, at unit RMS from @c f32 or @c f64 when @p kernel is angular and some kit
  *  narrows into the scalar, as an angular index is blind to magnitude and narrow floats spend their
  *  range on direction. NumKong narrows only from @c f32, so @c f64 rows widen into @p widened. */
-template <nk_capability_t capability_, nk::numeric_dtype scalar_type_>
+template <typename elementwise_kit_type_, typename rmscast_kit_type_, nk::numeric_dtype scalar_type_>
 void import_row(rows_view_t source, std::size_t row, nk_kernel_kind_t kernel, nk::vector_span<scalar_type_> target,
                 nk::vector_span<f32_t> widened) noexcept {
-    using cast_kit_t = typename elementwise_ladder<capability_>::kit_t;
     byte_t const* const from = source.row(row);
     std::size_t const columns = source.columns;
     if (source.dtype == scalar_type_::dtype()) {
@@ -3130,61 +3149,62 @@ void import_row(rows_view_t source, std::size_t row, nk_kernel_kind_t kernel, nk
         return;
     }
     [[maybe_unused]] nk_status_t status = nk_success_k;
-    if constexpr (requires { typename rmscast_ladder<scalar_type_, capability_>::kit_t; })
+    if constexpr (!std::is_same_v<rmscast_kit_type_, no_rmscast_kit_t>)
         if (kernel == nk_kernel_angular_k && (source.dtype == nk_f32_k || source.dtype == nk_f64_k)) {
             f32_t const* wide = reinterpret_cast<f32_t const*>(from);
             if (source.dtype == nk_f64_k) {
-                status = cast_kit_t::cast(from, nk_f64_k, widened.data(), nk_f32_k, columns, nullptr);
+                status = elementwise_kit_type_::cast(from, nk_f64_k, widened.data(), nk_f32_k, columns, nullptr);
                 wide = widened.data();
             }
-            status = rmscast_ladder<scalar_type_, capability_>::kit_t::rmscast(
-                wide, nullptr, &target.data()->raw_, 1, 1, columns, columns * sizeof(f32_t),
-                packed_bytes(scalar_type_::dtype(), columns), std::numeric_limits<f32_t>::min(), nullptr);
+            status = rmscast_kit_type_::rmscast(wide, nullptr, &target.data()->raw_, 1, 1, columns,
+                                                columns * sizeof(f32_t), packed_bytes(scalar_type_::dtype(), columns),
+                                                std::numeric_limits<f32_t>::min(), nullptr);
             assert(status == nk_success_k && "Every kit RMS-casts from f32");
             return;
         }
-    status = cast_kit_t::cast(from, source.dtype, target.byte_data(), scalar_type_::dtype(), columns, nullptr);
+    status = elementwise_kit_type_::cast(from, source.dtype, target.byte_data(), scalar_type_::dtype(), columns,
+                                         nullptr);
     assert(status == nk_success_k && "Every kit casts every dtype pair");
 }
 
 /** Rows @b [first,first+count) of @p source in @p scalar_type_: borrowed when they already are,
  *  else imported through @ref import_row into the leading rows of @p staging. */
-template <nk_capability_t capability_, nk::numeric_dtype scalar_type_>
+template <typename elementwise_kit_type_, typename rmscast_kit_type_, nk::numeric_dtype scalar_type_>
 nk::matrix_view<scalar_type_> import_rows(rows_view_t source, std::size_t first, std::size_t count,
                                           nk_kernel_kind_t kernel, nk::matrix_span<scalar_type_> staging,
                                           nk::vector_span<f32_t> widened) noexcept {
     if (source.template holds<scalar_type_>()) return source.slice(first, count).template as<scalar_type_>();
     for (std::size_t row = 0; row != count; ++row)
-        import_row<capability_>(source, first + row, kernel, staging.row(row).as_vector(), widened);
+        import_row<elementwise_kit_type_, rmscast_kit_type_>(source, first + row, kernel, staging.row(row).as_vector(),
+                                                             widened);
     return staging(nk::range(0, count), nk::slice);
 }
 
 /** Writes @p native, one row in @p native_dtype, as row @p row of @p target in its scalar: a byte
  *  move when they agree, else a cast. */
-template <nk_capability_t capability_>
+template <typename elementwise_kit_type_>
 void export_row(void const* native, nk_dtype_t native_dtype, rows_span_t target, std::size_t row) noexcept {
-    using cast_kit_t = typename elementwise_ladder<capability_>::kit_t;
     if (target.dtype == native_dtype) {
         std::memcpy(target.row(row), native, packed_bytes(target.dtype, target.columns));
         return;
     }
-    [[maybe_unused]] nk_status_t const status = cast_kit_t::cast(native, native_dtype, target.row(row), target.dtype,
-                                                                 target.columns, nullptr);
+    [[maybe_unused]] nk_status_t const status = elementwise_kit_type_::cast(native, native_dtype, target.row(row),
+                                                                            target.dtype, target.columns, nullptr);
     assert(status == nk_success_k && "Every kit casts every dtype pair");
 }
 
 /** Scales each of @p heads @c f32 sums, at most eight, by its correction, then adds @p count value rows into it, each
  *  row's weights one tile over the heads. Each chunk of the rows widens once and stays in L1 while every head
  *  blends it. */
-template <nk::numeric_dtype scalar_type_, nk_capability_t caps_>
+template <nk::numeric_dtype scalar_type_, typename elementwise_kit_type_>
 void values_step(f32_t* outputs, std::size_t heads, std::size_t columns, char const* const* rows,
                  std::array<f32_t, 8> const* weights, std::array<f32_t, 8> const& corrections,
                  std::size_t count) noexcept {
-    using kit_t = typename elementwise_ladder<caps_>::kit_t;
+    using kit_t = elementwise_kit_type_;
     // A multiple of eight columns, so every chunk starts on a byte even for the packed kinds.
     constexpr std::size_t chunk_columns_k = 64;
     std::size_t const bits = nk_dtype_bits(scalar_type_::dtype());
-    std::array<std::array<f32_t, chunk_columns_k>, 4> widened;
+    quad<std::array<f32_t, chunk_columns_k>> widened;
     assert(count <= widened.size() && heads <= corrections.size() && "Four nodes and eight heads per step");
     f32_t const one = 1, zero = 0;
     for (std::size_t first = 0; first < columns; first += chunk_columns_k) {
@@ -3209,7 +3229,7 @@ void values_step(f32_t* outputs, std::size_t heads, std::size_t columns, char co
 }
 
 /** One finalize read two ways: the native dots, and the distances derived from them. */
-template <typename dot_result_type_, std::size_t fan_out_>
+template <typename dot_result_type_, std::size_t fan_out_ = quad_lanes_k>
 struct scores_result {
 
     /** Native dot products in kernel lane order, before any distance conversion. */
@@ -3250,9 +3270,9 @@ concept quads_supported = quads_adapted<scalar_, caps_> &&
 
 /** Widens the four lanes an epilogue wrote as @p lane_type_ into distances. */
 template <typename lane_type_, typename finalized_vec_type_>
-[[gnu::always_inline]] inline std::array<f32_t, 4> distances_of_(finalized_vec_type_ const& lanes) noexcept {
-    static_assert(sizeof(finalized_vec_type_) == 4 * sizeof(lane_type_), "An epilogue writes four lanes");
-    std::array<lane_type_, 4> const& typed = *reinterpret_cast<std::array<lane_type_, 4> const*>(&lanes);
+[[gnu::always_inline]] inline quad<f32_t> distances_of_(finalized_vec_type_ const& lanes) noexcept {
+    static_assert(sizeof(finalized_vec_type_) == quad_lanes_k * sizeof(lane_type_), "An epilogue writes four lanes");
+    quad<lane_type_> const& typed = *reinterpret_cast<quad<lane_type_> const*>(&lanes);
     return {static_cast<f32_t>(typed[0]), static_cast<f32_t>(typed[1]), static_cast<f32_t>(typed[2]),
             static_cast<f32_t>(typed[3])};
 }
@@ -3266,9 +3286,10 @@ template <typename lane_type_, typename finalized_vec_type_>
  *  rest @c f32.
  */
 template <quads_kit kit_>
-[[gnu::always_inline]] inline std::array<f32_t, 4> convert_to_distances(
-    nk_kernel_kind_t kernel, typename kit_::finalized_vec_t const& dots,
-    typename kit_::scalar_t::dot_result_t query_sumsq, typename kit_::finalized_vec_t const& sumsqs) noexcept {
+[[gnu::always_inline]] inline quad<f32_t> convert_to_distances(nk_kernel_kind_t kernel,
+                                                               typename kit_::finalized_vec_t const& dots,
+                                                               typename kit_::scalar_t::dot_result_t query_sumsq,
+                                                               typename kit_::finalized_vec_t const& sumsqs) noexcept {
     using dot_result_t = typename kit_::scalar_t::dot_result_t;
     alignas(16) typename kit_::finalized_vec_t distances;
     if constexpr (bits_kit<kit_>) switch (kernel) {
@@ -3301,7 +3322,7 @@ template <quads_kit kit_>
  *  finalize is hardcoded fan-out-4); for 1-to-1 the bottom three slots are left as
  *  register noise and the resulting lanes 1-3 are dropped at extract time.
  */
-template <std::size_t fan_out_, quads_kit kit_, typename cache_hints_type_>
+template <std::size_t fan_out_, quads_kit kit_, typename prefetcher_type_>
 [[gnu::always_inline]] inline scores_result<typename kit_::scalar_t::dot_result_t, fan_out_> invoke_scores_( //
     nk_kernel_kind_t kernel,                                                                                 //
     nk::vector_view<typename kit_::scalar_t> query,                                                          //
@@ -3309,9 +3330,9 @@ template <std::size_t fan_out_, quads_kit kit_, typename cache_hints_type_>
     std::array<nk::vector_view<typename kit_::scalar_t>, fan_out_> candidates,                               //
     std::array<vector_norms<typename kit_::scalar_t::dot_result_t>, fan_out_> candidates_norms,              //
     std::array<nk::vector_view<typename kit_::scalar_t>, fan_out_> next_candidates,                          //
-    [[maybe_unused]] cache_hints_type_ hints) noexcept {
+    [[maybe_unused]] prefetcher_type_ const& prefetcher) noexcept {
 
-    static_assert(fan_out_ == 1 || fan_out_ == 4, "Only 1-to-1 and 1-to-4 fan-outs are supported");
+    static_assert(fan_out_ == 1 || fan_out_ == quad_lanes_k, "Only 1-to-1 and 1-to-4 fan-outs are supported");
     using scalar_t = typename kit_::scalar_t;
     using accumulator_t = typename kit_::accumulator_t;
     using step_vec_t = typename kit_::step_vec_t;
@@ -3323,11 +3344,8 @@ template <std::size_t fan_out_, quads_kit kit_, typename cache_hints_type_>
     // scalar variants - and its caller contract is that every slot it reads is initialized,
     // even when the 1-to-1 instantiation only extracts lane 0. Three zero-stores buy a
     // well-defined finalize on every path.
-    alignas(64) accumulator_t accumulators[4];
-    kit_::init_accumulator(&accumulators[0]);
-    kit_::init_accumulator(&accumulators[1]);
-    kit_::init_accumulator(&accumulators[2]);
-    kit_::init_accumulator(&accumulators[3]);
+    alignas(64) accumulator_t accumulators[quad_lanes_k];
+    for (accumulator_t& accumulator : accumulators) kit_::init_accumulator(&accumulator);
 
     auto const* query_base = query.data();
     auto candidate_bases = [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
@@ -3357,10 +3375,10 @@ template <std::size_t fan_out_, quads_kit kit_, typename cache_hints_type_>
         }(std::make_index_sequence<fan_out_> {});
 
         // One prefetch per line of the next quad, at the depth this quad has reached.
-        if constexpr (!std::is_same_v<cache_hints_type_, fu::standard_cache_hints_t>)
-            if (value_offset * sizeof(scalar_t) % fu::default_alignment_k == 0)
+        if constexpr (prefetcher_type_::prefetches_k)
+            if (value_offset * sizeof(scalar_t) % default_alignment_k == 0)
                 [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
-                    (hints(next_bases[lane_index] + value_offset, fu::prefetch_line_k), ...);
+                    (prefetcher.prefetch(next_bases[lane_index] + value_offset, default_alignment_k), ...);
                 }(std::make_index_sequence<fan_out_> {});
     }
 
@@ -3384,7 +3402,7 @@ template <std::size_t fan_out_, quads_kit kit_, typename cache_hints_type_>
     using finalized_vec_t = typename kit_::finalized_vec_t;
     alignas(64) finalized_vec_t dot_products_vec;
     if constexpr (quads_compensated<kit_>) {
-        alignas(16) std::array<dot_result_t, 4> candidates_sums_array {};
+        alignas(16) quad<dot_result_t> candidates_sums_array {};
         [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
             ((candidates_sums_array[lane_index] = candidates_norms[lane_index].sum), ...);
         }(std::make_index_sequence<fan_out_> {});
@@ -3398,17 +3416,16 @@ template <std::size_t fan_out_, quads_kit kit_, typename cache_hints_type_>
     }
 
     // Now infer the metric's distance from the inner product, in vec form.
-    alignas(16) std::array<dot_result_t, 4> candidates_sumsqs_array {};
+    alignas(16) quad<dot_result_t> candidates_sumsqs_array {};
     [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
         ((candidates_sumsqs_array[lane_index] = candidates_norms[lane_index].sumsq), ...);
     }(std::make_index_sequence<fan_out_> {});
-    std::array<f32_t, 4> const distances_array = convert_to_distances<kit_>(
+    quad<f32_t> const distances_array = convert_to_distances<kit_>(
         kernel, dot_products_vec, query_norms.sumsq,
         *reinterpret_cast<finalized_vec_t const*>(candidates_sumsqs_array.data()));
 
-    static_assert(sizeof(finalized_vec_t) == 4 * sizeof(dot_result_t), "A finalize holds four dot lanes");
-    std::array<dot_result_t, 4> const& dots_array = *reinterpret_cast<std::array<dot_result_t, 4> const*>(
-        &dot_products_vec);
+    static_assert(sizeof(finalized_vec_t) == quad_lanes_k * sizeof(dot_result_t), "A finalize holds four dot lanes");
+    quad<dot_result_t> const& dots_array = *reinterpret_cast<quad<dot_result_t> const*>(&dot_products_vec);
     scores_result<dot_result_t, fan_out_> scores;
     [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
         ((scores.dots[lane_index] = dots_array[lane_index]), ...);
@@ -3419,74 +3436,69 @@ template <std::size_t fan_out_, quads_kit kit_, typename cache_hints_type_>
 
 /** Compute @c (sum,sumsq) of @p vec via the kit's @c compute_norms - one source of truth, the
  *  kit. */
-template <nk_capability_t caps_, nk::numeric_dtype scalar_>
-[[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> norms(
-    nk::vector_view<scalar_> vec) noexcept {
-    using kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
-    return invoke_dense_norms_(kit_t::compute_norms, vec);
+template <quads_kit kit_>
+[[gnu::always_inline]] inline vector_norms<typename kit_::scalar_t::dot_result_t> norms(
+    nk::vector_view<typename kit_::scalar_t> vec) noexcept {
+    return invoke_dense_norms_(kit_::compute_norms, vec);
 }
 
 /**
  *  @brief 1-to-1 distance from @c query to @c candidate under @p kernel.
  *
- *  Free function template - scalar deduced from the @c nk::vector_view; capability passed
- *  explicitly, the metric at runtime. The chosen kit is internal to the trampoline.
+ *  Free function template - the quads kit passed explicitly, the metric at runtime.
  */
-template <nk_capability_t caps_, nk::numeric_dtype scalar_>
-[[gnu::always_inline]] inline f32_t distance(                 //
-    nk_kernel_kind_t kernel,                                  //
-    nk::vector_view<scalar_> query,                           //
-    vector_norms<typename scalar_::dot_result_t> query_norms, //
-    nk::vector_view<scalar_> candidate,                       //
-    vector_norms<typename scalar_::dot_result_t> candidate_norms) noexcept {
-    using kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
-    return invoke_scores_<1, kit_t>( //
-               kernel, query, query_norms, std::array<nk::vector_view<scalar_>, 1> {candidate},
-               std::array {candidate_norms}, std::array<nk::vector_view<scalar_>, 1> {candidate},
-               fu::standard_cache_hints_t {})
+template <quads_kit kit_>
+[[gnu::always_inline]] inline f32_t distance(                        //
+    nk_kernel_kind_t kernel,                                         //
+    nk::vector_view<typename kit_::scalar_t> query,                  //
+    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms, //
+    nk::vector_view<typename kit_::scalar_t> candidate,              //
+    vector_norms<typename kit_::scalar_t::dot_result_t> candidate_norms) noexcept {
+    using vector_view_t = nk::vector_view<typename kit_::scalar_t>;
+    return invoke_scores_<1, kit_>( //
+               kernel, query, query_norms, std::array<vector_view_t, 1> {candidate}, std::array {candidate_norms},
+               std::array<vector_view_t, 1> {candidate}, object_prefetcher<dummy_cache_hints_t> {})
         .distances[0];
 }
 
 /** 1-to-4 distances from @c query to four @c candidates under @p kernel. */
-template <nk_capability_t caps_, nk::numeric_dtype scalar_>
-[[gnu::always_inline]] inline std::array<f32_t, 4> distances( //
-    nk_kernel_kind_t kernel,                                  //
-    nk::vector_view<scalar_> query,                           //
-    vector_norms<typename scalar_::dot_result_t> query_norms, //
-    std::array<nk::vector_view<scalar_>, 4> candidates,       //
-    std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms) noexcept {
-    using kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
-    return invoke_scores_<4, kit_t>(kernel, query, query_norms, candidates, candidates_norms, candidates,
-                                    fu::standard_cache_hints_t {})
+template <quads_kit kit_>
+[[gnu::always_inline]] inline quad<f32_t> distances(                 //
+    nk_kernel_kind_t kernel,                                         //
+    nk::vector_view<typename kit_::scalar_t> query,                  //
+    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms, //
+    quad<nk::vector_view<typename kit_::scalar_t>> candidates,       //
+    quad<vector_norms<typename kit_::scalar_t::dot_result_t>> candidates_norms) noexcept {
+    return invoke_scores_<quad_lanes_k, kit_>(kernel, query, query_norms, candidates, candidates_norms, candidates,
+                                              object_prefetcher<dummy_cache_hints_t> {})
         .distances;
 }
 
 /** 1-to-4 native dots and the distances derived from them, from one finalize, under @p kernel. */
-template <nk_capability_t caps_, nk::numeric_dtype scalar_>
-[[gnu::always_inline]] inline scores_result<typename scalar_::dot_result_t, 4> scores( //
-    nk_kernel_kind_t kernel,                                                           //
-    nk::vector_view<scalar_> query,                                                    //
-    vector_norms<typename scalar_::dot_result_t> query_norms,                          //
-    std::array<nk::vector_view<scalar_>, 4> candidates,                                //
-    std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms) noexcept {
-    using kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
-    return invoke_scores_<4, kit_t>(kernel, query, query_norms, candidates, candidates_norms, candidates,
-                                    fu::standard_cache_hints_t {});
+template <quads_kit kit_>
+[[gnu::always_inline]] inline scores_result<typename kit_::scalar_t::dot_result_t> scores( //
+    nk_kernel_kind_t kernel,                                                               //
+    nk::vector_view<typename kit_::scalar_t> query,                                        //
+    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,                       //
+    quad<nk::vector_view<typename kit_::scalar_t>> candidates,                             //
+    quad<vector_norms<typename kit_::scalar_t::dot_result_t>> candidates_norms) noexcept {
+    return invoke_scores_<quad_lanes_k, kit_>(kernel, query, query_norms, candidates, candidates_norms, candidates,
+                                              object_prefetcher<dummy_cache_hints_t> {});
 }
 
 /** As @c scores, while streaming @p next_candidates toward L2 one line per line scored, so the walk's next quad
  *  arrives as this one finishes. */
-template <nk_capability_t caps_, nk::numeric_dtype scalar_, typename cache_hints_type_>
-[[gnu::always_inline]] inline scores_result<typename scalar_::dot_result_t, 4> scores( //
-    nk_kernel_kind_t kernel,                                                           //
-    nk::vector_view<scalar_> query,                                                    //
-    vector_norms<typename scalar_::dot_result_t> query_norms,                          //
-    std::array<nk::vector_view<scalar_>, 4> candidates,                                //
-    std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms,      //
-    std::array<nk::vector_view<scalar_>, 4> next_candidates,                           //
-    cache_hints_type_ hints) noexcept {
-    using kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
-    return invoke_scores_<4, kit_t>(kernel, query, query_norms, candidates, candidates_norms, next_candidates, hints);
+template <quads_kit kit_, typename prefetcher_type_>
+[[gnu::always_inline]] inline scores_result<typename kit_::scalar_t::dot_result_t> scores( //
+    nk_kernel_kind_t kernel,                                                               //
+    nk::vector_view<typename kit_::scalar_t> query,                                        //
+    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,                       //
+    quad<nk::vector_view<typename kit_::scalar_t>> candidates,                             //
+    quad<vector_norms<typename kit_::scalar_t::dot_result_t>> candidates_norms,            //
+    quad<nk::vector_view<typename kit_::scalar_t>> next_candidates,                        //
+    prefetcher_type_ const& prefetcher) noexcept {
+    return invoke_scores_<quad_lanes_k, kit_>(kernel, query, query_norms, candidates, candidates_norms, next_candidates,
+                                              prefetcher);
 }
 
 /** The walks' default rescoring: none, so every node keeps the score the kit gave it. */

@@ -98,9 +98,8 @@ static std::size_t check_vram_amd_attend(settings_t const& settings, hip_executo
     if (settings.selects("vram_indexes"))
         failures_count += report(
             "rocm-sharded bf16+attend",
-            dense_expect_vram_indexes_attend<
-                vram_amd_indexes<u32_t, nk_bf16_k, dense_amd_capabilities_k, dense_amd_code_object_t>,
-                dense_hip_value_table_t>(settings.seed, executor));
+            dense_expect_vram_indexes_attend<vram_amd_indexes<u32_t, nk_bf16_k, dense_amd_code_object_t>,
+                                             dense_hip_value_table_t>(settings.seed, executor));
     return failures_count;
 }
 

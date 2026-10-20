@@ -377,7 +377,8 @@ static candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
     for (std::size_t row = 0; row < row_count; ++row) fill_cyclic(pool.matrix.span().row(row).as_vector(), row);
     pool.norms.reserve(row_count);
     for (std::size_t row = 0; row < row_count; ++row)
-        pool.norms.push_back(norms<nk_cap_serial_k>(pool.matrix.view().row(row).as_vector()));
+        pool.norms.push_back(
+            norms<typename quads_ladder<scalar_, nk_cap_serial_k>::kit_t>(pool.matrix.view().row(row).as_vector()));
     return pool;
 }
 
@@ -400,11 +401,12 @@ static constexpr std::size_t row_bytes_of(std::size_t dim) noexcept {
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void measure_distance(loop_t& loop, environment_t const& env, std::size_t dim) {
     if (!runs_on<caps_>(env.machine)) return loop.skip("capabilities missing at runtime");
+    using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
     auto query = nk::vector<scalar_>::zeros(dim).value;
     fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
-    auto query_norms = norms<caps_>(query_view);
+    auto query_norms = norms<quads_kit_t>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
     splitmix64_t random_generator {stream_key(env.settings.seed, rows_family_k)};
@@ -413,7 +415,7 @@ static void measure_distance(loop_t& loop, environment_t const& env, std::size_t
         std::size_t const row = random_generator() & row_index_mask;
         adjacency.touch(random_generator());
         auto candidate_view = pool.matrix.view().row(row).as_vector();
-        auto distance_value = distance<caps_>(kernel_, query_view, query_norms, candidate_view, pool.norms[row]);
+        auto distance_value = distance<quads_kit_t>(kernel_, query_view, query_norms, candidate_view, pool.norms[row]);
         do_not_optimize(distance_value);
     }
     rate_distances(loop, dim, 1, row_bytes_of<scalar_>(dim));
@@ -423,11 +425,12 @@ static void measure_distance(loop_t& loop, environment_t const& env, std::size_t
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void measure_distances_quad(loop_t& loop, environment_t const& env, std::size_t dim) {
     if (!runs_on<caps_>(env.machine)) return loop.skip("capabilities missing at runtime");
+    using quads_kit_t = typename quads_ladder<scalar_, caps_>::kit_t;
     auto query = nk::vector<scalar_>::zeros(dim).value;
     fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
-    auto query_norms = norms<caps_>(query_view);
+    auto query_norms = norms<quads_kit_t>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
     splitmix64_t random_generator {stream_key(env.settings.seed, rows_family_k)};
@@ -443,7 +446,8 @@ static void measure_distances_quad(loop_t& loop, environment_t const& env, std::
             pool.matrix.view().row(row2).as_vector(), pool.matrix.view().row(row3).as_vector()};
         std::array<vector_norms<typename scalar_::dot_result_t>, 4> const candidate_norms {
             pool.norms[row0], pool.norms[row1], pool.norms[row2], pool.norms[row3]};
-        auto distance_values = distances<caps_>(kernel_, query_view, query_norms, candidate_views, candidate_norms);
+        auto distance_values = distances<quads_kit_t>(kernel_, query_view, query_norms, candidate_views,
+                                                      candidate_norms);
         do_not_optimize(distance_values);
     }
     rate_distances(loop, dim, 4, 4 * row_bytes_of<scalar_>(dim));
@@ -525,12 +529,13 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
     // The finalizer takes queries four lanes at a time, so the per-query sums regroup into lanes.
     std::array<typename scalar_::dot_result_t, queries_k> query_sumsqs;
     for (std::size_t query = 0; query != queries_k; ++query)
-        query_sumsqs[query] = norms<caps_>(queries.row(query).as_vector()).sumsq;
+        query_sumsqs[query] = norms<quads_kit_t>(queries.row(query).as_vector()).sumsq;
     lanes_t query_lanes;
     static_assert(sizeof(query_lanes) == sizeof(query_sumsqs), "four sums fill one finalizer lane group");
     std::memcpy(query_lanes.data(), query_sumsqs.data(), sizeof(query_lanes));
     std::array<typename scalar_::dot_result_t, rows_k> row_sumsqs;
-    for (std::size_t row = 0; row != rows_k; ++row) row_sumsqs[row] = norms<caps_>(rows.row(row).as_vector()).sumsq;
+    for (std::size_t row = 0; row != rows_k; ++row)
+        row_sumsqs[row] = norms<quads_kit_t>(rows.row(row).as_vector()).sumsq;
     auto dots = nk::matrix<raw_dot_t>::zeros({rows_k, queries_k}).value;
     std::array<std::array<std::array<f32_t, 4>, queries_k / 4>, rows_k> distances;
 

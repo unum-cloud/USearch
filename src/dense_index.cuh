@@ -2318,8 +2318,7 @@ static void append_capability(usearch_dense_index_handle_t& handle, char const* 
 template <typename multi_type_, typename placement_type_>
 static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_ const&,
                                  placement_type_ const&) noexcept {
-    constexpr nk_capability_t picked =
-        us::dense::quads_ladder<typename multi_type_::scalar_t, multi_type_::capability_k>::picked_k;
+    constexpr nk_capability_t picked = multi_type_::quads_kit_t::capability_k;
     for (numkong_capability_name_t const& named : numkong_capability_names_k)
         if (picked & named.bit) append_capability(handle, named.name);
 }
@@ -2380,6 +2379,15 @@ static usearch_dense_index_t new_dense_handle(placement_type_ const& placement, 
         usearch_dense_index_handle_t(std::in_place_type<variant_type_>, kernel, host_allocator_of(placement));
 }
 
+/** Allocates the handle holding the RAM variant @p variant_type_, its shards streaming rows by this
+ *  machine's cache line. */
+template <typename variant_type_>
+static usearch_dense_index_t new_dense_handle(usearch_ram_options_t const& placement,
+                                              nk_kernel_kind_t kernel) noexcept {
+    return new (std::nothrow) usearch_dense_index_handle_t(std::in_place_type<variant_type_>, kernel,
+                                                           host_allocator_of(placement), machine_cache_line_bytes());
+}
+
 /** Allocates the handle holding the NVMe view @p variant_type_, which takes its metric from the
  *  parts' headers. */
 template <typename variant_type_>
@@ -2414,14 +2422,9 @@ static usearch_dense_index_t make_punned_dense_index(usearch_dense_metadata_t co
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 consteval bool rung_advances() noexcept {
     constexpr cpu_class_t parent_k = parent_class_of(cpu_class_);
-    using scalar_t = typename nk::type_for<dtype_>::type;
-    using upper_ladder_t = us::dense::quads_ladder<scalar_t, numkong_capabilities_of(cpu_class_)>;
-    using lower_ladder_t = us::dense::quads_ladder<scalar_t, numkong_capabilities_of(parent_k)>;
-    using upper_tiles_t = us::dense::tiles_ladder<scalar_t, numkong_capabilities_of(cpu_class_)>;
-    using lower_tiles_t = us::dense::tiles_ladder<scalar_t, numkong_capabilities_of(parent_k)>;
     return cpu_class_compiled(cpu_class_) &&
-           (upper_ladder_t::picked_k != lower_ladder_t::picked_k ||
-            upper_tiles_t::picked_k != lower_tiles_t::picked_k ||
+           (!std::is_same_v<quads_kit_of<dtype_, cpu_class_>, quads_kit_of<dtype_, parent_k>> ||
+            !std::is_same_v<tiles_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, parent_k>> ||
             forkunion_capabilities_of<cpu_class_>() != forkunion_capabilities_of<parent_k>());
 }
 
@@ -2444,8 +2447,11 @@ static usearch_dense_index_t descend_ram_ladder(usearch_dense_metadata_t const& 
             return make_punned_dense_index<ram_indexes<dtype_, cpu_class_>>(geometry, ram, kernel, outcome);
     }
     else {
-        static_assert(!variant_carries<ram_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::dense_variant_t>,
-                      "This rung no longer advances past the one below - drop it from the variant list");
+        // A class picking its parent's kits, waiter and atomics names the parent's very variant.
+        static_assert(
+            std::is_same_v<ram_indexes<dtype_, cpu_class_>, ram_indexes<dtype_, parent_class_of(cpu_class_)>> ||
+                !variant_carries<ram_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::dense_variant_t>,
+            "This rung no longer advances past the one below - drop it from the variant list");
     }
     return descend_ram_ladder<dtype_, lower_classes_...>(geometry, ram, kernel, available, outcome);
 }
@@ -2519,10 +2525,10 @@ static usearch_dense_index_t descend_nvme_ladder(usearch_dense_metadata_t const&
             return make_punned_dense_index<nvme_indexes<dtype_, cpu_class_>>(geometry, nvme, kernel, outcome);
     }
     else {
-        // A class sharing its parent's mask names the parent's very variant, which the variant
+        // A class picking its parent's kits names the parent's very variant, which the variant
         // rightly carries.
         static_assert(
-            numkong_capabilities_of(cpu_class_) == numkong_capabilities_of(parent_class_of(cpu_class_)) ||
+            std::is_same_v<nvme_indexes<dtype_, cpu_class_>, nvme_indexes<dtype_, parent_class_of(cpu_class_)>> ||
                 !variant_carries<nvme_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::dense_variant_t>,
             "This NVMe rung no longer advances past the one below - drop it from the variant list");
     }
@@ -2741,6 +2747,22 @@ static nk_dtype_t rows_dtype_of(usearch_scalar_t scalar, std::size_t columns, us
     return dtype;
 }
 
+/** Bytes of cache each thread over @p topology keeps to itself: the deepest cache a compute domain
+ *  confines to its cores, split across them, at its smallest across domains, or zero where no
+ *  platform source names one. */
+static std::size_t thread_cache_bytes(fu_topology_t topology) noexcept {
+    std::size_t domains = 0, smallest = 0;
+    if (fu_compute_domains_count(topology, &domains) != fu_success_k) return 0;
+    for (std::size_t domain = 0; domain != domains; ++domain) {
+        std::size_t bytes = 0, cores = 0;
+        if (fu_compute_cache_bytes_in(topology, domain, &bytes) != fu_success_k ||
+            fu_logical_cores_count_in(topology, domain, &cores) != fu_success_k || !bytes || !cores)
+            continue;
+        smallest = smallest ? min_of(smallest, bytes / cores) : bytes / cores;
+    }
+    return smallest;
+}
+
 /**
  *  @brief The one loop every row verb drives on a variant that serves it: hands @p rows to @p sink
  *      chunk by chunk, each variant importing its rows into its own scalar.
@@ -2766,6 +2788,9 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
     if (!executor) return false;
     typename variant_type_::search_config_t search_config {};
     search_config.expansion_factor = static_cast<u32_t>(expansion_factor);
+    // A RAM scan blocks its rows by each thread's own cache.
+    if constexpr (requires { search_config.cache_bytes; })
+        search_config.cache_bytes = thread_cache_bytes(executor->topology());
     if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row");
 
@@ -2810,6 +2835,61 @@ static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor
     };
     return for_each_dense_chunk(variant, executor, count * rows_per_query, rows, rows_per_query, expansion_factor,
                                 progress, stats, outcome, sink);
+}
+
+/** Whether every query @p query_offsets cuts holds rows; false once @p outcome records why not. */
+static bool accepts_query_offsets(std::span<std::size_t const> query_offsets, usearch_outcome_t* outcome) noexcept {
+    for (std::size_t query = 0; query + 1 < query_offsets.size(); ++query)
+        if (query_offsets[query + 1] <= query_offsets[query])
+            return propagate_error(usearch_status_shape_mismatch_k, outcome, "Every query needs at least one row");
+    return true;
+}
+
+/** The late-interaction sink on one serving variant: chunks of whole queries, one per step of the
+ *  progress handler, each query's rows cut by @p query_offsets and its keys landing in @p landing;
+ *  @p predicate narrows the nominations once it names a callback. */
+template <typename variant_type_>
+static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const& arguments,
+                           std::span<std::size_t const> query_offsets, predicate_t& predicate,
+                           matches_landing_t const& landing, usearch_outcome_t* outcome) noexcept {
+    using key_t = typename variant_type_::key_t;
+    static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the plan writes them");
+    usearch_rows_view_t const& rows = arguments.queries;
+    std::size_t const count = query_offsets.size() - 1, wanted = landing.wanted;
+    if (!rows.data) return propagate_error(usearch_status_invalid_argument_k, outcome, "The rows must name storage");
+    nk_dtype_t const source_dtype = rows_dtype_of(rows.scalar, rows.columns, outcome);
+    if (source_dtype == nk_dtype_unknown_k) return false;
+    if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
+        return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row");
+    usearch_executor_handle_t call_executor;
+    typename variant_type_::executor_t* const executor = executor_of(variant, arguments.executor, call_executor,
+                                                                     outcome);
+    if (!executor) return false;
+    typename variant_type_::search_config_t config {};
+    config.expansion_factor = static_cast<u32_t>(arguments.expansion_factor);
+    config.traversal = static_cast<traversal_t>(arguments.traversal);
+    nk::matrix_span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys), count, wanted};
+    nk::matrix_span<f64_t> const scores {landing.scores, count, wanted};
+    us::dense::rows_view_t const all = rows_of(rows, query_offsets.back());
+    progress_ticks_t ticks {arguments.progress, count};
+    std::size_t const step = ticks.slice();
+    for (std::size_t first = 0; first != count;) {
+        std::size_t const taking = min_of(step, count - first);
+        nk::range_t const chunk = nk::range(first, first + taking);
+        std::span<std::size_t const> const chunk_offsets = query_offsets.subspan(first, taking + 1);
+        std::span<std::size_t> const chunk_counts {landing.counts + first, taking};
+        specialized_index view {variant};
+        expected<typename variant_type_::search_result_t> const found =
+            predicate.predicate.callback ? view.maxsim_if(all, chunk_offsets, *executor, config, keys(chunk, nk::slice),
+                                                          scores(chunk, nk::slice), chunk_counts, predicate)
+                                         : view.maxsim(all, chunk_offsets, *executor, config, keys(chunk, nk::slice),
+                                                       scores(chunk, nk::slice), chunk_counts);
+        if (!crossed(found, arguments.stats, outcome)) return false;
+        first += taking;
+        if (ticks(first, count) == continuation_t::cancel_k)
+            return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call");
+    }
+    return true;
 }
 
 #pragma endregion Multi Verbs
@@ -3168,7 +3248,7 @@ USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
         if (arguments->changed) *arguments->changed = refined.changed_nodes;
         if (arguments->reachability)
             *arguments->reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
-                                        refined.health.sweeps};
+                                        refined.health.sweeps, refined.health.back_sweeps};
         if (failed(refined_status)) return propagate_error(refined_status, outcome), void();
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
@@ -3186,7 +3266,7 @@ USEARCH_EXPORT void usearch_dense_health(usearch_dense_health_t* arguments) {
             if (!executor) return;
             auto const [audit, status] = specialized_index {variant}.health(*executor);
             if (failed(status)) return propagate_error(status, outcome), void();
-            *arguments->reachability = {audit.audited_nodes, audit.reachable_nodes, audit.sweeps};
+            *arguments->reachability = {audit.audited_nodes, audit.reachable_nodes, audit.sweeps, audit.back_sweeps};
             propagate_error(usearch_status_success_k, outcome, nullptr);
         },
         arguments->index->variant);
@@ -3199,7 +3279,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
     if (rejects_columns(*arguments->index, count, arguments->queries.columns, outcome)) return;
-    key_predicate_t keyed {arguments->predicate};
+    predicate_t keyed {arguments->predicate};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if (accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) {
@@ -3235,7 +3315,13 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                             return view.search(rows, executor, config, keys, distances, counts, predicate);
                         });
                 };
-                if (!(keyed.predicate.callback ? search_with(keyed) : search_with(dummy_predicate_t {}))) return;
+                bool searched = false;
+                if (!keyed.predicate.callback) searched = search_with(dummy_predicate_t {});
+                // An expensive one stays the C struct, from which each call builds its own family.
+                else if (keyed.predicate.cost == usearch_predicate_cost_expensive_k)
+                    searched = search_with(keyed.predicate);
+                else searched = search_with(keyed);
+                if (!searched) return;
                 *arguments->matches = landing.view();
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3276,7 +3362,7 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
             std::size_t total = 0;
             us::dense::rows_span_t const target {rows, entries, dimensions, row_bytes, target_dtype};
             // Rows in another scalar than the stored one are read in the stored one, which every
-            // face exports, and cast on the host before they land.
+            // face exports, and cast on the host by the serial kit, as a GPU face has no CPU class.
             nk_dtype_t const stored_dtype = variant_type_::vector_dtype_k;
             std::size_t const stored_bytes = us::dense::packed_bytes(stored_dtype, dimensions);
             std::byte* const stored = stored_dtype == target_dtype
@@ -3290,7 +3376,8 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
                 return propagate_error(got, outcome, "Failed to export the rows"), void();
             if (stored != rows)
                 for (std::size_t row = 0; row != min_of(total, entries); ++row)
-                    us::dense::export_row<nk_cap_any_k>(stored + row * stored_bytes, stored_dtype, target, row);
+                    us::dense::export_row<us::dense::serial_elementwise_kit_t>(stored + row * stored_bytes,
+                                                                               stored_dtype, target, row);
             if (status_t const landed = drained(*arena, publish(*arena, rows, entries * row_bytes)); failed(landed))
                 return propagate_error(landed, outcome, "Failed to land the rows on the device"), void();
             *arguments->vectors = {rows, row_bytes, dimensions, scalar};
@@ -3447,7 +3534,7 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
         if (arguments->changed) *arguments->changed = refined.changed_nodes;
         if (arguments->reachability)
             *arguments->reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
-                                        refined.health.sweeps};
+                                        refined.health.sweeps, refined.health.back_sweeps};
         if (failed(status)) return propagate_error(status, outcome), void();
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
@@ -3578,7 +3665,7 @@ USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_fin
         if (arguments->changed) *arguments->changed = refined.changed_nodes;
         if (arguments->reachability)
             *arguments->reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
-                                        refined.health.sweeps};
+                                        refined.health.sweeps, refined.health.back_sweeps};
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -3618,11 +3705,15 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
     if (arguments->required) *arguments->required = 0;
     if (arguments->stats) *arguments->stats = {};
     if (rejects_columns(*arguments->index, count, arguments->left.columns, outcome)) return;
+    predicate_t keyed {arguments->predicate};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if (!accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) return;
             if (variant.kernel() != nk_kernel_dot_k)
                 propagate_error(usearch_status_config_mismatch_k, outcome,
                                 "A product is a dot, so the kind must be inner product");
+            else if (arguments->traversal == usearch_traversal_scan_k)
+                propagate_error(usearch_status_unsupported_k, outcome, "No residency multiplies by an exact scan yet");
             else {
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
                                                                   arguments->executor, device_of(variant),
@@ -3652,6 +3743,10 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                                     typename variant_type_::search_config_t config, std::size_t resolved,
                                     std::size_t taking) noexcept {
                         nk::range_t const chunk = nk::range(resolved, resolved + taking);
+                        if (keyed.predicate.callback)
+                            return view.multiply_if(chunk_rows, executor, config, kept_keys(chunk, nk::slice),
+                                                    kept_scores(chunk, nk::slice), scored.subspan(resolved, taking),
+                                                    keyed);
                         return view.multiply(chunk_rows, executor, config, kept_keys(chunk, nk::slice),
                                              kept_scores(chunk, nk::slice), scored.subspan(resolved, taking));
                     };
@@ -3716,12 +3811,16 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     if (rejects_columns(*arguments->index, count, columns, outcome)) return;
     std::size_t const row_bytes = us::dense::packed_bytes(outputs_dtype, columns);
     f32_t const requested_scale = arguments->score_scale;
+    predicate_t keyed {arguments->predicate};
 
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if (!accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) return;
             if (variant.kernel() != nk_kernel_dot_k)
                 propagate_error(usearch_status_config_mismatch_k, outcome,
                                 "A softmax weighs logits, so the kind must be inner product");
+            else if (arguments->traversal == usearch_traversal_scan_k)
+                propagate_error(usearch_status_unsupported_k, outcome, "No residency attends by an exact scan yet");
             else if (!arguments->value_lookup)
                 propagate_error(usearch_status_invalid_argument_k, outcome, "The value lookup must be set");
             else {
@@ -3730,7 +3829,11 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                                                   {arguments->queries.data, carry}, outcome);
                 if (!arena) return;
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                std::byte* landing = carve<std::byte>(arena->memory, count * row_bytes);
+                // A VRAM arena's outputs are carved on its device, where the shards' merge lands
+                // them in place.
+                std::byte* const landing = arena->device_memory
+                                               ? carve<std::byte>(arena->device_memory, count * row_bytes)
+                                               : carve<std::byte>(arena->memory, count * row_bytes);
                 if (!landing)
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
                 typename specialized_index<variant_type_>::attend_lookup_t const value_lookup {
@@ -3747,17 +3850,19 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                     f32_t const score_scale = requested_scale > 0
                                                   ? requested_scale
                                                   : 1 / std::sqrt(static_cast<f32_t>(view.dimensions()));
+                    std::span<us::dense::softmax_state_t> const chunk_carry = carried.empty()
+                                                                                  ? carried
+                                                                                  : carried.subspan(resolved, taking);
+                    if (keyed.predicate.callback)
+                        return view.attend_if(chunk_rows, head_count, value_lookup, score_scale,
+                                              outputs.slice(resolved, taking), chunk_carry, executor, config, keyed);
                     return view.attend(chunk_rows, head_count, value_lookup, score_scale,
-                                       outputs.slice(resolved, taking),
-                                       carried.empty() ? carried : carried.subspan(resolved, taking), executor, config);
+                                       outputs.slice(resolved, taking), chunk_carry, executor, config);
                 };
                 if (!for_each_dense_chunk(variant, arguments->executor, count, arguments->queries, head_count,
                                           arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
                                           sink))
                     return;
-                if (status_t const landed = drained(*arena, publish(*arena, landing, count * row_bytes));
-                    failed(landed))
-                    return propagate_error(landed, outcome, "Failed to land the outputs on the device"), void();
                 *arguments->outputs = {landing, row_bytes, columns, outputs_scalar};
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3772,11 +3877,12 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     std::size_t const wanted = arguments->wanted;
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
-    if (!rows_per_query)
+    if (!arguments->query_offsets && !rows_per_query)
         return propagate_error(usearch_status_shape_mismatch_k, outcome, "Every query needs at least one row"), void();
-    if (rejects_columns(*arguments->index, count, arguments->queries.columns, outcome)) return;
+    predicate_t keyed {arguments->predicate};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if (!accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) return;
             if (variant.kernel() != nk_kernel_dot_k)
                 propagate_error(usearch_status_config_mismatch_k, outcome,
                                 "Late interaction sums maxima over logits, so the kind must be inner product");
@@ -3786,15 +3892,21 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                                                                   {arguments->queries.data}, outcome);
                 if (!arena) return;
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+                // Uniform queries become offsets in the arena, so every residency reads one layout.
+                std::size_t* const uniform = arguments->query_offsets ? nullptr
+                                                                      : carve<std::size_t>(arena->memory, count + 1);
+                if (!arguments->query_offsets && !uniform)
+                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+                for (std::size_t query = 0; uniform && query != count + 1; ++query)
+                    uniform[query] = query * rows_per_query;
+                std::span<std::size_t const> const query_offsets {
+                    arguments->query_offsets ? arguments->query_offsets : uniform, count + 1};
+                if (!accepts_query_offsets(query_offsets, outcome)) return;
+                if (rejects_columns(*arguments->index, query_offsets.back(), arguments->queries.columns, outcome))
+                    return;
                 matches_landing_t landing;
                 if (!carve_matches(arena->memory, count, wanted, landing, outcome)) return;
-                if (!match_dense_rows(
-                        variant, arguments->executor, count, arguments->queries, rows_per_query, landing,
-                        arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
-                        [&](auto view, auto rows, auto& executor, auto config, auto keys, auto scores, auto counts) {
-                            return view.maxsim(rows, rows_per_query, executor, config, keys, scores, counts);
-                        }))
-                    return;
+                if (!maxsim_queries(variant, *arguments, query_offsets, keyed, landing, outcome)) return;
                 if (!publish_matches(*arena, count, landing, outcome)) return;
                 *arguments->matches = landing.view();
                 propagate_error(usearch_status_success_k, outcome, nullptr);

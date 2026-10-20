@@ -72,9 +72,8 @@ enum cuda_device_attribute_t : int {
     cuda_attribute_reserved_shared_memory_per_block_k = 111,
 };
 
-/** The @c CUfunction_attribute USearch reads, the static shared memory a kernel declares, and the
- *  one it raises, the dynamic shared memory a launch may ask for. */
-inline constexpr int cuda_function_static_shared_bytes_k = 1;
+/** The @c CUfunction_attribute USearch reads and raises, the dynamic shared memory a launch may ask
+ *  for. */
 inline constexpr int cuda_function_dynamic_shared_bytes_k = 8;
 
 /** The @c CUmem_advise values USearch gives managed memory. */
@@ -1236,30 +1235,25 @@ inline cuda_rows_map_t cuda_encode_rows_map(void* first_row, u32_t row_bytes, u3
     return map;
 }
 
-/** Shared memory a block may take, its static and dynamic parts together, before its kernel opts
- *  in to more. */
-inline constexpr u32_t cuda_static_scratch_limit_k = 48 * 1024;
-
 /** Whether a launch waits for its stream predecessor to finish, or may start while it drains. */
 enum class cuda_overlap_t : bool { serialized_k, overlapping_k };
 
 /** Launches @p function over @p blocks of @p threads on @p stream - the only launch path - passing
  *  each argument by address, as the driver takes them, so each must already be the kernel's own
- *  type, raising the kernel's dynamic-shared ceiling first when @p shared_bytes and its static
- *  shared memory outgrow the default window; answers the launch's own error, like a bad
- *  configuration or too much shared memory. With @p overlapping the kernel may start while its
- *  predecessor on @p stream drains, which only a kernel waiting on that predecessor at entry may
- *  ask for. */
+ *  type, raising the kernel's dynamic-shared ceiling first when @p shared_bytes outgrows the window
+ *  the kernel grants; answers the launch's own error, like a bad configuration or too much shared
+ *  memory. With @p overlapping the kernel may start while its predecessor on @p stream drains,
+ *  which only a kernel waiting on that predecessor at entry may ask for. */
 template <typename... argument_types_>
 status_t cuda_launch(cuda_function_handle_t function, u32_t blocks, u32_t threads, u32_t shared_bytes,
                      cuda_stream_handle_t stream, cuda_overlap_t overlapping, argument_types_... arguments) noexcept {
     static_assert((std::is_trivially_copyable_v<argument_types_> && ...), "Kernels take their arguments by bytes");
     if (!function) return status_t::device_error_k;
-    int static_bytes = 0;
-    if (shared_bytes && cuda_api().function_get_attribute(&static_bytes, cuda_function_static_shared_bytes_k,
+    int granted_bytes = 0;
+    if (shared_bytes && cuda_api().function_get_attribute(&granted_bytes, cuda_function_dynamic_shared_bytes_k,
                                                           function) != cuda_success_k)
         return status_t::device_error_k;
-    if (shared_bytes + static_cast<u32_t>(static_bytes) > cuda_static_scratch_limit_k &&
+    if (shared_bytes > static_cast<u32_t>(granted_bytes) &&
         cuda_api().function_set_attribute(function, cuda_function_dynamic_shared_bytes_k,
                                           static_cast<int>(shared_bytes)) != cuda_success_k)
         return status_t::device_error_k;
@@ -1277,7 +1271,8 @@ static_assert(cuda_reservable_allocator<cuda_virtual_memory_allocator<byte_t>>);
 /** Claim counters a traversal context keeps: three for each of the insert waves one fill zeroes
  *  ahead, so overlapping launches chain wave after wave with no fill between them. Waves double
  *  from 32 rows, so no 32-bit ID range spans more than 28. */
-inline constexpr u32_t cuda_claim_counters_k = 3 * 32;
+inline constexpr u32_t cuda_claim_counters_k = 3 * (std::numeric_limits<u32_t>::digits -
+                                                    std::countr_zero(vram_admission_ramp_floor_k) + 1);
 
 /** One stream's device-side scratch for driving a CUDA index: the traversal arena, the batch
  *  staging, the telemetry counters and the attend miss word, riding the stream its allocator names

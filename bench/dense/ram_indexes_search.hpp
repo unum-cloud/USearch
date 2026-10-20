@@ -99,8 +99,10 @@ struct bench_indexes_context {
      *  heap when none is named. */
     bench_indexes_context(settings_t const& settings, nk_kernel_kind_t kernel) noexcept
         : settings(settings),
-          indexes(kernel, forkunion_allocator_t {settings.memory_domains.empty() ? no_memory_domain_k
-                                                                                 : settings.memory_domains.front()}) {}
+          indexes(kernel,
+                  forkunion_allocator_t {settings.memory_domains.empty() ? no_memory_domain_k
+                                                                         : settings.memory_domains.front()},
+                  machine_cache_line_bytes()) {}
 };
 
 /** Serializes the sharded index as one SafeGraphs checkpoint - a monolith per shard and the
@@ -286,10 +288,10 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     fmt::println("  shape: {} × {}d", inserted_rows, dimensions);
     if (bench.settings.skip_vectors.value) fmt::println("  topping: {} loaded rows", bench.settings.skip_vectors.value);
     fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(), nk_kernel_name(bench.indexes.kernel()),
-                 bit_name(compute_choices_k, index_t::picked_quads_capability_k, "serial"));
+                 bit_name(compute_choices_k, index_t::quads_kit_t::capability_k, "serial"));
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-    if (index_t::picked_quads_capability_k == nk_cap_serial_k &&
+    if (index_t::quads_kit_t::capability_k == nk_cap_serial_k &&
         (bench.settings.max_compute & available & ~nk_cap_serial_k))
         fmt::println("  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric");
     fmt::println("  threads: {}", bench.executor.size());
@@ -476,7 +478,13 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability
     requires quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_kind_t kernel,
                   workload_type_ const& workload) {
-    using indexes_t = ram_indexes<u32_t, stored_dtype_, capability_, wait_type_, fu::preferred_atomic_ref>;
+    using indexes_t =
+        ram_indexes<u32_t, typename quads_ladder<typename nk::type_for<stored_dtype_>::type, capability_>::kit_t,
+                    typename tiles_ladder<typename nk::type_for<stored_dtype_>::type, capability_>::kit_t,
+                    typename elementwise_ladder<capability_>::kit_t,
+                    typename rmscast_ladder<typename nk::type_for<stored_dtype_>::type, capability_>::kit_t,
+                    typename visits_hash_set_ladder<capability_>::kit_t, wait_type_, fu::preferred_atomic_ref,
+                    fu::preferred_cache_hints_t>;
     using bench_context_type_ = bench_indexes_context<indexes_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
     using scalar_t = typename bench_context_type_::scalar_t;

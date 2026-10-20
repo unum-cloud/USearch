@@ -27,25 +27,30 @@
 
 namespace unum::usearch::dense {
 
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename kernels_type_,
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
           typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
-bool vram_amd_index<vector_dtype_, capability_, kernels_type_, vectors_allocator_type_, neighbors_allocator_type_,
-                    traversals_allocator_type_>::walk_scratch_fits(std::size_t fold_bytes) const noexcept {
-    using kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
-    using warp_t = typename schedule_ladder<capability_>::schedule_t::warp_t;
+bool vram_amd_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
+                      neighbors_allocator_type_, traversals_allocator_type_>::walk_scratch_fits(core_t const& core,
+                                                                                                std::size_t fold_bytes)
+    const noexcept {
+    using kit_t = typename quads_ladder<scalar_t, capability_k>::kit_t;
+    using warp_t = typename schedule_ladder<capability_k>::schedule_t::warp_t;
     static_assert(std::is_same_v<typename kit_t::norms_t, norms_t> &&
-                  sizeof(typename kit_t::fragment_t) == base_t::fragment_bytes_k);
-    static_assert(warp_t::width_k == hip_wave_lanes(capability_));
-    return std::size_t {vram_warps_per_block_k} * (row_bytes() + fold_bytes + sizeof(vram_gathered<kit_t, warp_t>)) <=
-           device_.shared_memory_per_block_bytes;
+                  sizeof(typename kit_t::fragment_t) == core_t::fragment_bytes_k);
+    static_assert(warp_t::width_k == hip_wave_lanes(capability_k));
+    return std::size_t {vram_warps_per_block_k} *
+               (core.row_bytes() + fold_bytes + sizeof(vram_gathered<kit_t, warp_t>)) <=
+           core.device_.shared_memory_per_block_bytes;
 }
 
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename kernels_type_,
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
           typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
-bool vram_amd_index<vector_dtype_, capability_, kernels_type_, vectors_allocator_type_, neighbors_allocator_type_,
-                    traversals_allocator_type_>::build_scratch_fits(u32_t scratch_bytes_per_warp) const noexcept {
-    using kit_t = typename quads_ladder<scalar_t, capability_>::kit_t;
-    using schedule_t = typename schedule_ladder<capability_>::schedule_t;
+bool vram_amd_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
+                      neighbors_allocator_type_,
+                      traversals_allocator_type_>::build_scratch_fits(core_t const& core,
+                                                                      u32_t scratch_bytes_per_warp) const noexcept {
+    using kit_t = typename quads_ladder<scalar_t, capability_k>::kit_t;
+    using schedule_t = typename schedule_ladder<capability_k>::schedule_t;
     std::size_t const statics = std::size_t {vram_warps_per_block_k} *
                                 (sizeof(vram_gathered<kit_t, typename schedule_t::warp_t>) +
                                  sizeof(typename schedule_t::shared_t));
@@ -55,8 +60,8 @@ bool vram_amd_index<vector_dtype_, capability_, kernels_type_, vectors_allocator
     // and arena were sized for.
     std::size_t const resident_blocks = max_of(resident_blocks_(vram_kernel_t::insert_k, 0),
                                                resident_blocks_(vram_kernel_t::refine_k, 0));
-    return block_bytes <= device_.shared_memory_per_block_bytes &&
-           resident_blocks * block_bytes <= device_.shared_memory_per_multiprocessor_bytes;
+    return block_bytes <= core.device_.shared_memory_per_block_bytes &&
+           resident_blocks * block_bytes <= core.device_.shared_memory_per_multiprocessor_bytes;
 }
 
 #pragma region Kernels

@@ -2,19 +2,20 @@
  *  @file include/usearch/dense/vram_index.hpp
  *  @author Ash Vardanian
  *  @date October 15, 2026
- *  @brief The base the NVIDIA and AMD dense indexes share: the kernels' argument records, and the
- *      host machinery that fills them, claims rows, publishes them and moves checkpoints.
+ *  @brief The shard core the NVIDIA and AMD dense indexes share: the kernels' argument records, and
+ *      the host machinery that fills them, claims rows, publishes them and moves checkpoints.
  *
- *  @c vram_nvidia_index and @c vram_amd_index derive from it, CRTP style, compiled by any C++
- *  compiler. Each names its runtime through a vendor policy - @c cuda_vendor_t or @c hip_vendor_t,
- *  the types it declares with and the copies, fills and waits it queues - and keeps only its
- *  kernels: loading them, the launches, the walks it stages, and the passes of a refinement.
+ *  @c vram_nvidia_index and @c vram_amd_index each own one, compiled by any C++ compiler. Each
+ *  names its runtime through a vendor policy, the types it declares with and the copies, fills and
+ *  waits it queues, and its kernels through a member the core holds: loading them, the launches,
+ *  the walks it stages, and the passes of a refinement.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
 
 #include <bit>         // `std::bit_width` - a refine's rounds, `std::has_single_bit` - the connectivity
+#include <limits>      // `std::numeric_limits` - the unit-RMS import's epsilon
 #include <memory>      // `std::unique_ptr` - an audit's landing
 #include <span>        // `std::span` - the parts' bases, the counts of a graph product
 #include <type_traits> // `std::is_same_v`
@@ -29,7 +30,8 @@
 #include <numkong/vector.hpp>
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/vram_walks.hpp" // `gpu_arena_shape_t`, `gpu_candidate_slots`, `vram_bitset_t`
+#include "usearch/utilities/vram_device.hpp" // `vram_kernel_t` - the kernels the core launches and sizes grids for
+#include "usearch/utilities/vram_walks.hpp"  // `gpu_arena_shape_t`, `gpu_candidate_slots`, `vram_bitset_t`
 #include "usearch/dense/types.hpp"
 
 namespace unum::usearch::dense {
@@ -251,8 +253,112 @@ struct vram_arguments_t {
 
 #pragma endregion Kernel Records
 
+#pragma region Shard Types
+
+/** Which frontier a warp's arena slice serves: the register ladder needs only the exact visited
+ *  set, the wide arena frontier adds its spill tail. */
+enum class vram_frontier_kind_t : u32_t { register_ladder_k, wide_arena_k };
+
+/** Optional tuning knobs of a shard's @c search; zeros mean "derive from connectivity". */
+struct vram_search_config_t {
+
+    /** How many candidates a walk keeps, walked as given when it covers @c count and widened to
+     *  @c count otherwise; a single-query walk takes twice the connectivity for zero. */
+    u32_t expansion_factor = 0;
+
+    /** Matches reported per query; a walk past the widest register rung ranks every candidate its
+     *  arena frontier kept. */
+    u32_t count = 10;
+
+    /** The caller's mutation contract; every level shares one code path, since the walk is
+     *  insert-safe by protocol, so the field only documents intent. */
+    synchronization_t synchronization = synchronization_t::concurrent_k;
+
+    /** How rows are reached; @c scan_k scores every visible row exactly on the kits' tile steps,
+     *  keeping each query's @c count nearest, and only the NVIDIA @c search implements it. */
+    traversal_t traversal = traversal_t::walk_k;
+};
+
+/** Telemetry of one shard's @c search batch. */
+struct [[nodiscard]] vram_search_result_t {
+    std::size_t count = 0;
+    std::size_t visited_members = 0;
+    std::size_t computed_distances = 0;
+    std::size_t restarts = 0;
+    std::size_t tail_compactions = 0;
+    std::size_t tail_dropped = 0;
+    std::size_t visited_saturations = 0;
+};
+
+/** Optional tuning knobs of a shard's @c refine; zeros mean "derive from connectivity". */
+struct vram_refine_config_t {
+
+    /** How many candidates a re-selection walk keeps, rounded up to the register rungs of 2 to 16
+     *  warps' worth of ranks and walked exactly past them; zero takes twice the connectivity, like
+     *  the CPU's. */
+    u32_t expansion_factor = 0;
+};
+
+/** The grouped-query heads an attend stages beside the rows its walks navigate by: every head of
+ *  every token, @c head_count consecutive rows per token. */
+struct vram_attend_heads_t {
+    rows_view_t rows;
+    std::size_t head_count;
+};
+
+/** The counters an audit lands in page-locked memory, in the order of the device's: the levels
+ *  that expanded, the last sweep's count, which only a sweep short of convergence leaves nonzero,
+ *  then the unreached, reconnected and claim counters. */
+struct vram_audit_landing_t {
+    u32_t levels;
+    u32_t last_expanded;
+    u32_t unreached;
+    u32_t reconnected;
+    u32_t claims[2];
+};
+
+/** Device scratch one refine plan carves once from a @p traversal_context_type_ and its passes and
+ *  audits reuse, or the audit share one @c health carves: the reached set and two frontiers, the
+ *  levels counter beside the last two sweeps' expanded counters, by the sweep number's parity, the
+ *  unreached, reconnected and claim counters an audit lands together, then for a refine the passes'
+ *  buffers, the unreached rows' IDs and in-link counts, and the parts' bases. Sweeps run until one
+ *  expands nothing: every row joins one frontier at most, so the rows bound them. */
+template <typename traversal_context_type_>
+struct vram_refine_scratch {
+    typename traversal_context_type_::bytes_ptr_t bytes;
+
+    /** The reached set and the two frontiers, one bit per row each. */
+    vram_bitset_t reached, frontier, next_frontier;
+
+    /** The levels that expanded anything, then the rows the last two sweeps expanded. */
+    u32_t* levels = nullptr;
+    u32_t* expanded = nullptr;
+    u32_t* unreached = nullptr;
+    u32_t* reconnected = nullptr;
+
+    /** The walk's and the merge's claim counters, the last pass's completion oracle. */
+    u32_t* claims = nullptr;
+
+    /** The reverse buckets' fill counters, then the bitset of rows the merge re-selects. */
+    u32_t* bucket_counts = nullptr;
+    vram_bitset_t touched;
+    u32_t* island_ids = nullptr;
+    u32_t* in_links = nullptr;
+
+    /** The shadow neighbors the walks land and the reverse buckets, @b [rows,connectivity] each. */
+    u32_t* shadow_neighbors = nullptr;
+    u32_t* buckets = nullptr;
+
+    /** The ascending first rows of the parts the walks merge, uploaded once by the plan. */
+    u32_t* part_bases = nullptr;
+    std::size_t words = 0;
+};
+
+#pragma endregion Shard Types
+
 /**
- *  @brief The base of the dense indexes over a single uniform latency memory space on one GPU.
+ *  @brief The core every dense index over a single uniform latency memory space on one GPU owns,
+ *      and forwards its verbs to.
  *
  *  Speaks the RAM-resident dense index's verbs, with two divergences: a batch's IDs are one
  *  contiguous range, and its rows publish unordered on the device, turning visible to searches a
@@ -263,21 +369,25 @@ struct vram_arguments_t {
  *  status are the only mutable host state; the published-row count is device memory no host
  *  thread dereferences.
  *
- *  @tparam derived_ The vendor's index, which loads and launches the kernels.
  *  @tparam vendor_type_ The vendor's runtime types and calls, @c cuda_vendor_t or @c hip_vendor_t.
+ *  @tparam kernels_type_ The vendor's kernels, held as a member: they load and launch the kernels,
+ *      stage the walks and queue a refinement's passes over the core they are handed.
  *  @tparam vector_dtype_ The stored scalar.
+ *  @tparam cache_hints_type_ The host's line hints, which demote a filled bounce half before its
+ *      copy.
  *  @tparam vectors_allocator_type_ The vectors matrix and norms column backend, on the device.
  *  @tparam neighbors_allocator_type_ The neighbors matrix backend, on the same device.
  *  @tparam traversals_allocator_type_ The traversal contexts' scratch backend.
  */
 template <                               //
-    typename derived_,                   //
     typename vendor_type_,               //
+    typename kernels_type_,              //
     nk_dtype_t vector_dtype_,            //
+    typename cache_hints_type_,          //
     typename vectors_allocator_type_,    //
     typename neighbors_allocator_type_,  //
     typename traversals_allocator_type_> //
-struct vram_index {
+struct vram_shard_core {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
 
@@ -353,13 +463,13 @@ struct vram_index {
     /** The @p kernel every walk scores by, checked against the dtype at the first @c reserve, and
      *  one allocator per storage concern, each carrying its device placement; the index pins itself
      *  to the vectors allocator's device and demands the neighbors allocator agree. */
-    explicit vram_index(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
-                        neighbors_allocator_t const& neighbors_allocator = {}) noexcept
+    explicit vram_shard_core(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
+                             neighbors_allocator_t const& neighbors_allocator = {}) noexcept
         : device_ {vectors_allocator.device()}, kernel_ {kernel}, vectors_matrix_(vectors_allocator),
           norms_column_(vectors_allocator), neighbors_matrix_(neighbors_allocator),
           grown_((static_cast<void>(vendor_t::select(vectors_allocator.device())), event_t {})) {}
-    vram_index(vram_index const&) = delete;
-    vram_index& operator=(vram_index const&) = delete;
+    vram_shard_core(vram_shard_core const&) = delete;
+    vram_shard_core& operator=(vram_shard_core const&) = delete;
 
 #pragma region Measures
 
@@ -412,6 +522,10 @@ struct vram_index {
     /** The metric every walk scores by, fixed at construction. */
     nk_kernel_kind_t kernel() const noexcept { return kernel_; }
 
+    /** The vendor's kernels, through which its tower reaches the hooks it serves verbs with. */
+    kernels_type_& kernels() noexcept { return kernels_; }
+    kernels_type_ const& kernels() const noexcept { return kernels_; }
+
     /** Whether rows keep norms: every metric but dot finalizes through them, so dot leaves the
      *  norms column empty and checkpoints carry none. */
     bool stores_norms() const noexcept { return kernel_ != nk_kernel_dot_k; }
@@ -421,7 +535,7 @@ struct vram_index {
         u32_t const fragments = row_fragments();
         return {vectors_rows_(),  norms_column_.base(),
                 neighbor_rows_(), static_cast<u32_t>(connectivity()),
-                fragments,        derived().lanes_per_row(),
+                fragments,        kernels_.lanes_per_row(*this),
                 steps_per_row(),  static_cast<u32_t>(((u64_t {1} << 31) + fragments - 1) / fragments),
                 kernel_};
     }
@@ -441,7 +555,7 @@ struct vram_index {
     std::size_t row_bytes() const noexcept { return row_fragments() * fragment_bytes_k; }
 
     /** Steps the lanes cooperating on one row take across it. */
-    u32_t steps_per_row() const noexcept { return divide_round_up(row_fragments(), derived().lanes_per_row()); }
+    u32_t steps_per_row() const noexcept { return divide_round_up(row_fragments(), kernels_.lanes_per_row(*this)); }
 
     /** Bytes of one builder warp's slice over @p selection_rows cached candidates: the query span
      *  while walking, then the candidate cache, and per cached candidate its score, three ID spans,
@@ -491,7 +605,7 @@ struct vram_index {
     /** Bytes this index occupies - the committed device storage, the published-row count among
      *  it, and the host struct; traversal scratch belongs to executors and contexts. */
     std::size_t memory_usage() const noexcept {
-        return sizeof(derived_) + vectors_matrix_.committed_bytes() + norms_column_.committed_bytes() +
+        return sizeof(vram_shard_core) + vectors_matrix_.committed_bytes() + norms_column_.committed_bytes() +
                neighbors_matrix_.committed_bytes();
     }
 
@@ -512,16 +626,14 @@ struct vram_index {
 
 #pragma region Reservation
 
-    /** Which frontier a warp's arena slice serves: the register ladder needs only the exact visited
-     *  set, the wide arena frontier adds its spill tail. */
-    enum class frontier_kind_t : u32_t { register_ladder_k, wide_arena_k };
+    using frontier_kind_t = vram_frontier_kind_t;
 
     /** One warp's arena slice for @p walks walks sharing one visited set over @p candidate_rows
      *  candidates each: the exact visited set over every ID they claim, plus the spill tail when
      *  @p frontier_kind outgrows registers, what their expansions stage. */
     gpu_arena_shape_t arena_shape_for(u32_t candidate_rows, frontier_kind_t frontier_kind,
                                       u32_t walks = 1) const noexcept {
-        u32_t const connectivity = static_cast<u32_t>(this->connectivity()), lanes = derived().wave_lanes();
+        u32_t const connectivity = static_cast<u32_t>(this->connectivity()), lanes = kernels_type_::wave_lanes();
         u32_t const visits = walks * gpu_walk_visits(candidate_rows, connectivity, lanes);
         u32_t const tail = frontier_kind == frontier_kind_t::wide_arena_k
                                ? walks * gpu_walk_tail_entries(candidate_rows, connectivity, lanes)
@@ -570,18 +682,18 @@ struct vram_index {
             device_ = specs;
             // Geometry no walk can fit is refused here; a builder whose scratch shared memory
             // cannot fit keeps it in its arena slice.
-            if (!derived().walk_scratch_fits()) return {0, status_t::config_mismatch_k};
-            if (status_t const loaded = derived().load_kernels_(); failed(loaded)) return {0, loaded};
-            // Virtual address space is free, so the ceiling is generous and independent of the
-            // first requested capacity; the reservation itself is the ceiling, no cached row count
-            // shadows it.
+            if (!kernels_.walk_scratch_fits(*this)) return {0, status_t::config_mismatch_k};
+            if (status_t const loaded = kernels_.load_kernels_(*this); failed(loaded)) return {0, loaded};
+            // Device storage maps at most the device's memory, which bounds the ceiling independent
+            // of the first requested capacity; the reservation itself is the ceiling, no cached row
+            // count shadows it.
             bool const normed = kernel_ != nk_kernel_dot_k;
             std::size_t const bytes_per_row = row_bytes() + (normed ? sizeof(norms_t) : 0) +
                                               connectivity * sizeof(u32_t);
             // Device storage budgets against VRAM; managed storage oversubscribes it and budgets
             // against host memory through their own backend, which keeps the topology symbols out
             // of device instantiations.
-            std::size_t budget_bytes = 4 * device_.vram_bytes;
+            std::size_t budget_bytes = device_.vram_bytes;
             if constexpr (vectors_allocator_t::address_space_k == vendor_t::address_space_t::managed_k)
                 budget_bytes = vectors_allocator_t::budget_bytes();
             std::size_t const ceiling_rows = min_of(max_node_count_k,
@@ -621,7 +733,7 @@ struct vram_index {
         u32_t const candidate_slots = candidate_slots_for_(expansion, 0);
         gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, candidate_slots, 1);
         std::size_t const arena_warps = device_.multiprocessor_count *
-                                        derived_::resident_blocks_(derived_::kernel_t::insert_k, candidate_slots) *
+                                        kernels_type_::resident_blocks_(vram_kernel_t::insert_k, candidate_slots) *
                                         vram_warps_per_block_k;
         std::size_t const results_bytes = // A default single query's device landing.
             non_zero_expansion_factor(search_config_t {}) * (sizeof(node_id_t) + sizeof(distance_t));
@@ -705,37 +817,8 @@ struct vram_index {
 
 #pragma region Search
 
-    /** Optional tuning knobs of @c search(); zeros mean "derive from connectivity". */
-    struct search_config_t {
-
-        /** How many candidates a walk keeps, walked as given when it covers @c count and widened to
-         *  @c count otherwise; a single-query walk takes twice the connectivity for zero. */
-        small_size_t expansion_factor = 0;
-
-        /** Matches reported per query; a walk past the widest register rung ranks every candidate
-         *  its arena frontier kept. */
-        small_size_t count = 10;
-
-        /** The caller's mutation contract; every level shares one code path, since the walk is
-         *  insert-safe by protocol, so the field only documents intent. */
-        synchronization_t synchronization = synchronization_t::concurrent_k;
-
-        /** How rows are reached; @c scan_k scores every visible row exactly on the kits' tile
-         *  steps, keeping each query's @c count nearest, and only the NVIDIA @c search implements
-         *  it. */
-        traversal_t traversal = traversal_t::walk_k;
-    };
-
-    /** Telemetry of one @c search() batch. */
-    struct [[nodiscard]] search_result_t {
-        std::size_t count = 0;
-        std::size_t visited_members = 0;
-        std::size_t computed_distances = 0;
-        std::size_t restarts = 0;
-        std::size_t tail_compactions = 0;
-        std::size_t tail_dropped = 0;
-        std::size_t visited_saturations = 0;
-    };
+    using search_config_t = vram_search_config_t;
+    using search_result_t = vram_search_result_t;
 
     /** The bytes a search under the indexer @p heads needs: the plain walk's, plus the staging of
      *  the heads and their weights. */
@@ -744,7 +827,7 @@ struct vram_index {
         // The heads share the staging carve, and aligning their bytes apart can only overestimate
         // it.
         std::size_t const heads_bytes = heads.heads.extent(0) * (row_bytes() + sizeof(f32_t));
-        return derived().traversal_memory_usage(rows, config) +
+        return kernels_.traversal_memory_usage(*this, rows, config) +
                divide_round_up<std::size_t>(heads_bytes, default_alignment_k) * default_alignment_k;
     }
 
@@ -758,7 +841,7 @@ struct vram_index {
                                                shards * (dimensions() * sizeof(f32_t) + sizeof(softmax_state_t)) +
                                                dimensions() * sizeof(f64_t)) +
                                        import_bytes_(rows, nk_f64_k);
-        return derived().traversal_memory_usage(head_count ? rows / head_count : rows, config) +
+        return kernels_.traversal_memory_usage(*this, head_count ? rows / head_count : rows, config) +
                divide_round_up<std::size_t>(rows_bytes, default_alignment_k) * default_alignment_k;
     }
 
@@ -782,7 +865,7 @@ struct vram_index {
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                      search_config_t config = {},
                                      completion_t completion = completion_t::blocking_k) noexcept {
-        return settle_(derived().submit_search_(queries, result_ids, result_distances, context, config, size()),
+        return settle_(kernels_.submit_search_(*this, queries, result_ids, result_distances, context, config, size()),
                        queries.rows, context, completion);
     }
 
@@ -798,8 +881,9 @@ struct vram_index {
         requires floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
-        return settle_(derived().submit_search_(queries, result_ids, result_distances, context, config, size(), heads),
-                       queries.rows, context, completion);
+        return settle_(
+            kernels_.submit_search_(*this, queries, result_ids, result_distances, context, config, size(), heads),
+            queries.rows, context, completion);
     }
 
     /** One query in, the nearest matches ascending in @c context.results - the correctness path; a
@@ -842,8 +926,8 @@ struct vram_index {
                                        completion_t completion = completion_t::blocking_k) noexcept {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         expected<search_result_t> landed = settle_(
-            derived().submit_multiply_(left, node_ids, products, counts, context, config, size()), left.rows, context,
-            completion);
+            kernels_.submit_multiply_(*this, left, node_ids, products, counts, context, config, size()), left.rows,
+            context, completion);
         if (landed && completion == completion_t::blocking_k)
             for (u32_t const scored : counts) landed.value.count += scored;
         return landed;
@@ -888,8 +972,8 @@ struct vram_index {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = landing_refusal_(rows_count, outputs, carry); failed(refusal))
             return {{}, refusal};
-        expected<f32_t*> const landed = derived().submit_attend_(queries, head_count, value_lookup, score_scale,
-                                                                 context, config, 1, exported_bytes_(outputs), size());
+        expected<f32_t*> const landed = kernels_.submit_attend_(*this, queries, head_count, value_lookup, score_scale,
+                                                                context, config, 1, exported_bytes_(outputs), size());
         if (!landed || !rows_count) return {{}, landed.status};
         if (status_t const copied = land_attended_(landed.value, 1, outputs, carry, context.stream()); failed(copied))
             return {{}, copied};
@@ -904,67 +988,14 @@ struct vram_index {
 
 #pragma region Refinement
 
-    /** Optional tuning knobs of @c refine(); zeros mean "derive from connectivity". */
-    struct refine_config_t {
-
-        /** How many candidates a re-selection walk keeps, rounded up to the register rungs of 2 to
-         *  16 warps' worth of ranks and walked exactly past them; zero takes twice the
-         *  connectivity, like the CPU's. */
-        small_size_t expansion_factor = 0;
-    };
+    using refine_config_t = vram_refine_config_t;
 
     using refine_result_t = dense::refine_result_t;
     using health_result_t = dense::health_result_t;
 
-  protected:
-
-    /** Device scratch one refine plan carves once and its passes and audits reuse, or the audit
-     *  share one @c health carves: the reached set and two frontiers, the levels counter beside the
-     *  last two sweeps' expanded counters, by the sweep number's parity, the unreached, reconnected
-     *  and claim counters an audit lands together, then for a refine the passes' buffers, the
-     *  unreached rows' IDs and in-link counts, and the parts' bases. Sweeps run until one expands
-     *  nothing: every row joins one frontier at most, so the rows bound them. */
-    struct refine_scratch_t {
-        typename traversal_context_t::bytes_ptr_t bytes;
-
-        /** The reached set and the two frontiers, one bit per row each. */
-        vram_bitset_t reached, frontier, next_frontier;
-
-        /** The levels that expanded anything, then the rows the last two sweeps expanded. */
-        u32_t* levels = nullptr;
-        u32_t* expanded = nullptr;
-        u32_t* unreached = nullptr;
-        u32_t* reconnected = nullptr;
-
-        /** The walk's and the merge's claim counters, the last pass's completion oracle. */
-        u32_t* claims = nullptr;
-
-        /** The reverse buckets' fill counters, then the bitset of rows the merge re-selects. */
-        u32_t* bucket_counts = nullptr;
-        vram_bitset_t touched;
-        u32_t* island_ids = nullptr;
-        u32_t* in_links = nullptr;
-
-        /** The shadow neighbors the walks land and the reverse buckets, @b [rows,connectivity]
-         *  each. */
-        u32_t* shadow_neighbors = nullptr;
-        u32_t* buckets = nullptr;
-
-        /** The ascending first rows of the parts the walks merge, uploaded once by the plan. */
-        u32_t* part_bases = nullptr;
-        std::size_t words = 0;
-    };
-
-    /** The counters an audit lands in page-locked memory, in the order of the device's: the levels
-     *  that expanded, the last sweep's count, which only a sweep short of convergence leaves
-     *  nonzero, then the unreached, reconnected and claim counters. */
-    struct audit_landing_t {
-        u32_t levels;
-        u32_t last_expanded;
-        u32_t unreached;
-        u32_t reconnected;
-        u32_t claims[2];
-    };
+  private:
+    using refine_scratch_t = vram_refine_scratch<traversal_context_t>;
+    using audit_landing_t = vram_audit_landing_t;
 
     /** Gives a landing back to the stream's slots it came from. */
     struct landing_return_t {
@@ -1011,7 +1042,9 @@ struct vram_index {
             case phase_t::reselect_k: {
                 iota_view<node_id_t> const range = round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
                 walked_ = range.size();
-                if (walked_) status_ = index_->refine_pass_(*context_, scratch_, config_, range, {}, parts_, round_);
+                if (walked_)
+                    status_ = index_->kernels_.refine_pass_(*index_, *context_, scratch_, config_, range, {}, parts_,
+                                                            round_);
                 if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), 0, stream);
                 break;
             }
@@ -1025,10 +1058,10 @@ struct vram_index {
                 // A continued audit sweeps on alone.
                 walked_ = next_sweep_ ? 0 : islands_;
                 if (walked_)
-                    status_ = index_->refine_pass_(*context_, scratch_, config_, {0, islands_},
-                                                   {scratch_.island_ids, islands_});
+                    status_ = index_->kernels_.refine_pass_(*index_, *context_, scratch_, config_, {0, islands_},
+                                                            {scratch_.island_ids, islands_});
                 if (succeeded(status_) && !next_sweep_)
-                    status_ = index_->queue_reconnect_(scratch_, islands_, scratch_rows_, stream);
+                    status_ = index_->kernels_.queue_reconnect_(*index_, scratch_, islands_, scratch_rows_, stream);
                 if (succeeded(status_)) status_ = queue_sweeps_();
                 break;
             default: return status_t::success_k;
@@ -1040,8 +1073,9 @@ struct vram_index {
         /** Queues the audit's next batch of sweeps, its seeds first when it starts. */
         status_t queue_sweeps_() noexcept {
             status_t const queued = next_sweep_
-                                        ? index_->queue_sweeps_(*context_, scratch_, landing_.get(), next_sweep_)
-                                        : index_->queue_audit_(*context_, scratch_, landing_.get());
+                                        ? index_->kernels_.queue_sweeps_(*index_, *context_, scratch_, landing_.get(),
+                                                                         next_sweep_)
+                                        : index_->kernels_.queue_audit_(*index_, *context_, scratch_, landing_.get());
             next_sweep_ = next_sweep_ ? 2 * next_sweep_ : 2;
             return queued;
         }
@@ -1066,7 +1100,7 @@ struct vram_index {
             }
             tally_.visited_nodes += walked_;
             if (phase_ == phase_t::reselect_k) {
-                if (!stopped_ && ++round_ != rounds_) return true;
+                if (++round_ < rounds_) return true;
                 phase_ = phase_t::audit_k;
                 return true;
             }
@@ -1088,7 +1122,7 @@ struct vram_index {
         /** Stops the re-selection after the round that landed last, so the next phase audits and
          *  heals; a no-op in any other phase. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k) stopped_ = true, phase_ = phase_t::audit_k;
+            if (phase_ == phase_t::reselect_k) rounds_ = 0, phase_ = phase_t::audit_k;
         }
 
         /** Whether the current phase re-selects the planned range - the phase a caller's
@@ -1113,11 +1147,11 @@ struct vram_index {
         }
 
       private:
-        friend struct vram_index;
+        friend struct vram_shard_core;
         enum class phase_t : u8_t { reselect_k, audit_k, heal_k, done_k };
 
         refine_scratch_t scratch_;
-        derived_* index_ = nullptr;
+        vram_shard_core* index_ = nullptr;
         traversal_context_t* context_ = nullptr;
         audit_landing_ptr_t landing_ {nullptr, landing_return_t {}};
         refine_config_t config_ {};
@@ -1131,7 +1165,6 @@ struct vram_index {
         u32_t parts_ = 0;
         u32_t rounds_ = 1;
         u32_t round_ = 0;
-        bool stopped_ = false;
 
         /** Rows the queued phase walks, and the islands the last audit left. */
         std::size_t walked_ = 0;
@@ -1181,7 +1214,7 @@ struct vram_index {
         u32_t const candidate_slots = candidate_slots_for_(expansion, 4);
         u32_t const walks = parts ? 2 : 1;
         std::size_t const arena_warps = device_.multiprocessor_count *
-                                        derived_::resident_blocks_(derived_::kernel_t::refine_k, candidate_slots) *
+                                        kernels_type_::resident_blocks_(vram_kernel_t::refine_k, candidate_slots) *
                                         vram_warps_per_block_k;
         if (!context.ensure_arena(
                 arena_warps * build_arena_shape_(expansion, candidate_slots, walks).template slice_bytes<node_id_t>()))
@@ -1194,7 +1227,7 @@ struct vram_index {
              failed(vendor_t::copy(plan.scratch_.part_bases, part_bases.data(), parts * sizeof(node_id_t), stream))))
             return {std::move(plan), status_t::device_error_k};
         node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
-        plan.index_ = &derived();
+        plan.index_ = this;
         plan.context_ = &context;
         plan.config_ = config;
         plan.nodes_ = {min_of(nodes.first, bound), bound};
@@ -1220,7 +1253,8 @@ struct vram_index {
 
     /** A split of this index into @p receivers, the inverse of an absorb, which no dense GPU face
      *  serves yet: it answers @c unsupported_k with an unbound plan. */
-    expected<refine_plan_t> plan_split(std::span<derived_*>, traversal_context_t& context, refine_config_t = {},
+    template <typename owner_type_>
+    expected<refine_plan_t> plan_split(std::span<owner_type_*>, traversal_context_t& context, refine_config_t = {},
                                        u64_t = 0) noexcept {
         using bytes_ptr_t = typename traversal_context_t::bytes_ptr_t;
         return {refine_plan_t {refine_scratch_t {
@@ -1240,12 +1274,12 @@ struct vram_index {
         if (failed(carve_status)) return {{}, carve_status};
         audit_landing_ptr_t const landing = take_landing_(context);
         if (!landing) return {{}, status_t::bad_alloc_k};
-        if (status_t const queued = derived().queue_audit_(context, scratch, landing.get()); failed(queued))
+        if (status_t const queued = kernels_.queue_audit_(*this, context, scratch, landing.get()); failed(queued))
             return {{}, queued};
         for (u32_t first_sweep = 2;; first_sweep *= 2) {
             if (status_t const drained = context.wait(); failed(drained)) return {{}, drained};
             if (!landing->last_expanded) break;
-            if (status_t const queued = derived().queue_sweeps_(context, scratch, landing.get(), first_sweep);
+            if (status_t const queued = kernels_.queue_sweeps_(*this, context, scratch, landing.get(), first_sweep);
                 failed(queued))
                 return {{}, queued};
         }
@@ -1264,7 +1298,7 @@ struct vram_index {
         u32_t const candidate_slots = candidate_slots_for_(expansion, 4);
         gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, candidate_slots, walks);
         std::size_t const arena_warps = device_.multiprocessor_count *
-                                        derived_::resident_blocks_(derived_::kernel_t::refine_k, candidate_slots) *
+                                        kernels_type_::resident_blocks_(vram_kernel_t::refine_k, candidate_slots) *
                                         vram_warps_per_block_k;
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
                aligned(arena_warps * arena_shape.slice_bytes<node_id_t>()) +
@@ -1324,7 +1358,7 @@ struct vram_index {
         /** The index snapshotted into @p columns on @p stream under the watermark at @p visible,
          *  its IDs shifted by @p id_shift; only @ref plan_save calls it, with the index's device
          *  current, where the events are born, and sizes the bounce afterwards. */
-        save_plan_t(vram_index const& index, columns_t columns, node_id_t id_shift,
+        save_plan_t(vram_shard_core const& index, columns_t columns, node_id_t id_shift,
                     typename executor_t::stream_t const& stream, node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), stream(stream.handle),
               bounce(typename vendor_t::pinned_allocator_t {stream}), visible(visible),
@@ -1492,7 +1526,7 @@ struct vram_index {
 
         /** The index being snapshotted; null in the empty plan a refused @ref plan_save returns,
          *  and once @c finish succeeded. */
-        vram_index const* index_ = nullptr;
+        vram_shard_core const* index_ = nullptr;
     };
 
     /**
@@ -1598,7 +1632,7 @@ struct vram_index {
         /** The index appended to at @p base on @p stream, under the claim over its rows or a claim
          *  word its caller closed; only @ref plan_load calls it, with the index's device current,
          *  where the events are born. */
-        load_plan_t(derived_& index, columns_view_t columns, iota_view<node_id_t> source_range,
+        load_plan_t(vram_shard_core& index, columns_view_t columns, iota_view<node_id_t> source_range,
                     typename executor_t::stream_t const& stream, node_id_t base, std::size_t rows) noexcept
             : columns(columns), source_range(source_range), stream(stream.handle),
               bounce(typename vendor_t::pinned_allocator_t {stream}), base(base), rows(rows),
@@ -1711,11 +1745,11 @@ struct vram_index {
                 return status_t::config_mismatch_k;
             // Dot reserves no norms column, so a part's column has nowhere to land.
             bool const normed = index_->stores_norms() && !norms_rows.empty();
+            std::size_t const half_bytes = half_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
             for (std::size_t done = 0; done < range.size(); done += half_rows) {
                 std::size_t const count = min_of(half_rows, range.size() - done), into = range.first + done;
                 std::size_t const half = chunks_++ % 2;
-                byte_t* const bounce_vectors =
-                    bounce.data() + half * half_rows * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
+                byte_t* const bounce_vectors = bounce.data() + half * half_bytes;
                 byte_t* const bounce_neighbors = bounce_vectors + half_rows * scalar_row_bytes;
                 byte_t* const bounce_norms = bounce_neighbors + half_rows * neighbors_row_bytes;
                 // The host refills a half only once the copies out of it landed, while the other
@@ -1735,6 +1769,8 @@ struct vram_index {
                                                    count * connectivity};
                 rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
                 compact_neighbors(landed, connectivity, static_cast<node_id_t>(into), node_id_unknown_k);
+                // The copy engine then reads the half from the last-level cache, not this core.
+                index_->prefetcher_.demote(bounce_vectors, half_bytes);
                 if (failed(vendor_t::copy_2d(index_->vectors_rows_() + into * index_->row_bytes(), index_->row_bytes(),
                                              bounce_vectors, scalar_row_bytes, scalar_row_bytes, count, stream)) ||
                     (normed && failed(vendor_t::copy(index_->norms_column_.base() + into * sizeof(norms_t),
@@ -1752,8 +1788,8 @@ struct vram_index {
         }
 
         /**
-         *  @brief The same copy out of @p source 's own storage rather than host columns, as an
-         *      absorb drives it, one donor shard at a time, its step naming the rows in that
+         *  @brief The same copy out of @p source_shard 's own storage rather than host columns, as
+         *      an absorb drives it, one donor shard at a time, its step naming the rows in that
          *      shard's row and ID spaces.
          *
          *  Both matrices keep fragment-padded rows of one geometry, so on one device every column
@@ -1761,17 +1797,19 @@ struct vram_index {
          *  device alone, so its rows cross through the bounce half a batch at a time, read out on
          *  @p source_stream and written in on the plan's, each stream waiting on the other's event
          *  rather than the host, so one half reads out while the other writes in. The neighbors
-         *  then rebase on the plan's stream. Nothing waits, so @p source must stay quiescent until
-         *  the caller drains both streams.
+         *  then rebase on the plan's stream. Nothing waits, so @p source_shard must stay quiescent
+         *  until the caller drains both streams.
          *
-         *  @param[in] step The step to fill; its source rows address @p source.
-         *  @param[in] source The index the rows come from.
+         *  @param[in] step The step to fill; its source rows address @p source_shard.
+         *  @param[in] source_shard The shard the rows come from, read through its core.
          *  @param[in] source_range The ID space the source's rows speak.
-         *  @param[inout] source_stream An executor stream on @p source 's device, which reads the
-         *      rows out when the devices differ and marks each half filled on its event.
+         *  @param[inout] source_stream An executor stream on @p source_shard 's device, which reads
+         *      the rows out when the devices differ and marks each half filled on its event.
          */
-        status_t load(step_t const& step, derived_ const& source, iota_view<node_id_t> source_range,
+        template <typename shard_type_>
+        status_t load(step_t const& step, shard_type_ const& source_shard, iota_view<node_id_t> source_range,
                       typename executor_t::stream_t& source_stream) noexcept {
+            vram_shard_core const& source = source_shard.core();
             if (!index_) return status_t::uninitialized_k;
             int const device = index_->device_specs().ordinal, source_device = source.device_specs().ordinal;
             if (failed(vendor_t::select(device))) return status_t::device_error_k;
@@ -1867,7 +1905,7 @@ struct vram_index {
                     failed(crossed_[0].record(stream)) || failed(crossed_[0].wait()))
                     return index_->fail_(status_t::device_error_k);
             }
-            derived_* const index = std::exchange(index_, nullptr);
+            vram_shard_core* const index = std::exchange(index_, nullptr);
             return rows ? index->publish_(base, rows) : status_t::success_k;
         }
 
@@ -1881,7 +1919,7 @@ struct vram_index {
 
         /** The index appended to; null in the empty plan a refused @ref plan_load returns, and once
          *  @c finish published. */
-        derived_* index_ = nullptr;
+        vram_shard_core* index_ = nullptr;
     };
 
     /**
@@ -1921,8 +1959,7 @@ struct vram_index {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (failed(vendor_t::select(device_.ordinal))) return {{}, status_t::device_error_k};
         if (!rows)
-            return {load_plan_t {derived(), {}, {}, stream, static_cast<node_id_t>(claimed_()), 0},
-                    status_t::success_k};
+            return {load_plan_t {*this, {}, {}, stream, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
         // A closed word is the caller's, who refines or absorbs around the load; an open one is
         // claimed like a batch's, so no batch lands beside it.
         bool const claiming = !claims_.closed();
@@ -1933,7 +1970,7 @@ struct vram_index {
             base = first_id;
         }
         else if (rows > max_node_count_k - base) return {{}, status_t::overflow_k};
-        load_plan_t plan {derived(), {}, {}, stream, base, rows};
+        load_plan_t plan {*this, {}, {}, stream, base, rows};
         if (status_t const grown = grow_rows_(base + rows, stream.handle); failed(grown)) return {{}, grown};
         return {std::move(plan), status_t::success_k};
     }
@@ -1950,11 +1987,6 @@ struct vram_index {
     }
 
 #pragma endregion Checkpoints
-
-  protected:
-
-    derived_& derived() noexcept { return static_cast<derived_&>(*this); }
-    derived_ const& derived() const noexcept { return static_cast<derived_ const&>(*this); }
 
 #pragma region Insertion
 
@@ -1996,7 +2028,7 @@ struct vram_index {
         u32_t const selection_rows = walk_selection_rows_(expansion, candidate_slots);
         gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, candidate_slots, 1);
         std::size_t const arena_warps = device_.multiprocessor_count *
-                                        derived_::resident_blocks_(derived_::kernel_t::insert_k, candidate_slots) *
+                                        kernels_type_::resident_blocks_(vram_kernel_t::insert_k, candidate_slots) *
                                         vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>());
@@ -2027,7 +2059,8 @@ struct vram_index {
                                   link_heads + total_rows + 2 * picks};
         // The launch is the last fallible step; reading its verdict here keeps the claim
         // reversible.
-        if (failed(derived().launch_insert_(build, candidate_slots, context))) return {{}, status_t::device_error_k};
+        if (failed(kernels_.launch_insert_(*this, build, candidate_slots, context)))
+            return {{}, status_t::device_error_k};
 
         insert_result_t result;
         result.first_id = first_id;
@@ -2041,12 +2074,7 @@ struct vram_index {
 
 #pragma region Search
 
-    /** The grouped-query heads an attend stages beside the rows its walks navigate by: every head
-     *  of every token, @c head_count consecutive rows per token. */
-    struct attend_heads_t {
-        rows_view_t rows;
-        std::size_t head_count;
-    };
+    using attend_heads_t = vram_attend_heads_t;
 
     /** Whether the device casts carry @p from values into @p to, as NumKong's plan of one value
      *  says. */
@@ -2112,16 +2140,16 @@ struct vram_index {
                     return status_t::device_error_k;
                 status_t landed = status_t::success_k;
                 if (!narrows_at_unit_rms_(rows.dtype))
-                    landed = derived().launch_cast_(window, rows.dtype, landing, vector_dtype_, count * pitch_values,
-                                                    stream);
+                    landed = kernels_.launch_cast_(*this, window, rows.dtype, landing, vector_dtype_,
+                                                   count * pitch_values, stream);
                 else if (rows.dtype == nk_f32_k)
-                    landed = derived().launch_rmscast_(reinterpret_cast<f32_t const*>(window), window_row_bytes,
-                                                       landing, count, stream);
+                    landed = launch_rmscast_(reinterpret_cast<f32_t const*>(window), window_row_bytes, landing, count,
+                                             stream);
                 else {
-                    landed = derived().launch_cast_(window, nk_f64_k, widened, nk_f32_k, count * pitch_values, stream);
+                    landed = kernels_.launch_cast_(*this, window, nk_f64_k, widened, nk_f32_k, count * pitch_values,
+                                                   stream);
                     if (succeeded(landed))
-                        landed = derived().launch_rmscast_(widened, pitch_values * sizeof(f32_t), landing, count,
-                                                           stream);
+                        landed = launch_rmscast_(widened, pitch_values * sizeof(f32_t), landing, count, stream);
                 }
                 if (failed(landed)) return landed;
             }
@@ -2161,7 +2189,8 @@ struct vram_index {
         byte_t* exported = reinterpret_cast<byte_t*>(landed);
         if (outputs.dtype != nk_f32_k) {
             exported += blocks * (values * sizeof(f32_t) + outputs.rows * sizeof(softmax_state_t));
-            if (status_t const cast = derived().launch_cast_(landed, nk_f32_k, exported, outputs.dtype, values, stream);
+            if (status_t const cast = kernels_.launch_cast_(*this, landed, nk_f32_k, exported, outputs.dtype, values,
+                                                            stream);
                 failed(cast))
                 return cast;
         }
@@ -2209,9 +2238,9 @@ struct vram_index {
         config.expansion_factor = expansion;
         config.count = count;
         expected<search_result_t> result = settle_(
-            derived().submit_search_(one_query, nk::matrix_span<node_id_t> {staged_ids, {1, count}},
-                                     nk::matrix_span<distance_t> {staged_distances, {1, count}}, context, config,
-                                     visible),
+            kernels_.submit_search_(*this, one_query, nk::matrix_span<node_id_t> {staged_ids, {1, count}},
+                                    nk::matrix_span<distance_t> {staged_distances, {1, count}}, context, config,
+                                    visible),
             1, context, completion_t::blocking_k);
         if (!result) return result;
         std::size_t live = 0;
@@ -2408,14 +2437,14 @@ struct vram_index {
     /** Rounds the requested expansion to the register ladder of 2 to 16 slots of the vendor's warp
      *  width, or zero past it, where the arena frontier's rung walks the expansion itself. */
     u32_t candidate_slots_for_(u32_t expansion_factor, u32_t default_slots) const noexcept {
-        return gpu_candidate_slots(expansion_factor, default_slots, derived().wave_lanes());
+        return gpu_candidate_slots(expansion_factor, default_slots, kernels_type_::wave_lanes());
     }
 
     /** Candidates a walk's diversity selection caches: all of the walk's candidates, as the CPU's
      *  selection judges, @p candidate_slots ranks per lane on the register ladder, or the arena
      *  frontier's @p expansion past it. */
     u32_t walk_selection_rows_(u32_t expansion, u32_t candidate_slots) const noexcept {
-        return candidate_slots ? candidate_slots * derived().wave_lanes() : expansion;
+        return candidate_slots ? candidate_slots * kernels_type_::wave_lanes() : expansion;
     }
 
     /** Candidates a re-selection caches, a back-link round's or a refinement merge's: a row of the
@@ -2438,11 +2467,109 @@ struct vram_index {
         gpu_arena_shape_t shape = arena_shape_for(
             walk_selection_rows_(expansion, candidate_slots),
             candidate_slots ? frontier_kind_t::register_ladder_k : frontier_kind_t::wide_arena_k, walks);
-        if (!derived().build_scratch_fits(scratch_bytes)) shape.scratch_bytes = scratch_bytes;
+        if (!kernels_.build_scratch_fits(*this, scratch_bytes)) shape.scratch_bytes = scratch_bytes;
         return shape;
     }
 
+    /** Rebuilds the norms of rows @b [first_row,first_row+rows) from their vectors. */
+    status_t launch_derive_norms_(std::size_t first_row, std::size_t rows, stream_handle_t stream) noexcept {
+        vram_arguments_t arguments {};
+        arguments.graph.storage = storage();
+        arguments.graph.first_id = static_cast<u32_t>(first_row);
+        arguments.graph.rows_count = static_cast<u32_t>(rows);
+        return kernels_.launch_(
+            vram_kernel_t::derive_norms_k, 0,
+            device_.multiprocessor_count * kernels_type_::resident_blocks_(vram_kernel_t::derive_norms_k, 0), 0, stream,
+            arguments);
+    }
+
+    /** Rebases rows @p rows of the neighbors matrix from @p source_range onto the IDs from @p shift
+     *  and compacts them, as a load through the bounce does on the host. */
+    status_t launch_rebase_links_(iota_view<node_id_t> rows, iota_view<node_id_t> source_range, node_id_t shift,
+                                  stream_handle_t stream) noexcept {
+        vram_arguments_t arguments {};
+        vram_graph_t& graph = arguments.graph;
+        graph.neighbors = neighbor_rows_();
+        graph.connectivity = static_cast<u32_t>(connectivity());
+        graph.first_id = rows.first;
+        graph.rows_count = static_cast<u32_t>(rows.size());
+        graph.source_first = source_range.first;
+        graph.source_bound = source_range.bound;
+        graph.shift = shift;
+        return kernels_.launch_(
+            vram_kernel_t::rebase_links_k, 0,
+            device_.multiprocessor_count * kernels_type_::resident_blocks_(vram_kernel_t::rebase_links_k, 0), 0, stream,
+            arguments);
+    }
+
+    /** Merges the attended rows and carries of @p shards walks into the first's on @p stream - the
+     *  sharded attend's gather. */
+    status_t launch_merge_attention_(byte_t* blocks, u32_t rows, u32_t columns, u32_t shards,
+                                     stream_handle_t stream) noexcept {
+        vram_arguments_t arguments {};
+        arguments.attend.outputs = reinterpret_cast<f32_t*>(blocks);
+        arguments.attend.rows = rows;
+        arguments.attend.columns = columns;
+        arguments.attend.shards = shards;
+        return kernels_.launch_(vram_kernel_t::merge_attention_k, 0,
+                                divide_round_up<u32_t>(rows, vram_warps_per_block_k), 0, stream, arguments);
+    }
+
+    /** Resolves the @p walked matches per query of @p queries_count at @p ids and @p distances
+     *  through the device @p keys column into @p ranking on @p stream - a sharded search's own
+     *  ranking, gathered or landed as is. */
+    status_t launch_resolve_matches_(node_id_t const* ids, distance_t const* distances, u32_t walked,
+                                     byte_t const* keys, vram_ranking_t const& ranking, u32_t queries_count,
+                                     stream_handle_t stream) const noexcept {
+        vram_arguments_t arguments {};
+        arguments.matches.ids = ids;
+        arguments.matches.distances = distances;
+        arguments.matches.keys = keys;
+        arguments.matches.ranking = ranking;
+        arguments.matches.walked = walked;
+        arguments.matches.queries_count = queries_count;
+        return kernels_.launch_(vram_kernel_t::resolve_matches_k, 0,
+                                divide_round_up<u32_t>(queries_count, vram_warps_per_block_k), 0, stream, arguments);
+    }
+
+    /** Merges @p shards rankings of @p queries_count queries, gathered @p block_bytes apart from
+     *  @p gathered, into @p ranking on @p stream - the sharded search's device gather. */
+    status_t launch_merge_matches_(vram_ranking_t const& gathered, std::size_t block_bytes, u32_t shards,
+                                   vram_ranking_t const& ranking, u32_t queries_count,
+                                   stream_handle_t stream) const noexcept {
+        vram_arguments_t arguments {};
+        arguments.matches.gathered = gathered;
+        arguments.matches.ranking = ranking;
+        arguments.matches.block_bytes = block_bytes;
+        arguments.matches.queries_count = queries_count;
+        arguments.matches.shards = shards;
+        return kernels_.launch_(vram_kernel_t::merge_matches_k, 0,
+                                divide_round_up<u32_t>(queries_count, vram_warps_per_block_k), 0, stream, arguments);
+    }
+
+    /** Narrows @p rows rows of the index's columns at @p from, @p from_stride bytes apart, into
+     *  @p to at the vectors matrix pitch at unit RMS on @p stream, one block per row. */
+    status_t launch_rmscast_(f32_t const* from, std::size_t from_stride, byte_t* to, std::size_t rows,
+                             stream_handle_t stream) const noexcept {
+        vram_arguments_t arguments {};
+        nk_each_rmsnorm_arguments_t& rmscast = arguments.rmscast;
+        rmscast.x = reinterpret_cast<unsigned char const*>(from);
+        rmscast.y = reinterpret_cast<unsigned char*>(to);
+        rmscast.groups = 1;
+        rmscast.columns = dimensions();
+        rmscast.vectors = rows;
+        rmscast.x_stride = from_stride;
+        rmscast.y_stride = row_bytes();
+        rmscast.epsilon = std::numeric_limits<f32_t>::min();
+        u32_t const blocks = static_cast<u32_t>(min_of<std::size_t>(
+            rows, device_.multiprocessor_count * kernels_type_::resident_blocks_(vram_kernel_t::rmscast_k, 0)));
+        return kernels_.launch_(vram_kernel_t::rmscast_k, 0, blocks, 0, stream, arguments);
+    }
+
 #pragma endregion Launches
+
+  private:
+    friend kernels_type_;
 
     /** The vectors matrix and norms column backend, rebound to bytes. */
     using vectors_matrix_allocator_t = typename vectors_allocator_t::template rebind<byte_t>::other;
@@ -2487,6 +2614,12 @@ struct vram_index {
 
     /** The first post-claim device failure: IDs past it may be unpublished or unfilled. */
     status_t status_ = status_t::success_k;
+
+    /** The vendor's kernels, loaded at the first @c reserve. */
+    kernels_type_ kernels_;
+
+    /** Demotes a filled bounce half toward the last-level cache, where the copy engine reads it. */
+    object_prefetcher<cache_hints_type_> prefetcher_;
 };
 
 } // namespace unum::usearch::dense

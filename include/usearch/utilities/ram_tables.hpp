@@ -375,6 +375,25 @@ class chunked_multimap {
         return result;
     }
 
+    /** The first value stored under @p key in chunk and probe order, stopping there, or
+     *  @c malformed_k when absent; the same value every call once the key's inserts published. */
+    expected<value_t> find_first(key_t const& key) const noexcept {
+        for (std::size_t index = 0; index != max_chunks_k; ++index) {
+            std::span<slot_state_t const> const states = states_.chunk(index);
+            std::span<slot_t const> const slots = slots_.chunk(index);
+            if (slots.empty()) break;
+            for (std::size_t position = first_probe_of(key, states.size());;
+                 position = (position + 1) & (states.size() - 1)) {
+                slot_state_t const state =
+                    atomic_ref<slot_state_t const>(states[position]).load(std::memory_order_acquire);
+                if (state == slot_state_t::empty_k) break;
+                if (state == slot_state_t::published_k && slots[position].key == key)
+                    return {slots[position].value, status_t::success_k};
+            }
+        }
+        return {value_t {}, status_t::malformed_k};
+    }
+
     /** Invokes @p callback for every value stored under @p key, across every published chunk - wait-free. A chunk
      *  whose slots are not published yet holds no entry, and neither does any after it. */
     template <typename callback_type_>

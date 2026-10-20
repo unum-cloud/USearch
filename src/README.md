@@ -38,9 +38,9 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
 
 The variants are aliases over those templates, keyed by the storage dtype and the class:
 
-- `ram_indexes<dtype, cpu_class>` → `dense::ram_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class), waiter_of<cpu_class>, ...>`, with the class's atomic reference and cache hints last.
-- `nvme_indexes<dtype, cpu_class>` → `dense::nvme_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class)>`.
-- `vram_nvidia_indexes<dtype, gpu_class>` → `dense::vram_nvidia_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class), cuda_fatbin<gpu_class>>`, and `vram_amd_indexes<dtype, gpu_class>` likewise over `dense::vram_amd_indexes` and `hip_code_object<gpu_class>`.
+- `ram_indexes<dtype, cpu_class>` → `dense::ram_indexes<uuid_t, quads_kit_of<dtype, cpu_class>, tiles_kit_of<...>, elementwise_kit_of<cpu_class>, rmscast_kit_of<...>, visits_kit_of<cpu_class>, waiter_of<cpu_class>, ...>`, each kit its ladder's pick under the class's NumKong mask, with the class's atomic reference and cache hints last.
+- `nvme_indexes<dtype, cpu_class>` → `dense::nvme_indexes<uuid_t, ...>` over the same five kits.
+- `vram_nvidia_indexes<dtype, gpu_class>` → `dense::vram_nvidia_indexes<uuid_t, dtype, cuda_fatbin<gpu_class>, fu::preferred_cache_hints_t>`, the fatbin stating the class's NumKong mask as its `capability_k`, and `vram_amd_indexes<dtype, gpu_class>` likewise over `dense::vram_amd_indexes` and `hip_code_object<gpu_class>`.
 - `vram_apple_indexes<dtype, gpu_class>` → `dense::vram_apple_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class)>`, one variant per Apple class, each compiling its own library at first use.
 
 A variant's executor type is its residency, so `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.

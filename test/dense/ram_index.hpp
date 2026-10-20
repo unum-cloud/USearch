@@ -30,10 +30,10 @@ namespace unum::usearch::test::dense {
 
 /** No-op sibling picked when the cell cannot be compiled on this target: its serial
  *  kernels are not adapted yet, or the requested kit is absent from the build. */
-template <                                       //
-    nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
-    typename waiter_type_ = dummy_waiter_t,      //
-    nk_capability_t caps_ = nk_cap_serial_k,     //
+template <                                        //
+    nk_dtype_t dtype_, nk_kernel_kind_t kernel_,  //
+    typename waiter_type_ = fu::standard_yield_t, //
+    nk_capability_t caps_ = nk_cap_serial_k,      //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
 static std::size_t test_ram_index_configuration(char const* name, u64_t) {
     if constexpr (!quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
@@ -41,16 +41,20 @@ static std::size_t test_ram_index_configuration(char const* name, u64_t) {
     else return report(name, "kit not compiled for this target");
 }
 
-template <                                       //
-    nk_dtype_t dtype_, nk_kernel_kind_t kernel_, //
-    typename waiter_type_ = dummy_waiter_t,      //
-    nk_capability_t caps_ = nk_cap_serial_k,     //
+template <                                        //
+    nk_dtype_t dtype_, nk_kernel_kind_t kernel_,  //
+    typename waiter_type_ = fu::standard_yield_t, //
+    nk_capability_t caps_ = nk_cap_serial_k,      //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
     requires dense_cell_testable<dtype_, kernel_, caps_>
 static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
 
-    using index_t = ram_index<dtype_, caps_, waiter_type_, atomic_ref_, fu::standard_cache_hints_t,
-                              counting_allocator_t, counting_allocator_t, std::allocator<byte_t>>;
+    using index_t = ram_index<typename quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+                              typename tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+                              typename elementwise_ladder<caps_>::kit_t,
+                              typename rmscast_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+                              typename visits_hash_set_ladder<caps_>::kit_t, waiter_type_, atomic_ref_,
+                              dummy_cache_hints_t, counting_allocator_t, counting_allocator_t, std::allocator<byte_t>>;
 
     if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
 
@@ -97,9 +101,13 @@ static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
     requires quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>
 static std::size_t test_starved_configuration(char const* name, u64_t seed) {
-    using index_t =
-        ram_index<dtype_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref, fu::standard_cache_hints_t,
-                  counting_allocator_t, counting_allocator_t, counting_allocator_t>;
+    using index_t = ram_index<typename quads_ladder<typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t,
+                              typename tiles_ladder<typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t,
+                              typename elementwise_ladder<nk_cap_serial_k>::kit_t,
+                              typename rmscast_ladder<typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t,
+                              typename visits_hash_set_ladder<nk_cap_serial_k>::kit_t, fu::standard_yield_t,
+                              fu::standard_atomic_ref, dummy_cache_hints_t, counting_allocator_t, counting_allocator_t,
+                              counting_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(
             new (std::nothrow) index_t(kernel_, counting_allocator_t(ledger), counting_allocator_t(ledger)));
