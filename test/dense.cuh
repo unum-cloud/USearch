@@ -415,12 +415,34 @@ auto drive_multiply(indexes_type_& indexes, left_type_ const& left, dense_indexe
         return indexes.multiply(left, driver.executor, to_writable_span(driver.traversals), arguments...);
     else return indexes.multiply(left, driver.executor, arguments...);
 }
-template <typename indexes_type_, typename rows_type_, typename... arguments_types_>
+
+/** Lands every query's kept keys in rank order into its row of @c keys and @c scores, counting them
+ *  in @c counts, which start at zero, so a MaxSim test reads the rectangle it always read. */
+template <typename key_type_, typename score_type_>
+struct maxsim_rows {
+    nk::matrix_span<key_type_> keys;
+    nk::matrix_span<score_type_> scores;
+    std::span<std::size_t> counts;
+
+    template <typename total_type_>
+    status_t operator()(std::size_t, std::size_t query, key_type_ const& key, total_type_ total) const noexcept {
+        std::size_t const rank = counts[query]++;
+        keys(query, rank) = key, scores(query, rank) = static_cast<score_type_>(total);
+        return status_t::success_k;
+    }
+};
+
+template <typename indexes_type_, typename rows_type_, typename score_type_>
 auto drive_maxsim(indexes_type_& indexes, rows_type_ const& rows, std::span<std::size_t const> query_offsets,
-                  dense_indexes_executor<indexes_type_>& driver, arguments_types_&&... arguments) noexcept {
+                  dense_indexes_executor<indexes_type_>& driver, typename indexes_type_::search_config_t config,
+                  nk::matrix_span<typename indexes_type_::key_t> keys, nk::matrix_span<score_type_> scores,
+                  std::span<std::size_t> counts) noexcept {
+    for (std::size_t& count : counts) count = 0;
+    maxsim_rows<typename indexes_type_::key_t, score_type_> const land {keys, scores, counts};
     if constexpr (ram_collection<indexes_type_>)
-        return indexes.maxsim(rows, query_offsets, driver.executor, to_writable_span(driver.traversals), arguments...);
-    else return indexes.maxsim(rows, query_offsets, driver.executor, arguments...);
+        return indexes.maxsim(rows, query_offsets, driver.executor, to_writable_span(driver.traversals), config,
+                              keys.extent(1), land);
+    else return indexes.maxsim(rows, query_offsets, driver.executor, config, keys.extent(1), land);
 }
 template <typename indexes_type_, typename... arguments_types_>
 status_t drive_run(typename indexes_type_::refine_plan_t& plan, dense_indexes_executor<indexes_type_>& driver,
@@ -2403,8 +2425,8 @@ std::size_t test_dense_indexes_products(u64_t seed, placement_types_&... placeme
 /** Sharded MaxSim against the native dots: 64 documents of 4 token rows share their keys, a walk
  *  as wide as the index ranks exactly the oracle's best documents at their exact scores, a default
  *  one never scores a key above its own, and a ragged batch refuses. Towers taking query offsets
- *  also score every key a default walk nominates exactly, rank a scan exactly, and cut queries of
- *  3 and 5 rows from one batch. */
+ *  also score every key a default walk nominates exactly, rank a scan exactly, cut queries of 3 and
+ *  5 rows from one batch, and rank a 16-row query, as wide as a matrix engine's tile, exactly. */
 template <typename indexes_type_, typename... placement_types_>
 std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placement) {
     using scalar_t = typename indexes_type_::scalar_t;
@@ -2428,9 +2450,9 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
     failures += expect(
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
 
-    // A document's exact score over query rows [first, end): every row's best dot among its
-    // tokens, summed. Test rows are non-negative, so every dot is too, and a row that misses a
-    // document only lowers its score.
+    // A document's exact score over query rows [first, end), the leading stored rows: every row's
+    // best dot among its tokens, summed. Test rows are non-negative, so every dot is too, and a row
+    // that misses a document only lowers its score.
     auto const queries = vectors(nk::range(std::size_t {0}, queries_count * rows_per_query), nk::slice);
     auto exact_of = [&](std::size_t first, std::size_t end, std::size_t document) noexcept {
         f64_t total = 0;
@@ -2438,7 +2460,7 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
             f64_t best = 0;
             for (std::size_t token = 0; token != tokens_per_document; ++token)
                 best = max_of(best, static_cast<f64_t>(dense_native_dot(
-                                        queries.row(row).as_vector(),
+                                        vectors.view().row(row).as_vector(),
                                         vectors.view().row(document * tokens_per_document + token).as_vector())));
             total += best;
         }
@@ -2531,6 +2553,18 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
         failures += expect(
             succeeded(maxsim_cut(queries, std::span<std::size_t const> {ragged_offsets}, exhaustive).status));
         failures += expect_ranked(ragged_exact, ragged_offsets.size() - 1);
+
+        // A query as wide as a matrix engine's tile folds through it, walked or scanned, exactly.
+        std::array<std::size_t, 2> const wide_offsets {0, 16};
+        exact_scores_t wide_exact {};
+        for (std::size_t document = 0; document != documents_count; ++document)
+            wide_exact[0][document] = exact_of(0, 16, document);
+        auto const wide_queries = vectors(nk::range(std::size_t {0}, std::size_t {16}), nk::slice);
+        for (search_config_t const config : {exhaustive, scan}) {
+            failures += expect(
+                succeeded(maxsim_cut(wide_queries, std::span<std::size_t const> {wide_offsets}, config).status));
+            failures += expect_ranked(wide_exact, 1);
+        }
     }
 
     // Offsets past the rows refuse their layout, and rows no uniform query divides their shape.

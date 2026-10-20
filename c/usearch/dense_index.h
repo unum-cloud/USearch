@@ -1866,7 +1866,7 @@ typedef struct usearch_dense_maxsim_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Queries - the batch axis; the outputs have @c count rows of @c wanted entries. */
+    /** Queries - the batch axis; @c matches spans @c count of them. */
     size_t count;
 
     /** The token rows of every query laid end to end, @c count times @c rows_per_query of them, or
@@ -1877,14 +1877,17 @@ typedef struct usearch_dense_maxsim_t {
      *  @c query_offsets is set. */
     size_t rows_per_query;
 
-    /** Output for the scored keys inside @c arena, @c scores carrying each key's summed maxima,
-     *  largest first. */
-    usearch_matches_view_t* matches;
+    /** Output for each query's best-scoring keys, largest first, as many as it found up to
+     *  @c wanted, or every key it scored when @c wanted is zero, packed into @c arena: query @c i
+     *  spans @c matches->offsets[i] up to @c matches->offsets[i+1], @c scores carrying each key's
+     *  summed maxima. */
+    usearch_matches_tape_view_t* matches;
 
     /** Memory for @c matches, rewound by the call. */
     usearch_arena_t arena;
 
-    /** The upper bound on keys per query - the "k" over documents, not rows. */
+    /** The @b optional bound on keys per query - the "k" over documents, not rows; zero keeps
+     *  every key the query scored. */
     size_t wanted;
 
     /** The @b optional breadth of the candidates; zero derives. */
@@ -1913,8 +1916,8 @@ typedef struct usearch_dense_maxsim_t {
  *  @ref dense_index_linear_algebra
  *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
  *  @retval usearch_status_shape_mismatch_k A query without rows, or @c query_offsets decreasing.
- *  @retval usearch_status_unsupported_k A scan, a @c predicate or ragged @c query_offsets on a VRAM
- *      handle.
+ *  @retval usearch_status_unsupported_k A scan, a @c predicate, ragged @c query_offsets or a zero
+ *      @c wanted on a VRAM handle.
  *
  *  This is what @c values_per_key above one exists for. A document is one key holding its token
  *  rows, and the walk stays over individual tokens under a plain inner product - no set-to-set
@@ -1933,7 +1936,7 @@ typedef struct usearch_dense_maxsim_t {
  *
  *  @code{.c}
  *  // 4 queries of 32 padded token rows each, scored against documents of any length.
- *  usearch_matches_view_t documents;
+ *  usearch_matches_tape_view_t documents;
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_maxsim(&(usearch_dense_maxsim_t){
  *      .index = index, .executor = executor, .outcome = &outcome,

@@ -1069,9 +1069,18 @@ func TestMaxsimSizesItsOutputsOverDocuments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the late interaction must resolve: %v", err)
 	}
+	every, err := index.On(pool(t)).Maxsim(RowsOf(slab[:queries*tokens*dimensions], dimensions), tokens, 0,
+		newArena(t, nil), nil)
+	if err != nil {
+		t.Fatalf("the unbounded late interaction must resolve: %v", err)
+	}
 	for query := uint(0); query < queries; query++ {
-		if found, _, err := outputs.Row(query); err != nil || len(found) != documents {
+		found, _, err := outputs.Row(query)
+		if err != nil || len(found) != documents {
 			t.Errorf("query %d scored %d of %d documents: %v", query, len(found), documents, err)
+		}
+		if scored, _, err := every.Row(query); err != nil || len(scored) < len(found) {
+			t.Errorf("query %d kept %d keys unbounded, below the %d of a bound: %v", query, len(scored), len(found), err)
 		}
 	}
 	if stats.ComputedDistances == 0 {

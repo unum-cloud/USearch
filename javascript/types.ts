@@ -502,8 +502,8 @@ export class MatchesRow {
 }
 
 /**
- * The ranked rows a search, a `maxsim` or a stream pull wrote into its arena: `queries` rows of
- * `columns` cells, row `i` holding `counts[i]` matches. Mirrors `usearch_matches_view_t`.
+ * The ranked rows a search or a stream pull wrote into its arena: `queries` rows of `columns`
+ * cells, row `i` holding `counts[i]` matches. Mirrors `usearch_matches_view_t`.
  */
 export class Matches extends ArenaView {
   /** Rows the call resolved, one per query. */
@@ -525,7 +525,7 @@ export class Matches extends ArenaView {
     return this.live(this.#landed.keys);
   }
 
-  /** The `queries × columns` score matrix, rows contiguous: distances for a search, summed maxima for `maxsim`. */
+  /** The `queries × columns` distance matrix, rows contiguous. */
   get scores(): Float64Array {
     return this.live(this.#landed.scores);
   }

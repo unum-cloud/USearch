@@ -402,9 +402,14 @@ for (0..products.rows) |row| {
 
 `maxsim` is late interaction: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what a `values_per_key` above one exists for, and the outputs are sized over documents rather than rows.
+The keys land as a `DenseProducts`, one row per query, largest score first, and a zero `wanted` keeps every key a query scored.
 
 ```zig
 const documents = try index.on(executor).maxsim(try .of(f32, tokens, 768), tokens_per_query, 10, &arena, .{});
+for (0..documents.rows) |query| {
+    const ranked = try documents.row(query);
+    rerank(query, ranked.keys, ranked.scores);
+}
 ```
 
 ### Attention

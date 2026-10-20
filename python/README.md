@@ -140,7 +140,7 @@ calls = [shard.deferred(pool).search(queries, 10, arena) for shard, arena in zip
 results = [call.wait() for call in calls]  # or, in a coroutine: await call
 ```
 
-`search` and `maxsim` answer a `usearch.Matches`, `get` and `attend` answer `usearch.DenseVectors`, a cursor's batches `usearch.DenseBatch`, `multiply` answers `usearch.DenseProducts`, and `save_buffer` answers `usearch.Monolith`.
+`search` answers a `usearch.Matches`, `get` and `attend` answer `usearch.DenseVectors`, a cursor's batches `usearch.DenseBatch`, `multiply` and `maxsim` answer `usearch.DenseProducts`, and `save_buffer` answers `usearch.Monolith`.
 Their `len()` counts rows, or bytes of a monolith.
 
 ## Keys
@@ -360,12 +360,14 @@ row_keys, row_scores = products.row(0)  # one row's pairs, for each of the len(p
 ### Late Interaction
 
 `maxsim` scores multi-row queries against multi-row entries, where every query row takes its best match within a key and those maxima sum to that key's score.
-A document is one key holding its token rows, which is what `values_per_key` above one exists for, and the result is sized over documents rather than over rows.
+A document is one key holding its token rows, which is what `values_per_key` above one exists for, and the result is the ragged run `multiply` answers, one run of documents per query, largest first.
+A zero `wanted` keeps every document a query scored.
 
 ```python
 tokens = DenseIndex.init_ram(dimensions=128, metric=DenseMetric.INNER, values_per_key=32)
 ...
-documents = tokens.on(pool).maxsim(query_tokens, 32, 10, arena)  # 32 token rows per query, 10 documents each
+documents = tokens.on(pool).maxsim(query_tokens, 32, 10, arena)  # 32 token rows per query, up to 10 documents each
+offsets = np.asarray(documents.offsets)  # (queries + 1,): query `i` spans offsets[i] to offsets[i + 1]
 ```
 
 ### Attention

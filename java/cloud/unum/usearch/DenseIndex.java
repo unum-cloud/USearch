@@ -614,7 +614,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         DenseTraversalStats stats;
 
         /**
-         * Up to {@code wanted} documents per query - the "k" over keys, not rows.
+         * Up to {@code wanted} documents per query - the "k" over keys, not rows; zero keeps every key
+         * the query scored.
          *
          * @throws USearchException INVALID_ARGUMENT on a negative count.
          */
@@ -815,7 +816,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * The ragged sparse product {@link DenseVerbs#multiply} wrote into its arena: per left row, every
-     * pair its walk scored, in traversal order. Valid until the arena's next call or its close.
+     * pair its walk scored, in traversal order; or the keys {@link DenseVerbs#maxsim} kept per query,
+     * largest score first. Valid until the arena's next call or its close.
      */
     public static final class DenseProducts {
 
@@ -853,12 +855,16 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     required);
         }
 
-        /** Left rows the call multiplied. */
+        /** Left rows the call multiplied, or queries it scored. */
         public int queries() {
             return queries;
         }
 
-        /** Pairs the walks scored across every row, before the wanted bound cut any. */
+        /**
+         * Pairs the walks scored across every row, before the wanted bound cut any; a
+         * {@link DenseVerbs#maxsim} reports no such count, so it holds the keys landed across every
+         * query, zero over device memory.
+         */
         public long required() {
             return required;
         }
@@ -1228,7 +1234,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /** Submits {@link DenseVerbs#maxsim(RowsView, long, long, Arena)}. Calls {@code usearch_dense_maxsim}. */
-        public Deferred<Matches> maxsim(RowsView queries, long rowsPerQuery, long wanted, Arena arena) {
+        public Deferred<DenseProducts> maxsim(RowsView queries, long rowsPerQuery, long wanted, Arena arena) {
             return submit(DenseVerbs.scoring(queries, rowsPerQuery, new DenseMaxsimConfig(wanted), arena));
         }
 
@@ -1236,7 +1242,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
          * Submits {@link DenseVerbs#maxsim(RowsView, long, DenseMaxsimConfig, Arena)}. Calls
          * {@code usearch_dense_maxsim}.
          */
-        public Deferred<Matches> maxsim(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
+        public Deferred<DenseProducts> maxsim(
+                RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
             return submit(DenseVerbs.scoring(queries, rowsPerQuery, config, arena));
         }
 

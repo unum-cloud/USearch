@@ -731,9 +731,11 @@ std::size_t test_nvme_indexes_telemetry(u64_t seed) {
         typename nvme_type_::search_config_t nominating;
         for (traversal_t const traversal : {traversal_t::walk_k, traversal_t::scan_k}) {
             nominating.traversal = traversal;
+            std::fill(counts.begin(), counts.end(), 0);
+            maxsim_rows<key_t, f64_t> const land {keys.span(), scores.span(), std::span {counts}};
             failures += expect_eq(viewed
                                       .maxsim_if(queries, std::span<std::size_t const> {query_offsets}, driver.executor,
-                                                 nominating, keys.span(), scores.span(), std::span {counts}, odd)
+                                                 nominating, wanted, land, odd)
                                       .status,
                                   status_t::success_k);
             for (std::size_t query = 0; query != queries_count; ++query) {
@@ -780,11 +782,11 @@ std::size_t test_nvme_indexes_telemetry(u64_t seed) {
         failures += expect_eq(
             viewed.multiply(queries, driver.executor, {}, keys.span(), products.span(), std::span {counts}).status,
             status_t::config_mismatch_k);
-        failures += expect_eq(viewed
-                                  .maxsim(queries, std::span<std::size_t const> {query_offsets}, driver.executor, {},
-                                          keys.span(), scores.span(), std::span {counts})
-                                  .status,
-                              status_t::config_mismatch_k);
+        maxsim_rows<key_t, f64_t> const land {keys.span(), scores.span(), std::span {counts}};
+        failures += expect_eq(
+            viewed.maxsim(queries, std::span<std::size_t const> {query_offsets}, driver.executor, {}, wanted, land)
+                .status,
+            status_t::config_mismatch_k);
         failures += expect_eq(attended.value_reads.count, 0u);
     }
     return failures;
@@ -1764,10 +1766,11 @@ struct nvme_staged_indexes {
         return viewed.multiply(left, executor, config, keys, products, counts);
     }
 
+    template <typename land_type_>
     expected<search_result_t> maxsim(vectors_view_t queries, std::span<std::size_t const> query_offsets,
-                                     executor_t& executor, search_config_t config, nk::matrix_span<key_t> keys,
-                                     nk::matrix_span<f64_t> scores, std::span<std::size_t> counts) noexcept {
-        return viewed.maxsim(queries, query_offsets, executor, config, keys, scores, counts);
+                                     executor_t& executor, search_config_t config, std::size_t wanted,
+                                     land_type_&& land) noexcept {
+        return viewed.maxsim(queries, query_offsets, executor, config, wanted, land);
     }
 
     template <typename value_lookup_type_>

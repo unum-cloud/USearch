@@ -733,7 +733,7 @@ const usearch_dense_maxsim_t = extern struct {
     count: usize,
     queries: usearch_rows_view_t,
     rows_per_query: usize,
-    matches: *usearch_matches_view_t,
+    matches: *usearch_matches_tape_view_t,
     arena: ?*anyopaque,
     wanted: usize,
     expansion_factor: usize,
@@ -1168,10 +1168,10 @@ pub const DenseIndex = extern struct {
     /// takes its best match within a key, and those maxima sum to that key's score.
     ///
     /// `queries` carries the queries laid end to end, `rows_per_query` rows apiece and uniform, so
-    /// ColBERT's padding applies as is, and the matches land in `arena`, up to `wanted` keys per
-    /// query. Approximate downward only, and runs on the inner-product kind only.
-    /// Calls `usearch_dense_maxsim`.
-    pub fn maxsim(self: DenseIndex, queries: RowsView, rows_per_query: usize, wanted: usize, arena: *Arena, config: DenseMaxsimConfig) Error!Matches {
+    /// ColBERT's padding applies as is, and each query's keys land in `arena` largest first, up to
+    /// `wanted` of them, or every key it scored when `wanted` is zero. Approximate downward only,
+    /// and runs on the inner-product kind only. Calls `usearch_dense_maxsim`.
+    pub fn maxsim(self: DenseIndex, queries: RowsView, rows_per_query: usize, wanted: usize, arena: *Arena, config: DenseMaxsimConfig) Error!DenseProducts {
         return self.here().maxsim(queries, rows_per_query, wanted, arena, config);
     }
 };
@@ -1789,14 +1789,14 @@ pub const DenseAttend = struct {
 
 /// One `DenseIndex.maxsim`, as a `Deferred` holds it.
 pub const DenseMaxsim = struct {
-    pub const Result = Matches;
+    pub const Result = DenseProducts;
     queries: RowsView,
     rows_per_query: usize,
     wanted: usize,
     config: DenseMaxsimConfig,
     /// The call the borrowed arena serves, which every view over the outputs carries.
     stamp: Arena.Stamp = undefined,
-    matches: usearch_matches_view_t = .{},
+    matches: usearch_matches_tape_view_t = .{},
     outcome: Outcome = .{},
 
     pub fn launch(self: *DenseMaxsim, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
@@ -1818,9 +1818,12 @@ pub const DenseMaxsim = struct {
         usearch_dense_maxsim(&arguments);
     }
 
-    pub fn finish(self: *DenseMaxsim) Error!Matches {
+    pub fn finish(self: *DenseMaxsim) Error!DenseProducts {
         try self.outcome.check();
-        return .{ .stamp = self.stamp, .view = self.matches, .queries = self.queries.rows / self.rows_per_query };
+        const queries = self.queries.rows / self.rows_per_query;
+        // The call reports no total, so it is the last offset, which the host reads alone.
+        const written = if (queries == 0 or self.stamp.arena.residency == .vram) 0 else self.matches.offsets.?[queries];
+        return .{ .stamp = self.stamp, .view = self.matches, .rows = queries, .written = written, .required = written };
     }
 };
 
@@ -1886,23 +1889,26 @@ pub const Monolith = struct {
     }
 };
 
-/// The ragged output of `DenseIndex.multiply` in an arena, laid out as Apache Arrow does: row `i`
-/// spans pairs `offsets[i]` up to `offsets[i + 1]` of `keys` and `scores`.
+/// The ragged output of `DenseIndex.multiply` or `DenseIndex.maxsim` in an arena, laid out as
+/// Apache Arrow does: row `i` spans pairs `offsets[i]` up to `offsets[i + 1]` of `keys` and
+/// `scores`.
 /// Mirrors `usearch_matches_tape_view_t`.
 ///
 /// It reads the arena, so every read is refused once that arena serves another call or is freed.
 pub const DenseProducts = struct {
     stamp: Arena.Stamp,
     view: usearch_matches_tape_view_t,
-    /// Left-hand rows the call multiplied.
+    /// Left-hand rows the call multiplied, or queries it scored.
     rows: usize,
     /// Pairs written across every row.
     written: usize,
-    /// Pairs scored across every row, before `DenseMultiplyConfig.wanted` cut any.
+    /// Pairs scored across every row, before `DenseMultiplyConfig.wanted` cut any; `written` for
+    /// a `maxsim`.
     required: usize,
 
-    /// The pairs of one left-hand row, in traversal order, refusing a `position` past `rows` with
-    /// `Error.InvalidArgument`, a stale view with `Error.Uninitialized`, and device memory with `Error.Device`.
+    /// The pairs of one row, in traversal order or largest first for a `maxsim`, refusing a
+    /// `position` past `rows` with `Error.InvalidArgument`, a stale view with `Error.Uninitialized`,
+    /// and device memory with `Error.Device`.
     pub fn row(self: DenseProducts, position: usize) Error!MatchesRow {
         try self.stamp.check();
         if (position >= self.rows) return refuse(.invalid_argument);
@@ -2487,6 +2493,8 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
 
     const documents = try index.maxsim(try .of(f32, &left, dimensions), 2, 4, &arena, .{});
     try std.testing.expect((try documents.row(0)).keys.len != 0);
+    const every = try index.maxsim(try .of(f32, &left, dimensions), 2, 0, &second, .{});
+    try std.testing.expect((try every.row(0)).keys.len >= (try documents.row(0)).keys.len);
     try std.testing.expectError(Error.ShapeMismatch, index.maxsim(try .of(f32, &left, dimensions), 3, 4, &arena, .{}));
 }
 

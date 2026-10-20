@@ -1000,7 +1000,7 @@ pub struct MatchesRow<'matches> {
     pub distances: &'matches [Distance],
 }
 
-/// The ranked rows a search, a `maxsim` or a stream pull wrote into the arena it borrows; see
+/// The ranked rows a search or a stream pull wrote into the arena it borrows; see
 /// [`DenseVerbs::search`](crate::DenseVerbs::search).
 ///
 /// Mirrors `usearch_matches_view_t`.

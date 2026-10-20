@@ -1150,8 +1150,7 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         return;
     if (reject_view(queries, queries_count * rows_per_query, index, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {queries.data}, outcome);
-    ranked_landing_t landing {};
-    if (!arena || !carve_ranked(*arena, queries_count, arguments->wanted, landing, outcome)) return;
+    if (!arena) return;
     usearch_scalar_t const scalar_kind = queries.scalar;
 
     std::shared_lock readers(index.mutex);
@@ -1171,7 +1170,8 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     }
 
     std::vector<double> query_rows(rows_per_query * dimensions);
-    std::vector<match_t> ranked;
+    std::vector<match_t> ranked, landed;
+    std::vector<std::size_t> landed_offsets {0};
     std::size_t answered = 0;
     for (std::size_t query = 0; query != queries_count; ++query) {
         for (std::size_t row = 0; row != rows_per_query; ++row)
@@ -1194,7 +1194,10 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         std::stable_sort(ranked.begin(), ranked.end(),
                          [](match_t const& first, match_t const& second) { return first.distance > second.distance; });
 
-        landing.write(query, ranked);
+        // A zero `wanted` keeps every scored document.
+        std::size_t const kept = arguments->wanted ? std::min(arguments->wanted, ranked.size()) : ranked.size();
+        landed.insert(landed.end(), ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(kept));
+        landed_offsets.push_back(landed.size());
         if (stats) {
             stats->visited_members += index.entries.size();
             stats->computed_distances += documents.size() * rows_per_query;
@@ -1204,7 +1207,14 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         if (!keep_going(arguments->progress, answered, queries_count)) break;
     }
     if (reject_cancelled(answered, queries_count, outcome)) return;
-    *arguments->matches = landing.view();
+    std::size_t* const offsets = carve<std::size_t>(*arena, queries_count + 1, outcome);
+    usearch_key_t* const keys = offsets ? carve<usearch_key_t>(*arena, landed.size(), outcome) : nullptr;
+    usearch_distance_t* const scores = keys ? carve<usearch_distance_t>(*arena, landed.size(), outcome) : nullptr;
+    if (!scores) return;
+    std::copy(landed_offsets.begin(), landed_offsets.end(), offsets);
+    for (std::size_t match = 0; match != landed.size(); ++match)
+        keys[match] = landed[match].key, scores[match] = landed[match].distance;
+    *arguments->matches = {keys, scores, offsets};
 }
 
 } // extern "C"

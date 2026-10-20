@@ -241,11 +241,12 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
             query_offsets[query] = query * rows_per_query;
         // An exhaustive walk and a scan nominate every even document alike.
         for (search_config_t const config : {exhaustive, scan}) {
+            counts.fill(0);
+            maxsim_rows<key_t, f64_t> const land {found_keys.span(), found_scores.span(), std::span {counts}};
             failures += expect(
                 succeeded(indexes
                               .maxsim_if(queries, std::span<std::size_t const> {query_offsets}, driver.executor,
-                                         to_writable_span(driver.traversals), config, found_keys.span(),
-                                         found_scores.span(), std::span {counts}, admit_even)
+                                         to_writable_span(driver.traversals), config, wanted, land, admit_even)
                               .status));
             for (std::size_t query = 0; query != queries_count; ++query) {
                 failures += expect_eq(counts[query], wanted);
@@ -313,14 +314,16 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     return report(name, failures_count);
 }
 
-/** The exact scan alone over shards a matrix engine streams under @p caps_, skipped where the build
- *  lacks the kit or the host its capabilities. */
+/** The exact scan and MaxSim alone over shards a matrix engine streams under @p caps_, skipped
+ *  where the build lacks the kit or the host its capabilities; only dot kernels offer MaxSim. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, nk_capability_t caps_>
 std::size_t test_ram_scan_configuration(char const* name, u64_t seed) {
     if constexpr (!dense_cell_testable<dtype_, kernel_, caps_>) return report(name, "kit not compiled for this target");
     else if (!dense_cell_admitted<caps_, fu::standard_atomic_ref>())
         return report(name, "capabilities missing at runtime");
-    else return report(name, test_dense_indexes_scan<ram_indexes_for<dtype_, caps_>, kernel_>(seed));
+    else
+        return report(name, test_dense_indexes_scan<ram_indexes_for<dtype_, caps_>, kernel_>(seed) +
+                                test_dense_indexes_maxsim<ram_indexes_for<dtype_, caps_>, kernel_>(seed));
 }
 
 /** The sharded-index suite entry its translation unit defines and @c dense.cpp

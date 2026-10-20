@@ -250,6 +250,48 @@ struct dense_scratch<indexes_type_> {
     }
 };
 
+/** One key a MaxSim query kept, waiting in its thread's run to scatter into the call's tape. */
+struct maxsim_match_t {
+    std::size_t query;
+    usearch_key_t key;
+    usearch_distance_t score;
+};
+
+static_assert(sizeof(maxsim_match_t) == 32, "A kept key is a 32-byte hot entry");
+
+/** Opens one empty MaxSim run per thread that ranks @p indexes_type_ 's queries into @p runs: one
+ *  per executor thread over that thread's arena, or one over the call's @p staging for a device
+ *  index, whose host reduction ranks on the calling thread. */
+template <typename indexes_type_>
+status_t open_maxsim_runs(growing_buffer<growing_buffer<maxsim_match_t, thread_allocator_t>, thread_allocator_t>& runs,
+                          typename indexes_type_::executor_t& executor, thread_allocator_t staging) noexcept {
+    using run_t = growing_buffer<maxsim_match_t, thread_allocator_t>;
+    if constexpr (is_vram_index<indexes_type_>) {
+        if (failed(runs.reserve_exactly(1))) return status_t::bad_alloc_k;
+        runs.push_back_reserved(run_t {staging});
+    }
+    else {
+        if (failed(runs.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
+        for (std::size_t thread = 0; thread != executor.size(); ++thread)
+            runs.push_back_reserved(run_t {thread_allocator_t {executor.arena(thread)}});
+    }
+    return status_t::success_k;
+}
+
+/** Where a MaxSim call's queries land: one run per executor thread, in rank order per query and
+ *  growing in that thread's arena, and the call's own arena, where a host reduction stages the
+ *  rectangle it ranks into first. Called as an engine's lander, it appends one kept key. */
+struct maxsim_landing_t {
+    std::span<growing_buffer<maxsim_match_t, thread_allocator_t>> runs;
+    thread_allocator_t staging;
+
+    template <typename key_type_, typename total_type_>
+    status_t operator()(std::size_t thread, std::size_t query, key_type_ const& key, total_type_ total) const noexcept {
+        return runs[thread].push_back(
+            {query, std::bit_cast<usearch_key_t>(key), static_cast<usearch_distance_t>(total)});
+    }
+};
+
 /** Searches @p index under an expensive @p predicate through a family of per-thread predicates
  *  gathering what the traversal @p config names hands them; the engine opens the family and
  *  reserves it for the widest round it settles. */
@@ -368,18 +410,18 @@ struct specialized_index {
                                           search_config_t config, keys_span_t keys, scores_span_t products,
                                           counts_span_t counts, predicate_t& predicate) noexcept;
 
-    /** Late interaction of the queries @p query_offsets cut @p queries into; a GPU index walks
-     *  uniform queries alone, answering @c unsupported_k for a scan or ragged offsets. */
+    /** Late interaction of the queries @p query_offsets cut @p queries into, each keeping @p wanted
+     *  keys, or every key it scored when zero, in @p landing; a GPU index walks uniform queries
+     *  alone, answering @c unsupported_k for a scan, ragged offsets or a zero @p wanted. */
     expected<search_result_t> maxsim(rows_view_t queries, std::span<std::size_t const> query_offsets,
-                                     executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
-                                     scores_span_t scores, counts_span_t counts) noexcept;
+                                     executor_t& executor, scratch_t& scratch, search_config_t config,
+                                     std::size_t wanted, maxsim_landing_t landing) noexcept;
 
     /** Narrows the nominated keys by a host predicate, which a device walk cannot take, so a GPU
      *  index answers @c unsupported_k. */
     expected<search_result_t> maxsim_if(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                         executor_t& executor, scratch_t& scratch, search_config_t config,
-                                        keys_span_t keys, scores_span_t scores, counts_span_t counts,
-                                        predicate_t& predicate) noexcept;
+                                        std::size_t wanted, maxsim_landing_t landing, predicate_t& predicate) noexcept;
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
                                      f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
                                      executor_t& executor, scratch_t& scratch, search_config_t config) noexcept;
@@ -594,28 +636,43 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim(
     rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, scratch_t& scratch,
-    search_config_t config, keys_span_t keys, scores_span_t scores, counts_span_t counts) noexcept {
+    search_config_t config, std::size_t wanted, maxsim_landing_t landing) noexcept {
     if constexpr (is_vram_index<index_type_>) {
+        // The device reduction ranks into a rectangle on this thread, then lands in the one run.
+        std::size_t const queries_count = query_offsets.size() - 1;
         std::size_t const rows_per_query = query_offsets[1] - query_offsets[0];
-        for (std::size_t query = 0; query != counts.size(); ++query)
+        for (std::size_t query = 0; query != queries_count; ++query)
             if (query_offsets[query + 1] - query_offsets[query] != rows_per_query) return {{}, status_t::unsupported_k};
-        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
-        return index.maxsim(queries.slice(query_offsets.front(), query_offsets.back() - query_offsets.front()),
-                            rows_per_query, executor, config, keys, scores, counts);
+        if (config.traversal != traversal_t::walk_k || !wanted) return {{}, status_t::unsupported_k};
+        growing_buffer<key_t, thread_allocator_t> keys {landing.staging};
+        growing_buffer<f64_t, thread_allocator_t> scores {landing.staging};
+        growing_buffer<std::size_t, thread_allocator_t> counts {landing.staging};
+        if (failed(keys.resize_uninitialized(queries_count * wanted)) ||
+            failed(scores.resize_uninitialized(queries_count * wanted)) ||
+            failed(counts.resize_uninitialized(queries_count)))
+            return {{}, status_t::bad_alloc_k};
+        expected<search_result_t> const reduced = index.maxsim(
+            queries.slice(query_offsets.front(), query_offsets.back() - query_offsets.front()), rows_per_query,
+            executor, config, keys_span_t {keys.data(), queries_count, wanted},
+            scores_span_t {scores.data(), queries_count, wanted}, to_writable_span(counts));
+        for (std::size_t query = 0; reduced && query != queries_count; ++query)
+            for (std::size_t rank = 0; rank != counts[query]; ++rank)
+                if (failed(landing(0, query, keys[query * wanted + rank], scores[query * wanted + rank])))
+                    return {reduced.value, status_t::bad_alloc_k};
+        return reduced;
     }
     else
-        return index.maxsim(queries, query_offsets, executor, to_writable_span(scratch.traversals), config, keys,
-                            scores, counts);
+        return index.maxsim(queries, query_offsets, executor, to_writable_span(scratch.traversals), config, wanted,
+                            landing);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim_if(
     rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, scratch_t& scratch,
-    search_config_t config, keys_span_t keys, scores_span_t scores, counts_span_t counts,
-    predicate_t& predicate) noexcept {
+    search_config_t config, std::size_t wanted, maxsim_landing_t landing, predicate_t& predicate) noexcept {
     if constexpr (is_vram_index<index_type_>) return {{}, status_t::unsupported_k};
     else
-        return index.maxsim_if(queries, query_offsets, executor, to_writable_span(scratch.traversals), config, keys,
-                               scores, counts, predicate);
+        return index.maxsim_if(queries, query_offsets, executor, to_writable_span(scratch.traversals), config, wanted,
+                               landing, predicate);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
@@ -735,12 +792,11 @@ struct specialized_index<index_type_> {
                                           search_config_t config, keys_span_t keys, scores_span_t products,
                                           counts_span_t counts, predicate_t& predicate) noexcept;
     expected<search_result_t> maxsim(rows_view_t queries, std::span<std::size_t const> query_offsets,
-                                     executor_t& executor, scratch_t& scratch, search_config_t config, keys_span_t keys,
-                                     scores_span_t scores, counts_span_t counts) noexcept;
+                                     executor_t& executor, scratch_t& scratch, search_config_t config,
+                                     std::size_t wanted, maxsim_landing_t landing) noexcept;
     expected<search_result_t> maxsim_if(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                         executor_t& executor, scratch_t& scratch, search_config_t config,
-                                        keys_span_t keys, scores_span_t scores, counts_span_t counts,
-                                        predicate_t& predicate) noexcept;
+                                        std::size_t wanted, maxsim_landing_t landing, predicate_t& predicate) noexcept;
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
                                      f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
                                      executor_t& executor, scratch_t& scratch, search_config_t config) noexcept;
@@ -873,16 +929,15 @@ template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim(
     rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, scratch_t&,
-    search_config_t config, keys_span_t keys, scores_span_t scores, counts_span_t counts) noexcept {
-    return index.maxsim(queries, query_offsets, executor, config, keys, scores, counts);
+    search_config_t config, std::size_t wanted, maxsim_landing_t landing) noexcept {
+    return index.maxsim(queries, query_offsets, executor, config, wanted, landing);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim_if(
     rows_view_t queries, std::span<std::size_t const> query_offsets, executor_t& executor, scratch_t&,
-    search_config_t config, keys_span_t keys, scores_span_t scores, counts_span_t counts,
-    predicate_t& predicate) noexcept {
-    return index.maxsim_if(queries, query_offsets, executor, config, keys, scores, counts, predicate);
+    search_config_t config, std::size_t wanted, maxsim_landing_t landing, predicate_t& predicate) noexcept {
+    return index.maxsim_if(queries, query_offsets, executor, config, wanted, landing, predicate);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>

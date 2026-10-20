@@ -540,7 +540,8 @@ func DenseValues[Value Element](vectors DenseVectors) ([]Value, error) {
 }
 
 // DenseProducts is the ragged sparse product Multiply wrote into its arena: per left row, every pair
-// its walk scored, in traversal order.
+// its walk scored, in traversal order. Maxsim lands its keys in the same shape, one row per query,
+// largest score first.
 //
 // Mirrors usearch_matches_tape_view_t.
 type DenseProducts struct {
@@ -550,10 +551,11 @@ type DenseProducts struct {
 	required uint
 }
 
-// Rows reports how many left rows the call multiplied.
+// Rows reports how many left rows the call multiplied, or how many queries it scored.
 func (products DenseProducts) Rows() uint { return products.rows }
 
-// Required reports the pairs the walks scored across every row, before the wanted bound cut any.
+// Required reports the pairs the walks scored across every row, before the wanted bound cut any;
+// for Maxsim, the keys it landed across every query.
 func (products DenseProducts) Required() uint { return products.required }
 
 // Row borrows one left row's pairs from the arena - a key naming each indexed row, and its product -
@@ -1074,18 +1076,19 @@ func (on DenseIndexDeferredOn) Search(queries RowsView, wanted uint, arena *Aren
 //
 // A document is one key holding its token rows, which is what ValuesPerKey above one exists
 // for. rowsPerQuery is the token count each query occupies, queries holds them end to end, and
-// wanted counts documents rather than rows. Runs on an inner-product index alone.
+// wanted counts documents rather than rows, zero keeping every key a query scored. Each query's
+// keys land in arena as one row, largest score first. Runs on an inner-product index alone.
 //
 // See https://arxiv.org/abs/2004.12832 - ColBERT, which introduced this scoring. Calls
 // usearch_dense_maxsim.
 func (on DenseIndexOn) Maxsim(queries RowsView, rowsPerQuery, wanted uint, arena *Arena,
-	config *DenseMaxsimConfig) (MatchesView, error) {
+	config *DenseMaxsimConfig) (DenseProducts, error) {
 	return block(on.maxsim(C.usearch_completion_blocking_k, queries, rowsPerQuery, wanted, arena, config))
 }
 
 // Maxsim submits DenseIndexOn.Maxsim. Calls usearch_dense_maxsim.
 func (on DenseIndexDeferredOn) Maxsim(queries RowsView, rowsPerQuery, wanted uint, arena *Arena,
-	config *DenseMaxsimConfig) *Deferred[MatchesView] {
+	config *DenseMaxsimConfig) *Deferred[DenseProducts] {
 	return submitted(on.maxsim(C.usearch_completion_deferred_k, queries, rowsPerQuery, wanted, arena, config))
 }
 
@@ -1387,11 +1390,11 @@ func (receiver denseReceiver) search(completion C.usearch_completion_t, queries 
 }
 
 func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries RowsView, rowsPerQuery, wanted uint,
-	arena *Arena, config *DenseMaxsimConfig) *lent[MatchesView] {
+	arena *Arena, config *DenseMaxsimConfig) *lent[DenseProducts] {
 	if config == nil {
 		config = new(DenseMaxsimConfig)
 	}
-	lent := open[MatchesView]()
+	lent := open[DenseProducts]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
 		return lent.refuse(refusal)
@@ -1405,7 +1408,7 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 		return lent.refuse(refusal)
 	}
 	count := queries.rows / rowsPerQuery
-	matches := pin(&lent.call, new(C.usearch_matches_view_t))
+	matches := pin(&lent.call, new(C.usearch_matches_tape_view_t))
 	C.usearch_dense_maxsim(&C.usearch_dense_maxsim_t{
 		index:            index,
 		executor:         executor,
@@ -1422,7 +1425,14 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 		stats:            lent.stats(config.Stats),
 	})
 	view := lent.rewound(arena)
-	lent.result = func() MatchesView { return MatchesView{exported: view, raw: *matches, queries: count} }
+	lent.result = func() DenseProducts {
+		// The call reports no total, so it is the last offset, which the host reads alone.
+		var landed uint
+		if count != 0 && view.host() == nil {
+			landed = unsafe.Slice((*uint)(unsafe.Pointer(matches.offsets)), count+1)[count]
+		}
+		return DenseProducts{exported: view, raw: *matches, rows: count, required: landed}
+	}
 	return lent
 }
 

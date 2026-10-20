@@ -726,13 +726,13 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="rowsPerQuery">The rows in every query; uniform, so the row count must be a
     /// whole multiple of it and the quotient is the query count.</param>
     /// <param name="wanted">The upper bound on documents per query - the "k" over documents rather
-    /// than over rows.</param>
-    /// <param name="arena">Where the scored keys land, rewound by the call.</param>
+    /// than over rows; zero keeps every key the query scored.</param>
+    /// <param name="arena">Where the scored keys and their offsets land, rewound by the call.</param>
     /// <param name="expansionFactor">The breadth of the candidates the walk explores; zero derives it
     /// from the geometry.</param>
     /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
-    /// <returns>The run, one row per query, each key's summed maxima largest first.</returns>
-    public Matches Maxsim(
+    /// <returns>The keys of every query, ragged, each key's summed maxima largest first.</returns>
+    public DenseProducts Maxsim(
         RowsView queries, int rowsPerQuery, int wanted, Arena arena, ulong expansionFactor = 0,
         DenseTraversalStats? stats = null) =>
         Calls.Block(new DenseMaxsimCall(
@@ -986,13 +986,13 @@ public static class DenseVerbs
         Calls.Defer(new DenseSearchCall(Of(on), queries, wanted, arena, expansionFactor, predicate, stats, traversal));
 
     /// <inheritdoc cref="DenseIndex.Maxsim"/>
-    public static Matches Maxsim(
+    public static DenseProducts Maxsim(
         this DenseIndexOn on, RowsView queries, int rowsPerQuery, int wanted, Arena arena, ulong expansionFactor = 0,
         DenseTraversalStats? stats = null) =>
         Calls.Block(new DenseMaxsimCall(Of(on), queries, rowsPerQuery, wanted, arena, expansionFactor, stats)).Result;
 
     /// <inheritdoc cref="DenseIndex.Maxsim"/>
-    public static Deferred<Matches> Maxsim(
+    public static Deferred<DenseProducts> Maxsim(
         this DenseIndexDeferredOn on, RowsView queries, int rowsPerQuery, int wanted, Arena arena,
         ulong expansionFactor = 0, DenseTraversalStats? stats = null) =>
         Calls.Defer(new DenseMaxsimCall(Of(on), queries, rowsPerQuery, wanted, arena, expansionFactor, stats));
@@ -1396,12 +1396,12 @@ internal unsafe struct DenseSearchCall(
 /// <summary>A late-interaction scoring; see <see cref="DenseIndex.Maxsim"/>.</summary>
 internal unsafe struct DenseMaxsimCall(
     CallHandles handles, RowsView queries, int rowsPerQuery, int wanted, Arena arena, ulong expansionFactor,
-    DenseTraversalStats? stats) : ICall<Matches>
+    DenseTraversalStats? stats) : ICall<DenseProducts>
 {
     private MemoryHandle _queries;
     private int _generation;
 
-    public Matches Result { get; private set; }
+    public DenseProducts Result { get; private set; }
 
     public void Submit(Landing* landing, Completion completion)
     {
@@ -1427,7 +1427,7 @@ internal unsafe struct DenseMaxsimCall(
             {
                 Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome, Completion = completion,
                 Count = (nuint)(queries.Rows / rowsPerQuery), Queries = queries.AsView(rows),
-                RowsPerQuery = (nuint)rowsPerQuery, Matches = (NativeMatchesView*)landing->View,
+                RowsPerQuery = (nuint)rowsPerQuery, Matches = (NativeMatchesTapeView*)landing->View,
                 Arena = lent.Pointer, Wanted = bound, ExpansionFactor = (nuint)expansionFactor,
                 Stats = (NativeDenseTraversalStats*)landing->Report,
             };
@@ -1442,8 +1442,10 @@ internal unsafe struct DenseMaxsimCall(
     {
         landing->Outcome.ThrowIfFailed();
         stats?.Adopt(*(NativeDenseTraversalStats*)landing->Report);
-        this.Result = new Matches(
-            arena, this._generation, *(NativeMatchesView*)landing->View, queries.Rows / rowsPerQuery);
+        NativeMatchesTapeView view = *(NativeMatchesTapeView*)landing->View;
+        int count = queries.Rows / rowsPerQuery;
+        nuint landed = arena.Residency == Residency.Vram || view.Offsets == null ? 0 : view.Offsets[count];
+        this.Result = new DenseProducts(arena, this._generation, view, count, landed);
     }
 }
 
@@ -1854,8 +1856,9 @@ public readonly unsafe struct DenseVectors
     }
 }
 
-/// <summary>The pairs <see cref="DenseIndex.Multiply"/> scored, ragged by left row, in its
-/// <see cref="Arena"/>. Mirrors <c>usearch_matches_tape_view_t</c>.</summary>
+/// <summary>The pairs <see cref="DenseIndex.Multiply"/> scored, ragged by left row, or the keys
+/// <see cref="DenseIndex.Maxsim"/> kept, ragged by query, in its <see cref="Arena"/>. Mirrors
+/// <c>usearch_matches_tape_view_t</c>.</summary>
 /// <remarks>A view by value, readable until the arena's next call or disposal, as
 /// <see cref="Matches"/> is.</remarks>
 public readonly unsafe struct DenseProducts
@@ -1873,13 +1876,16 @@ public readonly unsafe struct DenseProducts
         this.Required = (ulong)required;
     }
 
-    /// <summary>How many left rows were multiplied.</summary>
+    /// <summary>How many left rows were multiplied, or queries scored.</summary>
     public int Queries { get; }
 
-    /// <summary>The pairs the walks scored across every row, before the wanted bound cut any.</summary>
+    /// <summary>The pairs the walks scored across every row, before the wanted bound cut any; a
+    /// <see cref="DenseIndex.Maxsim"/> reports no such count, so it holds the keys landed across
+    /// every query, zero over device memory.</summary>
     public ulong Required { get; }
 
-    /// <summary>The keys naming each indexed row one left row reached, in traversal order.</summary>
+    /// <summary>The keys naming each indexed row one left row reached, in traversal order, or the
+    /// keys one query kept, largest score first.</summary>
     /// <param name="row">The left row.</param>
     /// <returns>The keys, valid until the arena's next call or disposal.</returns>
     public ReadOnlySpan<Key> Keys(int row) => new(this._view.Keys + this.Begin(row), this.Length(row));
@@ -2633,7 +2639,7 @@ internal unsafe struct NativeDenseMaxsim
     public nuint Count;
     public NativeRowsView Queries;
     public nuint RowsPerQuery;
-    public NativeMatchesView* Matches;
+    public NativeMatchesTapeView* Matches;
     public IntPtr Arena;
     public nuint Wanted;
     public nuint ExpansionFactor;

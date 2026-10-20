@@ -575,13 +575,15 @@ public sealed class DenseIndexTests : IDisposable
         float[] tokens = [1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f];
         index.On(this._pool).Insert(KeysOf(1, 1, 2, 2), Rows(tokens));
 
-        Matches scored = index.On(this._pool).Maxsim(
-            Rows([1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f]), rowsPerQuery: 2, wanted: 2, this._arena);
+        float[] query = [1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f];
+        DenseProducts scored = index.On(this._pool).Maxsim(Rows(query), rowsPerQuery: 2, wanted: 2, this._arena);
 
-        Assert.Equal(2, scored[0].Count);
-        Assert.Equal(Key.FromUInt64(1), scored[0].Keys[0]);
-        Assert.Equal(2d, scored[0].Distances[0], 6);
-        Assert.Equal(Key.FromUInt64(2), scored[0].Keys[1]);
+        Assert.Equal(2, scored.Keys(0).Length);
+        Assert.Equal(Key.FromUInt64(1), scored.Keys(0)[0]);
+        Assert.Equal(2d, scored.Scores(0)[0], 6);
+        Assert.Equal(Key.FromUInt64(2), scored.Keys(0)[1]);
+        int bounded = scored.Keys(0).Length;
+        Assert.True(index.Maxsim(Rows(query), rowsPerQuery: 2, wanted: 0, this._arena).Keys(0).Length >= bounded);
         Assert.Equal(
             Status.ShapeMismatch,
             Assert.Throws<USearchException>(

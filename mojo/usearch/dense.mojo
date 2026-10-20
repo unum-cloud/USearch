@@ -63,6 +63,7 @@ from usearch.types import (
     PredicateCost,
     ProgressArguments,
     RamOptions,
+    Residency,
     RowsView,
     RowsViewArguments,
     ScalarKind,
@@ -425,8 +426,9 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
 
 @fieldwise_init
 struct DenseProducts[origin: MutOrigin](Movable):
-    """The ragged output of `multiply` - `usearch_matches_tape_view_t` - read in place from its arena:
-    row `i` spans pairs `offsets()[i]` up to `offsets()[i + 1]` of `keys()` and `scores()`.
+    """The ragged output of `multiply` and `maxsim` - `usearch_matches_tape_view_t` - read in place
+    from its arena: row `i` spans pairs `offsets()[i]` up to `offsets()[i + 1]` of `keys()` and
+    `scores()`.
 
     Parameters:
         origin: The arena the pairs live in, which this result borrows.
@@ -439,11 +441,12 @@ struct DenseProducts[origin: MutOrigin](Movable):
     var view: MatchesTapeViewArguments
     """The keys, products and offsets, as the engine wrote them."""
     var rows: Int
-    """Left-hand rows the call multiplied."""
+    """Left-hand rows the call multiplied, or queries it scored."""
     var pairs: Int
     """Pairs written across every row."""
     var required: Int
-    """Pairs the walks scored before `wanted` cut any; above `pairs` means rows were truncated."""
+    """Pairs the walks scored before `wanted` cut any, or `pairs` for `maxsim`; above `pairs` means
+    rows were truncated."""
 
     def offsets(ref self) raises Error -> Span[c_size_t, origin_of(self)]:
         """One more offset than left-hand rows, as Apache Arrow lays a ragged batch out.
@@ -1595,8 +1598,8 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
 struct _DenseMaxsimCall[origin: MutOrigin](Call):
     """The crossing of `usearch_dense_maxsim`, which borrows the arena its matches land in."""
 
-    comptime Outputs = MatchesViewArguments
-    comptime Result = Matches[Self.origin]
+    comptime Outputs = MatchesTapeViewArguments
+    comptime Result = DenseProducts[Self.origin]
     comptime symbol: StaticString = "usearch_dense_maxsim"
     var queries: RowsViewArguments
     var rows: Int
@@ -1642,9 +1645,15 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
     def served(self, status: Status) -> Int:
         return _served(self.arena, status)
 
-    def conclude(deinit self, outputs: MatchesViewArguments, generation: Int) -> Self.Result:
+    def conclude(deinit self, outputs: MatchesTapeViewArguments, generation: Int) -> Self.Result:
         var queries = self.rows // self.rows_per_query if self.rows_per_query > 0 else 0
-        return Self.Result(self.arena, generation, outputs, queries)
+        # The engine reports no total, so it is the last offset, which only host memory lends.
+        var pairs = 0
+        if outputs.offsets != NULL_ADDRESS and self.arena[]._residency != Residency.VRAM:
+            pairs = Int(
+                Pointer[c_size_t, MutAnyOrigin](unsafe_from_address=outputs.offsets + queries * size_of[c_size_t]())[]
+            )
+        return Self.Result(self.arena, generation, outputs, queries, pairs, pairs)
 
 
 @fieldwise_init
@@ -2751,7 +2760,7 @@ trait DenseVerbs:
         wanted: Int,
         mut arena: Arena,
         config: DenseMaxsimConfig[stats_origin] = DenseMaxsimConfig(),
-    ) raises Error -> Matches[origin_of(arena)]:
+    ) raises Error -> DenseProducts[origin_of(arena)]:
         """Late-interaction scoring: every query row takes its best match within a key, and those
         maxima sum to that key's score, landing in a lent arena. Calls `usearch_dense_maxsim`.
 
@@ -2766,7 +2775,8 @@ trait DenseVerbs:
         Args:
             queries: The token rows of every query, laid end to end.
             rows_per_query: Rows in every query; uniform, so ColBERT's padding applies as is.
-            wanted: Keys per query - the "k" over documents rather than rows; zero lands only the counts.
+            wanted: Keys per query - the "k" over documents rather than rows; zero keeps every key
+                scored.
             arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
             config: The breadth of the candidates and the telemetry slot.
 

@@ -150,7 +150,8 @@ Expansion controls the candidates, & connectivity controls the adjacency width; 
 
 `maxsim` ranks multi-vector documents, with token rows sharing one document key.
 For query tokens $q_i$ & document tokens $d_j$, it sums each query token's best similarity: $\sum_i \max_j \langle q_i,d_j\rangle$.
-The implementation walks the query rows & reduces the observed token matches by key, sharing the graph machinery with ordinary retrieval.
+The implementation walks the query rows to nominate documents, sharing the graph machinery with ordinary retrieval, then scores every token row of each nominated document exactly.
+Each query lands a ragged run of its best `wanted` documents, or of every scored document when `wanted` is zero.
 This avoids flattening a document's token geometry into one pooled vector.
 
 ### Sparse Linear Algebra

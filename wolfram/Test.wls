@@ -108,7 +108,10 @@ Expect["duplicate value keys", DenseValues[$index, {43, 43}, $rows][[1]], "inval
 Expect["missing attention value", DenseAttend[$index, $typed,
     DenseValues[$index, {43}, {Last[$rows]}], $arena][[1]], "shape-mismatch"]
 Expect["single-row queries scored late-interaction style",
-    Length /@ DenseMaxsim[DenseIndexOn[$index, $executor], $typed, 1, 10, $arena, "ExpansionFactor" -> 0]["Keys"], {2, 2}]
+    Differences[DenseMaxsim[DenseIndexOn[$index, $executor], $typed, 1, 10, $arena, "ExpansionFactor" -> 0]["Offsets"]],
+    {2, 2}]
+Expect["a zero wanted lands every scored key", And @@ MapThread[GreaterEqual,
+    Differences[DenseMaxsim[$index, $typed, 1, #, $arena]["Offsets"]] & /@ {0, 1}], True]
 
 Expect["a refinement", IntegerQ[DenseRefine[DenseIndexOn[$index, $executor]]], True]
 Expect["an audit", KeyTake[DenseHealth[$index], {"Audited", "Reachable"}], <|"Audited" -> 2, "Reachable" -> 2|>]

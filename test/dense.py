@@ -1117,7 +1117,7 @@ def late_interaction_index(executor, dimensions: int = 16) -> tuple[DenseIndex, 
     return index, tokens
 
 
-def scored_documents(index, tokens, queries: int, wanted: int, executor, **kwargs) -> Matches:
+def scored_documents(index, tokens, queries: int, wanted: int, executor, **kwargs) -> DenseProducts:
     """Runs `maxsim` over *queries* whole queries."""
     return index.on(executor).maxsim(
         tokens[: queries * _LATE_INTERACTION_TOKENS], _LATE_INTERACTION_TOKENS, wanted, Arena(executor), **kwargs
@@ -1125,35 +1125,37 @@ def scored_documents(index, tokens, queries: int, wanted: int, executor, **kwarg
 
 
 def test_maxsim_sizes_its_outputs_over_documents(executor):
-    """A query is a run of token rows, so the result has one row per query rather than per token."""
+    """A query is a run of token rows, so the result has one run per query rather than per token."""
     index, tokens = late_interaction_index(executor)
     queries = 2
     stats = DenseTraversalStats()
-    matches = scored_documents(index, tokens, queries, 4, executor, stats=stats)
+    documents = scored_documents(index, tokens, queries, 4, executor, stats=stats)
+    offsets = np.asarray(documents.offsets)
 
-    assert len(matches) == queries
-    assert np.asarray(matches.keys).shape == (queries, 4, 16)
-    assert np.asarray(matches.distances).shape == (queries, 4)
-    assert np.asarray(matches.counts).shape == (queries,)
+    assert isinstance(documents, DenseProducts) and len(documents) == queries
+    assert offsets.shape == (queries + 1,)
+    assert offsets[0] == 0 and offsets[-1] == len(np.asarray(documents.scores)) == documents.required
+    assert np.asarray(documents.keys).shape == (offsets[-1], 16)
+    assert all(0 < end - begin <= 4 for begin, end in pairwise(offsets.tolist())), "each query keeps at most wanted"
     assert stats.computed_distances > 0
 
 
 def test_maxsim_scores_each_document_once(executor):
     """The reduction groups by key, so a document holding many token rows still lands one entry."""
     index, tokens = late_interaction_index(executor)
-    matches = scored_documents(index, tokens, 1, 4, executor)
-    count = int(np.asarray(matches.counts)[0])
-    found = keys_to_integers(matches.keys)[0, :count]
-    assert count > 0
-    assert len(set(found.tolist())) == count
+    documents = scored_documents(index, tokens, 1, 4, executor)
+    begin, end = np.asarray(documents.offsets).tolist()
+    found = keys_to_integers(documents.keys)[begin:end]
+    assert end > begin
+    assert len(set(found.tolist())) == end - begin
 
 
 def test_maxsim_orders_by_summed_maxima(executor):
-    """Summed maxima are a similarity, so a row descends where a search's distances ascend."""
+    """Summed maxima are a similarity, so a query's run descends where a search's distances ascend."""
     index, tokens = late_interaction_index(executor)
-    matches = scored_documents(index, tokens, 1, 4, executor)
-    count = int(np.asarray(matches.counts)[0])
-    scored = np.asarray(matches.distances)[0, :count]
+    documents = scored_documents(index, tokens, 1, 4, executor)
+    begin, end = np.asarray(documents.offsets).tolist()
+    scored = np.asarray(documents.scores)[begin:end]
     assert list(scored) == sorted(scored, reverse=True)
 
 
@@ -1167,12 +1169,21 @@ def test_maxsim_refuses_ragged_queries(executor):
 def test_maxsim_scores_only_admitted_documents(executor):
     """A predicate is asked before any of a document's rows score, so a rejected one never lands."""
     index, tokens = late_interaction_index(executor)
-    matches = scored_documents(index, tokens, 2, 4, executor, predicate=lambda key: int(key) % 2 == 0)
-    found = keys_to_integers(matches.keys)
-    counts = np.asarray(matches.counts)
-    for query_index in range(len(counts)):
-        assert counts[query_index] > 0
-        assert np.all(found[query_index, : counts[query_index]] % 2 == 0)
+    documents = scored_documents(index, tokens, 2, 4, executor, predicate=lambda key: int(key) % 2 == 0)
+    found = keys_to_integers(documents.keys)
+    for begin, end in pairwise(np.asarray(documents.offsets).tolist()):
+        assert end > begin
+        assert np.all(found[begin:end] % 2 == 0)
+
+
+def test_maxsim_keeps_every_scored_document_when_wanted_is_zero(executor):
+    """A zero bound keeps every document a query scored, so no query lands fewer than under a bound."""
+    index, tokens = late_interaction_index(executor)
+    every = np.diff(np.asarray(scored_documents(index, tokens, 2, 0, executor).offsets))
+    bounded = np.diff(np.asarray(scored_documents(index, tokens, 2, 2, executor).offsets))
+    scanned = np.diff(np.asarray(scored_documents(index, tokens, 2, 0, executor, traversal=Traversal.SCAN).offsets))
+    assert np.all(every >= bounded)
+    assert scanned.tolist() == [_LATE_INTERACTION_DOCUMENTS] * 2, "a scan nominates every document"
 
 
 def test_maxsim_refuses_a_distance_kind(executor):

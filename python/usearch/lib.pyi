@@ -262,7 +262,10 @@ class DenseVectors(_ArenaBuffer):
 
 @final
 class DenseProducts:
-    """The ragged sparse product `multiply` wrote into an `Arena`: per left row, every pair its walk scored."""
+    """The ragged sparse product `multiply` wrote into an `Arena`: per left row, every pair its walk scored.
+
+    `maxsim` lands its documents alike, one run per query, largest first, `required` counting those it landed.
+    """
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @property
@@ -316,7 +319,7 @@ class Match(structseq[Any], tuple[Key, float]):
 
 @final
 class Matches:
-    """A ranked run `search` or `maxsim` wrote into an `Arena`, reading through to three outputs."""
+    """A ranked run `search` wrote into an `Arena`, reading through to three outputs."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @property
@@ -459,7 +462,7 @@ class On[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Matches: ...
+    ) -> DenseProducts: ...
     def absorb(
         self: On[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0
     ) -> None: ...
@@ -577,7 +580,7 @@ class DeferredOn[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Deferred[Matches]: ...
+    ) -> Deferred[DenseProducts]: ...
     def absorb(
         self: DeferredOn[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0
     ) -> Deferred[None]: ...
@@ -999,8 +1002,8 @@ class DenseIndex:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Matches:
-        """Late-interaction scoring of multi-row queries. Calls `usearch_dense_maxsim`."""
+    ) -> DenseProducts:
+        """Late interaction over multi-row queries, refused on VRAM with `DeviceError`. Calls `usearch_dense_maxsim`."""
         ...
 
     def absorb(self, *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0) -> None:

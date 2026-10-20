@@ -324,9 +324,13 @@ for row in range(left_rows):
 
 `maxsim` is late interaction: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what a `values_per_key` above one exists for, and the wanted count is over documents rather than rows.
+The keys land as `multiply`'s pairs do, query `i` spanning `offsets()[i]` up to `offsets()[i + 1]`, largest score first, and a zero `wanted` keeps every key a query scored.
 
 ```mojo
-var documents = index.on(executor).maxsim(tokens, tokens_per_query, 10, arena)  # Matches, as search answers
+var documents = index.on(executor).maxsim(tokens, tokens_per_query, 10, arena)  # DenseProducts, as multiply answers
+var offsets = documents.offsets()
+for query in range(documents.rows):
+    print(query, Int(offsets[query + 1] - offsets[query]), "documents")
 ```
 
 ### Attention

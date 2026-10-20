@@ -310,6 +310,40 @@ void scan_tiles(nk_kernel_kind_t kernel, nk::matrix_view<typename quads_kit_type
     }
 }
 
+/**
+ *  @brief Folds a gathered block of stored @p rows against the query rows packed in @p packed: the
+ *      dots of each segment's rows, those below @p segment_ends[s] and at or past the previous end,
+ *      raise segment s's row of @p maxima, one column per packed query row.
+ *
+ *  Rows stream through the matrix engine @c stream_rows_k at a time into @p dots, as @c scan_tiles
+ *  streams them; a matrix engine answers inner products, which MaxSim takes as they are.
+ */
+template <typename tiles_kit_type_, typename scalar_type_>
+void fold_tiles(nk::matrix_view<scalar_type_> rows, void const* packed, std::span<std::size_t const> segment_ends,
+                nk::matrix_span<typename scalar_type_::dot_result_t> maxima,
+                nk::matrix_span<typename scalar_type_::dot_result_t::raw_t> dots) noexcept {
+    using dot_result_t = typename scalar_type_::dot_result_t;
+    using raw_dot_t = typename dot_result_t::raw_t;
+    std::size_t const rows_count = rows.extent(0), dimensions = rows.extent(1), columns = maxima.extent(1);
+    std::size_t segment = 0;
+    for (std::size_t offset = 0; offset < rows_count; offset += tiles_kit_type_::stream_rows_k) {
+        std::size_t const step_rows = min_of(tiles_kit_type_::stream_rows_k, rows_count - offset);
+        nk::matrix_view<scalar_type_> const step = rows(nk::range(offset, offset + step_rows), nk::slice);
+        [[maybe_unused]] nk_status_t const scored = tiles_kit_type_::dots_packed(
+            step.raw_values_data(), packed, dots.data(), step_rows, columns, dimensions,
+            static_cast<std::size_t>(step.stride_bytes(0)), static_cast<std::size_t>(dots.stride_bytes(0)), nullptr, 0,
+            nullptr);
+        assert(scored == nk_success_k && "A matrix engine scores any call");
+        for (std::size_t row = 0; row != step_rows; ++row) {
+            while (segment_ends[segment] <= offset + row) ++segment;
+            std::span<raw_dot_t const> const row_dots = to_span(dots.row(row).as_vector());
+            std::span<dot_result_t> const segment_maxima = to_span(maxima.row(segment).as_vector());
+            for (std::size_t column = 0; column != columns; ++column)
+                segment_maxima[column] = max_of(segment_maxima[column], dot_result_t::from_raw(row_dots[column]));
+        }
+    }
+}
+
 /** The most rows an exact scan asks an aggregating predicate between two settles: one streamed step
  *  of @p tiles_kit_type_ where it is a matrix engine, one quad otherwise. */
 template <typename tiles_kit_type_>

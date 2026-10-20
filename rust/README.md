@@ -447,9 +447,13 @@ for row in products.rows()? {
 
 `maxsim` is late interaction - every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what a `values_per_key` above one exists for, and the wanted count is over documents rather than rows.
+Each query lands its best documents, largest score first, in the same ragged `DenseProducts` run `multiply` returns, and a `wanted` of zero keeps every document the query scored.
 
 ```rust
 let documents = index.on(&executor).maxsim(&rows(&tokens, 768)?, tokens_per_query, 10, &mut arena)?;
+for query in documents.rows()? {
+    println!("best {:?} of {} documents", query.keys.first(), query.keys.len());
+}
 ```
 
 ### Attention

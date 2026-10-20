@@ -215,7 +215,7 @@ DenseSearch[receiver_, queries : ({__List} | _NumericArray), wanted_Integer, are
         {wanted, arena, OptionValue["ExpansionFactor"], OptionValue["Traversal"]}]
 Options[DenseMaxsim] = {"ExpansionFactor" -> 0};
 DenseMaxsim[receiver_, {}, rowsPerQuery_Integer, wanted_Integer, arena_Arena, OptionsPattern[]] :=
-    <|"Keys" -> {}, "Scores" -> {}|>
+    <|"Offsets" -> {0}, "Keys" -> {}, "Scores" -> {}, "Required" -> 0|>
 DenseMaxsim[receiver_, queries : ({__List} | _NumericArray), rowsPerQuery_Integer, wanted_Integer, arena_Arena, OptionsPattern[]] :=
     submitRows[receiver, denseMaxsim, {}, queries, {rowsPerQuery, wanted, arena, OptionValue["ExpansionFactor"]}]
 DenseCount[receiver_, key_?keyQ] := submit[receiver, denseCount, {keyBytes[key]}]

@@ -26,6 +26,10 @@ std::size_t test::dense::check_ram_indexes(settings_t const& settings) {
         "sharded bf16+angular+sme", settings.seed);
     failures_count += test_ram_scan_configuration<nk_bf16_k, nk_kernel_angular_k, amx_caps_k>(
         "sharded bf16+angular+amx", settings.seed);
+    failures_count += test_ram_scan_configuration<nk_bf16_k, nk_kernel_dot_k, sme_caps_k>("sharded bf16+dot+sme",
+                                                                                          settings.seed);
+    failures_count += test_ram_scan_configuration<nk_bf16_k, nk_kernel_dot_k, amx_caps_k>("sharded bf16+dot+amx",
+                                                                                          settings.seed);
 #if USEARCH_DENSE_DTYPES >= 3
     failures_count += test_ram_indexes_configuration<nk_i8_k, nk_kernel_dot_k>("sharded i8+dot", settings.seed);
     // Icelake's i8 finalize subtracts the row sums, so even a dot index saves its norms column.

@@ -322,10 +322,13 @@ DenseOptions colbert = DenseOptions.Default with
     ValuesPerKey = 32,               // A document is one key holding its token rows
 };
 
-Matches scored = index.On(pool).Maxsim(RowsView.RowsOf<float>(queryTokens, dimensions: 128), rowsPerQuery: 32, wanted: 10, arena);
+DenseProducts scored = index.On(pool).Maxsim(RowsView.RowsOf<float>(queryTokens, dimensions: 128), rowsPerQuery: 32, wanted: 10, arena);
+ReadOnlySpan<Key> documents = scored.Keys(0);         // The first query's best documents, largest first
+ReadOnlySpan<double> totals = scored.Scores(0);       // Each document's summed maxima
 ```
 
 Every query row takes its best match within a key, and those maxima sum to that key's score, so the wanted count is the "k" over documents rather than over rows.
+Each query lands a ragged run in the arena, the same `DenseProducts` that `Multiply` returns, and a wanted count of zero keeps every document the query scored.
 That is what a values-per-key bound above one exists for, and a graph frozen under a distance kind refuses with `Status.ConfigMismatch`.
 
 ### Attention

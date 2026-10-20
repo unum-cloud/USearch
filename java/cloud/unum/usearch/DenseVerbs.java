@@ -202,13 +202,13 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     }
 
     /**
-     * Late-interaction scoring keeping up to {@code wanted} keys per query, with every other knob
-     * derived.
+     * Late-interaction scoring keeping up to {@code wanted} keys per query, zero keeping every key a
+     * query scored, with every other knob derived.
      *
      * @throws USearchException the statuses {@link #maxsim(RowsView, long, DenseMaxsimConfig, Arena)}
      *     names.
      */
-    public Matches maxsim(RowsView queries, long rowsPerQuery, long wanted, Arena arena) {
+    public DenseProducts maxsim(RowsView queries, long rowsPerQuery, long wanted, Arena arena) {
         return block(scoring(queries, rowsPerQuery, new DenseMaxsimConfig(wanted), arena));
     }
 
@@ -221,13 +221,14 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * Every query carries the same number of rows, so a padded token batch applies as is, and the
      * query count is the row count divided by that. Approximate in the same way a search is: a key
      * can score below its exact value but never above it. Runs on the inner-product kinds alone.
-     * Calls {@code usearch_dense_maxsim}.
+     * Each query's keys land in {@code arena} largest score first, as one ragged output like
+     * {@link #multiply}'s. Calls {@code usearch_dense_maxsim}.
      *
      * @throws USearchException CONFIG_MISMATCH on a graph frozen under a distance kind,
      *     SHAPE_MISMATCH when the token rows do not divide into whole queries or the rows are not as
      *     wide as the frozen geometry, and CONTENDED when the arena serves another call.
      */
-    public Matches maxsim(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
+    public DenseProducts maxsim(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
         return block(scoring(queries, rowsPerQuery, config, arena));
     }
 
@@ -460,24 +461,30 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
         });
     }
 
-    static Request<Matches> scoring(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
+    static Request<DenseProducts> scoring(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
         if (rowsPerQuery <= 0) {
             throw new USearchException(Status.SHAPE_MISMATCH, "a query cannot carry zero rows");
         }
         if (queries.rows() % rowsPerQuery != 0) {
             throw new USearchException(Status.SHAPE_MISMATCH, "the token rows do not divide into whole queries");
         }
-        long count = queries.rows() / rowsPerQuery;
+        int count = Types.Extents.toIndex(queries.rows() / rowsPerQuery, "the query count");
         return new Request<>(DenseIndex.MAXSIM, call -> {
             call.size("count", count);
             call.rows("queries", queries);
             call.size("rows_per_query", rowsPerQuery);
-            MemorySegment matches = call.output("matches", Library.MATCHES_VIEW);
+            MemorySegment matches = call.output("matches", Library.MATCHES_TAPE_VIEW);
             call.arena("arena", arena);
             call.size("wanted", config.wanted);
             call.size("expansion_factor", config.expansionFactor);
             call.stats("stats", config.stats);
-            return () -> Matches.lift(call, matches, count);
+            return () -> {
+                MemorySegment offsets = call.reach(
+                        matches.get(Library.POINTER, Library.offset(Library.MATCHES_TAPE_VIEW, "offsets")),
+                        (count + 1L) * Long.BYTES);
+                long landed = offsets.address() == 0 ? 0 : offsets.getAtIndex(Library.SIZE, count);
+                return DenseProducts.lift(call, matches, count, landed, landed);
+            };
         });
     }
 

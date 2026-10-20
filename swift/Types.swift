@@ -435,8 +435,8 @@ public struct Match: Equatable, Sendable {
     public let distance: Distance
 }
 
-/// The ranked rows a search, a `maxsim` or a stream pull wrote into an arena, one per query, read
-/// in place. Mirrors `usearch_matches_view_t`.
+/// The ranked rows a search or a stream pull wrote into an arena, one per query, read in place.
+/// Mirrors `usearch_matches_view_t`.
 public struct Matches: RandomAccessCollection {
     /// The arena the rows live in, and which call wrote them.
     let write: ArenaWrite

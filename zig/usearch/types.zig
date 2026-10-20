@@ -509,8 +509,8 @@ pub const MatchesRow = struct {
     scores: []const Distance,
 };
 
-/// The ranked rows a search, a `maxsim` or a stream pull wrote into an arena, one per query, each
-/// holding up to the `wanted` the call asked for. Mirrors `usearch_matches_view_t`.
+/// The ranked rows a search or a stream pull wrote into an arena, one per query, each holding up
+/// to the `wanted` the call asked for. Mirrors `usearch_matches_view_t`.
 ///
 /// It reads the arena, so every read is refused once that arena serves another call or is freed.
 pub const Matches = struct {

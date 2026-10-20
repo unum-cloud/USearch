@@ -38,13 +38,13 @@ typedef struct usearch_js_dense_call_t {
     /** Entries under a key, nodes a refinement changed, or the rows or pairs a call landed. */
     size_t written;
 
-    /** Pairs a product scored before its bound cut any. */
+    /** Pairs a product scored before its bound cut any, or keys a late interaction landed. */
     size_t required;
 
-    /** The ranked run a search, a late-interaction scoring or a stream pull landed in its arena. */
+    /** The ranked run a search or a stream pull landed in its arena. */
     usearch_matches_view_t matches;
 
-    /** The pairs a product landed in its arena. */
+    /** The pairs a product, or the keys a late-interaction scoring, landed in its arena. */
     usearch_matches_tape_view_t products;
 
     /** The rows a retrieval, a cursor pull or an attention landed in its arena. */
@@ -744,12 +744,44 @@ static napi_value usearch_js_index_search(napi_env env, napi_callback_info info)
     return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
 }
 
+/** Views the pairs and their Arrow offsets inside the arena. */
+static napi_value usearch_js_finish_multiply(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
+    usearch_js_dense_call_t const* const dense = (usearch_js_dense_call_t const*)call;
+    napi_value const arena = slots[usearch_js_slot_arena_k];
+    size_t const pairs = dense->written;
+    if (!usearch_js_stats_report(env, slots[usearch_js_slot_stats_k], &dense->stats)) return NULL;
+    napi_value const offsets = usearch_js_arena_view(env, arena, napi_biguint64_array, (void*)dense->products.offsets,
+                                                     (dense->count + 1) * sizeof(size_t), dense->count + 1);
+    napi_value const keys = offsets
+                                ? usearch_js_arena_view(env, arena, napi_uint8_array, (void*)dense->products.keys,
+                                                        pairs * sizeof(usearch_key_t), pairs * sizeof(usearch_key_t))
+                                : NULL;
+    napi_value const scores = keys
+                                  ? usearch_js_arena_view(env, arena, napi_float64_array, (void*)dense->products.scores,
+                                                          pairs * sizeof(usearch_distance_t), pairs)
+                                  : NULL;
+    if (!scores) return NULL;
+    static char const* const names[] = {"offsets", "keys", "scores", "required"};
+    napi_value const values[] = {offsets, keys, scores, usearch_js_number(env, dense->required)};
+    return usearch_js_object(env, usearch_js_table_size_(names), names, values);
+}
+
+/** Views a late-interaction scoring's documents as a product's pairs; MaxSim reports no totals, so
+ *  the last offset counts both, left unread on a device, where every view is null anyway. */
+static napi_value usearch_js_finish_maxsim(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
+    usearch_js_dense_call_t* const dense = (usearch_js_dense_call_t*)call;
+    if (dense->count && call->arena->residency != usearch_residency_vram_k)
+        dense->written = dense->required = dense->products.offsets[dense->count];
+    return usearch_js_finish_multiply(env, call, slots);
+}
+
 /**
  *  @brief @c maxsim(executor, completion, data, rows, columns, stride, scalar, rowsPerQuery, arena,
- *      wanted, expansion, stats) → @c {keys, scores, counts, columns}, viewed inside @p arena.
+ *      wanted, expansion, stats) → @c {offsets, keys, scores, required}, viewed inside @p arena.
  *
  *  Every query row takes its best match within a key and those maxima sum to that key's score,
- *  so the run is over keys rather than rows.
+ *  so query @c i spans keys @c offsets[i] up to @c offsets[i+1], largest first; a zero @p wanted
+ *  keeps every key it scored.
  */
 static napi_value usearch_js_index_maxsim(napi_env env, napi_callback_info info) {
     napi_value arguments[12], self = NULL, deferred = NULL;
@@ -780,10 +812,10 @@ static napi_value usearch_js_index_maxsim(napi_env env, napi_callback_info info)
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0], arguments[8], arguments[2], NULL, arguments[11]};
-    call->call.finish = usearch_js_finish_matches;
+    call->call.finish = usearch_js_finish_maxsim;
     call->count = maxsim.count;
     maxsim.outcome = &call->call.outcome;
-    maxsim.matches = &call->matches;
+    maxsim.matches = &call->products;
     if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
     usearch_dense_maxsim(&maxsim);
     return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
@@ -819,28 +851,6 @@ static napi_value usearch_js_index_get(napi_env env, napi_callback_info info) {
     if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
     usearch_dense_get(&get);
     return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
-}
-
-/** Views the pairs and their Arrow offsets inside the arena. */
-static napi_value usearch_js_finish_multiply(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
-    usearch_js_dense_call_t const* const dense = (usearch_js_dense_call_t const*)call;
-    napi_value const arena = slots[usearch_js_slot_arena_k];
-    size_t const pairs = dense->written;
-    if (!usearch_js_stats_report(env, slots[usearch_js_slot_stats_k], &dense->stats)) return NULL;
-    napi_value const offsets = usearch_js_arena_view(env, arena, napi_biguint64_array, (void*)dense->products.offsets,
-                                                     (dense->count + 1) * sizeof(size_t), dense->count + 1);
-    napi_value const keys = offsets
-                                ? usearch_js_arena_view(env, arena, napi_uint8_array, (void*)dense->products.keys,
-                                                        pairs * sizeof(usearch_key_t), pairs * sizeof(usearch_key_t))
-                                : NULL;
-    napi_value const scores = keys
-                                  ? usearch_js_arena_view(env, arena, napi_float64_array, (void*)dense->products.scores,
-                                                          pairs * sizeof(usearch_distance_t), pairs)
-                                  : NULL;
-    if (!scores) return NULL;
-    static char const* const names[] = {"offsets", "keys", "scores", "required"};
-    napi_value const values[] = {offsets, keys, scores, usearch_js_number(env, dense->required)};
-    return usearch_js_object(env, usearch_js_table_size_(names), names, values);
 }
 
 /**

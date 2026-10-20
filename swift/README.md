@@ -346,10 +346,11 @@ for pair in products[0] { print(pair.key, pair.distance) }
 
 `maxsim` is late interaction: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what a `valuesPerKey` above one exists for, and the outputs are sized over documents rather than rows.
+The call returns the same `DenseProducts` as `multiply`, one ragged row per whole query with its documents largest score first, and a zero `wanted` keeps every document the query scored.
 
 ```swift
-// one row per whole query
 let documents = try index.on(executor).maxsim(tokens, rowsPerQuery: tokensPerQuery, wanted: 10, arena: arena)
+for document in documents[0] { print(document.key, document.distance) }
 ```
 
 ### Attention

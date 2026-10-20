@@ -246,7 +246,9 @@ The original three-argument form keeps the offsets & keys, which identify the co
 
 ### Late Interaction
 
-`DenseMaxsim[receiver, queries, rowsPerQuery, wanted, arena]` scores multi-row queries late-interaction style, answering `<|"Keys"->…, "Scores"->…|>` with one list per query.
+`DenseMaxsim[receiver, queries, rowsPerQuery, wanted, arena]` scores multi-row queries late-interaction style, answering `<|"Offsets"->…, "Keys"->…, "Scores"->…, "Required"->…|>` as `DenseMultiply` does.
+Query `i` owns keys `offsets[[i]] + 1` through `offsets[[i + 1]]`, largest summed maxima first, and `"Required"` counts the keys landed.
+`wanted` keeps at most that many keys per query, zero keeping every key a query scored.
 The token rows of every query are laid end to end, so their number divides by `rowsPerQuery`.
 
 ### Folded Attention

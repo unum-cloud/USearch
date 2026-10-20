@@ -644,10 +644,11 @@ def test_maxsim_scores_over_documents_rather_than_rows() raises:
     var tokens = [Float32(1), 0, Float32(0), 1]
     var arena = Arena(library)
     var matches = index.maxsim(RowsView.of(tokens, 2), 2, 2, arena)
-    assert_equal(len(matches), 1, "two token rows are one query")
-    assert_equal(len(matches.row_keys(0)), 2, "over two documents")
-    var counted = index.maxsim(RowsView.of(tokens, 2), 2, 0, arena)
-    assert_equal(len(counted.row_keys(0)), 0, "a zero wanted lands only the counts")
+    assert_equal(matches.rows, 1, "two token rows are one query")
+    var bounded = Int(matches.offsets()[1] - matches.offsets()[0])
+    assert_equal(bounded, 2, "over two documents")
+    var every = index.maxsim(RowsView.of(tokens, 2), 2, 0, arena)
+    assert_true(Int(every.offsets()[1] - every.offsets()[0]) >= bounded, "a zero wanted keeps every scored key")
 
 
 @fieldwise_init

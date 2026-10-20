@@ -2851,16 +2851,19 @@ static bool accepts_query_offsets(std::span<std::size_t const> query_offsets, us
 }
 
 /** The late-interaction sink on one serving variant: chunks of whole queries, one per step of the
- *  progress handler, each query's rows cut by @p query_offsets and its keys landing in @p landing;
- *  @p predicate narrows the nominations once it names a callback. */
+ *  progress handler, each query's rows cut by @p query_offsets. A chunk's queries rank into one run
+ *  per executor thread, and the runs then count, prefix-sum and scatter into @p keys, @p scores and
+ *  @p offsets growing in @p arena, as geospatial `within` lands; @p predicate narrows the
+ *  nominations once it names a callback. */
 template <typename variant_type_>
 static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const& arguments,
                            std::span<std::size_t const> query_offsets, predicate_t& predicate,
-                           matches_landing_t const& landing, usearch_outcome_t* outcome) noexcept {
-    using key_t = typename variant_type_::key_t;
-    static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the plan writes them");
+                           usearch_arena_handle_t& arena, usearch_key_t*& landed_keys,
+                           usearch_distance_t*& landed_scores, std::size_t*& landed_offsets,
+                           usearch_outcome_t* outcome) noexcept {
+    using run_t = growing_buffer<maxsim_match_t, thread_allocator_t>;
     usearch_rows_view_t const& rows = arguments.queries;
-    std::size_t const count = query_offsets.size() - 1, wanted = landing.wanted;
+    std::size_t const count = query_offsets.size() - 1;
     if (!rows.data) return propagate_error(usearch_status_invalid_argument_k, outcome, "The rows must name storage");
     nk_dtype_t const source_dtype = rows_dtype_of(rows.scalar, rows.columns, outcome);
     if (source_dtype == nk_dtype_unknown_k) return false;
@@ -2873,32 +2876,57 @@ static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const&
     typename variant_type_::search_config_t config {};
     config.expansion_factor = static_cast<u32_t>(arguments.expansion_factor);
     config.traversal = static_cast<traversal_t>(arguments.traversal);
-    nk::matrix_span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys), count, wanted};
-    nk::matrix_span<f64_t> const scores {landing.scores, count, wanted};
+    if constexpr (requires { config.cache_bytes; }) config.cache_bytes = thread_cache_bytes(executor->topology());
+
+    // The runs' headers and the tape sit in the call's arena, which no engine rewinds.
+    thread_allocator_t const staging {arena.memory};
+    growing_buffer<run_t, thread_allocator_t> runs {staging};
+    growing_buffer<std::size_t, thread_allocator_t> offsets {staging}, cursors {staging};
+    growing_buffer<usearch_key_t, thread_allocator_t> keys {staging};
+    growing_buffer<usearch_distance_t, thread_allocator_t> scores {staging};
+    if (failed(open_maxsim_runs<variant_type_>(runs, *executor, staging)) || failed(offsets.resize(count + 1)))
+        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+
     us::dense::rows_view_t const all = rows_of(rows, query_offsets.back());
     progress_ticks_t ticks {arguments.progress, count};
     std::size_t const step = ticks.slice();
     for (std::size_t first = 0; first != count;) {
         std::size_t const taking = min_of(step, count - first);
-        nk::range_t const chunk = nk::range(first, first + taking);
         std::span<std::size_t const> const chunk_offsets = query_offsets.subspan(first, taking + 1);
-        std::span<std::size_t> const chunk_counts {landing.counts + first, taking};
-        // Each chunk is one call of the verb, so it rewinds the arenas once and carves contexts.
+        // Each chunk is one call of the verb, which rewinds the arenas once, so the runs restart
+        // empty and first allocate after it.
+        for (run_t& run : runs) run.reset();
         dense_scratch<variant_type_> scratch {*executor};
         if (status_t const prepared = scratch.prepare(*executor); failed(prepared))
             return propagate_error(prepared, outcome, "Failed to carve the contexts");
         specialized_index view {variant};
+        maxsim_landing_t const landing {to_writable_span(runs), staging};
         expected<typename variant_type_::search_result_t> const found =
             predicate.predicate.callback
-                ? view.maxsim_if(all, chunk_offsets, *executor, scratch, config, keys(chunk, nk::slice),
-                                 scores(chunk, nk::slice), chunk_counts, predicate)
-                : view.maxsim(all, chunk_offsets, *executor, scratch, config, keys(chunk, nk::slice),
-                              scores(chunk, nk::slice), chunk_counts);
+                ? view.maxsim_if(all, chunk_offsets, *executor, scratch, config, arguments.wanted, landing, predicate)
+                : view.maxsim(all, chunk_offsets, *executor, scratch, config, arguments.wanted, landing);
         if (!crossed(found, arguments.stats, outcome)) return false;
+
+        // Each query landed whole on one thread in rank order, so per-query counts place every key.
+        for (run_t const& run : runs)
+            for (maxsim_match_t const& match : run) ++offsets[first + match.query + 1];
+        for (std::size_t query = first; query != first + taking; ++query) offsets[query + 1] += offsets[query];
+        std::size_t const landed = offsets[first + taking];
+        if (failed(keys.reserve(landed)) || failed(scores.reserve(landed)) ||
+            failed(cursors.resize_uninitialized(taking)))
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+        keys.extend_uninitialized(landed), scores.extend_uninitialized(landed);
+        for (std::size_t query = 0; query != taking; ++query) cursors[query] = offsets[first + query];
+        for (run_t const& run : runs)
+            for (maxsim_match_t const& match : run) {
+                std::size_t const slot = cursors[match.query]++;
+                keys[slot] = match.key, scores[slot] = match.score;
+            }
         first += taking;
         if (ticks(first, count) == continuation_t::cancel_k)
             return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call");
     }
+    landed_keys = keys.data(), landed_scores = scores.data(), landed_offsets = offsets.data();
     return true;
 }
 
@@ -3892,7 +3920,6 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     if (submitted<usearch_dense_maxsim>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
     std::size_t const count = arguments->count, rows_per_query = arguments->rows_per_query;
-    std::size_t const wanted = arguments->wanted;
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
     if (!arguments->query_offsets && !rows_per_query)
@@ -3922,11 +3949,19 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                 if (!accepts_query_offsets(query_offsets, outcome)) return;
                 if (rejects_columns(*arguments->index, query_offsets.back(), arguments->queries.columns, outcome))
                     return;
-                matches_landing_t landing;
-                if (!carve_matches(arena->memory, count, wanted, landing, outcome)) return;
-                if (!maxsim_queries(variant, *arguments, query_offsets, keyed, landing, outcome)) return;
-                if (!publish_matches(*arena, count, landing, outcome)) return;
-                *arguments->matches = landing.view();
+                usearch_key_t* keys = nullptr;
+                usearch_distance_t* scores = nullptr;
+                std::size_t* offsets = nullptr;
+                if (!maxsim_queries(variant, *arguments, query_offsets, keyed, *arena, keys, scores, offsets, outcome))
+                    return;
+                std::size_t const landed = offsets[count];
+                if (!landed) keys = nullptr, scores = nullptr;
+                status_t published = publish(*arena, keys, landed);
+                if (succeeded(published)) published = publish(*arena, scores, landed);
+                if (succeeded(published)) published = publish(*arena, offsets, count + 1);
+                if (failed(published = drained(*arena, published)))
+                    return propagate_error(published, outcome, "Failed to land the matches on the device"), void();
+                *arguments->matches = {keys, scores, offsets};
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },

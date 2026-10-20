@@ -333,17 +333,17 @@ export class DenseVectors extends ArenaView {
 
 /**
  * Every pair a sparse product scored, as a ragged run with Apache Arrow offsets: row `i` spans
- * pairs `offsets[i]` up to `offsets[i + 1]`, in traversal order rather than sorted. Mirrors
- * `usearch_matches_tape_view_t`.
+ * pairs `offsets[i]` up to `offsets[i + 1]`, in traversal order rather than sorted. `maxsim` lands
+ * its documents alike, one run per query, largest first. Mirrors `usearch_matches_tape_view_t`.
  */
 export class DenseProducts extends ArenaView {
   /** Left rows the product covers. */
   readonly rows: number;
-  /** Pairs scored across every row, before `wanted` cut any. */
+  /** Pairs scored across every row, before `wanted` cut any; for `maxsim`, the documents landed. */
   readonly required: number;
   readonly #landed: CompiledProducts;
 
-  /** Made by `multiply`, never directly. */
+  /** Made by `multiply` and `maxsim`, never directly. */
   constructor(landed: CompiledProducts, rows: number) {
     super();
     this.#landed = landed;
@@ -695,10 +695,10 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
    *
    * @param {RowsView|Vector} queries - The token rows of every query, end to end.
    * @param {number} rowsPerQuery - Rows in every query; uniform, so padded queries apply as is.
-   * @param {number} wanted - Documents per query; one row per query, not per token row.
+   * @param {number} wanted - Documents per query, not per token row; zero keeps every document a query scored.
    * @param {Arena} arena - The memory the scored keys land in, rewound by the call.
    * @param {DenseMaxsimConfig} [config] - Per-call breadth and telemetry sink.
-   * @return {Matches} The scored keys, largest first, viewed inside `arena`.
+   * @return {DenseProducts} The scored keys, one run per query, largest first, viewed inside `arena`.
    * @throws Will throw when the token rows do not split into whole queries.
    */
   maxsim(
@@ -707,7 +707,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
     wanted: number,
     arena: Arena,
     config: DenseMaxsimConfig = {},
-  ): Answer<Receiving, Matches> {
+  ): Answer<Receiving, DenseProducts> {
     const rows = crossing(queries);
     const queriesCount = rows[1] / rowsPerQuery;
     if (!isPositiveInteger(queriesCount)) throw fail(Status.ShapeMismatch, "The rows do not split into whole queries.");
@@ -723,7 +723,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
           config.expansionFactor,
           config.stats,
         ),
-      (landed: CompiledMatches) => new Matches(landed, queriesCount),
+      (landed: CompiledProducts) => new DenseProducts(landed, queriesCount),
     );
   }
 

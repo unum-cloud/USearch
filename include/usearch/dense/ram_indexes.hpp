@@ -128,6 +128,7 @@ struct ram_indexes {
 
     /** The kits every shard scores and imports through, as @c src/ picked them. */
     using quads_kit_t = quads_kit_type_;
+    using tiles_kit_t = tiles_kit_type_;
     using elementwise_kit_t = elementwise_kit_type_;
 
 #pragma region Placement
@@ -1294,22 +1295,20 @@ struct ram_indexes {
      *  @param[in] config The per-shard walk configuration, applied uniformly; each row nominates as
      *      many keys as its expansion factor, and a @c traversal_t::scan_k scan nominates every
      *      key.
-     *  @param[out] keys The best-scoring keys of each query, one query per row, as many keys
-     *      as its width.
-     *  @param[out] scores Their summed maxima as @p score_type_, largest first, parallel to
-     *      @p keys.
-     *  @param[out] counts Keys written per query, at most the width of @p keys.
+     *  @param[in] wanted Keys each query keeps, the best ones; zero keeps every key it scored, up
+     *      to as many as the shards held when the call began under a scan.
+     *  @param[in] land Takes each kept key of a query in rank order, largest total first, on the
+     *      thread that ranked it, as `land(thread, query, key, total) noexcept → status_t`; the
+     *      first failure stops that query and is what the call answers.
      *
      *  Refused with @c shape_mismatch_k for a query without rows, and with @c config_mismatch_k
      *  for offsets past the rows or unless the shards walk by dot.
      */
-    template <typename score_type_>
+    template <typename land_type_>
     expected<search_result_t> maxsim(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                      executor_t& executor, std::span<traversal_context_t> traversals,
-                                     search_config_t config, nk::matrix_span<key_t> keys,
-                                     nk::matrix_span<score_type_> scores, std::span<std::size_t> counts) noexcept {
-        return maxsim_if(queries, query_offsets, executor, traversals, config, keys, scores, counts,
-                         dummy_predicate_t {});
+                                     search_config_t config, std::size_t wanted, land_type_&& land) noexcept {
+        return maxsim_if(queries, query_offsets, executor, traversals, config, wanted, land, dummy_predicate_t {});
     }
 
     /**
@@ -1319,23 +1318,20 @@ struct ram_indexes {
      *  @param[in] predicate The per-key admission filter: a walk asks it as the filtered
      *      @ref search_if asks it, a scan once per key and query.
      */
-    template <typename score_type_, typename predicate_type_>
+    template <typename land_type_, typename predicate_type_>
     expected<search_result_t> maxsim_if(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                         executor_t& executor, std::span<traversal_context_t> traversals,
-                                        search_config_t config, nk::matrix_span<key_t> keys,
-                                        nk::matrix_span<score_type_> scores, std::span<std::size_t> counts,
+                                        search_config_t config, std::size_t wanted, land_type_&& land,
                                         predicate_type_&& predicate) noexcept {
         static_assert((!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> &&
                        !aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
                       "An engine driving its own threads takes an aggregating predicate per thread");
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
-        if (kernel() != nk_kernel_dot_k || query_offsets.size() != counts.size() + 1)
-            return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = rankings_refusal(counts.size(), keys, scores); failed(refusal))
-            return {{}, refusal};
+        if (kernel() != nk_kernel_dot_k || query_offsets.empty()) return {{}, status_t::config_mismatch_k};
+        std::size_t const queries_count = query_offsets.size() - 1;
         std::size_t widest = 0;
-        for (std::size_t query = 0; query != counts.size(); ++query) {
+        for (std::size_t query = 0; query != queries_count; ++query) {
             if (query_offsets[query + 1] <= query_offsets[query]) return {{}, status_t::shape_mismatch_k};
             widest = max_of(widest, query_offsets[query + 1] - query_offsets[query]);
         }
@@ -1346,18 +1342,45 @@ struct ram_indexes {
         config.traversal = traversal_t::walk_k;
         config.expansion_factor = static_cast<typename index_t::small_size_t>(
             shards_[0].index->non_zero_expansion_factor(config));
-        auto maxsim_row = [&](std::size_t query, std::size_t thread, traversal_context_t& traversal,
-                              std::span<node_id_t const> watermarks) noexcept {
-            return maxsim_query_(queries, query_offsets[query], query_offsets[query + 1] - query_offsets[query],
-                                 nominating, config, traversal, watermarks, thread_predicate(predicate, thread),
-                                 to_span(keys.row(query).as_vector()), to_span(scores.row(query).as_vector()),
-                                 counts[query]);
+        // Without a bound, a query keeps every candidate it can have: its walks', or every row.
+        std::size_t const visible = size();
+        auto capacity_of = [&](std::size_t rows) noexcept {
+            return wanted ? wanted : nominating == traversal_t::walk_k ? rows * config.expansion_factor : visible;
+        };
+        // A scan with a matrix engine reads the shards once per block of queries, a block a thread.
+        bool const blocking = index_t::has_tiles_k && nominating == traversal_t::scan_k;
+        std::size_t const block_queries =
+            blocking ? divide_round_up(queries_count, max_of<std::size_t>(traversals.size(), 1)) : 1;
+        std::size_t const blocks = divide_round_up(queries_count, block_queries);
+        std::size_t staged_bytes = maxsim_staged_bytes_(queries.columns, widest, nominating, config,
+                                                        capacity_of(widest));
+        for (std::size_t block = 0; blocking && block != blocks; ++block) {
+            std::size_t const first = block * block_queries, taking = min_of(block_queries, queries_count - first);
+            std::size_t const rows = query_offsets[first + taking] - query_offsets[first];
+            staged_bytes = max_of(
+                staged_bytes, maxsim_scan_bytes_(queries.columns, rows, taking, capacity_of(rows), config.cache_bytes));
+        }
+        auto maxsim_block = [&](std::size_t block, std::size_t thread, traversal_context_t& traversal,
+                                std::span<node_id_t const> watermarks) noexcept {
+            std::size_t const first = block * block_queries, taking = min_of(block_queries, queries_count - first);
+            if constexpr (index_t::has_tiles_k)
+                if (blocking && query_offsets[first + taking] - query_offsets[first] >= tiles_kit_t::tile_columns_k)
+                    return maxsim_scan_(queries, query_offsets, first, taking, capacity_of(0), config, traversal,
+                                        watermarks, thread_predicate(predicate, thread), thread, land);
+            for (std::size_t query = first; query != first + taking; ++query) {
+                std::size_t const rows = query_offsets[query + 1] - query_offsets[query];
+                if (status_t const ran = maxsim_query_(queries, query_offsets[query], rows, nominating, config,
+                                                       traversal, watermarks, thread_predicate(predicate, thread),
+                                                       capacity_of(rows), thread, query, land);
+                    failed(ran))
+                    return ran;
+            }
+            return status_t::success_k;
         };
         std::size_t const candidates = max_of(index_t::round_capacity(connectivity()),
                                               index_t::chunk_schedule_t::rows_in(0));
-        return for_each_row_(counts.size(), executor, traversals, config,
-                             maxsim_staged_bytes_(queries.columns, widest, nominating, config, keys.extent(1)),
-                             maxsim_row, counts, predicate, candidates);
+        return for_each_row_(blocks, executor, traversals, config, staged_bytes, maxsim_block, {}, predicate,
+                             candidates);
     }
 
     /**
@@ -1740,41 +1763,254 @@ struct ram_indexes {
         }
     };
 
-    /** Bytes one MaxSim query of at most @p widest rows of @p columns stages, keeping @p wanted
-     *  keys, laid out as @ref maxsim_query_ carves them. */
+    /** Bytes one pack of up to @c pack_columns_k query rows takes, each pack on its own line; zero
+     *  without a tiles kit. */
+    std::size_t pack_stride_() const noexcept {
+        if constexpr (!index_t::has_tiles_k) return 0;
+        else {
+            nk_size_t bytes = 0;
+            if (tiles_kit_t::pack_size(tiles_kit_t::pack_columns_k, dimensions(), &bytes) != nk_success_k) return 0;
+            return round_up_to_multiple<std::size_t>(bytes, default_alignment_k);
+        }
+    }
+
+    /** Stored rows one gather block holds: as many as share @p cache_bytes with one pack, never
+     *  fewer than a kit step, and one step when the cache is unknown. */
+    std::size_t block_rows_(std::size_t cache_bytes) const noexcept {
+        if constexpr (!index_t::has_tiles_k) return 0;
+        else {
+            std::size_t const pack_stride = pack_stride_(), row_bytes = packed_bytes(vector_dtype_k, dimensions());
+            return max_of((cache_bytes - min_of(cache_bytes, pack_stride)) / row_bytes, tiles_kit_t::stream_rows_k);
+        }
+    }
+
+    /** Bytes a @ref tiled_fold_t over @p columns query rows stages: their packs, a gather block
+     *  of @ref block_rows_ stored rows, its segment ends and keys, and the block's maxima; none
+     *  without a tiles kit or below a tile's columns. */
+    std::size_t tiled_fold_bytes_(std::size_t columns, std::size_t cache_bytes) const noexcept {
+        if constexpr (!index_t::has_tiles_k) return 0;
+        else {
+            using slice_t = arena_allocator<byte_t>;
+            if (columns < tiles_kit_t::tile_columns_k) return 0;
+            std::size_t const block_rows = block_rows_(cache_bytes);
+            return slice_t::reserved_bytes(divide_round_up(columns, tiles_kit_t::pack_columns_k) * pack_stride_()) +
+                   slice_t::reserved_bytes(block_rows * packed_bytes(vector_dtype_k, dimensions())) +
+                   slice_t::reserved_bytes((block_rows + 1) * sizeof(std::size_t)) +
+                   slice_t::reserved_bytes((block_rows + 1) * sizeof(key_t)) +
+                   slice_t::reserved_bytes((block_rows + 1) * columns * sizeof(dot_result_t));
+        }
+    }
+
+    /**
+     *  @brief Folds keys through the tiles kit for one query or a block of queries, every key's
+     *      visible rows gathered into a block of stored rows, one segment per key.
+     *
+     *  The block folds against every pack of the query rows once full, and the @c rank_key each
+     *  call passes takes each key with its maxima row, one maximum per query row, once all of its
+     *  rows folded. Laid out in the staged queries from @c staged on as @ref tiled_fold_bytes_
+     *  counts it; a key with more rows than the block carries its maxima row into the next fold.
+     */
+    struct tiled_fold_t {
+        using raw_dot_t = typename dot_result_t::raw_t;
+
+        tiled_fold_t(ram_indexes const& owner, vectors_view_t query_rows, byte_t* staged, std::size_t cache_bytes,
+                     std::span<node_id_t const> watermarks, nk::matrix_span<raw_dot_t> dots,
+                     std::size_t& computed_distances) noexcept
+            : owner_(owner), watermarks_(watermarks), dots_(dots), computed_distances_(computed_distances),
+              columns_(query_rows.extent(0)), pack_bytes_(owner.pack_stride_()),
+              block_capacity_(owner.block_rows_(cache_bytes)),
+              row_bytes_(packed_bytes(vector_dtype_k, owner.dimensions())) {
+            using slice_t = arena_allocator<byte_t>;
+            std::size_t const packs = divide_round_up(columns_, tiles_kit_t::pack_columns_k);
+            packs_ = staged;
+            block_ = packs_ + slice_t::reserved_bytes(packs * pack_bytes_);
+            byte_t* const past_block = block_ + slice_t::reserved_bytes(block_capacity_ * row_bytes_);
+            ends_ = {reinterpret_cast<std::size_t*>(past_block), block_capacity_ + 1};
+            byte_t* const past_ends = past_block + slice_t::reserved_bytes(ends_.size_bytes());
+            keys_ = {reinterpret_cast<key_t*>(past_ends), block_capacity_ + 1};
+            byte_t* const past_keys = past_ends + slice_t::reserved_bytes(keys_.size_bytes());
+            maxima_ = {reinterpret_cast<dot_result_t*>(past_keys), block_capacity_ + 1, columns_};
+            for (std::size_t pack = 0; pack != packs; ++pack) {
+                std::size_t const first = pack * tiles_kit_t::pack_columns_k;
+                std::size_t const width = min_of(tiles_kit_t::pack_columns_k, columns_ - first);
+                vectors_view_t const pack_rows = query_rows(nk::range(first, first + width), nk::slice);
+                [[maybe_unused]] nk_status_t const packing = tiles_kit_t::pack(
+                    pack_rows.raw_values_data(), width, owner.dimensions(),
+                    static_cast<std::size_t>(pack_rows.stride_bytes(0)), packs_ + pack * pack_bytes_, 0, width,
+                    nullptr);
+                assert(packing == nk_success_k && "A matrix engine packs any block");
+            }
+        }
+
+        /** Gathers every visible row of @p key as its own segment, folding the block whenever it
+         *  fills; a key without visible rows folds nothing and is never ranked. */
+        template <typename rank_key_type_>
+        void add(key_t const& key, rank_key_type_& rank_key) noexcept {
+            if (gathered_ == block_capacity_) flush_(rank_key);
+            keys_[segments_] = key;
+            for (dot_result_t& maximum : to_span(maxima_.row(segments_).as_vector()))
+                maximum = dot_result_t::finite_min();
+            std::size_t folded = 0;
+            owner_.shards_.locators().find_each(key, [&](key_locator_t locator) noexcept {
+                if (locator.node >= watermarks_[locator.shard]) return;
+                if (gathered_ == block_capacity_) carry_(rank_key);
+                vector_view_t const row = owner_.shards_[locator.shard].index->vector(locator.node);
+                std::memcpy(block_ + gathered_++ * row_bytes_, row.byte_data(), row_bytes_);
+                ++folded;
+            });
+            ends_[segments_] = gathered_;
+            if (folded) ++segments_;
+        }
+
+        /** Folds and ranks whatever the block still holds. */
+        template <typename rank_key_type_>
+        void finish(rank_key_type_& rank_key) noexcept {
+            if (segments_) flush_(rank_key);
+        }
+
+      private:
+        ram_indexes const& owner_;
+        std::span<node_id_t const> watermarks_;
+        nk::matrix_span<raw_dot_t> dots_;
+        std::size_t& computed_distances_;
+        std::size_t columns_, pack_bytes_, block_capacity_, row_bytes_;
+        byte_t* packs_ = nullptr;
+        byte_t* block_ = nullptr;
+        std::span<std::size_t> ends_;
+        std::span<key_t> keys_;
+        nk::matrix_span<dot_result_t> maxima_;
+        std::size_t gathered_ = 0, segments_ = 0;
+
+        /** Folds the block's rows into the first @p segments segments against every pack. */
+        void fold_(std::size_t segments) noexcept {
+            std::size_t const dimensions = owner_.dimensions();
+            vectors_view_t const rows {reinterpret_cast<scalar_t const*>(block_), gathered_, dimensions};
+            for (std::size_t first = 0; first < columns_; first += tiles_kit_t::pack_columns_k) {
+                std::size_t const width = min_of(tiles_kit_t::pack_columns_k, columns_ - first);
+                fold_tiles<tiles_kit_t>(
+                    rows, packs_ + (first / tiles_kit_t::pack_columns_k) * pack_bytes_, ends_.first(segments),
+                    maxima_(nk::range(std::size_t {0}, segments), nk::range(first, first + width), nk::slice), dots_);
+            }
+            computed_distances_ += gathered_ * columns_;
+        }
+
+        /** Folds and ranks every closed segment and empties the block. */
+        template <typename rank_key_type_>
+        void flush_(rank_key_type_& rank_key) noexcept {
+            fold_(segments_);
+            for (std::size_t segment = 0; segment != segments_; ++segment)
+                rank_key(keys_[segment], to_span(maxima_.row(segment).as_vector()));
+            gathered_ = segments_ = 0;
+        }
+
+        /** Folds a block that filled inside a key: the closed segments rank, and the open one moves
+         *  to the front with its maxima to keep accumulating. */
+        template <typename rank_key_type_>
+        void carry_(rank_key_type_& rank_key) noexcept {
+            ends_[segments_] = gathered_;
+            fold_(segments_ + 1);
+            for (std::size_t segment = 0; segment != segments_; ++segment)
+                rank_key(keys_[segment], to_span(maxima_.row(segment).as_vector()));
+            if (segments_) {
+                std::span<dot_result_t> const open = to_span(maxima_.row(segments_).as_vector());
+                std::copy(open.begin(), open.end(), to_span(maxima_.row(0).as_vector()).begin());
+                keys_[0] = keys_[segments_];
+            }
+            gathered_ = segments_ = 0;
+        }
+    };
+
+    /** Larger totals first, ties by key bytes, so every thread count ranks alike. */
+    static bool better_(total_t first_total, key_t const& first_key, total_t second_total,
+                        key_t const& second_key) noexcept {
+        if (first_total != second_total) return first_total > second_total;
+        return std::memcmp(&first_key, &second_key, sizeof(key_t)) < 0;
+    }
+
+    /** Keeps @p key at @p total among @p best and its keys, @p kept of them so far: appended while
+     *  there is room, else in place of the worst it beats. */
+    static void rank_into_(std::span<maxsim_ranked<total_t>> best, std::span<key_t> best_keys, std::size_t& kept,
+                           key_t const& key, total_t total) noexcept {
+        if (best.empty()) return;
+        if (kept != best.size()) {
+            best[kept] = {static_cast<u32_t>(kept), total};
+            best_keys[kept++] = key;
+            return;
+        }
+        std::size_t worst = 0;
+        for (std::size_t slot = 1; slot != kept; ++slot)
+            if (better_(best[worst].total, best_keys[best[worst].candidate], best[slot].total,
+                        best_keys[best[slot].candidate]))
+                worst = slot;
+        if (!better_(total, key, best[worst].total, best_keys[best[worst].candidate])) return;
+        best[worst].total = total;
+        best_keys[best[worst].candidate] = key;
+    }
+
+    /** Hands the @p kept of @p best to @p land as query @p query of thread @p thread, largest
+     *  first; answers the first refusal @p land gives. */
+    template <typename land_type_>
+    static status_t land_ranked_(std::span<maxsim_ranked<total_t>> best, std::span<key_t const> best_keys,
+                                 std::size_t kept, std::size_t thread, std::size_t query, land_type_& land) noexcept {
+        partial_sort(best.first(kept), kept,
+                     [&](maxsim_ranked<total_t> const& first, maxsim_ranked<total_t> const& second) noexcept {
+                         return better_(first.total, best_keys[first.candidate], second.total,
+                                        best_keys[second.candidate]);
+                     });
+        for (std::size_t rank = 0; rank != kept; ++rank)
+            if (status_t const landed = land(thread, query, best_keys[best[rank].candidate], best[rank].total);
+                failed(landed))
+                return landed;
+        return status_t::success_k;
+    }
+
+    /** Bytes one MaxSim query of at most @p widest rows of @p columns stages, ranking up to
+     *  @p capacity keys, laid out as @ref maxsim_query_ carves them. */
     std::size_t maxsim_staged_bytes_(std::size_t columns, std::size_t widest, traversal_t nominating,
-                                     search_config_t config, std::size_t wanted) const noexcept {
+                                     search_config_t config, std::size_t capacity) const noexcept {
         using slice_t = arena_allocator<byte_t>;
         std::size_t const width = nominating == traversal_t::walk_k ? config.expansion_factor : 0;
         return staged_rows_bytes(vector_dtype_k, widest, columns) +
                slice_t::reserved_bytes(widest * sizeof(vector_norms_t)) +
                slice_t::reserved_bytes(widest * sizeof(dot_result_t)) +
-               slice_t::reserved_bytes(wanted * sizeof(maxsim_ranked<total_t>)) +
-               slice_t::reserved_bytes(wanted * sizeof(key_t)) +
+               slice_t::reserved_bytes(capacity * sizeof(maxsim_ranked<total_t>)) +
+               slice_t::reserved_bytes(capacity * sizeof(key_t)) +
                slice_t::reserved_bytes(widest * width * sizeof(key_t)) +
-               slice_t::reserved_bytes(width * sizeof(distance_t));
+               slice_t::reserved_bytes(width * sizeof(distance_t)) +
+               (nominating == traversal_t::walk_k ? tiled_fold_bytes_(widest, config.cache_bytes) : 0);
+    }
+
+    /** Bytes a MaxSim scan of a block of @p queries_count queries of @p rows rows of @p columns
+     *  stages, each ranking up to @p capacity keys, laid out as @ref maxsim_scan_ carves them. */
+    std::size_t maxsim_scan_bytes_(std::size_t columns, std::size_t rows, std::size_t queries_count,
+                                   std::size_t capacity, std::size_t cache_bytes) const noexcept {
+        using slice_t = arena_allocator<byte_t>;
+        return staged_rows_bytes(vector_dtype_k, rows, columns) +
+               slice_t::reserved_bytes(queries_count * capacity * sizeof(maxsim_ranked<total_t>)) +
+               slice_t::reserved_bytes(queries_count * capacity * sizeof(key_t)) +
+               slice_t::reserved_bytes(queries_count * sizeof(std::size_t)) + tiled_fold_bytes_(rows, cache_bytes);
     }
 
     /**
      *  @brief Late interaction of one query, rows @b [first,first+rows) of @p queries, on
      *      @p traversal: every candidate folds each of its rows below @p watermarks, and the best
-     *      land in @p keys and @p scores, largest first, their number in @p count.
+     *      @p capacity of them go to @p land as query @p query of thread @p thread, largest first.
      *
      *  Walks rank @p config's breadth of keys per query row, which sort in place and keep each key
      *  once; under a @c traversal_t::scan_k scan every key whose first locator is a visible row is
-     *  a candidate. @p predicate hears each candidate before it folds. Everything lives in the
-     *  traversal's staged queries, laid out as @ref maxsim_staged_bytes_ counts it: the rows, their
-     *  norms, one maximum per row, the ranking and its keys, and under walks the candidates and one
-     *  row's merge distances.
+     *  a candidate. @p predicate hears each candidate before it folds. A query of at least a tile's
+     *  columns folds its walks' candidates through the tiles kit, any other a quad of its rows at a
+     *  time. Everything lives in the traversal's staged queries, laid out as
+     *  @ref maxsim_staged_bytes_ counts it: the rows, their norms, one maximum per row, the ranking
+     *  and its keys, under walks the candidates and one row's merge distances, then the tiled fold.
      */
-    template <typename score_type_, typename predicate_type_>
+    template <typename predicate_type_, typename land_type_>
     status_t maxsim_query_(rows_view_t queries, std::size_t first, std::size_t rows, traversal_t nominating,
                            search_config_t config, traversal_context_t& traversal,
-                           std::span<node_id_t const> watermarks, predicate_type_& predicate, std::span<key_t> keys,
-                           std::span<score_type_> scores, std::size_t& count) noexcept {
+                           std::span<node_id_t const> watermarks, predicate_type_& predicate, std::size_t capacity,
+                           std::size_t thread, std::size_t query, land_type_& land) noexcept {
         using slice_t = arena_allocator<byte_t>;
         constexpr bool filtered_k = !std::is_same_v<std::remove_cv_t<predicate_type_>, dummy_predicate_t>;
-        std::size_t const wanted = keys.size();
         std::size_t const width = nominating == traversal_t::walk_k ? config.expansion_factor : 0;
         vectors_view_t const query_rows = shards_[0].index->import_rows_(queries, first, rows, traversal);
         byte_t* const past_rows = traversal.staged_queries.data() +
@@ -1783,23 +2019,23 @@ struct ram_indexes {
         byte_t* const past_norms = past_rows + slice_t::reserved_bytes(norms.size_bytes());
         std::span<dot_result_t> const maxima {reinterpret_cast<dot_result_t*>(past_norms), rows};
         byte_t* const past_maxima = past_norms + slice_t::reserved_bytes(maxima.size_bytes());
-        std::span<maxsim_ranked<total_t>> const best {reinterpret_cast<maxsim_ranked<total_t>*>(past_maxima), wanted};
+        std::span<maxsim_ranked<total_t>> const best {reinterpret_cast<maxsim_ranked<total_t>*>(past_maxima), capacity};
         byte_t* const past_best = past_maxima + slice_t::reserved_bytes(best.size_bytes());
-        std::span<key_t> const best_keys {reinterpret_cast<key_t*>(past_best), wanted};
+        std::span<key_t> const best_keys {reinterpret_cast<key_t*>(past_best), capacity};
         byte_t* const past_best_keys = past_best + slice_t::reserved_bytes(best_keys.size_bytes());
         std::span<key_t> const candidates {reinterpret_cast<key_t*>(past_best_keys), rows * width};
         byte_t* const past_candidates = past_best_keys + slice_t::reserved_bytes(candidates.size_bytes());
         std::span<distance_t> const merged {reinterpret_cast<distance_t*>(past_candidates), width};
+        [[maybe_unused]] byte_t* const past_merged = past_candidates + slice_t::reserved_bytes(merged.size_bytes());
         for (std::size_t row = 0; row != rows; ++row)
             norms[row] = shards_[0].index->norms(query_rows.row(row).as_vector());
 
-        // Larger totals first, ties by key bytes, so every thread count ranks alike.
-        auto better = [](total_t first_total, key_t const& first_key, total_t second_total,
-                         key_t const& second_key) noexcept {
-            if (first_total != second_total) return first_total > second_total;
-            return std::memcmp(&first_key, &second_key, sizeof(key_t)) < 0;
-        };
         std::size_t kept = 0;
+        auto rank_key = [&](key_t const& key, std::span<dot_result_t const> key_maxima) noexcept {
+            total_t total {};
+            for (dot_result_t const maximum : key_maxima) total += total_t(maximum);
+            rank_into_(best, best_keys, kept, key, total);
+        };
         auto score_key = [&](key_t const& key) noexcept {
             for (dot_result_t& maximum : maxima) maximum = dot_result_t::finite_min();
             std::size_t folded = 0;
@@ -1808,23 +2044,9 @@ struct ram_indexes {
                 fold_row_(shards_[locator.shard].index->vector(locator.node), query_rows, norms, maxima);
                 ++folded;
             });
-            if (!folded || !wanted) return;
+            if (!folded) return;
             traversal.computed_distances += folded * rows;
-            total_t total {};
-            for (dot_result_t const maximum : maxima) total += total_t(maximum);
-            if (kept != wanted) {
-                best[kept] = {static_cast<u32_t>(kept), total};
-                best_keys[kept++] = key;
-                return;
-            }
-            std::size_t worst = 0;
-            for (std::size_t slot = 1; slot != kept; ++slot)
-                if (better(best[worst].total, best_keys[best[worst].candidate], best[slot].total,
-                           best_keys[best[slot].candidate]))
-                    worst = slot;
-            if (!better(total, key, best[worst].total, best_keys[best[worst].candidate])) return;
-            best[worst].total = total;
-            best_keys[best[worst].candidate] = key;
+            rank_key(key, maxima);
         };
 
         if (nominating == traversal_t::walk_k) {
@@ -1854,8 +2076,28 @@ struct ram_indexes {
                 return std::memcmp(&first_key, &second_key, sizeof(key_t)) < 0;
             };
             partial_sort(candidates.first(nominated), nominated, by_bytes);
+            std::size_t unique = 0;
             for (std::size_t position = 0; position != nominated; ++position)
-                if (!position || !(candidates[position] == candidates[position - 1])) score_key(candidates[position]);
+                if (!position || !(candidates[position] == candidates[position - 1]))
+                    candidates[unique++] = candidates[position];
+            bool tiled = false;
+            if constexpr (index_t::has_tiles_k)
+                if (rows >= tiles_kit_t::tile_columns_k) {
+                    if (failed(traversal.reserve_tiles(tiles_kit_t::stream_rows_k, tiles_kit_t::pack_columns_k, 0)))
+                        return status_t::bad_alloc_k;
+                    tiled_fold_t fold {*this,
+                                       query_rows,
+                                       past_merged,
+                                       config.cache_bytes,
+                                       watermarks,
+                                       traversal.step_dots.span(),
+                                       traversal.computed_distances};
+                    for (key_t const& key : candidates.first(unique)) fold.add(key, rank_key);
+                    fold.finish(rank_key);
+                    tiled = true;
+                }
+            if (!tiled)
+                for (key_t const& key : candidates.first(unique)) score_key(key);
         }
         else {
             // A key is a candidate at its first locator, asked a quad of rows at a time and settled
@@ -1885,16 +2127,94 @@ struct ram_indexes {
                 }
             }
         }
+        return land_ranked_(best, best_keys, kept, thread, query, land);
+    }
 
-        partial_sort(
-            best.first(kept), kept,
-            [&](maxsim_ranked<total_t> const& first_entry, maxsim_ranked<total_t> const& second_entry) noexcept {
-                return better(first_entry.total, best_keys[first_entry.candidate], second_entry.total,
-                              best_keys[second_entry.candidate]);
-            });
-        for (std::size_t rank = 0; rank != kept; ++rank)
-            keys[rank] = best_keys[best[rank].candidate], scores[rank] = static_cast<score_type_>(best[rank].total);
-        count = kept;
+    /**
+     *  @brief Late interaction of a block of queries, @p queries_count of them from @p first_query,
+     *      scanned together through the tiles kit on @p traversal.
+     *
+     *  Their rows pack once, every key visits once at its first locator, and its rows gather into
+     *  blocks folded against every pack, so the shards are read once per block of queries rather
+     *  than once per query. Each query keeps its best @p capacity keys and hands them to @p land as
+     *  its own query of thread @p thread, largest first. @p predicate hears each key once for the
+     *  whole block. A key finishes inside the fold that holds its last row, so only the rankings
+     *  outlive a fold. Laid out in the staged queries as @ref maxsim_scan_bytes_ counts it.
+     */
+    template <typename predicate_type_, typename land_type_>
+    status_t maxsim_scan_(rows_view_t queries, std::span<std::size_t const> query_offsets, std::size_t first_query,
+                          std::size_t queries_count, std::size_t capacity, search_config_t config,
+                          traversal_context_t& traversal, std::span<node_id_t const> watermarks,
+                          predicate_type_& predicate, std::size_t thread, land_type_& land) noexcept {
+        using slice_t = arena_allocator<byte_t>;
+        std::size_t const first_row = query_offsets[first_query];
+        std::size_t const rows = query_offsets[first_query + queries_count] - first_row;
+        vectors_view_t const query_rows = shards_[0].index->import_rows_(queries, first_row, rows, traversal);
+        byte_t* const past_rows = traversal.staged_queries.data() +
+                                  staged_rows_bytes(vector_dtype_k, rows, queries.columns);
+        std::span<maxsim_ranked<total_t>> const best {reinterpret_cast<maxsim_ranked<total_t>*>(past_rows),
+                                                      queries_count * capacity};
+        byte_t* const past_best = past_rows + slice_t::reserved_bytes(best.size_bytes());
+        std::span<key_t> const best_keys {reinterpret_cast<key_t*>(past_best), queries_count * capacity};
+        byte_t* const past_best_keys = past_best + slice_t::reserved_bytes(best_keys.size_bytes());
+        std::span<std::size_t> const kept {reinterpret_cast<std::size_t*>(past_best_keys), queries_count};
+        byte_t* const past_kept = past_best_keys + slice_t::reserved_bytes(kept.size_bytes());
+        for (std::size_t& count : kept) count = 0;
+
+        // Each query of the block sums its own columns of a key's maxima.
+        auto rank_key = [&](key_t const& key, std::span<dot_result_t const> key_maxima) noexcept {
+            for (std::size_t query = 0; query != queries_count; ++query) {
+                std::size_t const begin = query_offsets[first_query + query] - first_row;
+                std::size_t const end = query_offsets[first_query + query + 1] - first_row;
+                total_t total {};
+                for (dot_result_t const maximum : key_maxima.subspan(begin, end - begin)) total += total_t(maximum);
+                rank_into_(best.subspan(query * capacity, capacity), best_keys.subspan(query * capacity, capacity),
+                           kept[query], key, total);
+            }
+        };
+        if (failed(traversal.reserve_tiles(tiles_kit_t::stream_rows_k, tiles_kit_t::pack_columns_k, 0)))
+            return status_t::bad_alloc_k;
+        tiled_fold_t fold {*this,
+                           query_rows,
+                           past_kept,
+                           config.cache_bytes,
+                           watermarks,
+                           traversal.step_dots.span(),
+                           traversal.computed_distances};
+
+        // A key is a candidate at its first locator, asked a quad of rows at a time and settled
+        // once per first chunk's width of rows.
+        std::size_t const settled_rows = index_t::chunk_schedule_t::rows_in(0);
+        for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
+            shard_t const& one = shards_[shard];
+            auto const key_of = [&one](node_id_t node) noexcept { return one.keys[node]; };
+            node_predicate admits {predicate, key_of};
+            auto keep = [&](scan_payload_t node) noexcept { fold.add(one.keys[node], rank_key); };
+            for (std::size_t start = 0; start < watermarks[shard]; start += settled_rows) {
+                std::size_t const end = min_of<std::size_t>(start + settled_rows, watermarks[shard]);
+                quad<node_id_t> nodes;
+                quad<scan_payload_t> payloads;
+                std::size_t filled = 0;
+                for (std::size_t node = start; node != end; ++node) {
+                    auto const [leader, leader_status] = shards_.locators().find_first(one.keys[node]);
+                    if (failed(leader_status) || leader.shard != shard || leader.node != node) continue;
+                    nodes[filled] = static_cast<node_id_t>(node);
+                    payloads[filled] = static_cast<scan_payload_t>(node);
+                    if (++filled != quad_lanes_k) continue;
+                    ask_contenders(admits, nodes, payloads, filled, keep);
+                    filled = 0;
+                }
+                ask_contenders(admits, nodes, payloads, filled, keep);
+                settle_predicate(predicate, keep);
+            }
+        }
+        fold.finish(rank_key);
+        for (std::size_t query = 0; query != queries_count; ++query)
+            if (status_t const landed = land_ranked_(best.subspan(query * capacity, capacity),
+                                                     best_keys.subspan(query * capacity, capacity), kept[query], thread,
+                                                     first_query + query, land);
+                failed(landed))
+                return landed;
         return status_t::success_k;
     }
 

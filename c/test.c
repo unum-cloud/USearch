@@ -2610,6 +2610,132 @@ void test_attend(void) {
     printf("Test: Attend - PASSED\n");
 }
 
+/** Every landed run of @p matches against @p exact, `[query][document]` totals: as many keys as
+ *  @p expected_count per query, largest first, each at its exact total, even keys alone when
+ *  @p even_only. */
+static void expect_maxsim_tape(usearch_matches_tape_view_t matches, size_t queries, size_t documents,
+                               double const* exact, size_t const* expected_count, bool even_only) {
+    expect(matches.offsets && matches.offsets[0] == 0, "A tape starts at zero");
+    for (size_t query = 0; query != queries; ++query) {
+        size_t const first = matches.offsets[query], end = matches.offsets[query + 1];
+        expect_eq(end - first, expected_count[query], "Every query lands as many keys as it kept");
+        for (size_t entry = first; entry != end; ++entry) {
+            uint64_t const document = value_of(matches.keys[entry]);
+            expect(document < documents, "A landed key names a document");
+            expect(!even_only || document % 2 == 0, "A predicate narrows the landed keys");
+            expect(fabs(matches.scores[entry] - exact[query * documents + document]) < 1e-3,
+                   "A landed key scores its exact summed maxima");
+            expect(entry == first || matches.scores[entry] <= matches.scores[entry - 1], "Keys land largest first");
+        }
+    }
+}
+
+/** Documents of 2 to 4 token rows hold small integers, which `bf16` keeps exactly, so every MaxSim
+ *  total is exact: queries of 1, 2 and 3 rows land a ragged tape, walks and a scan alike, every
+ *  document without a bound, the best one with one, and even documents alone under a predicate. */
+void test_maxsim(void) {
+    printf("Test: MaxSim\n");
+
+    enum { documents = 6, dimensions = 8, rows_count = 18, query_rows = 6, queries = 3 };
+    size_t const document_rows[documents] = {2, 3, 4, 2, 3, 4};
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_inner_k,
+                                                        .quantization = usearch_scalar_bf16_k,
+                                                        .dimensions = dimensions,
+                                                        .connectivity = 16});
+    expect(!outcome.message, outcome.message);
+    usearch_executor_t const executor = create_executor(0);
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = rows_count});
+    expect(!outcome.message, outcome.message);
+
+    float rows[rows_count * dimensions];
+    usearch_key_t keys[rows_count];
+    for (size_t document = 0, row = 0; document != documents; ++document)
+        for (size_t token = 0; token != document_rows[document]; ++token, ++row) {
+            keys[row] = key_of(document);
+            for (size_t column = 0; column != dimensions; ++column)
+                rows[row * dimensions + column] = (float)((row * 7 + column * 3 + document) % 4);
+        }
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = index,
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = rows_count,
+                                   .keys = {keys, sizeof(usearch_key_t)},
+                                   .vectors = {rows, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+
+    // Every query row's best dot among a document's tokens, summed over the query's rows.
+    float query_vectors[query_rows * dimensions];
+    for (size_t position = 0; position != query_rows * dimensions; ++position)
+        query_vectors[position] = (float)((position * 5) % 3);
+    size_t const query_offsets[queries + 1] = {0, 1, 3, 6};
+    double exact[queries * documents] = {0};
+    for (size_t query = 0; query != queries; ++query)
+        for (size_t query_row = query_offsets[query]; query_row != query_offsets[query + 1]; ++query_row)
+            for (size_t document = 0, row = 0; document != documents; row += document_rows[document++]) {
+                double best = -INFINITY;
+                for (size_t token = 0; token != document_rows[document]; ++token) {
+                    double dot = 0;
+                    for (size_t column = 0; column != dimensions; ++column)
+                        dot += (double)query_vectors[query_row * dimensions + column] *
+                               rows[(row + token) * dimensions + column];
+                    if (dot > best) best = dot;
+                }
+                exact[query * documents + document] += best;
+            }
+
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_matches_tape_view_t matches = {0};
+    usearch_dense_maxsim_t maxsim = {
+        .index = index,
+        .executor = executor,
+        .outcome = &outcome,
+        .count = queries,
+        .queries = {query_vectors, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+        .matches = &matches,
+        .arena = arena,
+        .expansion_factor = rows_count,
+        .query_offsets = query_offsets};
+    size_t const every[queries] = {documents, documents, documents};
+    size_t const best_only[queries] = {1, 1, 1};
+    size_t const even_ones[queries] = {documents / 2, documents / 2, documents / 2};
+    usearch_traversal_t const traversals[2] = {usearch_traversal_walk_k, usearch_traversal_scan_k};
+    for (size_t form = 0; form != 2; ++form) {
+        maxsim.traversal = traversals[form];
+        maxsim.wanted = 0;
+        maxsim.predicate = (usearch_predicate_t) {0};
+        usearch_dense_maxsim(&maxsim);
+        expect(!outcome.message, outcome.message);
+        expect_maxsim_tape(matches, queries, documents, exact, every, false);
+
+        maxsim.wanted = 1;
+        usearch_dense_maxsim(&maxsim);
+        expect(!outcome.message, outcome.message);
+        expect_maxsim_tape(matches, queries, documents, exact, best_only, false);
+        for (size_t query = 0; query != queries; ++query)
+            for (size_t document = 0; document != documents; ++document)
+                expect(exact[query * documents + document] <= matches.scores[matches.offsets[query]] + 1e-3,
+                       "The one kept key is the best");
+
+        size_t widest_batch = 0;
+        maxsim.wanted = 0;
+        maxsim.predicate = (usearch_predicate_t) {admits_even, &widest_batch};
+        usearch_dense_maxsim(&maxsim);
+        expect(!outcome.message, outcome.message);
+        expect_maxsim_tape(matches, queries, documents, exact, even_ones, true);
+    }
+
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+    usearch_dense_free(index);
+    printf("Test: MaxSim - PASSED\n");
+}
+
 /** A RAM index saved as one monolith serves the same keys and rows from storage: an NVMe executor
  *  views the file, its search, count, get, health and cursor answer as the RAM index did, and every
  *  mutation is refused. An implementation without an NVMe residency says so, and the test skips. */
@@ -3421,6 +3547,7 @@ int main(int argc, char* argv[]) {
 #if USEARCH_DENSE_DTYPES >= 3
     if (selected("attend")) test_attend();
 #endif
+    if (selected("maxsim")) test_maxsim();
     if (selected("nvme_view")) test_nvme_view(dimension_counts[0]);
     if (selected("nvme_view_narrow_keys")) test_nvme_view_narrow_keys();
     if (selected("vram_parts_share_a_device")) test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]);

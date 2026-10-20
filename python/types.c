@@ -2436,7 +2436,7 @@ typedef struct Matches {
 static char const doc_Matches[] =                                                               //
     "Matches\n"                                                                                 //
     "\n"                                                                                        //
-    "A ranked run `search` or `maxsim` wrote into an `Arena`, viewing it until it rewinds.\n"   //
+    "A ranked run `search` wrote into an `Arena`, viewing it until it rewinds.\n"               //
     "\n"                                                                                        //
     "Reads through to three outputs, so `np.asarray` costs nothing and NumPy is never\n"        //
     "required; a buffer exported over them holds the arena against the next call. No NumPy\n"   //
@@ -2537,7 +2537,7 @@ PyTypeObject MatchesType = {
     .tp_doc = doc_Matches,
     .tp_basicsize = sizeof(Matches),
     .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = NULL, // Returned by `search` and `maxsim`, never constructed by name.
+    .tp_new = NULL, // Returned by `search`, never constructed by name.
     .tp_dealloc = (destructor)Matches_dealloc,
     .tp_repr = (reprfunc)Matches_repr,
     .tp_as_sequence = &Matches_as_sequence,
@@ -2575,7 +2575,8 @@ static char const doc_DenseProducts[] =                                         
     "up to `offsets[i + 1]`. `keys`, a (pairs, 16) run naming each pair's indexed row, and\n"    //
     "`scores`, the (pairs,) float64 products, sit beside them. `required` counts the pairs\n"    //
     "scored before `wanted` cut any. `len()` counts the left rows, and `row(i)` answers the\n"   //
-    "(keys, scores) of one.";
+    "(keys, scores) of one. `maxsim` lands its documents alike, one run per query, largest\n"    //
+    "first, its `required` counting the documents it landed.";
 
 PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t const* view, size_t rows, size_t pairs,
                                   size_t required) {
@@ -2654,7 +2655,7 @@ PyTypeObject DenseProductsType = {
     .tp_doc = doc_DenseProducts,
     .tp_basicsize = sizeof(DenseProducts),
     .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = NULL, // Returned by `multiply`, never constructed by name.
+    .tp_new = NULL, // Returned by `multiply` and `maxsim`, never constructed by name.
     .tp_dealloc = (destructor)DenseProducts_dealloc,
     .tp_repr = (reprfunc)DenseProducts_repr,
     .tp_as_sequence = &DenseProducts_as_sequence,

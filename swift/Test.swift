@@ -719,6 +719,9 @@ struct LinearAlgebraTests {
         let documents = try index.maxsim(tokens, rowsPerQuery: 2, wanted: 2, arena: arena)
         #expect(documents.count == 1)
         #expect(Set(documents[0].map(\.key)) == [Key(0), Key(1)])
+        let bounded = documents[0].count
+        let every = try index.maxsim(tokens, rowsPerQuery: 2, wanted: 0, arena: arena)
+        #expect(every[0].count >= bounded, "a zero bound keeps every scored document")
 
         // A token count the rows do not divide by is a shape the binding refuses on its own.
         #expect(failureStatus(of: try index.maxsim(tokens, rowsPerQuery: 3, wanted: 2, arena: arena)) == .shapeMismatch)

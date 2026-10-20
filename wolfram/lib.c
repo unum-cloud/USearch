@@ -409,22 +409,22 @@ struct call_t {
      *  hold. */
     size_t count;
 
-    /** Rows of @c get or pairs of @c multiply the call landed. */
+    /** Rows of @c get, or pairs of @c multiply and keys of @c maxsim, the call landed. */
     size_t written;
 
-    /** Pairs @c multiply scored before @c wanted cut any. */
+    /** Pairs @c multiply scored before @c wanted cut any, or the keys @c maxsim landed. */
     size_t required;
 
     /** Entries under the key of @c count, or nodes @c refine changed. */
     size_t tally;
 
-    /** Matches of @c search and @c maxsim, inside the arena. */
+    /** Matches of @c search, inside the arena. */
     usearch_matches_view_t matches;
 
     /** Rows of @c get, inside the arena. */
     usearch_rows_view_t vectors;
 
-    /** Pairs of @c multiply, inside the arena. */
+    /** Pairs of @c multiply or keys of @c maxsim, inside the arena. */
     usearch_matches_tape_view_t products;
 
     /** The @c save_buffer monolith, inside the arena. */
@@ -1152,9 +1152,8 @@ EXTERN_C DLLEXPORT int DenseMetadataReadBuffer(WolframLibraryData library_data, 
 
 #pragma region Dense Index Verbs
 
-/** Copies the matches of a search or a late-interaction scoring out of the arena: every query's
- *  found keys and scores end to end, as @b [found,16] bytes and @b [found] reals, and a count per
- *  query. */
+/** Copies the matches of a search out of the arena: every query's found keys and scores end to
+ *  end, as @b [found,16] bytes and @b [found] reals, and a count per query. */
 static int answer_matches(WolframLibraryData library_data, call_t* call, DataStore store) {
     usearch_matches_view_t const matches = call->matches;
     size_t found = 0;
@@ -1222,6 +1221,13 @@ static int answer_multiply(WolframLibraryData library_data, call_t* call, DataSt
         status = store_reals(library_data, store, "Scores", products.scores, 1, keys_extents);
     if (status == LIBRARY_NO_ERROR) store_size(library_data, store, "Required", call->required);
     return status;
+}
+
+/** Copies the keys of @c maxsim out of the arena as @c multiply lands its pairs; MaxSim reports no
+ *  totals, so the last offset counts both. */
+static int answer_maxsim(WolframLibraryData library_data, call_t* call, DataStore store) {
+    call->written = call->required = call->products.offsets ? call->products.offsets[call->count] : 0;
+    return answer_multiply(library_data, call, store);
 }
 
 /** Copies the @c save_buffer monolith out of the arena as an @c UnsignedInteger8 vector. */
@@ -1406,10 +1412,12 @@ EXTERN_C DLLEXPORT int DenseSearch(WolframLibraryData library_data, mint argumen
 }
 
 /**
- *  @brief Calls @c usearch_dense_maxsim: @c queries → @c rowsPerQuery → @c wanted → @c arena
- *      → @c expansionFactor → the scored keys, their summed maxima, and one count per query.
+ *  @brief Calls @c usearch_dense_maxsim: @c queries → @c rowsPerQuery → @c wanted → @c arena →
+ *      @c expansionFactor → offsets, the scored keys, their summed maxima, and the keys landed.
  *
  *  The token rows of every query are laid end to end, so their number divides by @p rowsPerQuery.
+ *  Query @c i spans keys @c offsets[[i+1]]+1 through @c offsets[[i+2]], largest first; keys are
+ *  @b [landed,16] byte cells. A zero @p wanted keeps every key a query scored.
  */
 EXTERN_C DLLEXPORT int DenseMaxsim(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                    MArgument result) {
@@ -1434,7 +1442,7 @@ EXTERN_C DLLEXPORT int DenseMaxsim(WolframLibraryData library_data, mint argumen
         !(arena = call_arena(&call, MArgument_getInteger(arguments[receiver_arguments + 4]))))
         return call_answer(library_data, &call, result);
     call.count = rows / rows_per_query;
-    call.answer = answer_matches;
+    call.answer = answer_maxsim;
     usearch_dense_maxsim(&(usearch_dense_maxsim_t) {
         .index = call.index,
         .executor = call.executor,
@@ -1442,7 +1450,7 @@ EXTERN_C DLLEXPORT int DenseMaxsim(WolframLibraryData library_data, mint argumen
         .count = call.count,
         .queries = queries,
         .rows_per_query = rows_per_query,
-        .matches = &call.matches,
+        .matches = &call.products,
         .arena = arena,
         .wanted = wanted,
         .expansion_factor = expansion,

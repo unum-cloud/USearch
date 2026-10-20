@@ -634,8 +634,8 @@ PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void cons
  *  exception set. */
 PyObject* usearch_py_matches_new(PyObject* arena, usearch_matches_view_t const* matches, size_t queries);
 
-/** A new @c DenseProducts over the @p pairs across @p rows rows @c multiply wrote into @p arena,
- *  and the pairs it @p required; NULL with an exception set. */
+/** A new @c DenseProducts over the @p pairs across @p rows rows @c multiply or @c maxsim wrote into
+ *  @p arena, and the pairs it @p required; NULL with an exception set. */
 PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t const* products, size_t rows,
                                   size_t pairs, size_t required);
 

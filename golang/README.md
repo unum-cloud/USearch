@@ -525,12 +525,17 @@ for row := range products.Rows() {
 `Maxsim` scores multi-row queries against multi-row entries: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what a `ValuesPerKey` above one exists for, and the wanted count is over documents rather than rows.
 It runs on an inner-product index alone, since a sum of maxima needs logits rather than distances.
+The keys land as `Multiply`'s pairs do, one `DenseProducts` row per query, largest score first, and a zero wanted count keeps every key a query scored.
 
 ```go
 options.Metric = usearch.DenseMetricInner
 options.ValuesPerKey = 512
 
 documents, err := index.On(executor).Maxsim(usearch.RowsOf(tokens, dimensions), tokensPerQuery, 10, arena, nil)
+for query := range documents.Rows() {
+	keys, scores, _ := documents.Row(query)
+	rerank(query, keys, scores)
+}
 ```
 
 ### Attention

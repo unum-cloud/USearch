@@ -633,12 +633,15 @@ test("Late interaction over multi-row entries", () => {
   index.reserve(4);
   index.insert([7n, 7n, 8n, 8n], rows(4, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1));
 
-  const matches = index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 2, 2, new Arena());
+  const documents = index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 2, 2, new Arena());
 
-  assert.equal(matches.queries, 1, "two token rows make one query");
-  assert.equal(matches.columns, 2);
-  assert.deepEqual(matches.counts, new BigUint64Array([2n]), "both keys scored");
-  assert.equal(usearch.integerFromKey(usearch.keyAt(matches.keys, 0)), 7n);
+  assert.equal(documents.rows, 1, "two token rows make one query");
+  assert.deepEqual(documents.offsets, new BigUint64Array([0n, 2n]), "both keys scored");
+  assert.equal(documents.required, 2, "the keys landed");
+  assert.equal(usearch.integerFromKey(usearch.keyAt(documents.keys, 0)), 7n);
+  const every = index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 2, 0, new Arena());
+  const bounded = index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 2, 1, new Arena());
+  assert(every.get(0).count >= bounded.get(0).count, "a zero wanted lands every key the query scored");
   assert.throws(() => index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 3, 2, new Arena()), {
     code: Status.ShapeMismatch,
     message: "The rows do not split into whole queries.",

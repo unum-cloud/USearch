@@ -426,7 +426,7 @@ pub struct usearch_dense_maxsim_t {
     pub count: usize,
     pub queries: usearch_rows_view_t,
     pub rows_per_query: usize,
-    pub matches: *mut usearch_matches_view_t,
+    pub matches: *mut usearch_matches_tape_view_t,
     pub arena: usearch_arena_t,
     pub wanted: usize,
     pub expansion_factor: usize,
@@ -927,7 +927,8 @@ impl From<usize> for DenseSearchConfig<'_> {
 ///
 /// Mirrors `usearch_dense_maxsim_t`.
 pub struct DenseMaxsimConfig<'config> {
-    /// Documents kept per query, counted over keys rather than rows.
+    /// Documents kept per query, counted over keys rather than rows; zero keeps every key the
+    /// query scored.
     pub wanted: usize,
     /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     pub expansion_factor: usize,
@@ -1148,8 +1149,9 @@ impl<'arena, Value: Element> DenseVectors<'arena, Value> {
     pub fn view(&self) -> Result<MatrixView<'arena, Value>> { exported_rows(self.arena, &self.vectors.0, self.count) }
 }
 
-/// The ragged sparse product [`DenseVerbs::multiply`] exported into the arena it borrows: per left
-/// row, every pair its walk scored, in traversal order.
+/// The ragged run [`DenseVerbs::multiply`] or [`DenseVerbs::maxsim`] exported into the arena it
+/// borrows: per left row, every pair its walk scored, in traversal order, or per query, its kept
+/// keys, largest score first.
 ///
 /// Mirrors `usearch_matches_tape_view_t`.
 pub struct DenseProducts<'arena> {
@@ -1160,15 +1162,18 @@ pub struct DenseProducts<'arena> {
 }
 
 impl<'arena> DenseProducts<'arena> {
-    /// Left rows the call multiplied.
+    /// Left rows the call multiplied, or queries it scored.
     pub fn queries(&self) -> usize { self.count }
 
-    /// Pairs the walks scored across every row, before the wanted bound cut any.
+    /// Pairs the walks scored across every row, before the wanted bound cut any; a `maxsim`
+    /// reports no such count, so it holds the keys landed across every query, zero over device
+    /// memory.
     pub fn required(&self) -> usize { self.required }
 
-    /// The pairs of one left row, a key naming each indexed row beside its product, refused with
-    /// [`Status::InvalidArgument`] when `row` is not below [`DenseProducts::queries`] and with
-    /// [`Status::Device`] over device memory.
+    /// The pairs of one left row, a key naming each indexed row beside its product, or the keys
+    /// of one query beside their summed maxima, refused with [`Status::InvalidArgument`] when
+    /// `row` is not below [`DenseProducts::queries`] and with [`Status::Device`] over device
+    /// memory.
     pub fn row(&self, row: usize) -> Result<MatchesRow<'arena>> {
         self.arena.host()?;
         match row < self.count {
@@ -1758,8 +1763,9 @@ pub trait DenseVerbs<'index>: Copy {
         })
     }
 
-    /// Late-interaction scoring of multi-row queries against multi-row entries, keeping up to
-    /// `wanted` keys per query, largest score first.
+    /// Late-interaction scoring of multi-row queries against multi-row entries, landing up to
+    /// `wanted` keys per query, largest score first, in `arena` as one ragged run; zero keeps every
+    /// key a query scored.
     ///
     /// Every query row takes its best match within a key, and those maxima sum to that key's
     /// score - so `rows_per_query` is the token count each query occupies, `queries` holds them
@@ -2353,13 +2359,13 @@ pub struct DenseMaxsim<'config, 'arena, Queries> {
     rows_per_query: usize,
     config: DenseMaxsimConfig<'config>,
     arena: &'arena mut Arena,
-    matches: Exported<usearch_matches_view_t>,
+    matches: Exported<usearch_matches_tape_view_t>,
     count: usize,
 }
 
 impl<'arena, Queries: RowsView> Calling for DenseMaxsim<'_, 'arena, Queries> {
     type Arguments = usearch_dense_maxsim_t;
-    type Output = Matches<'arena>;
+    type Output = DenseProducts<'arena>;
 
     fn arguments(
         &mut self,
@@ -2399,11 +2405,18 @@ impl<'arena, Queries: RowsView> Calling for DenseMaxsim<'_, 'arena, Queries> {
 
     unsafe fn call(arguments: *mut Self::Arguments) { usearch_dense_maxsim(arguments) }
 
-    fn finish(self) -> Result<Matches<'arena>> {
-        Ok(Matches {
+    fn finish(self) -> Result<DenseProducts<'arena>> {
+        let offsets = self.matches.0.offsets;
+        let required = match self.arena.host().is_ok() && !offsets.is_null() {
+            // Safety: a finished call on host memory wrote `count + 1` offsets, the last the total.
+            true => unsafe { *offsets.add(self.count) },
+            false => 0,
+        };
+        Ok(DenseProducts {
             arena: self.arena,
-            view: self.matches,
-            queries: self.count,
+            products: self.matches,
+            count: self.count,
+            required,
         })
     }
 }
@@ -3738,6 +3751,13 @@ mod tests {
             matches.rows()?.all(|row| row.keys.len() == DOCUMENTS),
             "every document is scored, once per query"
         );
+        let bounded: Vec<usize> = matches.rows()?.map(|row| row.keys.len()).collect();
+        let every = index.maxsim(&tokens, TOKENS, 0, &mut arena)?;
+        assert!(
+            every.rows()?.zip(bounded).all(|(row, kept)| row.keys.len() >= kept),
+            "no bound lands every key a query scored"
+        );
+        assert_eq!(every.required(), every.rows()?.map(|row| row.keys.len()).sum::<usize>());
         assert!(matches!(
             index.maxsim(&tokens, TOKENS + 1, DOCUMENTS, &mut arena),
             Err(Error {

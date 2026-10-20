@@ -162,7 +162,7 @@ export interface CompiledIndex {
       expansion: number | undefined,
       stats: CompiledStats | undefined,
     ]
-  ): CompiledMatches | CompiledDeferred;
+  ): CompiledProducts | CompiledDeferred;
   get(
     ...arguments_: [...On, key: Uint8Array, scalar: number, arena: CompiledArena]
   ): CompiledVectors | CompiledDeferred;

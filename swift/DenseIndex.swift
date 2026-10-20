@@ -665,15 +665,18 @@ public struct DenseLinks: RandomAccessCollection {
 }
 
 /// The ragged sparse product `multiply` wrote into an arena: per left row, every pair its walk
-/// scored, in traversal order, read in place. Mirrors `usearch_matches_tape_view_t`.
+/// scored, in traversal order; or the keys `maxsim` kept per query, largest score first; read in
+/// place. Mirrors `usearch_matches_tape_view_t`.
 public struct DenseProducts: RandomAccessCollection {
     /// The arena the pairs live in, and which call wrote them.
     let write: ArenaWrite
     /// The keys, products and offsets the call wrote.
     let products: usearch_matches_tape_view_t
-    /// One past the last left row.
+    /// One past the last left row or query.
     public let endIndex: Int
-    /// Pairs the walks scored across every row, before the wanted bound cut any.
+    /// Pairs the walks scored across every row, before the wanted bound cut any; a `maxsim`
+    /// reports no such count, so it holds the keys landed across every query, zero over device
+    /// memory.
     public let required: Int
 
     /// The first row's position, which a collection walk starts from.
@@ -1076,8 +1079,9 @@ public final class DenseIndex: @unchecked Sendable {
     ///
     /// A document is one key holding its token rows, which is what a `valuesPerKey` above one
     /// exists for. `rowsPerQuery` is the token count each query occupies, `queries` holds them end
-    /// to end, and up to `wanted` documents land in `arena`, one row per whole query rather than
-    /// per token. Approximate downward only: a token whose neighborhood the walk never entered
+    /// to end, and up to `wanted` documents land in `arena` as one ragged run, one row per whole
+    /// query rather than per token, largest score first; a zero `wanted` keeps every document the
+    /// query scored. Approximate downward only: a token whose neighborhood the walk never entered
     /// contributes no maximum, so a key can score below its exact value but never above it. Runs on
     /// an inner-product index alone.
     ///
@@ -1089,7 +1093,7 @@ public final class DenseIndex: @unchecked Sendable {
         wanted: Int,
         arena: Arena,
         config: DenseMaxsimConfig = DenseMaxsimConfig()
-    ) throws(USearchError) -> Matches {
+    ) throws(USearchError) -> DenseProducts {
         try here.maxsim(queries, rowsPerQuery: rowsPerQuery, wanted: wanted, arena: arena, config: config)
     }
 
@@ -1265,7 +1269,7 @@ public struct DenseIndexOn: Sendable {
         wanted: Int,
         arena: Arena,
         config: DenseMaxsimConfig = DenseMaxsimConfig()
-    ) throws(USearchError) -> Matches {
+    ) throws(USearchError) -> DenseProducts {
         try run { (call) throws(USearchError) in
             try call.maxsim(queries, rowsPerQuery: rowsPerQuery, wanted: wanted, arena: arena, config: config)
         }
@@ -1413,7 +1417,7 @@ public struct DenseIndexDeferredOn: Sendable {
         wanted: Int,
         arena: Arena,
         config: DenseMaxsimConfig = DenseMaxsimConfig()
-    ) throws(USearchError) -> Deferred<Matches> {
+    ) throws(USearchError) -> Deferred<DenseProducts> {
         try submit { (call) throws(USearchError) in
             try call.maxsim(queries, rowsPerQuery: rowsPerQuery, wanted: wanted, arena: arena, config: config)
         }
@@ -1692,12 +1696,12 @@ struct DenseCall {
         wanted: Int,
         arena: Arena,
         config: DenseMaxsimConfig
-    ) throws(USearchError) -> Submission<Matches> {
+    ) throws(USearchError) -> Submission<DenseProducts> {
         let count = try wholeQueries(queries, rowsPerQuery)
         let handle = try open()
         landing.anchor(queries.owner)
         landing.anchor(config.stats)
-        let matches = landing.slots(usearch_matches_view_t())
+        let matches = landing.slots(usearch_matches_tape_view_t())
         let write = landing.lend(arena)
         let progress = landing.lend(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_maxsim_t(
@@ -1719,7 +1723,10 @@ struct DenseCall {
             query_offsets: nil
         )
         usearch_dense_maxsim(&arguments)
-        func read() -> Matches { Matches(write: write, view: matches.pointee, endIndex: count) }
+        func read() -> DenseProducts {
+            let landed = arena.residency == .vram ? 0 : matches.pointee.offsets.map { $0[count] } ?? 0
+            return DenseProducts(write: write, products: matches.pointee, endIndex: count, required: landed)
+        }
         return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
     }
 

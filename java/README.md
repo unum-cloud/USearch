@@ -389,11 +389,15 @@ for (int row = 0; row < products.queries(); ++row) {
 `maxsim` scores multi-row queries against multi-row entries: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, so `valuesPerKey` bounds how many rows share a key and the wanted count is the "k" over documents rather than over rows.
 Every query carries the same number of rows, so a padded token batch applies as is.
+Each query's keys land largest score first in the same ragged `DenseProducts` that `multiply` returns, and a wanted count of zero keeps every key the query scored.
 
 ```java
 DenseOptions tokens = new DenseOptions().dimensions(128).metric(DenseMetric.INNER).valuesPerKey(512);
 try (DenseIndex index = DenseIndex.initRam(tokens, new int[0])) {
-    Matches documents = index.on(pool).maxsim(queryTokens, 32, 10, arena);
+    DenseProducts documents = index.on(pool).maxsim(queryTokens, 32, 10, arena);
+    for (long rank = 0; rank < documents.count(0); ++rank) {
+        System.out.println(documents.key(0, rank) + " scores " + documents.score(0, rank));
+    }
 }
 ```
 

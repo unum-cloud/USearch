@@ -265,7 +265,7 @@ A row run claiming more bytes than its array holds is refused before it crosses.
 
 ### Search
 
-`search` and `maxsim` land their matches in the arena as `Matches`, three views: the keys, the scores, and how many matches every query actually found.
+`search` lands its matches in the arena as `Matches`, three views: the keys, the scores, and how many matches every query actually found.
 
 ```js
 const matches = index.search(queries, 10, arena);
@@ -401,14 +401,16 @@ The Arrow `offsets`, one entry longer than the left rows, land in the arena besi
 
 ### Late Interaction
 
-An index whose `valuesPerKey` is above one holds several token rows per document, and `maxsim` scores documents rather than rows:
+An index whose `valuesPerKey` is above one holds several token rows per document, and `maxsim` scores documents rather than rows.
+It answers the `DenseProducts` run `multiply` does, one run of documents per query, largest first, and a zero `wanted` keeps every document a query scored:
 
 ```js
 const index = usearch.DenseIndex.initRam({ metric: usearch.DenseMetric.Inner, dimensions: 128, valuesPerKey: 64 });
 index.on(executor).insert(documentKeys, tokenRows);
 
-// 32 padded token rows per query, one run row per query
+// 32 padded token rows per query, up to 10 documents each, query `i` spanning `offsets[i]` up to `offsets[i + 1]`
 const documents = index.on(executor).maxsim(queryTokens, 32, 10, arena);
+const best = documents.get(0); // A MatchesRow over the first query's documents
 ```
 
 ### Attention

@@ -337,9 +337,12 @@ public class DenseIndexTest {
                             new Key[] {Key.of(10), Key.of(10), Key.of(20), Key.of(20)},
                             RowsView.of(new float[] {1, 0, 0, 1, 2, 0, 0, 2}, 2));
 
-            Matches matches = index.on(POOL).maxsim(RowsView.of(new float[] {1, 0, 0, 1}, 2), 2, 2, arena);
+            RowsView tokens = RowsView.of(new float[] {1, 0, 0, 1}, 2);
+            DenseProducts matches = index.on(POOL).maxsim(tokens, 2, 2, arena);
             assertEquals(1, matches.queries());
             assertEquals(2, matches.count(0));
+            long bounded = matches.count(0);
+            assertTrue(index.on(POOL).maxsim(tokens, 2, 0, arena).count(0) >= bounded);
 
             // The rows of a batch must divide into whole queries, and the check runs before the call.
             assertEquals(
@@ -663,7 +666,7 @@ public class DenseIndexTest {
 
             // A failure travels to every join, and a call closed unjoined waits rather than leaking.
             Deferred<Long> counted = deferred.count(Key.of(20));
-            Deferred<Matches> refused = deferred.maxsim(RowsView.of(new float[] {1, 0}, 2), 1, 1, arena);
+            Deferred<DenseProducts> refused = deferred.maxsim(RowsView.of(new float[] {1, 0}, 2), 1, 1, arena);
             USearchException reported = assertThrows(USearchException.class, refused::join);
             assertEquals(Status.CONFIG_MISMATCH, reported.status());
             assertSame(reported, assertThrows(USearchException.class, refused::join));
