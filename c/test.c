@@ -236,6 +236,23 @@ void test_find_vector(size_t const collection_size, size_t const dimensions) {
         expect(found_count >= 1 && found_count <= collection_size, "Vector is missing");
     }
 
+    // Exact search must return the same closest vectors on one thread and on several
+    usearch_key_t* threaded_keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
+    float* threaded_distances = (float*)malloc(collection_size * sizeof(float));
+    expect(threaded_keys && threaded_distances, "Failed to allocate memory");
+    size_t const stride = dimensions * sizeof(float);
+    usearch_exact_search(data, collection_size, stride, data, collection_size, stride, usearch_scalar_f32_k, dimensions,
+                         opts.metric_kind, 1, 1, keys, sizeof(usearch_key_t), distances, sizeof(float), &error);
+    expect(!error, error);
+    usearch_exact_search(data, collection_size, stride, data, collection_size, stride, usearch_scalar_f32_k, dimensions,
+                         opts.metric_kind, 1, 4, threaded_keys, sizeof(usearch_key_t), threaded_distances,
+                         sizeof(float), &error);
+    expect(!error, error);
+    expect(!memcmp(keys, threaded_keys, collection_size * sizeof(usearch_key_t)), "Exact search differs by threads");
+    expect(!memcmp(distances, threaded_distances, collection_size * sizeof(float)), "Exact search differs by threads");
+
+    free(threaded_keys);
+    free(threaded_distances);
     free(data);
     free(keys);
     free(distances);
