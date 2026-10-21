@@ -337,6 +337,66 @@ test("Invalid operations", async (t) => {
   });
 });
 
+test("Invalid `k` and `threads`", async (t) => {
+  const index = new usearch.Index({
+    metric: "l2sq",
+    connectivity: 16,
+    dimensions: 3,
+  });
+  index.add(42n, new Float32Array([0.2, 0.6, 0.4]));
+  const query = new Float32Array([0.2, 0.6, 0.4]);
+  const label = (value) =>
+    typeof value === "bigint" ? `${value}n` : typeof value === "string" ? JSON.stringify(value) : String(value);
+
+  // These used to be forwarded to the native addon, which converts them to
+  // `size_t` and aborts the whole process (or fails to allocate) instead of throwing.
+  const badCounts = [NaN, Infinity, -Infinity, 1e300, 1.5, 0, -1, "2", null, undefined, 2n];
+  for (const k of badCounts) {
+    await t.test(`search rejects k=${label(k)}`, () => {
+      assert.throws(() => index.search(query, k), /`k` must be a positive integer/);
+    });
+  }
+
+  const badThreads = [NaN, Infinity, -Infinity, 1e300, 1.5, -1, "2", null, 2n];
+  for (const threads of badThreads) {
+    await t.test(`search rejects threads=${label(threads)}`, () => {
+      assert.throws(
+        () => index.search(query, 1, threads),
+        /`threads` must be a non-negative integer/,
+      );
+    });
+    await t.test(`add rejects threads=${label(threads)}`, () => {
+      assert.throws(
+        () => index.add(43n, new Float32Array([0.1, 0.2, 0.3]), threads),
+        /`threads` must be a non-negative integer/,
+      );
+    });
+    await t.test(`exactSearch rejects threads=${label(threads)}`, () => {
+      assert.throws(
+        () => usearch.exactSearch(query, query, 3, 1, "l2sq", threads),
+        /`threads` must be a non-negative integer/,
+      );
+    });
+  }
+  assert.equal(index.size(), 1, "rejected `add` calls must not modify the index");
+
+  for (const count of [NaN, Infinity, 1.5, 0, -1]) {
+    await t.test(`exactSearch rejects count=${label(count)}`, () => {
+      assert.throws(
+        () => usearch.exactSearch(query, query, 3, count, "l2sq"),
+        /Dimensions and count must be positive integers/,
+      );
+    });
+  }
+
+  await t.test("valid `k` and `threads` still work", () => {
+    for (const threads of [undefined, 0, 1, THREADS]) {
+      const results = index.search(query, 1, threads);
+      assert.deepEqual(results.keys, new BigUint64Array([42n]));
+    }
+  });
+});
+
 test("Serialization", async (t) => {
   const indexPath = path.join(os.tmpdir(), "usearch.test.index");
 

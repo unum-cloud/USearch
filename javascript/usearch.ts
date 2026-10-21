@@ -360,7 +360,7 @@ export class Index {
       );
     }
 
-    if ((!Number.isNaN(threads) && typeof threads !== "number") || threads < 0) {
+    if (!Number.isSafeInteger(threads) || threads < 0) {
       throw new Error(
         "`threads` must be a non-negative integer representing the number of threads to use for searching."
       );
@@ -395,12 +395,12 @@ export class Index {
   search(vectors: Vector, k: number, threads: number): Matches;
   search(vectors: Matrix, k: number, threads: number): BatchMatches;
   search(vectors: VectorOrMatrix, k: number, threads: number = 0): Matches | BatchMatches {
-    if ((!Number.isNaN(k) && typeof k !== "number") || k <= 0) {
+    if (!Number.isSafeInteger(k) || k <= 0) {
       throw new Error(
         "`k` must be a positive integer representing the number of nearest neighbors to search for."
       );
     }
-    if ((!Number.isNaN(threads) && typeof threads !== "number") || threads < 0) {
+    if (!Number.isSafeInteger(threads) || threads < 0) {
       throw new Error(
         "`threads` must be a non-negative integer representing the number of threads to use for searching."
       );
@@ -591,10 +591,15 @@ export function exactSearch(
   // Validate and normalize the dimensions and count
   dimensions = Number(dimensions);
   count = Number(count);
-  if (count <= 0 || dimensions <= 0) {
+  if (
+    !Number.isSafeInteger(count) ||
+    count <= 0 ||
+    !Number.isSafeInteger(dimensions) ||
+    dimensions <= 0
+  ) {
     throw new Error("Dimensions and count must be positive integers.");
   }
-  if ((!Number.isNaN(threads) && typeof threads !== "number") || threads < 0) {
+  if (!Number.isSafeInteger(threads) || threads < 0) {
     throw new Error(
       "`threads` must be a non-negative integer representing the number of threads to use for searching."
     );
