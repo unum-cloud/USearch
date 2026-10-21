@@ -733,7 +733,7 @@ class row_walker {
                 walk.frontier.clear();
                 walk.visited.clear();
                 walk.staged.clear();
-                walk.random_generator = splitmix64_t {mix_bits(u64_t(row) * parts + shard + 1)};
+                walk.random_generator = seeded_stream(u64_t(row) * parts + shard + 1);
                 walk.shard = shard;
                 walk.row_slot = slot_index;
                 walk.stage = nvme_walk_stage_t::seeding_k;

@@ -377,6 +377,26 @@ constexpr std::size_t scan_round_capacity() noexcept {
 
 #pragma region Rescorings
 
+/** The insertion and refine walks' rescoring: scores stay as the kit landed them, and each merged
+ *  quad keeps a zero-distance node only while the candidates hold none, so a duplicate class spends
+ *  one rank of the pool instead of all of them. */
+struct single_zero_rescoring_t {
+    template <typename ids_type_, typename keys_type_, typename norms_type_, typename scores_type_>
+    void operator()(ids_type_ const&, keys_type_ const&, norms_type_ const&, scores_type_&,
+                    std::size_t) const noexcept {}
+
+    /** The ascending @p scored quad past its leading zeros, all of them once @p candidates hold
+     *  one, all but the last otherwise. */
+    template <typename candidates_type_>
+    static std::span<scored_node_t> admitted(std::span<scored_node_t> scored,
+                                             candidates_type_ const& candidates) noexcept {
+        std::size_t zeros = 0;
+        while (zeros != scored.size() && scored[zeros].distance == 0) ++zeros;
+        bool const held = !candidates.empty() && candidates[0].distance == 0;
+        return scored.subspan(zeros - (zeros && !held));
+    }
+};
+
 /** Indexer heads as a walk's rescoring: each scored dot becomes Σₕ wₕ·ReLU(⟨qₕ, k⟩) and its
  *  distance 1 − score. */
 template <typename quads_kit_type_>
@@ -3396,49 +3416,69 @@ struct ram_index {
      *
      *  Reads the graph without locks. Cost is O(kept · considered) one-to-one distances.
      *
-     *  @param[in] candidates Search results, ascending by distance to the query.
+     *  @param[inout] candidates Search results, ascending by distance to the query; their ties
+     *      reorder in place on the hashed ring around @p query_id.
+     *  @param[in] query_id The row being linked.
      *  @param[in] limit Ceiling on the kept neighbors - typically the connectivity.
      *  @param[out] out Receives the kept scored nodes, diverse picks first; its live shape is the fill.
      *  @return The number of distance computations performed, for the caller's telemetry.
      */
-    std::size_t select_diverse(results_array_t const& candidates, std::size_t limit, selection_t& out,
+    std::size_t select_diverse(results_array_t& candidates, node_id_t query_id, std::size_t limit, selection_t& out,
                                traversal_context_t& context) const noexcept {
-        std::size_t const computed_distances = select_diverse_via_quads(candidates, limit, out, context);
+        std::size_t const computed_distances = select_diverse_via_quads(candidates, query_id, limit, out, context);
         fill_selection(to_span(candidates), out, limit);
         return computed_distances;
     }
 
     /** Appends the nearest rejected candidates of the ascending @p candidates to the diverse prefix
-     *  in @p out until @p limit or the candidates run out. The prefix is a subsequence of them, so
-     *  one merge-walk tells a kept candidate from a rejected one. */
+     *  in @p out until @p limit or the candidates run out, past the query's other duplicates once
+     *  the prefix keeps one. The prefix is a subsequence of them, so one merge-walk tells a kept
+     *  candidate from a rejected one. */
     static void fill_selection(std::span<scored_node_t const> candidates, selection_t& out,
                                std::size_t limit) noexcept {
         std::size_t const diverse_count = out.size();
         if (diverse_count == limit || nk::failed(out.resize({limit}))) return;
+        bool kept_zero = false;
+        for (std::size_t index = 0; index != diverse_count; ++index) kept_zero |= out[index].distance == 0;
         std::size_t filled_count = diverse_count;
         std::size_t matched = 0;
         for (scored_node_t const candidate : candidates) {
             if (filled_count == limit) break;
             if (matched != diverse_count && out[matched].node_id == candidate.node_id) ++matched;
-            else out[filled_count++] = candidate;
+            else if (!(kept_zero && candidate.distance == 0)) out[filled_count++] = candidate;
         }
         // Shrinking within the reservation never fails - the fill becomes the live shape.
         [[maybe_unused]] nk::status_t const shrunk = out.resize({filled_count});
     }
 
     /** The diverse prefix of @c select_diverse: pair distances computed on the fly with the 4-way
-     *  kernels, the greedy scan deciding as they arrive. The kept prefix's views & norms ride the
-     *  staging surface, free during any selection. */
-    std::size_t select_diverse_via_quads(results_array_t const& candidates, std::size_t limit, selection_t& out,
-                                         traversal_context_t& context) const noexcept {
+     *  kernels, the greedy scan deciding as they arrive, at most one zero-distance candidate kept.
+     *  The kept prefix's views & norms ride the staging surface, free during any selection. */
+    std::size_t select_diverse_via_quads(results_array_t& candidates, node_id_t query_id, std::size_t limit,
+                                         selection_t& out, traversal_context_t& context) const noexcept {
         if (nk::failed(out.resize({limit}))) return 0;
+        // Equal distances order on the hashed ring around the row, so a duplicate class links in a
+        // ring, not a star.
+        scored_node_t* const candidates_data = candidates.data();
+        for (std::size_t index = 1; index < candidates.size(); ++index) {
+            scored_node_t const candidate = candidates_data[index];
+            u32_t const ring = ring_offset(candidate.node_id, query_id);
+            std::size_t position = index;
+            for (; position && candidates_data[position - 1].distance == candidate.distance &&
+                   ring_offset(candidates_data[position - 1].node_id, query_id) > ring;
+                 --position)
+                candidates_data[position] = candidates_data[position - 1];
+            candidates_data[position] = candidate;
+        }
         vector_view_t* const kept_vectors = context.staged_vectors.data();
         vector_norms_t* const kept_norms = context.staged_norms.data();
         small_size_t kept_count = 0;
+        bool kept_zero = false;
         std::size_t computed_distances = 0;
-        scored_node_t const* candidates_data = candidates.data();
         for (std::size_t index = 0; index != candidates.size() && kept_count != limit; ++index) {
             scored_node_t const candidate = candidates_data[index];
+            // A second duplicate of the row would only repeat the first one's links.
+            if (kept_zero && candidate.distance == 0) continue;
             location_t const candidate_location = chunk_schedule_t::locate(candidate.node_id);
             vector_view_t const candidate_vector = vector_for(candidate_location);
             vector_norms_t const candidate_norms = norm_for(candidate_location);
@@ -3458,6 +3498,7 @@ struct ram_index {
             }
             // Surviving every batch is the diversity verdict itself - no flag to thread through.
             if (kept != kept_count) continue;
+            kept_zero |= candidate.distance == 0;
             out[kept_count] = candidate;
             kept_vectors[kept_count] = candidate_vector;
             kept_norms[kept_count] = candidate_norms;
@@ -3594,7 +3635,8 @@ struct ram_index {
             std::size_t refine_distances = 0;
             refine_distances = stage_scores_via_quads(neighbor_vector, neighbor_norms, new_node_id,
                                                       selected[selected_index].distance, context);
-            refine_distances += select_diverse_via_quads(refining_candidates, node_connectivity, refined, context);
+            refine_distances += select_diverse_via_quads(refining_candidates, neighbor_id, node_connectivity, refined,
+                                                         context);
             context.computed_distances += refine_distances;
             context.computed_distances_in_reverse_refines += refine_distances;
 
@@ -3680,13 +3722,14 @@ struct ram_index {
             atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire);
         dispensed_admission_t const admission {this, first_invisible_id, first_undispensed_id, new_node_id};
         if (failed(search_around(vector_view_t(owned_vector), new_norms, admission, non_zero_expansion_factor(config),
-                                 context, context.results)))
+                                 context, context.results, dummy_fold_t {}, {}, single_zero_rescoring_t {})))
             ++context.saturated_walks;
 
         // No reader can arrive before slot 0 turns non-sentinel, so relaxed stores into slots
         // 1.. need no lock and the untouched tail keeps its sentinel termination.
         selection_t& selected = context.selected_neighbors;
-        std::size_t const refine_distances = select_diverse(context.results, frozen.connectivity(), selected, context);
+        std::size_t const refine_distances = select_diverse(context.results, new_node_id, frozen.connectivity(),
+                                                            selected, context);
         context.computed_distances += refine_distances;
         context.computed_distances_in_refines += refine_distances;
         neighbors_ref_t const new_neighbors = neighbors_for(new_location);
@@ -3865,17 +3908,19 @@ struct ram_index {
         // inside the others.
         part_admission_t const other {across.first, min_of(across.bound, first_invisible_id)};
         if (other.first_id < other.first_invisible_id &&
-            failed(search_around(own_vector, own_norms, other, expansion_factor, context, context.results)))
+            failed(search_around(own_vector, own_norms, other, expansion_factor, context, context.results,
+                                 dummy_fold_t {}, {}, single_zero_rescoring_t {})))
             ++context.saturated_walks;
         small_size_t const staged_count = stage_neighbors_(own_neighbors, node_id, context);
         std::span<node_id_t const> const seeds {context.staged_ids.data(), staged_count};
         if (failed(search_around(own_vector, own_norms, snapshot_admission_t {first_invisible_id}, expansion_factor,
-                                 context, context.results, dummy_fold_t {}, seeds)))
+                                 context, context.results, dummy_fold_t {}, seeds, single_zero_rescoring_t {})))
             ++context.saturated_walks;
         context.computed_distances += add_row_candidates_(own_vector, own_norms, seeds, first_invisible_id, context);
 
         selection_t& selected = context.selected_neighbors;
-        std::size_t const refine_distances = select_diverse(context.results, node_connectivity, selected, context);
+        std::size_t const refine_distances = select_diverse(context.results, node_id, node_connectivity, selected,
+                                                            context);
         context.computed_distances += refine_distances;
         context.computed_distances_in_refines += refine_distances;
         small_size_t const selected_count = static_cast<small_size_t>(selected.size());
@@ -4345,9 +4390,12 @@ struct ram_index {
             return {walk_step_t::sated_k, status_t::success_k};
         settle_fold(fold);
         network_sort(scored, closer_scored_node_t {});
-        results.insert(scored, expansion_factor);
-        for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
-            if (status_t const queued = frontier.insert(scored_node_t(scored[lane])); failed(queued))
+        std::span<scored_node_t> admitted = scored;
+        if constexpr (std::is_same_v<rescoring_type_, single_zero_rescoring_t>)
+            admitted = single_zero_rescoring_t::admitted(scored, results);
+        results.insert(admitted, expansion_factor);
+        for (std::size_t lane = 0; lane != admitted.size(); ++lane)
+            if (status_t const queued = frontier.insert(scored_node_t(admitted[lane])); failed(queued))
                 return {walk_step_t::advanced_k, queued};
         return {walk_step_t::advanced_k, status_t::success_k};
     }
@@ -4526,10 +4574,13 @@ struct ram_index {
                     walk_demand_t::sated_k)
                     return status_t::success_k;
                 network_sort(scored, closer_scored_node_t {});
+                std::span<scored_node_t> admitted = scored;
+                if constexpr (std::is_same_v<rescoring_type_, single_zero_rescoring_t>)
+                    admitted = single_zero_rescoring_t::admitted(scored, results);
 
                 // One merge folds the ascending quad into the candidates; only its accepted prefix
                 // enters the frontier. The merge precedes the marks, so a refusal keeps the quad.
-                std::size_t const accepted_count = results.insert(scored, expansion_factor);
+                std::size_t const accepted_count = results.insert(admitted, expansion_factor);
 
                 // Grow the visited set ahead of the marks - `set()` itself never rehashes.
                 // Full quads - the hot case - mark all four lanes in one interleaved probe sweep.
@@ -4543,7 +4594,7 @@ struct ram_index {
                     }
 
                 for (small_size_t lane = 0; lane != accepted_count; ++lane)
-                    if (status_t const queued = frontier.insert(scored_node_t(scored[lane])); failed(queued))
+                    if (status_t const queued = frontier.insert(scored_node_t(admitted[lane])); failed(queued))
                         return queued;
             }
             settle_fold(fold);

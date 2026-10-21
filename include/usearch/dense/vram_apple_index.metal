@@ -445,7 +445,7 @@ struct metal_walk_t {
         return row - uint(row * row_fragments > word);
     }
 
-    /** One SplitMix64 step, as @c splitmix64_t takes it. */
+    /** One SplitMix64 step, as @c splitmix64_t takes it, by @c golden_ratio_u64_k. */
     ulong next_random() { return metal_mix_bits(random += 0x9E3779B97F4A7C15ul); }
 
     /** Probe rounds before a claim counts as saturated, as the CUDA set's @c probe_budget derives them: log2 of the

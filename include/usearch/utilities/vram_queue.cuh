@@ -41,7 +41,7 @@ __device__ __forceinline__ value_type_* vram_row(value_type_* base, std::size_t 
  *  or keys share one. */
 template <typename warp_type_>
 __device__ __forceinline__ splitmix64_t vram_lane_generator(u64_t stream_key, u32_t lane) noexcept {
-    return splitmix64_t {mix_bits(stream_key * warp_type_::width_k + lane + 1)};
+    return seeded_stream(stream_key * warp_type_::width_k + lane + 1);
 }
 
 /** The calling warp's place in a launch: its grid-wide index, its lane, and the grid's warps. */
@@ -421,6 +421,11 @@ struct vram_register_frontier {
     __device__ __forceinline__ scored_node_t worst() const noexcept {
         return shuffle_from<warp_t>(ranks_.entries_[slots_ - 1], warp_t::width_k - 1);
     }
+
+    /** The nearest kept rank, expanded or not; the sentinel while the ranks are empty. */
+    __device__ __forceinline__ scored_node_t nearest() const noexcept {
+        return shuffle_from<warp_t>(ranks_.entries_[0], 0);
+    }
     __device__ __forceinline__ void insert_batch(scored_node_t staged, u32_t lane) noexcept {
         // Only entries strictly nearer than the worst kept one enter, as on the CPU, so a plateau
         // of equal distances never keeps a walk expanding: a few take their ranks, a crowd takes
@@ -541,6 +546,12 @@ struct vram_arena_frontier {
 
     /** The tail keeps every entry the walk scores, so no rank bounds what enters. */
     __device__ __forceinline__ scored_node_t worst() const noexcept { return scored_node_t::sentinel(); }
+
+    /** The head's nearest entry, expanded or not; a refill spills it to the tail, so past one it is
+     *  the nearest of the head's generation only. */
+    __device__ __forceinline__ scored_node_t nearest() const noexcept {
+        return shuffle_from<warp_t>(head_.entries_[0], 0);
+    }
 
     /** Promotes the nearest unexpanded tail entries into the head. Every tail entry is farther
      *  than everything head-resident - that is the spill invariant - so a merge could never admit
@@ -746,7 +757,7 @@ struct vram_visited_set {
         // atomics: the lowest rival lane stores, the warp barrier publishes the store,
         // and losers re-read the slot, see a foreign epoch-current ID, and probe on.
         if constexpr (std::is_same_v<node_id_type_, u64_t>) {
-            u32_t slot = static_cast<u32_t>((node_id * 0x9E3779B97F4A7C15ull) >> 32) >> hash_shift_;
+            u32_t slot = static_cast<u32_t>((node_id * golden_ratio_u64_k) >> 32) >> hash_shift_;
             ulonglong2* const pairs = reinterpret_cast<ulonglong2*>(slots_);
             for (u32_t round = 0, budget = probe_budget(); warp_t::any(probing) && round != budget; ++round) {
                 // One 16-byte load covers the probed slot, its epoch word and its ID word.
@@ -765,7 +776,7 @@ struct vram_visited_set {
         }
         else {
             u64_t const claim = (static_cast<u64_t>(epoch_) << 32) | node_id;
-            u32_t slot = (node_id * 0x9E3779B9u) >> hash_shift_;
+            u32_t slot = (node_id * golden_ratio_u32_k) >> hash_shift_;
             ulonglong2 const* const pairs = reinterpret_cast<ulonglong2 const*>(slots_);
             for (u32_t round = 0, budget = probe_budget(); warp_t::any(probing) && round != budget; ++round) {
                 // One 16-byte load covers the probed slot's aligned pair, so an even-slot collision
@@ -1067,8 +1078,8 @@ struct vram_vector_cache {
 };
 
 /** Warp-cooperative ascending buffer of scored nodes over a shared-memory span: chunks arrive
- *  pre-sorted from the lane-wide bitonic network and merge in place, entries past @c capacity_
- *  drop. */
+ *  pre-sorted from the lane-wide bitonic network and merge in place by the whole word, so a key in
+ *  the ID bits orders distance ties, and entries past @c capacity_ drop. */
 template <typename warp_type_, typename node_id_type_>
 struct vram_sorted_buffer {
     using warp_t = warp_type_;
@@ -1083,7 +1094,7 @@ struct vram_sorted_buffer {
         bool const incoming = lane < count;
         u32_t incoming_rank = incoming ? lane : 0;
         for (u32_t i = 0; i != size_; ++i) // Warp-uniform bound: every lane walks the span.
-            incoming_rank += incoming && entries_[i].distance_bits() <= value.distance_bits();
+            incoming_rank += incoming && !(value < entries_[i]);
         // Existing entries shift by the number of incoming values strictly ahead of them;
         // ties resolve the other way than above, so no two final positions collide. Shifts only
         // move entries up, so moving the last lane-width first never overwrites an unmoved one.
@@ -1093,7 +1104,7 @@ struct vram_sorted_buffer {
             scored_node_t const moved = active ? entries_[index] : scored_node_t::sentinel();
             u32_t shift = 0;
             for (u32_t source = 0; source != count; ++source) // Warp-uniform: shuffles inside.
-                shift += (shuffle_from<warp_t>(value, source).distance_bits() < moved.distance_bits()) && active;
+                shift += (shuffle_from<warp_t>(value, source) < moved) && active;
             warp_t::sync(); // The whole lane-width is in registers before any of its writes lands.
             if (active && index + shift < capacity_) entries_[index + shift] = moved;
             warp_t::sync();

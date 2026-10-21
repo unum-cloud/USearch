@@ -570,7 +570,7 @@ status_t geospatial_ram_variant<cpu_class_>::draw_long_links_(iota_view<node_id_
     drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
         executor, nodes.size(), [&](std::size_t position, std::size_t thread) noexcept {
             node_id_t const node = static_cast<node_id_t>(nodes.first + position);
-            splitmix64_t generator {mix_bits(static_cast<u64_t>(node))};
+            splitmix64_t generator = seeded_stream(static_cast<u64_t>(node));
             keep_first_failure(linked, us::geospatial::draw_long_links(index, node, draws, scratch.metrics[thread],
                                                                        scratch.traversals[thread], generator));
         });

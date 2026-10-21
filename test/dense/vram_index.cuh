@@ -434,6 +434,7 @@ std::size_t test_vram_configuration(char const* name, u64_t seed, executor_type_
     failures_count += test_dense_vram_indexer_search<index_t, kernel_>(cell, seed);
     failures_count += test_dense_vram_wide_build<index_t, kernel_>(cell, seed);
     failures_count += test_dense_vram_tied_build<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_duplicate_basin<index_t, kernel_>(cell, seed);
     failures_count += test_dense_vram_broad_build<index_t, kernel_>(cell, seed);
     return report(vendor_name.c_str(), failures_count);
 }

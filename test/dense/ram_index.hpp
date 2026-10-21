@@ -70,6 +70,7 @@ static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_three_vectors<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_refine_settles<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_duplicate_basin<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_health_audits<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_heal_islands<index_t>(make_index, seed);
     failures_count += test_dense_split<index_t, kernel_>(make_index, seed);

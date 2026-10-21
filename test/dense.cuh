@@ -1790,6 +1790,84 @@ std::size_t test_dense_refine_settles(make_index_type_ const& make_index, u64_t 
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
+/** Builds and refines distinct rows of which every stride-th repeats the first, a duplicate class
+ *  of a hundred rows: every member must reach a row outside the class within two hops, no member
+ *  may draw a quarter of the class's links, and a search for the vector, unlike an insertion walk,
+ *  must keep more than one member. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+std::size_t test_dense_duplicate_basin(make_index_type_ const& make_index, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    // A dot scores identical rows by their norm and an angular through approximate roots, so
+    // neither meets zero.
+    if constexpr (kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_angular_k) return 0;
+    constexpr std::size_t duplicate_rows_k = 100;
+    constexpr std::size_t stride_k = dense_growth_nodes_k / duplicate_rows_k;
+    allocation_ledger_t ledger;
+    std::size_t failures = 0;
+    {
+        std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+        index_type_& index = *index_ptr;
+        typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dimensions, stream_key(seed, "basin"));
+        // Read through a view: a span's packed dimension is a proxy, and proxy-to-proxy assignment
+        // copies no bit.
+        auto const source = vectors.view().row(0).as_vector();
+        for (std::size_t row = stride_k; row < dense_growth_nodes_k; row += stride_k) {
+            auto target = vectors.row(row).as_vector();
+            for (std::size_t dimension = 0; dimension != dimensions; ++dimension) target[dimension] = source[dimension];
+        }
+        failures += expect(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status ==
+                           status_t::success_k);
+        auto assigned_ids = nk::vector<node_id_t>::zeros(dense_growth_nodes_k).value;
+        failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
+        failures += expect(index.refine({0, static_cast<node_id_t>(index.size())}, context).status ==
+                           status_t::success_k);
+
+        auto const shape = index.saved_shape();
+        auto saved_vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
+        auto saved_neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
+        auto scratch = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
+        failures += expect_eq(
+            dense_save(index, make_index, {dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
+                       synchronization_t::exclusive_k, scratch.span()),
+            status_t::success_k);
+
+        std::vector<bool> duplicate(shape.nodes, false);
+        for (std::size_t row = 0; row < dense_growth_nodes_k; row += stride_k) duplicate[assigned_ids[row]] = true;
+        auto const escapes = [&](node_id_t node) noexcept {
+            auto const links = saved_neighbors.row(node).as_vector();
+            bool found = false;
+            for (std::size_t slot = 0; slot != links.size(); ++slot)
+                found |= links[slot] != node_id_unknown_k && links[slot] != node && !duplicate[links[slot]];
+            return found;
+        };
+        std::vector<std::size_t> class_links(shape.nodes, 0);
+        std::size_t stranded = 0;
+        for (std::size_t row = 0; row < dense_growth_nodes_k; row += stride_k) {
+            node_id_t const member = assigned_ids[row];
+            auto const links = saved_neighbors.row(member).as_vector();
+            bool reached = escapes(member);
+            for (std::size_t slot = 0; slot != links.size(); ++slot) {
+                node_id_t const neighbor = links[slot];
+                if (neighbor == node_id_unknown_k || neighbor == member || !duplicate[neighbor]) continue;
+                ++class_links[neighbor];
+                reached |= escapes(neighbor);
+            }
+            stranded += !reached;
+        }
+        failures += expect_eq(stranded, 0u);
+        failures += expect(*std::max_element(class_links.begin(), class_links.end()) * 4 < duplicate_rows_k);
+
+        auto const [found, found_status] = index.search(vectors.row(0).as_vector(), context);
+        std::size_t members_found = 0;
+        for (std::size_t match = 0; succeeded(found_status) && match != found.count; ++match)
+            members_found += context.results[match].distance < dense_self_match_tolerance_k;
+        failures += expect(members_found > 1);
+    }
+    return failures + expect_eq(ledger.live_bytes.load(), 0);
+}
+
 /** The audit's contract on a graph nothing stranded: an empty index reaches nothing, a
  *  healthy one reaches everything, and two audits of one graph agree - the landmarks are
  *  stride-spread, so the answer is a property of the graph rather than of the draw. */

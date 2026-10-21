@@ -1586,6 +1586,11 @@ constexpr word_type_ multiply_high(word_type_ first, word_type_ second) noexcept
     return first_high * second_high + (cross >> half_bits_k) + (cross_with_carry >> half_bits_k);
 }
 
+/** 2^64 and 2^32 divided by the golden ratio, rounded to odd: SplitMix64's step and Fibonacci
+ *  hashing's multipliers, each a bijection that spreads consecutive integers apart. */
+inline constexpr u64_t golden_ratio_u64_k = 0x9E3779B97F4A7C15ull;
+inline constexpr u32_t golden_ratio_u32_k = 0x9E3779B9u;
+
 /** Avalanches all 64 bits of @p word - the SplitMix64 finalizer, the one bit-mixing
  *  primitive behind the PRNG, the UUID hash, and the open-addressing probe starts. */
 constexpr u64_t mix_bits(u64_t word) noexcept {
@@ -1593,6 +1598,11 @@ constexpr u64_t mix_bits(u64_t word) noexcept {
     word = (word ^ (word >> 27)) * 0x94D049BB133111EBull;
     return word ^ (word >> 31);
 }
+
+/** How far @p candidate sits past @p query on the Fibonacci-hashed ring, the hashes' difference
+ *  modulo 2^32. Equal distances order by it, so each member of a duplicate class prefers its own
+ *  successor on the ring, never the class's lowest ID. */
+constexpr u32_t ring_offset(u32_t candidate, u32_t query) noexcept { return golden_ratio_u32_k * (candidate - query); }
 
 /** The image of @p position under a bijection over `[0, count)` keyed by @p seed: two odd
  *  multiplies around an xor-shift over the next power of two, its cycle walked until the image
@@ -1634,8 +1644,11 @@ struct splitmix64_t {
     static constexpr u64_t max() noexcept { return ~u64_t(0); }
 
     /** One SplitMix64 step: 64 fresh uniform bits. */
-    constexpr u64_t operator()() noexcept { return mix_bits(state += 0x9E3779B97F4A7C15ull); }
+    constexpr u64_t operator()() noexcept { return mix_bits(state += golden_ratio_u64_k); }
 };
+
+/** A SplitMix64 stream for @p key, decorrelated from the streams of its neighboring keys. */
+constexpr splitmix64_t seeded_stream(u64_t key) noexcept { return splitmix64_t {mix_bits(key)}; }
 
 /**
  *  @brief Uniform index distribution over [0, @c bound) - the cheap sibling of
