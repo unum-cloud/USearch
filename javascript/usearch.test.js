@@ -196,6 +196,111 @@ test("Batch operations", async (t) => {
   });
 });
 
+test("Malformed vector batches", async (t) => {
+  const newIndex = () => {
+    const index = new usearch.Index({
+      metric: "l2sq",
+      connectivity: 16,
+      dimensions: 3,
+    });
+    index.add(1n, new Float32Array([1, 0, 0]));
+    index.add(2n, new Float32Array([0, 1, 0]));
+    return index;
+  };
+  const notAnArrayOfArrays = /Vectors must be a TypedArray or an array of arrays/;
+  const wrongRowLength = /Every vector must have 3 dimensions/;
+
+  await t.test("a flat array of numbers is rejected by `search`", () => {
+    // Used to return an empty `BatchMatches` without any error.
+    assert.throws(() => newIndex().search([1, 0, 0], 2), notAnArrayOfArrays);
+  });
+
+  await t.test("a flat array of numbers is rejected by `add`", () => {
+    // Used to fail with a misleading "length of keys (1) must match number of vectors (0)".
+    const index = newIndex();
+    assert.throws(() => index.add(3n, [0, 0, 1]), notAnArrayOfArrays);
+    assert.equal(index.size(), 2);
+  });
+
+  await t.test("rows that are not arrays are rejected", () => {
+    const index = newIndex();
+    assert.throws(() => index.search(["abc"], 1), notAnArrayOfArrays);
+    assert.throws(() => index.search([[1, 0, 0], 1], 1), notAnArrayOfArrays);
+    assert.throws(() => index.search([null], 1), notAnArrayOfArrays);
+  });
+
+  await t.test("ragged rows are rejected even if the total size fits", () => {
+    // 2 + 4 elements used to be accepted as two vectors of 3 dimensions.
+    const ragged = [
+      [1, 0],
+      [0, 0, 0, 1],
+    ];
+    const index = newIndex();
+    assert.throws(() => index.search(ragged, 2), wrongRowLength);
+    assert.throws(() => index.add([3n, 4n], ragged), wrongRowLength);
+    assert.equal(index.size(), 2);
+  });
+
+  await t.test("rows of the wrong length are rejected", () => {
+    const index = newIndex();
+    assert.throws(() => index.search([[1, 0, 0, 0]], 1), wrongRowLength);
+    assert.throws(() => index.search([[1, 0]], 1), wrongRowLength);
+    assert.throws(() => index.search([new Float32Array([1, 0])], 1), wrongRowLength);
+    // A single row holding several vectors is not a vector either.
+    assert.throws(() => index.search([[1, 0, 0, 0, 1, 0]], 1), wrongRowLength);
+  });
+
+  await t.test("`exactSearch` rejects malformed datasets and queries", () => {
+    const dataset = [new Float32Array([1, 0, 0]), new Float32Array([0, 1, 0])];
+    assert.throws(
+      () => usearch.exactSearch([1, 0, 0, 0, 1, 0], dataset, 3, 1, "l2sq"),
+      notAnArrayOfArrays,
+    );
+    assert.throws(
+      () => usearch.exactSearch(dataset, [1, 0, 0], 3, 1, "l2sq"),
+      notAnArrayOfArrays,
+    );
+    assert.throws(
+      () => usearch.exactSearch(dataset, [[1, 0]], 3, 1, "l2sq"),
+      wrongRowLength,
+    );
+  });
+
+  await t.test("well-formed batches are still accepted", () => {
+    const index = newIndex();
+    const asArrays = index.search(
+      [
+        [1, 0, 0],
+        [0, 1, 0],
+      ],
+      1,
+    );
+    assert.deepEqual(asArrays.counts, new BigUint64Array([1n, 1n]));
+    assert.deepEqual(asArrays.get(0).keys, new BigUint64Array([1n]));
+    assert.deepEqual(asArrays.get(1).keys, new BigUint64Array([2n]));
+
+    const asTypedArrays = index.search(
+      [new Float32Array([1, 0, 0]), new Int8Array([0, 1, 0])],
+      1,
+    );
+    assert.deepEqual(asTypedArrays.get(0).keys, new BigUint64Array([1n]));
+    assert.deepEqual(asTypedArrays.get(1).keys, new BigUint64Array([2n]));
+
+    // A single query in a nested array and a flat typed array still work.
+    assert.deepEqual(index.search([[0, 1, 0]], 1).keys, new BigUint64Array([2n]));
+    assert.deepEqual(
+      index.search(new Float32Array([1, 0, 0, 0, 1, 0]), 1).get(1).keys,
+      new BigUint64Array([2n]),
+    );
+
+    index.add([3n, 4n], [
+      [0, 0, 1],
+      [1, 1, 0],
+    ]);
+    assert.equal(index.size(), 4);
+  });
+});
+
 test("Expected results", () => {
   const index = new usearch.Index({
     metric: "l2sq",
