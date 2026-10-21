@@ -222,6 +222,32 @@
       }
     },
     {
+      "name": "dgx_blackwell",
+      "inherits": "cuda_release",
+      "displayName": "DGX Blackwell - Xeon 6 with B200 or B300",
+      "description": "Built anywhere for a Granite Rapids host and Blackwell GPUs; its tests and benchmarks run on that machine.",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "Linux",
+        "CMAKE_SYSTEM_PROCESSOR": "x86_64",
+        "CMAKE_C_FLAGS": "-march=graniterapids",
+        "CMAKE_CXX_FLAGS": "-march=graniterapids",
+        "USEARCH_CUDA_ARCHITECTURES": "100f-real"
+      }
+    },
+    {
+      "name": "dgx_hopper",
+      "inherits": "cuda_release",
+      "displayName": "DGX Hopper - Xeon 4 with H100 or H200",
+      "description": "Built anywhere for a Sapphire Rapids host and Hopper GPUs; its tests and benchmarks run on that machine.",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "Linux",
+        "CMAKE_SYSTEM_PROCESSOR": "x86_64",
+        "CMAKE_C_FLAGS": "-march=sapphirerapids",
+        "CMAKE_CXX_FLAGS": "-march=sapphirerapids",
+        "USEARCH_CUDA_ARCHITECTURES": "90a-real"
+      }
+    },
+    {
       "name": "rocm_relwithdebinfo",
       "inherits": "base",
       "displayName": "ROCm RelWithDebInfo - everything, the AMD arms included",
@@ -399,6 +425,16 @@
     {
       "name": "cuda_release",
       "configurePreset": "cuda_release",
+      "jobs": 0
+    },
+    {
+      "name": "dgx_blackwell",
+      "configurePreset": "dgx_blackwell",
+      "jobs": 0
+    },
+    {
+      "name": "dgx_hopper",
+      "configurePreset": "dgx_hopper",
       "jobs": 0
     },
     {

@@ -11,11 +11,9 @@
  */
 #pragma once
 
-#include <cmath>   // `std::log2` for ranking gains
-#include <cstring> // `std::memmove` - the sorted expected keys
+#include <cmath> // `std::log2` for ranking gains, `std::sqrt` for angular scores
 
 #include <algorithm> // `std::nth_element`, `std::partial_sort`
-#include <limits>    // `std::numeric_limits` - the oracle's unfilled ranks
 #include <span>      // `std::span`
 #include <vector>    // `std::vector`
 
@@ -199,112 +197,43 @@ inline void fill_discounts(std::span<double> discounts, std::span<double> ideal)
 /** The verdicts of one query's judgment, produced together by @c judge_ranking. */
 struct ranking_verdict_t {
 
-    /** 1 when the true nearest neighbor appears among the returned keys. Averaged
+    /** 1 when a returned row is no farther than the true nearest neighbor. Averaged
      *  over queries this is the production Recall@K - the probability of finding @b the
      *  nearest neighbor within the top K - monotone in K, so Recall@1 never exceeds
      *  Recall@10. */
     std::size_t found_nearest = 0;
 
-    /** The intersection size between the returned and expected sets - "overlap",
-     *  the set-coverage metric big-ANN leaderboards report. Stricter than Recall@K and
-     *  not monotone against it. */
+    /** Returned rows no farther than the deepest expected one, at most as many as were
+     *  expected - "overlap", the set-coverage metric big-ANN leaderboards report. Stricter
+     *  than Recall@K and not monotone against it. */
     std::size_t overlap = 0;
 
-    /** Unnormalized discounted cumulative gain: every returned key present in the
-     *  expected set earns its position's discount, so early hits weigh more. */
+    /** Unnormalized discounted cumulative gain: every row counted in @c overlap earns its
+     *  position's discount, so early hits weigh more. */
     double gain = 0;
 };
 
 /**
- *  @brief All ranking verdicts for one query in one sweep: the expected keys are sorted once,
- *      then every returned position pays one binary search - O(k·log k) where the naive
- *      nested probes go O(k²), which matters from top-100 recalls up.
+ *  @brief All ranking verdicts for one query in one sweep, judging rows by exact score rather
+ *      than by ID, so a row tied with an expected one counts wherever the ground truth broke
+ *      the tie.
  *
- *  @param[in] returned Keys the index produced, best first.
- *  @param[in] expected Ground-truth keys, ascending by true distance - @c expected[0] is the
- *      true nearest neighbor.
- *  @param[inout] scratch Clobbered workspace for sorting the expected keys; its length caps
- *      how many of them are judged.
+ *  @param[in] returned Exact scores of the rows the index produced, best first, higher nearer.
+ *  @param[in] nearest Exact score of the true nearest neighbor.
+ *  @param[in] deepest Exact score of the deepest judged expected row.
+ *  @param[in] depth Expected rows judged, capping the overlap.
  *  @param[in] discounts Position pay-offs from @c fill_discounts.
  */
-template <typename key_type_>
-ranking_verdict_t judge_ranking(std::span<key_type_ const> returned, std::span<key_type_ const> expected,
-                                std::span<key_type_> scratch, std::span<double const> discounts) noexcept {
-    std::size_t const expected_count = expected.size() < scratch.size() ? expected.size() : scratch.size();
-    for (std::size_t sorted = 0; sorted != expected_count; ++sorted) {
-        key_type_ const key = expected[sorted];
-        key_type_* const slot = lower_bound(scratch.subspan(0, sorted), key);
-        std::memmove(slot + 1, slot, (scratch.data() + sorted - slot) * sizeof(key_type_));
-        *slot = key;
-    }
-
+inline ranking_verdict_t judge_ranking(std::span<f64_t const> returned, f64_t nearest, f64_t deepest, std::size_t depth,
+                                       std::span<double const> discounts) noexcept {
     ranking_verdict_t verdict;
-    if (!expected_count) return verdict;
-    key_type_ const expected_nearest = expected.front();
-    std::span<key_type_ const> const sorted {scratch.data(), expected_count};
     for (std::size_t position = 0; position != returned.size(); ++position) {
-        key_type_ const key = returned[position];
-        verdict.found_nearest |= static_cast<std::size_t>(key == expected_nearest);
-        key_type_ const* const slot = lower_bound(sorted, key);
-        if (slot != sorted.data() + sorted.size() && *slot == key) {
-            verdict.overlap += 1;
-            if (position < discounts.size()) verdict.gain += discounts[position];
-        }
+        verdict.found_nearest |= static_cast<std::size_t>(returned[position] >= nearest);
+        if (returned[position] < deepest || verdict.overlap == depth) continue;
+        verdict.overlap += 1;
+        if (position < discounts.size()) verdict.gain += discounts[position];
     }
     return verdict;
-}
-
-/** Judges the merged hits after the clocks stopped - self-recall against own rows, or
- *  recall/overlap/ndcg against the ground truth - one sweep per query either way. Hits are
- *  dataset rows, so `--first-vector` shifts the self rows. */
-inline void judge_hits(settings_t const& settings, bench_results_t const& results, nk::matrix_view<u32_t> ground_truth,
-                       std::size_t query_count) {
-    if (settings.self_search == switch_t::present_k) {
-        std::size_t found_at_1 = 0, found_at_k = 0;
-        for (std::size_t query = 0; query != query_count; ++query) {
-            auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
-            u32_t const own_row = static_cast<u32_t>(settings.first_vector.value + query);
-            found_at_1 += !returned.empty() && returned.front() == own_row;
-            bool within = false;
-            for (u32_t row : returned) within |= row == own_row;
-            found_at_k += within;
-        }
-        double const queries = double(query_count);
-        double const self_at_1 = 100.0 * double(found_at_1) / queries;
-        double const self_at_k = 100.0 * double(found_at_k) / queries;
-        fmt::println("  self-recall@1: {:.2f}%", self_at_1);
-        fmt::println("  self-recall@{}: {:.2f}%", settings.top_k.value, self_at_k);
-    }
-    else if (!ground_truth.empty()) {
-        std::size_t const judged_depth = std::min(settings.top_k.value, ground_truth.extent(1));
-        std::vector<u32_t> scratch(judged_depth);
-        std::vector<double> discounts(settings.top_k.value), ideal(settings.top_k.value);
-        fill_discounts(discounts, ideal);
-
-        std::size_t found_at_1 = 0, found_at_k = 0, shared = 0;
-        double gain = 0;
-        for (std::size_t query = 0; query != query_count; ++query) {
-            auto expected = ground_truth.row(query).as_vector();
-            auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
-            found_at_1 += !returned.empty() && returned.front() == expected[0];
-            auto verdict = judge_ranking(std::span<u32_t const> {returned}, to_span(expected).first(judged_depth),
-                                         std::span<u32_t> {scratch}, std::span<double const> {discounts});
-            found_at_k += verdict.found_nearest;
-            shared += verdict.overlap;
-            gain += verdict.gain;
-        }
-
-        double const queries = double(query_count);
-        double const recall_at_1 = 100.0 * double(found_at_1) / queries;
-        double const recall_at_k = 100.0 * double(found_at_k) / queries;
-        double const overlap_at_k = 100.0 * double(shared) / (queries * double(judged_depth));
-        double const gain_at_k = 100.0 * gain / (queries * ideal[judged_depth - 1]);
-        fmt::println("  recall@1: {:.3f}%", recall_at_1);
-        fmt::println("  recall@{}: {:.3f}%", judged_depth, recall_at_k);
-        fmt::println("  overlap@{}: {:.3f}%", judged_depth, overlap_at_k);
-        fmt::println("  ndcg@{}: {:.3f}%", judged_depth, gain_at_k);
-    }
-    else { fmt::println("  recall: skipped, no ground-truth neighbors provided"); }
 }
 
 #pragma endregion
@@ -399,17 +328,22 @@ bool open_indexer_heads(index_type_ const& index, streamed_dataset_type_ const& 
     return true;
 }
 
-/** One query's exact scorer, in @c f64: the dot of its row and a key, or `Σₕ wₕ·ReLU(qₕ·k)` over its heads. */
+/** One query's exact scorer, in @c f64, higher nearer: under its kernel the dot of its row and a
+ *  key, their cosine or Jaccard similarity, or their negated euclidean or hamming distance, or
+ *  `Σₕ wₕ·ReLU(qₕ·k)` over its heads. */
 struct exact_scorer_t {
 
     /** The query's row, or its heads back to back. */
     std::vector<f64_t> rows;
 
-    /** The query's head weights; empty scores the plain dot. */
+    /** The query's head weights; empty scores the plain row under @c kernel. */
     std::span<f32_t const> weights;
 
     /** Per-key scratch, one row wide. */
     std::vector<f32_t> widened;
+
+    /** The metric a plain row scores under; heads score dots. */
+    nk_kernel_kind_t kernel = nk_kernel_dot_k;
 
     /** The exact score of @p key. */
     template <typename dataset_scalar_type_>
@@ -422,18 +356,37 @@ struct exact_scorer_t {
                 sum += rows[offset + dimension] * widened[dimension];
             return sum;
         };
-        if (weights.empty()) return dot(0);
-        f64_t score = 0;
-        for (std::size_t head = 0; head != weights.size(); ++head)
-            score += weights[head] * std::max(dot(head * dimensions), f64_t {});
-        return score;
+        if (weights.empty() && kernel == nk_kernel_dot_k) return dot(0);
+        if (!weights.empty()) {
+            f64_t score = 0;
+            for (std::size_t head = 0; head != weights.size(); ++head)
+                score += weights[head] * std::max(dot(head * dimensions), f64_t {});
+            return score;
+        }
+        f64_t products = 0, query_squares = 0, key_squares = 0, differences = 0;
+        for (std::size_t dimension = 0; dimension != dimensions; ++dimension) {
+            f64_t const query_value = rows[dimension], key_value = widened[dimension];
+            products += query_value * key_value;
+            query_squares += query_value * query_value;
+            key_squares += key_value * key_value;
+            differences += (query_value - key_value) * (query_value - key_value);
+        }
+        // Empty rows score as the index's kernels do: alike to each other and to nothing else.
+        f64_t const unions = query_squares + key_squares - products;
+        switch (kernel) {
+        case nk_kernel_angular_k:
+            return products != 0 ? products / std::sqrt(query_squares * key_squares)
+                                 : f64_t(query_squares + key_squares == 0);
+        case nk_kernel_jaccard_k: return unions != 0 ? products / unions : 1;
+        default: return -differences;
+        }
     }
 };
 
-/** The exact scorer of one plain @p query row. */
+/** The exact scorer of one plain @p query row under @p kernel. */
 template <typename dataset_scalar_type_>
-exact_scorer_t exact_scorer_of(nk::vector_view<dataset_scalar_type_> query) {
-    exact_scorer_t scorer {{}, {}, std::vector<f32_t>(query.size())};
+exact_scorer_t exact_scorer_of(nk::vector_view<dataset_scalar_type_> query, nk_kernel_kind_t kernel) {
+    exact_scorer_t scorer {{}, {}, std::vector<f32_t>(query.size()), kernel};
     widen_row(query, std::span {scorer.widened});
     scorer.rows.assign(scorer.widened.begin(), scorer.widened.end());
     return scorer;
@@ -469,16 +422,85 @@ std::vector<exact_row_t> exact_best_rows(exact_scorer_t& scorer, nk::matrix_view
     return best;
 }
 
+/** Judges the merged hits after the clocks stopped - self-recall against own rows, or
+ *  recall/overlap/ndcg against the ground truth - one sweep per query either way. Hits are
+ *  dataset rows, so `--first-vector` shifts the self rows. Against the ground truth every row
+ *  is scored exactly over @p vectors, by the query's heads or its row in @p query_vectors. */
+template <typename scalar_type_, typename dataset_scalar_type_>
+void judge_hits(settings_t const& settings, bench_indexer_heads<scalar_type_> const& heads,
+                bench_results_t const& results, nk::matrix_view<u32_t> ground_truth,
+                nk::matrix_view<dataset_scalar_type_> vectors, nk::matrix_view<dataset_scalar_type_> query_vectors,
+                std::size_t query_count) {
+    if (settings.self_search == switch_t::present_k) {
+        std::size_t found_at_1 = 0, found_at_k = 0;
+        for (std::size_t query = 0; query != query_count; ++query) {
+            auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
+            u32_t const own_row = static_cast<u32_t>(settings.first_vector.value + query);
+            found_at_1 += !returned.empty() && returned.front() == own_row;
+            bool within = false;
+            for (u32_t row : returned) within |= row == own_row;
+            found_at_k += within;
+        }
+        double const queries = double(query_count);
+        double const self_at_1 = 100.0 * double(found_at_1) / queries;
+        double const self_at_k = 100.0 * double(found_at_k) / queries;
+        fmt::println("  self-recall@1: {:.2f}%", self_at_1);
+        fmt::println("  self-recall@{}: {:.2f}%", settings.top_k.value, self_at_k);
+    }
+    else if (!ground_truth.empty()) {
+        std::size_t const judged_depth = std::min(settings.top_k.value, ground_truth.extent(1));
+        std::vector<f64_t> scores(settings.top_k.value);
+        std::vector<double> discounts(settings.top_k.value), ideal(settings.top_k.value);
+        fill_discounts(discounts, ideal);
+
+        std::size_t found_at_1 = 0, found_at_k = 0, shared = 0;
+        double gain = 0;
+        for (std::size_t query = 0; query != query_count; ++query) {
+            exact_scorer_t scorer = heads.engaged()
+                                        ? exact_scorer_of(heads, query)
+                                        : exact_scorer_of(query_vectors.row(query).as_vector(), settings.kernel);
+            auto score_of = [&](u32_t row) {
+                return scorer(vectors.row(row - settings.first_vector.value).as_vector());
+            };
+            auto expected = ground_truth.row(query).as_vector();
+            auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
+            for (std::size_t position = 0; position != returned.size(); ++position)
+                scores[position] = score_of(returned[position]);
+            f64_t const nearest = score_of(expected[0]);
+            found_at_1 += !returned.empty() && scores[0] >= nearest;
+            ranking_verdict_t const verdict = judge_ranking(std::span<f64_t const> {scores}.first(returned.size()),
+                                                            nearest, score_of(expected[judged_depth - 1]), judged_depth,
+                                                            std::span<double const> {discounts});
+            found_at_k += verdict.found_nearest;
+            shared += verdict.overlap;
+            gain += verdict.gain;
+        }
+
+        double const queries = double(query_count);
+        double const recall_at_1 = 100.0 * double(found_at_1) / queries;
+        double const recall_at_k = 100.0 * double(found_at_k) / queries;
+        double const overlap_at_k = 100.0 * double(shared) / (queries * double(judged_depth));
+        double const gain_at_k = 100.0 * gain / (queries * ideal[judged_depth - 1]);
+        fmt::println("  recall@1: {:.3f}%", recall_at_1);
+        fmt::println("  recall@{}: {:.3f}%", judged_depth, recall_at_k);
+        fmt::println("  overlap@{}: {:.3f}%", judged_depth, overlap_at_k);
+        fmt::println("  ndcg@{}: {:.3f}%", judged_depth, gain_at_k);
+    }
+    else { fmt::println("  recall: skipped, no ground-truth neighbors provided"); }
+}
+
 /** Judges the hits against `--query-neighbors`, or an indexer run without them against the exact
  *  oracle over its first `--oracle-queries`. */
 template <typename scalar_type_, typename dataset_scalar_type_>
 void judge_search(settings_t const& settings, bench_indexer_heads<scalar_type_> const& heads,
                   bench_results_t const& results, nk::matrix_view<u32_t> ground_truth,
-                  nk::matrix_view<dataset_scalar_type_> vectors, std::size_t query_count) {
-    if (!ground_truth.empty() || !heads.engaged()) return judge_hits(settings, results, ground_truth, query_count);
+                  nk::matrix_view<dataset_scalar_type_> vectors, nk::matrix_view<dataset_scalar_type_> query_vectors,
+                  std::size_t query_count) {
+    if (!ground_truth.empty() || !heads.engaged())
+        return judge_hits(settings, heads, results, ground_truth, vectors, query_vectors, query_count);
     std::size_t const judged = std::min(settings.oracle_queries.value, query_count);
-    std::size_t const top_k = settings.top_k.value;
-    std::vector<u32_t> truth(judged * top_k, std::numeric_limits<u32_t>::max());
+    std::size_t const top_k = std::min(settings.top_k.value, vectors.extent(0));
+    std::vector<u32_t> truth(judged * top_k);
     for (std::size_t query = 0; query != judged; ++query) {
         exact_scorer_t scorer = exact_scorer_of(heads, query);
         std::vector<exact_row_t> const best = exact_best_rows(scorer, vectors, top_k);
@@ -486,7 +508,8 @@ void judge_search(settings_t const& settings, bench_indexer_heads<scalar_type_> 
             truth[query * top_k + rank] = best[rank].row + static_cast<u32_t>(settings.first_vector.value);
     }
     fmt::println("  oracle: exact top-{} of {} queries", top_k, judged);
-    judge_hits(settings, results, nk::matrix_view<u32_t> {truth.data(), judged, top_k}, judged);
+    judge_hits(settings, heads, results, nk::matrix_view<u32_t> {truth.data(), judged, top_k}, vectors, query_vectors,
+               judged);
 }
 
 #pragma endregion

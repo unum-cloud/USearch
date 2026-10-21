@@ -248,7 +248,7 @@ std::vector<exact_attention_t> exact_attention(nk::matrix_view<dataset_scalar_ty
     std::vector<exact_scorer_t> scorers;
     std::vector<exact_attention_t> exact(judged);
     for (std::size_t query = 0; query != judged; ++query) {
-        scorers.push_back(exact_scorer_of(queries.row(query).as_vector()));
+        scorers.push_back(exact_scorer_of(queries.row(query).as_vector(), nk_kernel_dot_k));
         exact[query].output.assign(columns, 0);
     }
     std::vector<f32_t> row_values(columns);

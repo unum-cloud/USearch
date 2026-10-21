@@ -456,7 +456,8 @@ bool run_search(streamed_dataset_type_& streamed) {
     double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
 
     report_search_metrics(bench.settings, search_count, seconds, bench.executor.size(), sums, {});
-    judge_search(bench.settings, heads, bench.results, streamed.ground_truth, streamed.vectors, search_count);
+    judge_search(bench.settings, heads, bench.results, streamed.ground_truth, streamed.vectors, streamed.queries,
+                 search_count);
     return true;
 }
 

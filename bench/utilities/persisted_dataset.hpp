@@ -43,7 +43,7 @@ inline nk_dtype_t dtype_of_extension(sz::string_view_t path) noexcept {
     if (path.ends_with(".fbin")) return nk_f32_k;
     if (path.ends_with(".i8bin")) return nk_i8_k;
     if (path.ends_with(".u8bin")) return nk_u8_k;
-    if (path.ends_with(".u1x8bin")) return nk_u1_k;
+    if (path.ends_with(".u1x8bin") || path.ends_with(".b1bin")) return nk_u1_k;
     if (path.ends_with(".bf16bin")) return nk_bf16_k;
     if (path.ends_with(".f16bin")) return nk_f16_k;
     if (path.ends_with(".ibin")) return nk_u32_k;
@@ -188,6 +188,12 @@ class persisted_dataset {
     std::size_t dimensions() const noexcept { return dimensions_; }
     std::size_t neighbors_depth() const noexcept { return neighbors_depth_; }
     explicit operator bool() const noexcept { return static_cast<bool>(vectors_mapping_); }
+
+    /** The mapped vector and query files, headers included. */
+    struct mappings_t {
+        bytes_view_t vectors, queries;
+    };
+    mappings_t mappings() const noexcept { return {vectors_mapping_.view(), queries_mapping_.view()}; }
 };
 
 } // namespace unum::usearch::bench::utilities

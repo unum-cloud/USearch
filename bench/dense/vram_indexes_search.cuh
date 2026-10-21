@@ -398,7 +398,8 @@ bool run_indexes_search(streamed_dataset_type_& streamed) {
     // The empty latency span asks the shared report for the batch-uniform mean.
     report_search_metrics(settings, query_count, seconds, 1, sums, {});
     fmt::println("  preparation: {:.4f} s", preparing);
-    judge_search(settings, heads, bench.results, streamed.ground_truth, streamed.vectors, query_count);
+    judge_search(settings, heads, bench.results, streamed.ground_truth, streamed.vectors, streamed.queries,
+                 query_count);
     return true;
 }
 

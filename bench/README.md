@@ -81,7 +81,7 @@ build_host_release/usearch_bench_dense_ram_indexes_search \
 - `--expansion-add` defaults to `256`: candidates kept while inserting.
 - `--expansion-search` defaults to `96`: candidates kept while searching.
 - `--max-refines` defaults to `0`: upper bound on refinement passes after ingestion.
-- `--expansion-refine` defaults to twice the connectivity: candidates kept while refining.
+- `--expansion-refine` defaults to `--expansion-add`: candidates kept while refining.
 - `--top-k` defaults to `10`: matches judged per query.
 - `--max-base-vectors` defaults to the whole file: cap on ingested rows.
 - `--self-search` defaults to off: judge every stored vector as its own query; its variable takes `1`, `0`, `true` or `false`.
@@ -105,6 +105,7 @@ build_host_release/usearch_bench_dense_ram_indexes_search \
 A bad value prints one line, like `--top-k="0" does not parse, expected a positive count` or `RETRIEVAL_TOP_K="0" does not parse, expected a positive count`, and exits with status 1.
 
 Recall is judged against `--query-neighbors` as recall@1, recall@k, overlap@k and ndcg@k.
+A hit counts by its exact distance, computed from the dataset files, against the expected row's, so ties the ground truth broke arbitrarily are not undercounted.
 A ground truth is computed for the whole file, so `--max-base-vectors` reshapes the graph it describes and the harness drops it, printing a notice; `--self-search` judges connectivity instead and needs no ground truth at all.
 Judge GPU builds through a reload: a search issued right after a bulk build runs against a device still settling, and the checkpoint path is exactly what the C interface exposes.
 
@@ -144,7 +145,7 @@ A single index also loads a sharded checkpoint, its parts appended in order, whi
 
 Both `nvme_indexes` binaries build nothing: they view a checkpoint and take only the flags a view and its queries need.
 The first part's header names the metric they dispatch on and the stored dtype, and its `scale` is what the queries are staged under.
-The search judges its hits against `--query-neighbors` directly, and refuses a ground truth that names a row past the ones the parts hold.
+The search judges its hits against `--query-neighbors`, scoring them exactly over `--base-vectors`, and refuses a ground truth that names a row past the ones the parts hold, or base vectors holding fewer.
 Every query is answered from storage in one batched call, which primes as many rows per thread as the queue depth holds, and the verb times each query from its first primed walk to its final write.
 The `Storage` block names the parts and the transport the engines opened, then each phase reports reads and kilobytes per query by purpose, the round trips, the IOPS and bandwidth it sustained, and the latency percentiles.
 
@@ -152,6 +153,7 @@ The `Storage` block names the parts and the transport the engines opened, then e
 - `USEARCH_NVME_PATHS`, an environment variable like `USEARCH_DEVICES`, defaults to beside the manifest: one directory, file or device per part, comma-separated, to serve parts copied elsewhere.
 - `--query-vectors` is required: query vectors in the RetriEval layout, cast to the parts' stored dtype.
 - `--query-neighbors` is required by the search binary: ground truth, `.ibin`, over the rows the parts hold.
+- `--base-vectors` is required by the search binary: the base file the keys index, whose rows score the judged hits.
 - `--transport` defaults to `auto`: `blocking`, `linux-aio` or `linux-uring`; `auto` takes io_uring, then AIO, then blocking reads, whichever the host admits first.
 - `--queue-depth` defaults to `512`: reads each thread's engine keeps outstanding, which bounds the rows and the hops it overlaps.
 - `--expansion-search`, `--top-k`, `--threads`, `--max-compute`, `--heads` and `--weights` read as in [Running](#running) and [Indexer Heads](#indexer-heads).
@@ -163,7 +165,7 @@ cmake --preset host_release && cmake --build --preset host_release --target usea
 build_host_release/usearch_bench_dense_ram_indexes_search --base-vectors data/sift-10m/base.10M.u8bin \
     --metric euclidean --save sift10m --checkpoints-dir /mnt/nvme0
 build_host_release/usearch_bench_dense_nvme_indexes_search --view /mnt/nvme0/sift10m-u8-euclidean-c32.safegraphs.json \
-    --query-vectors data/sift-10m/query.public.10K.u8bin \
+    --base-vectors data/sift-10m/base.10M.u8bin --query-vectors data/sift-10m/query.public.10K.u8bin \
     --query-neighbors data/sift-10m/groundtruth.public.10K.ibin --transport linux-uring --queue-depth 512
 ```
 
@@ -237,8 +239,10 @@ Datasets and ground truth stay in this layout, while every index the benchmarks 
 | `deep-*`, Yandex Deep       |        `f32` |         96 | euclidean | 10M, 100M, 1B | 10K queries, 1B only   |
 | `turing-*`, Microsoft       |        `f32` |        100 | euclidean | 100M, 1B      | 100K queries           |
 | `t2i-1b`, Yandex T2I        |        `f32` |        200 | angular   | 1B            | 100K queries, 1B only  |
-| `pubchem-ecfp4-*`, PubChem  |         `u1` |       2048 | jaccard   | 10M, 100M     | 10K queries, 100M only |
-| `pubchem-maccs-*`, PubChem  |         `u1` |        168 | jaccard   | 10M, 100M     | 10K queries, 100M only |
+| `pubchem-maccs-*`, PubChem  |         `u1` |        166 | hamming   | 10M, 100M     | 10K queries            |
+| `pubchem-ecfp4-*`, PubChem  |         `u1` |       2048 | hamming   | 10M, 100M     | 10K queries            |
+| `gdb13-ecfp4-1b`, GDB-13    |         `u1` |       2048 | hamming   | 1B            | 10K queries            |
+| `gdb13-maccs-1b`, GDB-13    |         `u1` |        166 | hamming   | 1B            | 10K queries            |
 | `pubchem-usrcat-*`, PubChem |        `f16` |         60 | euclidean | 10M, 100M     | 10K queries, 100M only |
 
 The BigANN base file has no pre-sliced subsets, so a subset is a range request followed by a header patch.
@@ -254,7 +258,7 @@ mkdir -p ~/datasets/sift-10m && ln -sfn ~/datasets/sift-10m data/sift-10m && cd 
 The Yandex ground truth is published against the full 1B set only, so a 10M or 100M slice of Deep or T2I is judged by `--self-search`.
 Every other recipe is in RetriEval's README under the same names.
 
-The PubChem sets come from the USearchMolecules bucket, 99,964,587 base molecules with 10,000 held-out queries, Tanimoto ties judged by distance rather than by ID.
+The PubChem and GDB-13 sets come from the USearchMolecules bucket through RetriEval's `retri-download-molecules`, with 10,000 queries sampled from the base and Hamming ground truth, and `--limit 10000000` cutting the 10M sets.
 
 The other modalities keep their own entries, judged by the exact scan each binary runs.
 
@@ -276,39 +280,77 @@ Panoramax publishes every picture's metadata across its federated instances as o
 ## Results
 
 Every table below holds one row per machine and core class, so a new machine is a new row and nothing else moves.
-Unless a row says otherwise the configuration is the default: connectivity 32, expansion 256 on insertion and 96 on search, top-10, the whole file ingested in one run.
+Every row is connectivity 32 and top-10 over the whole file ingested in one run.
+Expansion lists the insertion and search expansions: the smallest pair reaching 99% recall@10, or the defaults of 256 and 96 on rows measured before that rule.
 
 ### 10M
 
 SIFT, `u8`, euclidean, 10,000,000 rows of 128 dimensions.
 
-| Machine                                            | Class       |   Insertions |      Queries | Recall@10 | Date       |
-| :------------------------------------------------- | :---------- | -----------: | -----------: | --------: | :--------- |
-| Intel i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell`   |   12.8 k IPS |   46.9 k QPS |     98.5% | 2026-09-02 |
-| NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`       |  114.5 k IPS |  210.9 k QPS |     98.6% | 2026-09-02 |
-| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot`  |  23.05 k IPS |  75.15 k QPS |   98.800% | 2026-10-11 |
-| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory   | `metal`     |  72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
-| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB     | `blackwell` |  59.89 k IPS | 235.81 k QPS |   97.726% | 2026-10-14 |
-| NVIDIA B200, 148 SMs, 178.35 GB                    | `blackwell` | 522.31 k IPS | 512.23 k QPS |   97.630% | 2026-10-15 |
+| Machine                                            | Class       | Expansion |   Insertions |      Queries | Recall@10 | Date       |
+| :------------------------------------------------- | :---------- | --------: | -----------: | -----------: | --------: | :--------- |
+| Intel i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell`   |  256 / 96 |   12.8 k IPS |   46.9 k QPS |     98.5% | 2026-09-02 |
+| NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`       |  256 / 96 |  114.5 k IPS |  210.9 k QPS |     98.6% | 2026-09-02 |
+| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot`  |  256 / 96 |  23.05 k IPS |  75.15 k QPS |   98.800% | 2026-10-11 |
+| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory   | `metal`     |  256 / 96 |  72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
+| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB     | `blackwell` |  256 / 96 |  59.89 k IPS | 235.81 k QPS |   97.726% | 2026-10-14 |
+| NVIDIA B200, 148 SMs, 178.35 GB                    | `blackwell` |  256 / 96 | 522.31 k IPS | 512.23 k QPS |   97.630% | 2026-10-15 |
+| NVIDIA B300 SXM6, 148 SMs, 267.68 GB               | `blackwell` |  256 / 96 | 646.25 k IPS | 894.72 k QPS |   99.110% | 2026-10-21 |
+
+PubChem MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, the first 10,000,000 molecules, of 166 and 2048 bits.
+
+| Machine | Class | Dataset | Expansion | Insertions | Queries | Recall@10 | Date |
+| :------ | :---- | :------ | ---: | ---------: | ------: | --------: | :--- |
+| - | - | - | - | - | - | - | - |
 
 ### 100M
 
 SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, and SpaceV, `i8`, euclidean, 100,000,000 rows of 100 dimensions.
 
-| Machine                                           | Class       | Dataset |   Insertions |      Queries | Recall@10 | Date       |
-| :------------------------------------------------ | :---------- | :------ | -----------: | -----------: | --------: | :--------- |
-| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages | `neonsdot`  | SIFT    |  16.86 k IPS |   5.63 k QPS |   96.410% | 2026-10-11 |
-| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory  | `metal`     | SIFT    |  61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
-| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB    | `blackwell` | SIFT    |  56.52 k IPS | 214.77 k QPS |   95.190% | 2026-10-14 |
-| NVIDIA B200, 148 SMs, 178.35 GB                   | `blackwell` | SIFT    | 342.23 k IPS | 483.06 k QPS |   95.160% | 2026-10-15 |
+| Machine                                           | Class       | Dataset | Expansion |   Insertions |      Queries | Recall@10 | Date       |
+| :------------------------------------------------ | :---------- | :------ | --------: | -----------: | -----------: | --------: | :--------- |
+| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages | `neonsdot`  | SIFT    |  256 / 96 |  16.86 k IPS |   5.63 k QPS |   96.410% | 2026-10-11 |
+| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory  | `metal`     | SIFT    |  256 / 96 |  61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
+| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB    | `blackwell` | SIFT    |  256 / 96 |  56.52 k IPS | 214.77 k QPS |   95.190% | 2026-10-14 |
+| NVIDIA B200, 148 SMs, 178.35 GB                   | `blackwell` | SIFT    |  256 / 96 | 342.23 k IPS | 483.06 k QPS |   95.160% | 2026-10-15 |
+| NVIDIA B300 SXM6, 148 SMs, 267.68 GB              | `blackwell` | SIFT    |  256 / 96 | 488.71 k IPS | 858.57 k QPS |   97.660% | 2026-10-21 |
+
+PubChem MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, all 115,627,267 molecules, of 166 and 2048 bits.
+
+| Machine                              | Class       | Dataset | Expansion |   Insertions |      Queries | Recall@10 | Date       |
+| :----------------------------------- | :---------- | :------ | --------: | -----------: | -----------: | --------: | :--------- |
+| NVIDIA B300 SXM6, 148 SMs, 267.68 GB | `blackwell` | MACCS   |  256 / 96 | 604.41 k IPS |   1.12 M QPS |   97.090% | 2026-10-21 |
+| NVIDIA B300 SXM6, 148 SMs, 267.68 GB | `blackwell` | ECFP4   |  256 / 96 | 335.83 k IPS | 745.29 k QPS |   93.450% | 2026-10-21 |
 
 ### 1B
 
-SIFT, `u8`, euclidean, 1,000,000,000 rows of 128 dimensions, the goal being one hour of build on a dual-socket CPU.
+SIFT, `u8`, euclidean, 1,000,000,000 rows of 128 dimensions, and Deep, `f32` stored as `bf16`, euclidean, 1,000,000,000 rows of 96 dimensions, the goal being one hour of build on a dual-socket CPU.
 
-| Machine | Class | Dataset | Insertions | Queries | Recall@10 | Date |
-| :------ | :---- | :------ | ---------: | ------: | --------: | :--- |
-| - | - | - | - | - | - | - |
+| Machine | Class | Dataset | Expansion | Insertions | Queries | Recall@10 | Date |
+| :------ | :---- | :------ | ---: | ---------: | ------: | --------: | :--- |
+| - | - | - | - | - | - | - | - |
+
+GDB-13 MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, all 977 million molecules, of 166 and 2048 bits.
+
+| Machine | Class | Dataset | Expansion | Insertions | Queries | Recall@10 | Date |
+| :------ | :---- | :------ | ---: | ---------: | ------: | --------: | :--- |
+| - | - | - | - | - | - | - | - |
+
+### Multiply
+
+Wiki, `f32` stored as `bf16`, dot, 1,000,000 rows of 256 dimensions, every one of the 100,000 query rows running one `multiply`.
+
+| Machine | Class | Rows | Pairs per row | Date |
+| :------ | :---- | ---: | ------------: | :--- |
+| - | - | - | - | - |
+
+### Attend
+
+The same index, every query row running one `attend` as a single head, judged on 16 queries against exact `f64` attention.
+
+| Machine | Class | Queries | Keys per query | Relative L2 error | Date |
+| :------ | :---- | ------: | -------------: | ----------------: | :--- |
+| - | - | - | - | - | - |
 
 ## Hyper-Parameters
 

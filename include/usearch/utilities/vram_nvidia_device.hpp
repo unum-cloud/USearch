@@ -160,12 +160,14 @@ struct alignas(64) cuda_tensor_map_t {
 inline constexpr int cuda_tensor_map_u64_k = 4;
 
 /** The flags USearch passes: @c CU_STREAM_NON_BLOCKING, @c CU_EVENT_BLOCKING_SYNC,
- *  @c CU_EVENT_DISABLE_TIMING, @c CU_MEMHOSTALLOC_PORTABLE, @c CU_MEM_ATTACH_GLOBAL and
+ *  @c CU_EVENT_DISABLE_TIMING, @c CU_MEMHOSTALLOC_PORTABLE, which @c CU_MEMHOSTREGISTER_PORTABLE
+ *  equals, @c CU_MEMHOSTREGISTER_READ_ONLY, @c CU_MEM_ATTACH_GLOBAL and
  *  @c CU_MEM_ALLOC_GRANULARITY_MINIMUM. */
 inline constexpr unsigned cuda_stream_non_blocking_k = 1;
 inline constexpr unsigned cuda_event_blocking_sync_k = 1;
 inline constexpr unsigned cuda_event_disable_timing_k = 2;
 inline constexpr unsigned cuda_host_portable_k = 1;
+inline constexpr unsigned cuda_host_read_only_k = 8;
 inline constexpr unsigned cuda_attach_global_k = 1;
 inline constexpr int cuda_granularity_minimum_k = 0;
 inline constexpr int cuda_pointer_memory_type_k = 2;
@@ -203,6 +205,8 @@ struct cuda_api_t {
     cuda_result_t (*free)(cuda_device_address_t) = nullptr;
     cuda_result_t (*allocate_host)(void**, std::size_t, unsigned) = nullptr;
     cuda_result_t (*free_host)(void*) = nullptr;
+    cuda_result_t (*register_host)(void const*, std::size_t, unsigned) = nullptr;
+    cuda_result_t (*unregister_host)(void const*) = nullptr;
     cuda_result_t (*copy)(cuda_device_address_t, cuda_device_address_t, std::size_t) = nullptr;
     cuda_result_t (*copy_async)(cuda_device_address_t, cuda_device_address_t, std::size_t,
                                 cuda_stream_handle_t) = nullptr;
@@ -270,7 +274,9 @@ struct cuda_api_t {
             library.resolve("cuMemAllocManaged", api.allocate_managed) &&
             library.resolve("cuMemAdvise_v2", api.memory_advise) && library.resolve("cuMemFree_v2", api.free) &&
             library.resolve("cuMemHostAlloc", api.allocate_host) && library.resolve("cuMemFreeHost", api.free_host) &&
-            library.resolve("cuMemcpy", api.copy) && library.resolve("cuMemcpyAsync", api.copy_async) &&
+            library.resolve("cuMemHostRegister_v2", api.register_host) &&
+            library.resolve("cuMemHostUnregister", api.unregister_host) && library.resolve("cuMemcpy", api.copy) &&
+            library.resolve("cuMemcpyAsync", api.copy_async) &&
             library.resolve("cuMemcpy2DAsync_v2", api.copy_2d_async) && library.resolve("cuMemsetD8_v2", api.fill) &&
             library.resolve("cuMemsetD8Async", api.fill_async) &&
             library.resolve("cuMemsetD32Async", api.fill_words_async) &&
@@ -839,6 +845,20 @@ struct cuda_pinned_allocator {
                    : nullptr;
     }
     void deallocate(value_type* pointer, std::size_t) noexcept { cuda_api().free_host(pointer); }
+
+    /** Page-locks @p bytes the caller owns, like a read-only file mapping, so copies from them
+     *  run as DMA; @ref unpin releases them before they unmap. */
+    static status_t pin(bytes_view_t bytes) noexcept {
+        if (bytes.empty()) return status_t::success_k;
+        cuda_api_t const& api = cuda_api();
+        unsigned const flags = cuda_host_portable_k | cuda_host_read_only_k;
+        bool const pinned = api && api.register_host(bytes.data(), bytes.size(), flags) == cuda_success_k;
+        return pinned ? status_t::success_k : status_t::device_error_k;
+    }
+    static void unpin(bytes_view_t bytes) noexcept {
+        if (!bytes.empty()) cuda_api().unregister_host(bytes.data());
+    }
+
     cuda_stream_handle_t stream() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
 

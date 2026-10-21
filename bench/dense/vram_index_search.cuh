@@ -461,7 +461,8 @@ bool run_search(streamed_dataset_type_& streamed) {
     // The empty latency span asks the shared report for the batch-uniform mean.
     report_search_metrics(settings, query_count, seconds, 1, bench.lane, {});
     fmt::println("  preparation: {:.4f} s", preparing);
-    judge_search(settings, heads, bench.results, streamed.ground_truth, streamed.vectors, query_count);
+    judge_search(settings, heads, bench.results, streamed.ground_truth, streamed.vectors, streamed.queries,
+                 query_count);
     return true;
 }
 
@@ -703,8 +704,15 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
                                                    : cuda_address_space_t::device_k;
     return open_dataset(settings.base_vectors_path, settings.query_vectors_path, settings.query_neighbors_path,
                         [&](auto const& dataset) {
-                            return on_dataset(dataset, settings, std::span<int const> {devices}, max_compute,
-                                              storage_space);
+                            auto const mapped = dataset.mappings();
+                            bool const pinned = succeeded(cuda_pinned_allocator_t::pin(mapped.vectors)) &&
+                                                succeeded(cuda_pinned_allocator_t::pin(mapped.queries));
+                            fmt::println("- Pinned inputs: {}", pinned);
+                            int const exit_code = on_dataset(dataset, settings, std::span<int const> {devices},
+                                                             max_compute, storage_space);
+                            cuda_pinned_allocator_t::unpin(mapped.queries);
+                            cuda_pinned_allocator_t::unpin(mapped.vectors);
+                            return exit_code;
                         });
 }
 

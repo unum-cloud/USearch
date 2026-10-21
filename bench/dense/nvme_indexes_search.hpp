@@ -10,11 +10,12 @@
  *  producer rescaled its rows by. Every query is answered from storage in one batched call, each
  *  timed by the verb from its first primed walk to its final write, and every read counted by
  *  purpose. Keys are dataset rows, so the merged rankings judge directly against
- *  `--query-neighbors`.
+ *  `--query-neighbors`, every row scored exactly over `--base-vectors`.
  *
  *  @code{.sh}
  *  usearch_bench_dense_nvme_indexes_search --view /mnt/nvme0/sift10m.safegraphs.json \
- *      --query-vectors ... --query-neighbors ... --transport linux-uring --queue-depth 512
+ *      --base-vectors ... --query-vectors ... --query-neighbors ... \
+ *      --transport linux-uring --queue-depth 512
  *  @endcode
  */
 #pragma once
@@ -117,12 +118,14 @@ inline std::array<flag_t, 8> nvme_flags(settings_t& settings, nvme_settings_t& n
     }};
 }
 
-/** The flags only the NVMe search binary takes: the truth its hits are judged against, and a
- *  lightning indexer's heads to rank by. */
-inline std::array<flag_t, 3> nvme_search_flags(settings_t& settings) noexcept {
+/** The flags only the NVMe search binary takes: the truth its hits are judged against, the base
+ *  rows they are scored over, and a lightning indexer's heads to rank by. */
+inline std::array<flag_t, 4> nvme_search_flags(settings_t& settings) noexcept {
     return {{
         {"--query-neighbors", "path", "ground truth over the dataset rows the parts' keys name, `.ibin`",
          &settings.query_neighbors_path},
+        {"--base-vectors", "path", "base vectors, a row per key, `.fbin` family, scoring the judged hits exactly",
+         &settings.base_vectors_path},
         {"--heads", "path", "any `.fbin`-family file, every query's indexer heads", &settings.heads_path},
         {"--weights", "path", "any `.fbin`-family file, one row of head weights per query", &settings.weights_path},
     }};
@@ -341,6 +344,9 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
         for (u32_t const row : to_span(truth.row(query).as_vector())) farthest = std::max(farthest, row);
     if (farthest >= rows)
         return fmt::println("--query-neighbors names row {}, past the {} rows the parts hold", farthest, rows), false;
+    if (streamed.vectors.extent(0) < rows)
+        return fmt::println("--base-vectors holds {} rows, but the parts hold {}", streamed.vectors.extent(0), rows),
+               false;
 
     bench_indexer_heads<scalar_t> heads;
     if (!open_indexer_heads(nvme.viewed, streamed, heads)) return false;
@@ -391,7 +397,7 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
     }
     report_search_metrics(settings, search_count, seconds, nvme.executor.size(), sums, std::span {latencies_us});
     report_storage_metrics("query", search_count, seconds, result, {});
-    judge_search(settings, heads, nvme.results, truth, streamed.vectors, search_count);
+    judge_search(settings, heads, nvme.results, truth, streamed.vectors, streamed.queries, search_count);
     return true;
 }
 

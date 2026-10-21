@@ -388,8 +388,8 @@ struct settings_t {
      *  nothing ends the phase early, and zero skips it outright. */
     count_t max_refines {.minimum = 0};
 
-    /** How many candidates a refinement keeps; absent takes the index's default, twice the
-     *  connectivity. */
+    /** How many candidates a refinement keeps; absent takes the insertion's, since a pass repeats
+     *  insertion's selection with the whole graph visible. */
     count_t expansion_refine;
 
     /** Any `.fbin`-family file of every query's indexer heads, consecutive rows per query; needs `--weights`. */
@@ -422,7 +422,7 @@ inline std::array<flag_t, 21> common_flags(settings_t& settings) noexcept {
         {"--expansion-search", "breadth", "search candidates; 96 by default", &settings.expansion_search},
         {"--max-refines", "passes", "upper bound on whole-graph refinement passes after ingestion; 0 by default",
          &settings.max_refines},
-        {"--expansion-refine", "breadth", "refinement candidates; twice the connectivity by default",
+        {"--expansion-refine", "breadth", "refinement candidates; --expansion-add by default",
          &settings.expansion_refine},
         {"--top-k", "count", "matches per query to judge; 10 by default", &settings.top_k},
         {"--first-vector", "row", "first dataset row viewed, keyed by its row; 0 by default", &settings.first_vector},
@@ -499,12 +499,13 @@ template <typename names_type_>
 /** Resolves the names every binary shares: the stored dtype, defaulting to the file's, and the metric. Exits with
  *  status 1 on the first name that matches nothing. */
 inline void resolve_common_names(settings_t& settings) {
+    if (!settings.expansion_refine.value) settings.expansion_refine.value = settings.expansion_add.value;
     auto const dtype_names = stored_dtypes_k | std::views::transform(dtype_name);
     auto const metric_names = metrics_k | std::views::transform(nk_kernel_name);
     nk_dtype_t const file_dtype = utilities::dtype_of_extension(settings.base_vectors_path);
     if (file_dtype == nk_dtype_unknown_k || file_dtype == nk_u32_k) {
         fmt::println(stderr, "--base-vectors=\"{}\" does not parse, expected a {} path", settings.base_vectors_path,
-                     ".fbin, .bf16bin, .f16bin, .i8bin, .u8bin or .u1x8bin");
+                     ".fbin, .bf16bin, .f16bin, .i8bin, .u8bin, .u1x8bin or .b1bin");
         std::exit(1);
     }
     settings.stored_dtype = file_dtype;
@@ -599,7 +600,7 @@ inline void print(settings_t const& settings) {
     fmt::println("- Expansion add: {}", settings.expansion_add.value);
     fmt::println("- Expansion search: {}", settings.expansion_search.value);
     fmt::println("- Max refines: {}", settings.max_refines.value);
-    fmt::println("- Expansion refine: {}", count_or_else(settings.expansion_refine, "twice the connectivity"));
+    fmt::println("- Expansion refine: {}", settings.expansion_refine.value);
     fmt::println("- Top k: {}", settings.top_k.value);
     fmt::println("- Max base vectors: {}", count_or_else(settings.max_base_vectors, "the whole file"));
     fmt::println("- First vector: {}", settings.first_vector.value);
