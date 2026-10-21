@@ -861,9 +861,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /**
-         * Pairs the walks scored across every row, before the wanted bound cut any; a
-         * {@link DenseVerbs#maxsim} reports no such count, so it holds the keys landed across every
-         * query, zero over device memory.
+         * Pairs the walks scored across every row, or keys scored across every query, before the
+         * wanted bound cut any.
          */
         public long required() {
             return required;
@@ -1853,8 +1852,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.padding(),
                     Library.SIZE.withName("count"),
                     Library.ROWS_VIEW.withName("queries"),
+                    Library.POINTER.withName("query_offsets"),
                     Library.SIZE.withName("rows_per_query"),
                     Library.POINTER.withName("matches"),
+                    Library.POINTER.withName("written"),
+                    Library.POINTER.withName("required"),
                     Library.POINTER.withName("arena"),
                     Library.SIZE.withName("wanted"),
                     Library.SIZE.withName("expansion_factor"),
@@ -1862,8 +1864,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     STATS,
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
-                    PREDICATE,
-                    Library.POINTER.withName("query_offsets")));
+                    PREDICATE));
 
     /** {@code usearch_value_lookup_t}. */
     private static final FunctionDescriptor LOOKUP = FunctionDescriptor.ofVoid(

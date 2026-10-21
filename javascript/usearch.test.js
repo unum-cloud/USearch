@@ -637,7 +637,7 @@ test("Late interaction over multi-row entries", () => {
 
   assert.equal(documents.rows, 1, "two token rows make one query");
   assert.deepEqual(documents.offsets, new BigUint64Array([0n, 2n]), "both keys scored");
-  assert.equal(documents.required, 2, "the keys landed");
+  assert.equal(documents.required, 2, "both keys were scored");
   assert.equal(usearch.integerFromKey(usearch.keyAt(documents.keys, 0)), 7n);
   const every = index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 2, 0, new Arena());
   const bounded = index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 2, 1, new Arena());

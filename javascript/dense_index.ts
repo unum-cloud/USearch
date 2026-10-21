@@ -339,7 +339,7 @@ export class DenseVectors extends ArenaView {
 export class DenseProducts extends ArenaView {
   /** Left rows the product covers. */
   readonly rows: number;
-  /** Pairs scored across every row, before `wanted` cut any; for `maxsim`, the documents landed. */
+  /** Pairs scored across every row, or documents across every query, before `wanted` cut any. */
   readonly required: number;
   readonly #landed: CompiledProducts;
 

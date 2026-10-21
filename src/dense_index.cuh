@@ -2853,13 +2853,13 @@ static bool accepts_query_offsets(std::span<std::size_t const> query_offsets, us
 /** The late-interaction sink on one serving variant: chunks of whole queries, one per step of the
  *  progress handler, each query's rows cut by @p query_offsets. A chunk's queries rank into one run
  *  per executor thread, and the runs then count, prefix-sum and scatter into @p keys, @p scores and
- *  @p offsets growing in @p arena, as geospatial `within` lands; @p predicate narrows the
- *  nominations once it names a callback. */
+ *  @p offsets growing in @p arena, as geospatial `within` lands, while @p required sums the keys
+ *  every query scored; @p predicate narrows the nominations once it names a callback. */
 template <typename variant_type_>
 static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const& arguments,
                            std::span<std::size_t const> query_offsets, predicate_t& predicate,
                            usearch_arena_handle_t& arena, usearch_key_t*& landed_keys,
-                           usearch_distance_t*& landed_scores, std::size_t*& landed_offsets,
+                           usearch_distance_t*& landed_scores, std::size_t*& landed_offsets, std::size_t& required,
                            usearch_outcome_t* outcome) noexcept {
     using run_t = growing_buffer<maxsim_match_t, thread_allocator_t>;
     usearch_rows_view_t const& rows = arguments.queries;
@@ -2881,10 +2881,11 @@ static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const&
     // The runs' headers and the tape sit in the call's arena, which no engine rewinds.
     thread_allocator_t const staging {arena.memory};
     growing_buffer<run_t, thread_allocator_t> runs {staging};
-    growing_buffer<std::size_t, thread_allocator_t> offsets {staging}, cursors {staging};
+    growing_buffer<std::size_t, thread_allocator_t> offsets {staging}, cursors {staging}, scored {staging};
     growing_buffer<usearch_key_t, thread_allocator_t> keys {staging};
     growing_buffer<usearch_distance_t, thread_allocator_t> scores {staging};
-    if (failed(open_maxsim_runs<variant_type_>(runs, *executor, staging)) || failed(offsets.resize(count + 1)))
+    if (failed(open_maxsim_runs<variant_type_>(runs, *executor, staging)) || failed(offsets.resize(count + 1)) ||
+        failed(scored.resize_uninitialized(count)))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
 
     us::dense::rows_view_t const all = rows_of(rows, query_offsets.back());
@@ -2901,11 +2902,14 @@ static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const&
             return propagate_error(prepared, outcome, "Failed to carve the contexts");
         specialized_index view {variant};
         maxsim_landing_t const landing {to_writable_span(runs), staging};
+        std::span<std::size_t> const chunk_scored = to_writable_span(scored).subspan(first, taking);
         expected<typename variant_type_::search_result_t> const found =
             predicate.predicate.callback
-                ? view.maxsim_if(all, chunk_offsets, *executor, scratch, config, arguments.wanted, landing, predicate)
-                : view.maxsim(all, chunk_offsets, *executor, scratch, config, arguments.wanted, landing);
+                ? view.maxsim_if(all, chunk_offsets, *executor, scratch, config, arguments.wanted, chunk_scored,
+                                 landing, predicate)
+                : view.maxsim(all, chunk_offsets, *executor, scratch, config, arguments.wanted, chunk_scored, landing);
         if (!crossed(found, arguments.stats, outcome)) return false;
+        for (std::size_t const query_scored : chunk_scored) required += query_scored;
 
         // Each query landed whole on one thread in rank order, so per-query counts place every key.
         for (run_t const& run : runs)
@@ -3922,6 +3926,8 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     std::size_t const count = arguments->count, rows_per_query = arguments->rows_per_query;
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
+    if (arguments->written) *arguments->written = 0;
+    if (arguments->required) *arguments->required = 0;
     if (!arguments->query_offsets && !rows_per_query)
         return propagate_error(usearch_status_shape_mismatch_k, outcome, "Every query needs at least one row"), void();
     predicate_t keyed {arguments->predicate};
@@ -3952,7 +3958,9 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                 usearch_key_t* keys = nullptr;
                 usearch_distance_t* scores = nullptr;
                 std::size_t* offsets = nullptr;
-                if (!maxsim_queries(variant, *arguments, query_offsets, keyed, *arena, keys, scores, offsets, outcome))
+                std::size_t required = 0;
+                if (!maxsim_queries(variant, *arguments, query_offsets, keyed, *arena, keys, scores, offsets, required,
+                                    outcome))
                     return;
                 std::size_t const landed = offsets[count];
                 if (!landed) keys = nullptr, scores = nullptr;
@@ -3962,6 +3970,8 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                 if (failed(published = drained(*arena, published)))
                     return propagate_error(published, outcome, "Failed to land the matches on the device"), void();
                 *arguments->matches = {keys, scores, offsets};
+                if (arguments->written) *arguments->written = landed;
+                if (arguments->required) *arguments->required = required;
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },

@@ -474,17 +474,14 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
             call.rows("queries", queries);
             call.size("rows_per_query", rowsPerQuery);
             MemorySegment matches = call.output("matches", Library.MATCHES_TAPE_VIEW);
+            MemorySegment written = call.output("written", Library.SIZE);
+            MemorySegment required = call.output("required", Library.SIZE);
             call.arena("arena", arena);
             call.size("wanted", config.wanted);
             call.size("expansion_factor", config.expansionFactor);
             call.stats("stats", config.stats);
-            return () -> {
-                MemorySegment offsets = call.reach(
-                        matches.get(Library.POINTER, Library.offset(Library.MATCHES_TAPE_VIEW, "offsets")),
-                        (count + 1L) * Long.BYTES);
-                long landed = offsets.address() == 0 ? 0 : offsets.getAtIndex(Library.SIZE, count);
-                return DenseProducts.lift(call, matches, count, landed, landed);
-            };
+            return () -> DenseProducts.lift(
+                    call, matches, count, written.get(Library.SIZE, 0), required.get(Library.SIZE, 0));
         });
     }
 

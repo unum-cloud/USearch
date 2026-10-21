@@ -452,12 +452,14 @@ class maxsim_reducer {
      *  @param[out] scores Their summed maxima as @p score_type_, largest first, parallel to
      *      @p keys.
      *  @param[out] counts Keys written per query, one per query.
+     *  @param[out] scored Keys scored per query, before the width of @p keys cut any.
      *  @return The keys written over every query.
      */
     template <typename score_type_>
     std::size_t operator()(nk::matrix_view<key_t> row_keys, nk::matrix_view<distance_t> row_distances,
                            std::span<std::size_t const> row_counts, nk::matrix_span<key_t> keys,
-                           nk::matrix_span<score_type_> scores, std::span<std::size_t> counts) noexcept {
+                           nk::matrix_span<score_type_> scores, std::span<std::size_t> counts,
+                           std::span<std::size_t> scored) noexcept {
         entry_t* const staged = staged_.data();
         std::size_t written = 0;
         for (std::size_t query = 0; query != counts.size(); ++query) {
@@ -488,6 +490,7 @@ class maxsim_reducer {
                 keys(query, rank) = staged[rank].key,
                             scores(query, rank) = static_cast<score_type_>(staged[rank].score);
             counts[query] = kept;
+            scored[query] = unique;
             written += kept;
         }
         return written;

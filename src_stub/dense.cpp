@@ -1139,16 +1139,24 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     usearch_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
     *arguments->matches = {};
+    if (arguments->written) *arguments->written = 0;
+    if (arguments->required) *arguments->required = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_unfrozen(index, outcome)) return;
     if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_status_config_mismatch_k,
                   "Late interaction sums maxima over logits, so the kind must be inner product", outcome))
         return;
     std::size_t const queries_count = arguments->count, rows_per_query = arguments->rows_per_query;
+    std::size_t const* const query_offsets = arguments->query_offsets;
     usearch_rows_view_t const& queries = arguments->queries;
-    if (reject_if(!rows_per_query, usearch_status_shape_mismatch_k, "A query must hold at least one row", outcome))
-        return;
-    if (reject_view(queries, queries_count * rows_per_query, index, outcome)) return;
+    auto const first_row = [&](std::size_t query) noexcept {
+        return query_offsets ? query_offsets[query] : query * rows_per_query;
+    };
+    bool hollow = !query_offsets && !rows_per_query;
+    for (std::size_t query = 0; query_offsets && query != queries_count; ++query)
+        hollow |= query_offsets[query + 1] <= query_offsets[query];
+    if (reject_if(hollow, usearch_status_shape_mismatch_k, "A query must hold at least one row", outcome)) return;
+    if (reject_view(queries, first_row(queries_count), index, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {queries.data}, outcome);
     if (!arena) return;
     usearch_scalar_t const scalar_kind = queries.scalar;
@@ -1169,19 +1177,21 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         token_rows[slot->second].push_back(row);
     }
 
-    std::vector<double> query_rows(rows_per_query * dimensions);
+    std::vector<double> query_rows;
     std::vector<match_t> ranked, landed;
     std::vector<std::size_t> landed_offsets {0};
-    std::size_t answered = 0;
+    std::size_t answered = 0, required = 0;
     for (std::size_t query = 0; query != queries_count; ++query) {
-        for (std::size_t row = 0; row != rows_per_query; ++row)
-            read_row(row_at<std::byte>(queries.data, query * rows_per_query + row, queries.stride, row_bytes),
-                     scalar_kind, std::span<double>(query_rows).subspan(row * dimensions, dimensions));
+        std::size_t const begin = first_row(query), rows = first_row(query + 1) - begin;
+        query_rows.resize(rows * dimensions);
+        for (std::size_t row = 0; row != rows; ++row)
+            read_row(row_at<std::byte>(queries.data, begin + row, queries.stride, row_bytes), scalar_kind,
+                     std::span<double>(query_rows).subspan(row * dimensions, dimensions));
 
         ranked.clear();
         for (std::size_t document = 0; document != documents.size(); ++document) {
             double summed = 0;
-            for (std::size_t row = 0; row != rows_per_query; ++row) {
+            for (std::size_t row = 0; row != rows; ++row) {
                 std::span<double const> const query_row {query_rows.data() + row * dimensions, dimensions};
                 double best = std::numeric_limits<double>::lowest();
                 for (std::size_t stored : token_rows[document])
@@ -1198,9 +1208,10 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         std::size_t const kept = arguments->wanted ? std::min(arguments->wanted, ranked.size()) : ranked.size();
         landed.insert(landed.end(), ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(kept));
         landed_offsets.push_back(landed.size());
+        required += ranked.size();
         if (stats) {
             stats->visited_members += index.entries.size();
-            stats->computed_distances += documents.size() * rows_per_query;
+            stats->computed_distances += documents.size() * rows;
             stats->restarts += 1;
         }
         ++answered;
@@ -1215,6 +1226,8 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     for (std::size_t match = 0; match != landed.size(); ++match)
         keys[match] = landed[match].key, scores[match] = landed[match].distance;
     *arguments->matches = {keys, scores, offsets};
+    if (arguments->written) *arguments->written = landed.size();
+    if (arguments->required) *arguments->required = required;
 }
 
 } // extern "C"

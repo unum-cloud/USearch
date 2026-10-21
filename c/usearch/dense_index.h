@@ -1873,6 +1873,10 @@ typedef struct usearch_dense_maxsim_t {
      *  as many as @c query_offsets spans. */
     usearch_rows_view_t queries;
 
+    /** The @b optional offsets of every query's rows, @c count + 1 of them; @c NULL keeps
+     *  @c rows_per_query. */
+    size_t const* query_offsets;
+
     /** Rows in every query; uniform, so ColBERT's padding applies as is; unread when
      *  @c query_offsets is set. */
     size_t rows_per_query;
@@ -1882,6 +1886,13 @@ typedef struct usearch_dense_maxsim_t {
      *  spans @c matches->offsets[i] up to @c matches->offsets[i+1], @c scores carrying each key's
      *  summed maxima. */
     usearch_matches_tape_view_t* matches;
+
+    /** The @b optional output for the keys written across every query, read on the host even
+     *  when @c matches lands in device memory. */
+    size_t* written;
+
+    /** The @b optional output for the keys scored across every query, before @c wanted cut any. */
+    size_t* required;
 
     /** Memory for @c matches, rewound by the call. */
     usearch_arena_t arena;
@@ -1904,10 +1915,6 @@ typedef struct usearch_dense_maxsim_t {
 
     /** The @b optional filter over keys, asked before any key's rows are reduced. */
     usearch_predicate_t predicate;
-
-    /** The @b optional offsets of every query's rows, @c count + 1 of them; @c NULL keeps
-     *  @c rows_per_query. */
-    size_t const* query_offsets;
 } usearch_dense_maxsim_t;
 
 /**

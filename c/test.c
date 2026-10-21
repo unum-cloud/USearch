@@ -2613,9 +2613,10 @@ void test_attend(void) {
 /** Every landed run of @p matches against @p exact, `[query][document]` totals: as many keys as
  *  @p expected_count per query, largest first, each at its exact total, even keys alone when
  *  @p even_only. */
-static void expect_maxsim_tape(usearch_matches_tape_view_t matches, size_t queries, size_t documents,
+static void expect_maxsim_tape(usearch_matches_tape_view_t matches, size_t written, size_t queries, size_t documents,
                                double const* exact, size_t const* expected_count, bool even_only) {
     expect(matches.offsets && matches.offsets[0] == 0, "A tape starts at zero");
+    expect_eq(written, matches.offsets[queries], "The written count is the tape's last offset");
     for (size_t query = 0; query != queries; ++query) {
         size_t const first = matches.offsets[query], end = matches.offsets[query + 1];
         expect_eq(end - first, expected_count[query], "Every query lands as many keys as it kept");
@@ -2632,7 +2633,8 @@ static void expect_maxsim_tape(usearch_matches_tape_view_t matches, size_t queri
 
 /** Documents of 2 to 4 token rows hold small integers, which `bf16` keeps exactly, so every MaxSim
  *  total is exact: queries of 1, 2 and 3 rows land a ragged tape, walks and a scan alike, every
- *  document without a bound, the best one with one, and even documents alone under a predicate. */
+ *  document without a bound, the best one with one while `required` counts them all, and even
+ *  documents alone under a predicate. */
 void test_maxsim(void) {
     printf("Test: MaxSim\n");
 
@@ -2691,16 +2693,19 @@ void test_maxsim(void) {
 
     usearch_arena_t const arena = create_arena(executor);
     usearch_matches_tape_view_t matches = {0};
+    size_t written = 0, required = 0;
     usearch_dense_maxsim_t maxsim = {
         .index = index,
         .executor = executor,
         .outcome = &outcome,
         .count = queries,
         .queries = {query_vectors, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+        .query_offsets = query_offsets,
         .matches = &matches,
+        .written = &written,
+        .required = &required,
         .arena = arena,
-        .expansion_factor = rows_count,
-        .query_offsets = query_offsets};
+        .expansion_factor = rows_count};
     size_t const every[queries] = {documents, documents, documents};
     size_t const best_only[queries] = {1, 1, 1};
     size_t const even_ones[queries] = {documents / 2, documents / 2, documents / 2};
@@ -2711,12 +2716,13 @@ void test_maxsim(void) {
         maxsim.predicate = (usearch_predicate_t) {0};
         usearch_dense_maxsim(&maxsim);
         expect(!outcome.message, outcome.message);
-        expect_maxsim_tape(matches, queries, documents, exact, every, false);
+        expect_maxsim_tape(matches, written, queries, documents, exact, every, false);
 
         maxsim.wanted = 1;
         usearch_dense_maxsim(&maxsim);
         expect(!outcome.message, outcome.message);
-        expect_maxsim_tape(matches, queries, documents, exact, best_only, false);
+        expect_maxsim_tape(matches, written, queries, documents, exact, best_only, false);
+        expect_eq(required, queries * documents, "Required counts every key scored before wanted cut them");
         for (size_t query = 0; query != queries; ++query)
             for (size_t document = 0; document != documents; ++document)
                 expect(exact[query * documents + document] <= matches.scores[matches.offsets[query]] + 1e-3,
@@ -2727,7 +2733,8 @@ void test_maxsim(void) {
         maxsim.predicate = (usearch_predicate_t) {admits_even, &widest_batch};
         usearch_dense_maxsim(&maxsim);
         expect(!outcome.message, outcome.message);
-        expect_maxsim_tape(matches, queries, documents, exact, even_ones, true);
+        expect_maxsim_tape(matches, written, queries, documents, exact, even_ones, true);
+        expect_eq(required, queries * documents / 2, "Required counts no key the predicate rejected");
     }
 
     usearch_arena_free(arena);

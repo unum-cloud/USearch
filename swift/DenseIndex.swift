@@ -674,9 +674,8 @@ public struct DenseProducts: RandomAccessCollection {
     let products: usearch_matches_tape_view_t
     /// One past the last left row or query.
     public let endIndex: Int
-    /// Pairs the walks scored across every row, before the wanted bound cut any; a `maxsim`
-    /// reports no such count, so it holds the keys landed across every query, zero over device
-    /// memory.
+    /// Pairs the walks scored across every row, or keys scored across every query, before the
+    /// wanted bound cut any.
     public let required: Int
 
     /// The first row's position, which a collection walk starts from.
@@ -1702,6 +1701,7 @@ struct DenseCall {
         landing.anchor(queries.owner)
         landing.anchor(config.stats)
         let matches = landing.slots(usearch_matches_tape_view_t())
+        let required = landing.slots(0)
         let write = landing.lend(arena)
         let progress = landing.lend(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_maxsim_t(
@@ -1711,21 +1711,22 @@ struct DenseCall {
             completion: completion,
             count: count,
             queries: queries.raw,
+            query_offsets: nil,
             rows_per_query: rowsPerQuery,
             matches: matches,
+            written: nil,
+            required: required,
             arena: arena.raw,
             wanted: wanted,
             expansion_factor: config.expansionFactor,
             progress: progress,
             stats: config.stats?.raw,
             traversal: Traversal.walk.raw,
-            predicate: usearch_predicate_t(),
-            query_offsets: nil
+            predicate: usearch_predicate_t()
         )
         usearch_dense_maxsim(&arguments)
         func read() -> DenseProducts {
-            let landed = arena.residency == .vram ? 0 : matches.pointee.offsets.map { $0[count] } ?? 0
-            return DenseProducts(write: write, products: matches.pointee, endIndex: count, required: landed)
+            DenseProducts(write: write, products: matches.pointee, endIndex: count, required: required.pointee)
         }
         return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
     }

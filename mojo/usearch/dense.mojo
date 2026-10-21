@@ -63,7 +63,6 @@ from usearch.types import (
     PredicateCost,
     ProgressArguments,
     RamOptions,
-    Residency,
     RowsView,
     RowsViewArguments,
     ScalarKind,
@@ -445,8 +444,8 @@ struct DenseProducts[origin: MutOrigin](Movable):
     var pairs: Int
     """Pairs written across every row."""
     var required: Int
-    """Pairs the walks scored before `wanted` cut any, or `pairs` for `maxsim`; above `pairs` means
-    rows were truncated."""
+    """Pairs the walks scored, or keys the queries scored for `maxsim`, before `wanted` cut any;
+    above `pairs` means rows were truncated."""
 
     def offsets(ref self) raises Error -> Span[c_size_t, origin_of(self)]:
         """One more offset than left-hand rows, as Apache Arrow lays a ragged batch out.
@@ -1099,8 +1098,11 @@ struct DenseMaxsimArguments(ImplicitlyCopyable):
     var completion: Completion
     var count: c_size_t
     var queries: RowsViewArguments
+    var query_offsets: Address
     var rows_per_query: c_size_t
     var matches: Address
+    var written: Address
+    var required: Address
     var arena: Address
     var wanted: c_size_t
     var expansion_factor: c_size_t
@@ -1108,7 +1110,6 @@ struct DenseMaxsimArguments(ImplicitlyCopyable):
     var stats: Address
     var traversal: Traversal
     var predicate: PredicateArguments
-    var query_offsets: Address
 
 
 comptime DenseInitRam = Verb[DenseInitRamArguments]
@@ -1202,7 +1203,7 @@ struct DenseCursorNextOutputs(Defaultable, ImplicitlyCopyable):
 
 @fieldwise_init
 struct DenseMultiplyOutputs(Defaultable, ImplicitlyCopyable):
-    """What `usearch_dense_multiply` writes through its pointers."""
+    """What `usearch_dense_multiply` and `usearch_dense_maxsim` write through their pointers."""
 
     var products: MatchesTapeViewArguments
     var written: c_size_t
@@ -1598,7 +1599,7 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
 struct _DenseMaxsimCall[origin: MutOrigin](Call):
     """The crossing of `usearch_dense_maxsim`, which borrows the arena its matches land in."""
 
-    comptime Outputs = MatchesTapeViewArguments
+    comptime Outputs = DenseMultiplyOutputs
     comptime Result = DenseProducts[Self.origin]
     comptime symbol: StaticString = "usearch_dense_maxsim"
     var queries: RowsViewArguments
@@ -1620,6 +1621,7 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
     ):
         if self.rows_per_query <= 0 or self.rows % self.rows_per_query != 0:
             return _refuse(outcome, Status.SHAPE_MISMATCH)
+        var landing = Pointer[DenseMultiplyOutputs, MutAnyOrigin](unsafe_from_address=outputs)
         _cross(
             DenseMaxsimArguments(
                 index,
@@ -1628,8 +1630,11 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
                 completion,
                 c_size_t(self.rows // self.rows_per_query),
                 self.queries,
+                NULL_ADDRESS,
                 c_size_t(self.rows_per_query),
-                outputs,
+                Int(Pointer(to=landing[].products)),
+                Int(Pointer(to=landing[].written)),
+                Int(Pointer(to=landing[].required)),
                 self.arena[]._address,
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
@@ -1637,7 +1642,6 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
                 self.stats,
                 Traversal.WALK,
                 PredicateArguments(NULL_ADDRESS, NULL_ADDRESS, PredicateCost.CHEAP),
-                NULL_ADDRESS,
             ),
             library.symbols().dense_maxsim,
         )
@@ -1645,15 +1649,11 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
     def served(self, status: Status) -> Int:
         return _served(self.arena, status)
 
-    def conclude(deinit self, outputs: MatchesTapeViewArguments, generation: Int) -> Self.Result:
+    def conclude(deinit self, outputs: DenseMultiplyOutputs, generation: Int) -> Self.Result:
         var queries = self.rows // self.rows_per_query if self.rows_per_query > 0 else 0
-        # The engine reports no total, so it is the last offset, which only host memory lends.
-        var pairs = 0
-        if outputs.offsets != NULL_ADDRESS and self.arena[]._residency != Residency.VRAM:
-            pairs = Int(
-                Pointer[c_size_t, MutAnyOrigin](unsafe_from_address=outputs.offsets + queries * size_of[c_size_t]())[]
-            )
-        return Self.Result(self.arena, generation, outputs, queries, pairs, pairs)
+        return Self.Result(
+            self.arena, generation, outputs.products, queries, Int(outputs.written), Int(outputs.required)
+        )
 
 
 @fieldwise_init

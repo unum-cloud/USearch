@@ -732,8 +732,11 @@ const usearch_dense_maxsim_t = extern struct {
     completion: Completion,
     count: usize,
     queries: usearch_rows_view_t,
+    query_offsets: ?[*]const usize = null,
     rows_per_query: usize,
     matches: *usearch_matches_tape_view_t,
+    written: ?*usize,
+    required: ?*usize,
     arena: ?*anyopaque,
     wanted: usize,
     expansion_factor: usize,
@@ -741,7 +744,6 @@ const usearch_dense_maxsim_t = extern struct {
     stats: ?*DenseTraversalStats,
     traversal: Traversal = .walk,
     predicate: Predicate = .{},
-    query_offsets: ?[*]const usize = null,
 };
 
 extern fn usearch_dense_init_ram(arguments: *usearch_dense_init_ram_t) void;
@@ -1797,6 +1799,8 @@ pub const DenseMaxsim = struct {
     /// The call the borrowed arena serves, which every view over the outputs carries.
     stamp: Arena.Stamp = undefined,
     matches: usearch_matches_tape_view_t = .{},
+    written: usize = 0,
+    required: usize = 0,
     outcome: Outcome = .{},
 
     pub fn launch(self: *DenseMaxsim, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
@@ -1809,6 +1813,8 @@ pub const DenseMaxsim = struct {
             .queries = .of(self.queries),
             .rows_per_query = self.rows_per_query,
             .matches = &self.matches,
+            .written = &self.written,
+            .required = &self.required,
             .arena = self.stamp.arena.handle,
             .wanted = self.wanted,
             .expansion_factor = self.config.expansion_factor,
@@ -1821,9 +1827,7 @@ pub const DenseMaxsim = struct {
     pub fn finish(self: *DenseMaxsim) Error!DenseProducts {
         try self.outcome.check();
         const queries = self.queries.rows / self.rows_per_query;
-        // The call reports no total, so it is the last offset, which the host reads alone.
-        const written = if (queries == 0 or self.stamp.arena.residency == .vram) 0 else self.matches.offsets.?[queries];
-        return .{ .stamp = self.stamp, .view = self.matches, .rows = queries, .written = written, .required = written };
+        return .{ .stamp = self.stamp, .view = self.matches, .rows = queries, .written = self.written, .required = self.required };
     }
 };
 
@@ -1902,8 +1906,8 @@ pub const DenseProducts = struct {
     rows: usize,
     /// Pairs written across every row.
     written: usize,
-    /// Pairs scored across every row, before `DenseMultiplyConfig.wanted` cut any; `written` for
-    /// a `maxsim`.
+    /// Pairs scored across every row, or keys across every query for a `maxsim`, before `wanted`
+    /// cut any.
     required: usize,
 
     /// The pairs of one row, in traversal order or largest first for a `maxsim`, refusing a

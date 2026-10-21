@@ -264,7 +264,7 @@ class DenseVectors(_ArenaBuffer):
 class DenseProducts:
     """The ragged sparse product `multiply` wrote into an `Arena`: per left row, every pair its walk scored.
 
-    `maxsim` lands its documents alike, one run per query, largest first, `required` counting those it landed.
+    `maxsim` lands its documents alike, one run per query, largest first, `required` counting those it scored.
     """
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
@@ -1003,7 +1003,7 @@ class DenseIndex:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> DenseProducts:
-        """Late interaction over multi-row queries, refused on VRAM with `DeviceError`. Calls `usearch_dense_maxsim`."""
+        """Late interaction over multi-row queries. Calls `usearch_dense_maxsim`."""
         ...
 
     def absorb(self, *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0) -> None:

@@ -554,8 +554,8 @@ type DenseProducts struct {
 // Rows reports how many left rows the call multiplied, or how many queries it scored.
 func (products DenseProducts) Rows() uint { return products.rows }
 
-// Required reports the pairs the walks scored across every row, before the wanted bound cut any;
-// for Maxsim, the keys it landed across every query.
+// Required reports the pairs the walks scored across every row, or for Maxsim the keys scored
+// across every query, before the wanted bound cut any.
 func (products DenseProducts) Required() uint { return products.required }
 
 // Row borrows one left row's pairs from the arena - a key naming each indexed row, and its product -
@@ -1409,6 +1409,7 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 	}
 	count := queries.rows / rowsPerQuery
 	matches := pin(&lent.call, new(C.usearch_matches_tape_view_t))
+	required := pin(&lent.call, new(C.size_t))
 	C.usearch_dense_maxsim(&C.usearch_dense_maxsim_t{
 		index:            index,
 		executor:         executor,
@@ -1418,6 +1419,7 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 		queries:          queries.lower(&lent.call),
 		rows_per_query:   C.size_t(rowsPerQuery),
 		matches:          matches,
+		required:         required,
 		arena:            memory,
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
@@ -1426,12 +1428,7 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 	})
 	view := lent.rewound(arena)
 	lent.result = func() DenseProducts {
-		// The call reports no total, so it is the last offset, which the host reads alone.
-		var landed uint
-		if count != 0 && view.host() == nil {
-			landed = unsafe.Slice((*uint)(unsafe.Pointer(matches.offsets)), count+1)[count]
-		}
-		return DenseProducts{exported: view, raw: *matches, rows: count, required: landed}
+		return DenseProducts{exported: view, raw: *matches, rows: count, required: uint(*required)}
 	}
 	return lent
 }

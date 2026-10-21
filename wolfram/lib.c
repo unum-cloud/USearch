@@ -412,7 +412,7 @@ struct call_t {
     /** Rows of @c get, or pairs of @c multiply and keys of @c maxsim, the call landed. */
     size_t written;
 
-    /** Pairs @c multiply scored before @c wanted cut any, or the keys @c maxsim landed. */
+    /** Pairs @c multiply or keys @c maxsim scored before @c wanted cut any. */
     size_t required;
 
     /** Entries under the key of @c count, or nodes @c refine changed. */
@@ -1223,13 +1223,6 @@ static int answer_multiply(WolframLibraryData library_data, call_t* call, DataSt
     return status;
 }
 
-/** Copies the keys of @c maxsim out of the arena as @c multiply lands its pairs; MaxSim reports no
- *  totals, so the last offset counts both. */
-static int answer_maxsim(WolframLibraryData library_data, call_t* call, DataStore store) {
-    call->written = call->required = call->products.offsets ? call->products.offsets[call->count] : 0;
-    return answer_multiply(library_data, call, store);
-}
-
 /** Copies the @c save_buffer monolith out of the arena as an @c UnsignedInteger8 vector. */
 static int answer_save_buffer(WolframLibraryData library_data, call_t* call, DataStore store) {
     mint const extents[1] = {(mint)call->monolith.length};
@@ -1442,7 +1435,7 @@ EXTERN_C DLLEXPORT int DenseMaxsim(WolframLibraryData library_data, mint argumen
         !(arena = call_arena(&call, MArgument_getInteger(arguments[receiver_arguments + 4]))))
         return call_answer(library_data, &call, result);
     call.count = rows / rows_per_query;
-    call.answer = answer_maxsim;
+    call.answer = answer_multiply;
     usearch_dense_maxsim(&(usearch_dense_maxsim_t) {
         .index = call.index,
         .executor = call.executor,
@@ -1451,6 +1444,8 @@ EXTERN_C DLLEXPORT int DenseMaxsim(WolframLibraryData library_data, mint argumen
         .queries = queries,
         .rows_per_query = rows_per_query,
         .matches = &call.products,
+        .written = &call.written,
+        .required = &call.required,
         .arena = arena,
         .wanted = wanted,
         .expansion_factor = expansion,

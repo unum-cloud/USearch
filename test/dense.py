@@ -1134,7 +1134,7 @@ def test_maxsim_sizes_its_outputs_over_documents(executor):
 
     assert isinstance(documents, DenseProducts) and len(documents) == queries
     assert offsets.shape == (queries + 1,)
-    assert offsets[0] == 0 and offsets[-1] == len(np.asarray(documents.scores)) == documents.required
+    assert offsets[0] == 0 and offsets[-1] == len(np.asarray(documents.scores)) <= documents.required
     assert np.asarray(documents.keys).shape == (offsets[-1], 16)
     assert all(0 < end - begin <= 4 for begin, end in pairwise(offsets.tolist())), "each query keeps at most wanted"
     assert stats.computed_distances > 0
@@ -1177,13 +1177,16 @@ def test_maxsim_scores_only_admitted_documents(executor):
 
 
 def test_maxsim_keeps_every_scored_document_when_wanted_is_zero(executor):
-    """A zero bound keeps every document a query scored, so no query lands fewer than under a bound."""
+    """A zero bound keeps every document a query scored, so no query lands fewer than under a bound,
+    and a bound cuts what lands but not what `required` counts."""
     index, tokens = late_interaction_index(executor)
     every = np.diff(np.asarray(scored_documents(index, tokens, 2, 0, executor).offsets))
     bounded = np.diff(np.asarray(scored_documents(index, tokens, 2, 2, executor).offsets))
     scanned = np.diff(np.asarray(scored_documents(index, tokens, 2, 0, executor, traversal=Traversal.SCAN).offsets))
+    cut = scored_documents(index, tokens, 2, 2, executor, traversal=Traversal.SCAN)
     assert np.all(every >= bounded)
     assert scanned.tolist() == [_LATE_INTERACTION_DOCUMENTS] * 2, "a scan nominates every document"
+    assert cut.required == 2 * _LATE_INTERACTION_DOCUMENTS, "every scanned document counts, kept or not"
 
 
 def test_maxsim_refuses_a_distance_kind(executor):

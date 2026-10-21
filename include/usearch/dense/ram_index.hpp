@@ -344,6 +344,29 @@ void fold_tiles(nk::matrix_view<scalar_type_> rows, void const* packed, std::spa
     }
 }
 
+/** Folds stored @p row against @p query_rows a quad of them a call, handing @p update each of
+ *  @p maxima beside its dot; the 4-way sibling of @ref fold_tiles. */
+template <typename quads_kit_type_, typename scalar_type_, typename update_type_>
+void fold_quads(nk::vector_view<scalar_type_> row, vector_norms<typename scalar_type_::dot_result_t> row_norms,
+                nk::matrix_view<scalar_type_> query_rows,
+                std::span<vector_norms<typename scalar_type_::dot_result_t> const> query_norms,
+                std::span<typename scalar_type_::dot_result_t> maxima, update_type_&& update) noexcept {
+    using dot_result_t = typename scalar_type_::dot_result_t;
+    for (std::size_t first = 0; first < maxima.size(); first += quad_lanes_k) {
+        std::size_t const lanes = min_of(quad_lanes_k, maxima.size() - first);
+        quad<nk::vector_view<scalar_type_>> lane_rows;
+        quad<vector_norms<dot_result_t>> lane_norms;
+        for (std::size_t lane = 0; lane != quad_lanes_k; ++lane) {
+            std::size_t const source = first + min_of(lane, lanes - 1);
+            lane_rows[lane] = query_rows.row(source).as_vector();
+            lane_norms[lane] = query_norms[source];
+        }
+        scores_result<dot_result_t> const scored = scores<quads_kit_type_>(nk_kernel_dot_k, row, row_norms, lane_rows,
+                                                                           lane_norms);
+        for (std::size_t lane = 0; lane != lanes; ++lane) update(maxima[first + lane], scored.dots[lane]);
+    }
+}
+
 /** The most rows an exact scan asks an aggregating predicate between two settles: one streamed step
  *  of @p tiles_kit_type_ where it is a matrix engine, one quad otherwise. */
 template <typename tiles_kit_type_>

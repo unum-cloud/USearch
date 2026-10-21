@@ -2576,7 +2576,7 @@ static char const doc_DenseProducts[] =                                         
     "`scores`, the (pairs,) float64 products, sit beside them. `required` counts the pairs\n"    //
     "scored before `wanted` cut any. `len()` counts the left rows, and `row(i)` answers the\n"   //
     "(keys, scores) of one. `maxsim` lands its documents alike, one run per query, largest\n"    //
-    "first, its `required` counting the documents it landed.";
+    "first, its `required` counting the documents scored before `wanted` cut any.";
 
 PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t const* view, size_t rows, size_t pairs,
                                   size_t required) {

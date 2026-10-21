@@ -368,11 +368,12 @@ struct nvme_indexes {
      *
      *  @param[in] queries The token rows of every query, laid end to end.
      *  @param[in] query_offsets Where every query's rows start in @p queries, then where the last
-     *      ends: one more than @p counts.
+     *      ends: one more than the queries.
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The walk configuration; each row nominates as many keys as its expansion
      *      factor, and a @c traversal_t::scan_k scan nominates every key.
      *  @param[in] wanted Keys each query keeps, the best ones; zero keeps every key it scored.
+     *  @param[out] scored Keys each query scored, before @p wanted cut any, one per query.
      *  @param[in] land Takes each kept key of a query in rank order, largest total first, on the
      *      thread that ranked it, as `land(thread, query, key, total) noexcept → status_t`; the
      *      first failure stops that query and is what the call answers.
@@ -383,8 +384,10 @@ struct nvme_indexes {
     template <typename land_type_>
     expected<search_result_t> maxsim(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                      executor_t& executor, search_config_t config, std::size_t wanted,
-                                     land_type_&& land, std::span<u64_t> latencies = {}) noexcept {
-        return maxsim_if(queries, query_offsets, executor, config, wanted, land, dummy_predicate_t {}, latencies);
+                                     std::span<std::size_t> scored, land_type_&& land,
+                                     std::span<u64_t> latencies = {}) noexcept {
+        return maxsim_if(queries, query_offsets, executor, config, wanted, scored, land, dummy_predicate_t {},
+                         latencies);
     }
 
     /**
@@ -397,7 +400,7 @@ struct nvme_indexes {
     template <typename land_type_, typename predicate_type_>
     expected<search_result_t> maxsim_if(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                         executor_t& executor, search_config_t config, std::size_t wanted,
-                                        land_type_&& land, predicate_type_&& predicate,
+                                        std::span<std::size_t> scored, land_type_&& land, predicate_type_&& predicate,
                                         std::span<u64_t> latencies = {}) noexcept {
         static_assert(!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
@@ -412,9 +415,10 @@ struct nvme_indexes {
             if (query_offsets[query + 1] <= query_offsets[query]) return {{}, status_t::shape_mismatch_k};
         std::size_t const rows_count = query_offsets.back() - query_offsets.front();
         if (query_offsets.back() > queries.rows || (rows_count && queries.columns != dimensions()) ||
-            (!latencies.empty() && latencies.size() != rows_count))
+            (!latencies.empty() && latencies.size() != rows_count) || scored.size() != queries_count)
             return {{}, status_t::config_mismatch_k};
         if (!queries_count) return {{}, status_t::success_k};
+        std::memset(scored.data(), 0, scored.size_bytes());
 
         // One call serves every pass: a walk's engines and arenas, then two scans.
         bool const scanning = config.traversal == traversal_t::scan_k;
@@ -442,9 +446,10 @@ struct nvme_indexes {
         for (std::size_t row = 0; row != rows_count; ++row)
             query_norms[row] = index_t::norms_(kernel_, query_rows.row(row).as_vector());
         if (scanning)
-            return scan_maxsim_(query_offsets, query_rows, to_span(query_norms), executor, wanted, land, predicate);
-        return walk_maxsim_(queries, query_offsets, query_rows, to_span(query_norms), shape, executor, wanted, land,
-                            predicate, latencies);
+            return scan_maxsim_(query_offsets, query_rows, to_span(query_norms), executor, wanted, scored, land,
+                                predicate);
+        return walk_maxsim_(queries, query_offsets, query_rows, to_span(query_norms), shape, executor, wanted, scored,
+                            land, predicate, latencies);
     }
 
     /**
@@ -1621,7 +1626,7 @@ struct nvme_indexes {
     expected<search_result_t> walk_maxsim_(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                            vectors_view_t query_rows, std::span<vector_norms_t const> query_norms,
                                            walk_shape_t const& shape, executor_t& executor, std::size_t wanted,
-                                           land_type_& land, predicate_type_& predicate,
+                                           std::span<std::size_t> scored, land_type_& land, predicate_type_& predicate,
                                            std::span<u64_t> latencies) noexcept {
         using row_t = search_row<dummy_heads_t, predicate_type_, distance_t>;
         using matches_t = growing_buffer<maxsim_match_t, scratch_allocator_t>;
@@ -1722,9 +1727,11 @@ struct nvme_indexes {
             std::size_t const first = query_offsets[query] - query_offsets.front();
             std::size_t const rows = query_offsets[query + 1] - query_offsets[query];
             vector_view_t const row {reinterpret_cast<scalar_t const*>(landed[0]), parts_[extents[0].shard].dimensions};
-            fold_row_(row, query_rows(nk::range(first, first + rows), nk::slice), query_norms.subspan(first, rows),
-                      maxima.subspan(maxima_starts[query] + (position - starts[query]) * rows, rows),
-                      [](dot_result_t& maximum, dot_result_t dot) noexcept { maximum = max_of(maximum, dot); });
+            fold_quads<quads_kit_t>(
+                row, index_t::norms_(kernel_, row), query_rows(nk::range(first, first + rows), nk::slice),
+                query_norms.subspan(first, rows),
+                maxima.subspan(maxima_starts[query] + (position - starts[query]) * rows, rows),
+                [](dot_result_t& maximum, dot_result_t dot) noexcept { maximum = max_of(maximum, dot); });
         };
         auto const [reads, read_status] = scan_reads_(executor, nominated, describe, consume);
         result.value_reads += reads;
@@ -1739,16 +1746,16 @@ struct nvme_indexes {
             capacity = max_of(capacity, starts[query + 1] - starts[query]);
         growing_buffer<maxsim_ranked<total_t>, scratch_allocator_t> ranked {scratch};
         if (failed(ranked.resize_uninitialized(executor.size() * capacity))) return {result, status_t::bad_alloc_k};
-        nk::matrix_span<maxsim_ranked<total_t>> const rankings {ranked.data(), executor.size(), capacity};
         status_t landing = status_t::success_k;
         status_t const ranking = executor.for_tasks(queries_count, [&](std::size_t query, std::size_t thread,
                                                                        std::size_t) noexcept {
             std::size_t const begin = starts[query], end = starts[query + 1];
             std::size_t const rows = query_offsets[query + 1] - query_offsets[query];
+            scored[query] = end - begin;
             nk::matrix_span<dot_result_t> const query_maxima {maxima.data() + maxima_starts[query], end - begin, rows};
             if (status_t const landed = rank_candidates_(nominations.subspan(begin, end - begin), query_maxima,
-                                                         to_span(rankings.row(thread).as_vector()), thread, query,
-                                                         land);
+                                                         to_writable_span(ranked).subspan(thread * capacity, capacity),
+                                                         thread, query, land);
                 failed(landed))
                 std::atomic_ref<status_t>(landing).store(landed, std::memory_order_relaxed);
         });
@@ -1766,7 +1773,8 @@ struct nvme_indexes {
     template <typename land_type_, typename predicate_type_>
     expected<search_result_t> scan_maxsim_(std::span<std::size_t const> query_offsets, vectors_view_t query_rows,
                                            std::span<vector_norms_t const> query_norms, executor_t& executor,
-                                           std::size_t wanted, land_type_& land, predicate_type_& predicate) noexcept {
+                                           std::size_t wanted, std::span<std::size_t> scored, land_type_& land,
+                                           predicate_type_& predicate) noexcept {
         std::size_t const queries_count = query_offsets.size() - 1, rows_count = size();
         std::size_t const queries_rows = query_rows.extent(0);
         scratch_allocator_t const scratch {executor.arena(0)};
@@ -1862,9 +1870,9 @@ struct nvme_indexes {
                 if (position == admitted) continue;
                 vector_view_t const values {reinterpret_cast<scalar_t const*>(landed[1] + row * part.value_row_bytes),
                                             part.dimensions};
-                fold_row_(
-                    values, query_rows, query_norms, to_span(maxima.row(position).as_vector()),
-                    [](dot_result_t& maximum, dot_result_t dot) noexcept {
+                fold_quads<quads_kit_t>(
+                    values, index_t::norms_(kernel_, values), query_rows, query_norms,
+                    to_span(maxima.row(position).as_vector()), [](dot_result_t& maximum, dot_result_t dot) noexcept {
                         std::atomic_ref<dot_result_t> const shared {maximum};
                         dot_result_t seen = shared.load(std::memory_order_relaxed);
                         while (seen < dot && !shared.compare_exchange_weak(seen, dot, std::memory_order_relaxed)) {}
@@ -1881,15 +1889,15 @@ struct nvme_indexes {
         std::size_t const capacity = wanted ? wanted : admitted;
         growing_buffer<maxsim_ranked<total_t>, scratch_allocator_t> ranked {scratch};
         if (failed(ranked.resize_uninitialized(executor.size() * capacity))) return {result, status_t::bad_alloc_k};
-        nk::matrix_span<maxsim_ranked<total_t>> const rankings {ranked.data(), executor.size(), capacity};
         status_t landing = status_t::success_k;
         status_t const ranking = executor.for_tasks(
             queries_count, [&](std::size_t query, std::size_t thread, std::size_t) noexcept {
                 std::size_t const first = query_offsets[query] - query_offsets.front();
                 std::size_t const rows = query_offsets[query + 1] - query_offsets[query];
+                scored[query] = admitted;
                 if (status_t const landed = rank_candidates_(
                         to_span(candidates).first(admitted), maxima(nk::all, nk::range(first, first + rows), nk::slice),
-                        to_span(rankings.row(thread).as_vector()), thread, query, land);
+                        to_writable_span(ranked).subspan(thread * capacity, capacity), thread, query, land);
                     failed(landed))
                     std::atomic_ref<status_t>(landing).store(landed, std::memory_order_relaxed);
             });
@@ -1924,27 +1932,6 @@ struct nvme_indexes {
                 failed(landed))
                 return landed;
         return status_t::success_k;
-    }
-
-    /** Scores stored @p row against @p query_rows, as many as @p maxima holds, a quad of query rows
-     *  a call, and hands @p update each maximum beside its dot. */
-    template <typename update_type_>
-    void fold_row_(vector_view_t row, vectors_view_t query_rows, std::span<vector_norms_t const> query_norms,
-                   std::span<dot_result_t> maxima, update_type_&& update) const noexcept {
-        vector_norms_t const row_norms = index_t::norms_(kernel_, row);
-        for (std::size_t offset = 0; offset < maxima.size(); offset += quad_lanes_k) {
-            std::size_t const lanes = min_of(quad_lanes_k, maxima.size() - offset);
-            quad<vector_view_t> lane_rows;
-            quad<vector_norms_t> lane_norms;
-            for (std::size_t lane = 0; lane != quad_lanes_k; ++lane) {
-                std::size_t const source = offset + min_of(lane, lanes - 1);
-                lane_rows[lane] = query_rows.row(source).as_vector();
-                lane_norms[lane] = query_norms[source];
-            }
-            scores_result<dot_result_t> const scored = dense::scores<quads_kit_t>(kernel_, row, row_norms, lane_rows,
-                                                                                  lane_norms);
-            for (std::size_t lane = 0; lane != lanes; ++lane) update(maxima[offset + lane], scored.dots[lane]);
-        }
     }
 
 #pragma endregion MaxSim

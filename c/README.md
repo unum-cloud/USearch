@@ -569,10 +569,12 @@ The linear-algebra verbs run on `usearch_dense_metric_inner_k` alone, since prod
 ### Late Interaction
 
 `usearch_dense_maxsim` is ColBERT scoring, and it is what `values_per_key` above one is for: a document is one key holding its token rows, and its score sums each query row's best match among them.
-The graph stays over individual tokens, so no set-to-set metric is evaluated during the walk, documents need not share a row count, and queries are padded to a uniform `rows_per_query`:
+The graph stays over individual tokens, so no set-to-set metric is evaluated during the walk, and documents need not share a row count.
+Queries share one `rows_per_query`, or `query_offsets` gives each its own run of rows:
 
 ```c
-usearch_matches_view_t documents = {0};
+usearch_matches_tape_view_t documents = {0};
+size_t landed = 0;
 usearch_dense_maxsim(&(usearch_dense_maxsim_t) {
     .index = index,
     .executor = executor,
@@ -581,11 +583,13 @@ usearch_dense_maxsim(&(usearch_dense_maxsim_t) {
     .queries = {query_tokens, 128 * sizeof(float), 128, usearch_scalar_f32_k},
     .rows_per_query = 32,
     .matches = &documents,
+    .written = &landed,
     .arena = arena,
     .wanted = 10});
 ```
 
-Each query row contributes only the tokens its walk ranked, so a key can score below its exact value but never above it, and widening the expansion narrows the gap.
+Query `i` spans `documents.offsets[i]` up to `documents.offsets[i+1]`, largest first, and `landed` counts every query's documents on the host, even when the arena lives in VRAM.
+The walks only nominate keys, and every row of a nominated key is scored, so a walk may miss a key but never scores one short, and widening the expansion narrows what it misses.
 
 ### Attention
 

@@ -727,7 +727,7 @@ std::size_t test_nvme_indexes_telemetry(u64_t seed) {
         // Filtered MaxSim ranks odd keys alone, whether walks or a scan nominate them.
         auto keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
         auto scores = nk::matrix<f64_t>::zeros({queries_count, wanted}).value;
-        std::vector<std::size_t> counts(queries_count);
+        std::vector<std::size_t> counts(queries_count), scored(queries_count);
         typename nvme_type_::search_config_t nominating;
         for (traversal_t const traversal : {traversal_t::walk_k, traversal_t::scan_k}) {
             nominating.traversal = traversal;
@@ -735,11 +735,11 @@ std::size_t test_nvme_indexes_telemetry(u64_t seed) {
             maxsim_rows<key_t, f64_t> const land {keys.span(), scores.span(), std::span {counts}};
             failures += expect_eq(viewed
                                       .maxsim_if(queries, std::span<std::size_t const> {query_offsets}, driver.executor,
-                                                 nominating, wanted, land, odd)
+                                                 nominating, wanted, std::span {scored}, land, odd)
                                       .status,
                                   status_t::success_k);
             for (std::size_t query = 0; query != queries_count; ++query) {
-                failures += expect(counts[query] > 0);
+                failures += expect(counts[query] > 0 && scored[query] >= counts[query]);
                 for (std::size_t rank = 0; rank != counts[query]; ++rank)
                     failures += expect(nvme_key_number(keys(query, rank)) % 2 == 1);
             }
@@ -783,10 +783,11 @@ std::size_t test_nvme_indexes_telemetry(u64_t seed) {
             viewed.multiply(queries, driver.executor, {}, keys.span(), products.span(), std::span {counts}).status,
             status_t::config_mismatch_k);
         maxsim_rows<key_t, f64_t> const land {keys.span(), scores.span(), std::span {counts}};
-        failures += expect_eq(
-            viewed.maxsim(queries, std::span<std::size_t const> {query_offsets}, driver.executor, {}, wanted, land)
-                .status,
-            status_t::config_mismatch_k);
+        failures += expect_eq(viewed
+                                  .maxsim(queries, std::span<std::size_t const> {query_offsets}, driver.executor, {},
+                                          wanted, std::span {counts}, land)
+                                  .status,
+                              status_t::config_mismatch_k);
         failures += expect_eq(attended.value_reads.count, 0u);
     }
     return failures;
@@ -1769,8 +1770,8 @@ struct nvme_staged_indexes {
     template <typename land_type_>
     expected<search_result_t> maxsim(vectors_view_t queries, std::span<std::size_t const> query_offsets,
                                      executor_t& executor, search_config_t config, std::size_t wanted,
-                                     land_type_&& land) noexcept {
-        return viewed.maxsim(queries, query_offsets, executor, config, wanted, land);
+                                     std::span<std::size_t> scored, land_type_&& land) noexcept {
+        return viewed.maxsim(queries, query_offsets, executor, config, wanted, scored, land);
     }
 
     template <typename value_lookup_type_>

@@ -436,13 +436,13 @@ template <typename indexes_type_, typename rows_type_, typename score_type_>
 auto drive_maxsim(indexes_type_& indexes, rows_type_ const& rows, std::span<std::size_t const> query_offsets,
                   dense_indexes_executor<indexes_type_>& driver, typename indexes_type_::search_config_t config,
                   nk::matrix_span<typename indexes_type_::key_t> keys, nk::matrix_span<score_type_> scores,
-                  std::span<std::size_t> counts) noexcept {
+                  std::span<std::size_t> counts, std::span<std::size_t> scored) noexcept {
     for (std::size_t& count : counts) count = 0;
     maxsim_rows<typename indexes_type_::key_t, score_type_> const land {keys, scores, counts};
     if constexpr (ram_collection<indexes_type_>)
         return indexes.maxsim(rows, query_offsets, driver.executor, to_writable_span(driver.traversals), config,
-                              keys.extent(1), land);
-    else return indexes.maxsim(rows, query_offsets, driver.executor, config, keys.extent(1), land);
+                              keys.extent(1), scored, land);
+    else return indexes.maxsim(rows, query_offsets, driver.executor, config, keys.extent(1), scored, land);
 }
 template <typename indexes_type_, typename... arguments_types_>
 status_t drive_run(typename indexes_type_::refine_plan_t& plan, dense_indexes_executor<indexes_type_>& driver,
@@ -2473,11 +2473,11 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
 
     auto found_keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
     auto found_scores = nk::matrix<f64_t>::zeros({queries_count, wanted}).value;
-    std::array<std::size_t, queries_count> counts;
+    std::array<std::size_t, queries_count> counts, scored;
     // Towers that take query offsets read the same uniform batch through them.
     constexpr bool uniform_k = requires(nk::matrix_view<scalar_t> rows, search_config_t config) {
         indexes.maxsim(rows, rows_per_query, driver.executor, config, found_keys.span(), found_scores.span(),
-                       std::span {counts});
+                       std::span {counts}, std::span {scored});
     };
     std::array<std::size_t, queries_count + 1> uniform_offsets;
     for (std::size_t query = 0; query != uniform_offsets.size(); ++query)
@@ -2487,11 +2487,12 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
         nk::range_t const landed = nk::range(std::size_t {0}, offsets.size() - 1);
         if constexpr (uniform_k)
             return indexes.maxsim(rows, rows_per_query, driver.executor, config, found_keys.span(), found_scores.span(),
-                                  std::span {counts});
+                                  std::span {counts}, std::span {scored});
         else
             return drive_maxsim(indexes, rows, offsets, driver, config, found_keys(landed, nk::slice),
                                 found_scores(landed, nk::slice),
-                                std::span<std::size_t>(counts.data(), offsets.size() - 1));
+                                std::span<std::size_t>(counts.data(), offsets.size() - 1),
+                                std::span<std::size_t>(scored.data(), offsets.size() - 1));
     };
     auto maxsim = [&](nk::matrix_view<scalar_t> rows, search_config_t config) noexcept {
         return maxsim_cut(rows, std::span<std::size_t const> {uniform_offsets}, config);
@@ -2500,14 +2501,14 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
         return static_cast<std::size_t>(found_keys(query, rank)) - 1;
     };
 
-    // Every landed query ranks the best documents of `expected_scores` at their exact scores, up
-    // to the rounding of a device that sums its dots in another order.
+    // Every landed query scores every document and ranks the best of `expected_scores` at their
+    // exact scores, up to the rounding of a device that sums its dots in another order.
     auto expect_ranked = [&](exact_scores_t const& expected_scores, std::size_t landed) noexcept {
         std::size_t missed = 0;
         for (std::size_t query = 0; query != landed; ++query) {
             std::array<f64_t, documents_count> ranked = expected_scores[query];
             std::sort(ranked.rbegin(), ranked.rend());
-            missed += expect_eq(counts[query], wanted);
+            missed += expect_eq(counts[query], wanted) + expect_eq(scored[query], documents_count);
             for (std::size_t rank = 0; rank != counts[query]; ++rank) {
                 std::size_t const document = document_of(query, rank);
                 missed += expect(document < documents_count);

@@ -766,15 +766,6 @@ static napi_value usearch_js_finish_multiply(napi_env env, usearch_js_call_t* ca
     return usearch_js_object(env, usearch_js_table_size_(names), names, values);
 }
 
-/** Views a late-interaction scoring's documents as a product's pairs; MaxSim reports no totals, so
- *  the last offset counts both, left unread on a device, where every view is null anyway. */
-static napi_value usearch_js_finish_maxsim(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
-    usearch_js_dense_call_t* const dense = (usearch_js_dense_call_t*)call;
-    if (dense->count && call->arena->residency != usearch_residency_vram_k)
-        dense->written = dense->required = dense->products.offsets[dense->count];
-    return usearch_js_finish_multiply(env, call, slots);
-}
-
 /**
  *  @brief @c maxsim(executor, completion, data, rows, columns, stride, scalar, rowsPerQuery, arena,
  *      wanted, expansion, stats) → @c {offsets, keys, scores, required}, viewed inside @p arena.
@@ -812,10 +803,12 @@ static napi_value usearch_js_index_maxsim(napi_env env, napi_callback_info info)
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0], arguments[8], arguments[2], NULL, arguments[11]};
-    call->call.finish = usearch_js_finish_maxsim;
+    call->call.finish = usearch_js_finish_multiply;
     call->count = maxsim.count;
     maxsim.outcome = &call->call.outcome;
     maxsim.matches = &call->products;
+    maxsim.written = &call->written;
+    maxsim.required = &call->required;
     if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
     usearch_dense_maxsim(&maxsim);
     return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);

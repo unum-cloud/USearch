@@ -335,8 +335,8 @@ class dense_index_t {
         return answered_(usearch_dense_attend, arguments, &usearch_dense_attend_t::outputs, executor);
     }
 
-    outcome<usearch_matches_view_t> maxsim(usearch_dense_maxsim_t arguments, arena_t const& arena,
-                                           executor_t const& executor = {}) noexcept {
+    outcome<usearch_matches_tape_view_t> maxsim(usearch_dense_maxsim_t arguments, arena_t const& arena,
+                                                executor_t const& executor = {}) noexcept {
         arguments.arena = arena.handle();
         return answered_(usearch_dense_maxsim, arguments, &usearch_dense_maxsim_t::matches, executor);
     }

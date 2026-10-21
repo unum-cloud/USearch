@@ -1638,8 +1638,7 @@ static char const doc_DenseIndex_maxsim[] =                                     
     "    applies as is. The query row count must be a whole multiple of it.\n"                   //
     "  wanted (int): Upper bound on matches per query - the 'k' over documents, not rows;\n"     //
     "    0 keeps every document the query scored.\n"                                             //
-    "  arena (Arena): Where the scored documents land, rewound by the call. Their total is\n"    //
-    "    the last offset, which a VRAM arena keeps on the device, so it raises `DeviceError`.\n" //
+    "  arena (Arena): Where the scored documents land, rewound by the call.\n"                   //
     "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Widening it\n" //
     "    nominates more documents, each still scored exactly.\n"                                 //
     "  traversal (Traversal, optional): `Traversal.WALK`, the default, nominates documents by\n" //
@@ -1656,7 +1655,7 @@ static char const doc_DenseIndex_maxsim[] =                                     
     "  DenseProducts: `offsets`, (Q + 1,) Apache Arrow offsets, query `i` spanning documents\n"  //
     "    `offsets[i]` up to `offsets[i + 1]`, largest first; `keys`, a (documents, 16) run of\n" //
     "    identities; `scores`, their (documents,) summed maxima; and `required`, the\n"          //
-    "    documents landed. All of them live in the arena.";
+    "    documents scored before `wanted` cut any. All of them live in the arena.";
 
 /** A @c usearch_dense_maxsim call, the queries it borrows, and the ragged matches it lands in the
  *  arena. */
@@ -1667,6 +1666,8 @@ typedef struct maxsim_call_t {
     usearch_py_callback_t predicate;
     walk_reports_t reports;
     usearch_matches_tape_view_t matches;
+    size_t written;
+    size_t required;
 } maxsim_call_t;
 
 static void maxsim_submit(void* call) { usearch_dense_maxsim(&((maxsim_call_t*)call)->arguments); }
@@ -1674,10 +1675,8 @@ static void maxsim_submit(void* call) { usearch_dense_maxsim(&((maxsim_call_t*)c
 static PyObject* maxsim_answer(void* erased) {
     maxsim_call_t* const call = (maxsim_call_t*)erased;
     walk_reports_answer(&call->reports);
-    size_t const count = call->arguments.count;
-    // MaxSim reports no totals, so the last offset counts both the documents landed and required.
-    size_t const landed = count ? call->matches.offsets[count] : 0;
-    return usearch_py_products_new(call->call.arena, &call->matches, count, landed, landed);
+    return usearch_py_products_new(call->call.arena, &call->matches, call->arguments.count, call->written,
+                                   call->required);
 }
 
 static void maxsim_release(void* erased) {
@@ -1747,11 +1746,6 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
         walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0 ||
         usearch_py_arena_claim(arena_object, &call->call.arena) != 0)
         return usearch_py_call_discard(&receiver, &maxsim_verb, call);
-    // The total is the last offset, which a VRAM arena lands where the host cannot read it.
-    if (((Arena*)call->call.arena)->residency == usearch_residency_vram_k) {
-        usearch_py_raise(usearch_status_device_k, "a VRAM MaxSim lands its total in device memory");
-        return usearch_py_call_discard(&receiver, &maxsim_verb, call);
-    }
 
     call->arguments = (usearch_dense_maxsim_t) {
         .index = handle,
@@ -1762,6 +1756,8 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
         .queries = rows_of(&queries),
         .rows_per_query = rows_per_query,
         .matches = &call->matches,
+        .written = &call->written,
+        .required = &call->required,
         .arena = ((Arena*)call->call.arena)->handle,
         .wanted = wanted,
         .expansion_factor = expansion_factor,

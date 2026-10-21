@@ -242,14 +242,15 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
         // An exhaustive walk and a scan nominate every even document alike.
         for (search_config_t const config : {exhaustive, scan}) {
             counts.fill(0);
+            std::array<std::size_t, queries_count> scored;
             maxsim_rows<key_t, f64_t> const land {found_keys.span(), found_scores.span(), std::span {counts}};
-            failures += expect(
-                succeeded(indexes
-                              .maxsim_if(queries, std::span<std::size_t const> {query_offsets}, driver.executor,
-                                         to_writable_span(driver.traversals), config, wanted, land, admit_even)
-                              .status));
+            failures += expect(succeeded(indexes
+                                             .maxsim_if(queries, std::span<std::size_t const> {query_offsets},
+                                                        driver.executor, to_writable_span(driver.traversals), config,
+                                                        wanted, std::span {scored}, land, admit_even)
+                                             .status));
             for (std::size_t query = 0; query != queries_count; ++query) {
-                failures += expect_eq(counts[query], wanted);
+                failures += expect_eq(counts[query], wanted) + expect_eq(scored[query], (documents_count + 1) / 2);
                 for (std::size_t rank = 0; rank != counts[query]; ++rank) {
                     std::size_t const document = static_cast<std::size_t>(found_keys(query, rank));
                     failures += expect(document < documents_count && document % 2 == 0);

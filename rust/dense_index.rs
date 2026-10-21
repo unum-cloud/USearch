@@ -425,8 +425,11 @@ pub struct usearch_dense_maxsim_t {
     pub completion: usearch_completion_t,
     pub count: usize,
     pub queries: usearch_rows_view_t,
+    pub query_offsets: *const usize,
     pub rows_per_query: usize,
     pub matches: *mut usearch_matches_tape_view_t,
+    pub written: *mut usize,
+    pub required: *mut usize,
     pub arena: usearch_arena_t,
     pub wanted: usize,
     pub expansion_factor: usize,
@@ -434,7 +437,6 @@ pub struct usearch_dense_maxsim_t {
     pub stats: *mut usearch_dense_traversal_stats_t,
     pub traversal: usearch_traversal_t,
     pub predicate: usearch_predicate_t,
-    pub query_offsets: *const usize,
 }
 
 extern "C" {
@@ -1165,9 +1167,8 @@ impl<'arena> DenseProducts<'arena> {
     /// Left rows the call multiplied, or queries it scored.
     pub fn queries(&self) -> usize { self.count }
 
-    /// Pairs the walks scored across every row, before the wanted bound cut any; a `maxsim`
-    /// reports no such count, so it holds the keys landed across every query, zero over device
-    /// memory.
+    /// Pairs the walks scored across every row, or keys scored across every query, before the
+    /// wanted bound cut any.
     pub fn required(&self) -> usize { self.required }
 
     /// The pairs of one left row, a key naming each indexed row beside its product, or the keys
@@ -1793,6 +1794,7 @@ pub trait DenseVerbs<'index>: Copy {
             arena,
             matches: Exported::default(),
             count: 0,
+            required: 0,
         })
     }
 
@@ -2361,6 +2363,7 @@ pub struct DenseMaxsim<'config, 'arena, Queries> {
     arena: &'arena mut Arena,
     matches: Exported<usearch_matches_tape_view_t>,
     count: usize,
+    required: usize,
 }
 
 impl<'arena, Queries: RowsView> Calling for DenseMaxsim<'_, 'arena, Queries> {
@@ -2390,8 +2393,11 @@ impl<'arena, Queries: RowsView> Calling for DenseMaxsim<'_, 'arena, Queries> {
             completion,
             count: self.count,
             queries: batch.rows,
+            query_offsets: ptr::null(),
             rows_per_query: self.rows_per_query,
             matches: &mut self.matches.0,
+            written: ptr::null_mut(),
+            required: &mut self.required,
             arena: self.arena.handle,
             wanted: self.config.wanted,
             expansion_factor: self.config.expansion_factor,
@@ -2399,24 +2405,17 @@ impl<'arena, Queries: RowsView> Calling for DenseMaxsim<'_, 'arena, Queries> {
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
             traversal: Traversal::Walk as usearch_traversal_t,
             predicate: lower_predicate(&None, callbacks),
-            query_offsets: ptr::null(),
         })
     }
 
     unsafe fn call(arguments: *mut Self::Arguments) { usearch_dense_maxsim(arguments) }
 
     fn finish(self) -> Result<DenseProducts<'arena>> {
-        let offsets = self.matches.0.offsets;
-        let required = match self.arena.host().is_ok() && !offsets.is_null() {
-            // Safety: a finished call on host memory wrote `count + 1` offsets, the last the total.
-            true => unsafe { *offsets.add(self.count) },
-            false => 0,
-        };
         Ok(DenseProducts {
             arena: self.arena,
             products: self.matches,
             count: self.count,
-            required,
+            required: self.required,
         })
     }
 }

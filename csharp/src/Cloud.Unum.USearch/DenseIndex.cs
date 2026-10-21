@@ -1428,7 +1428,8 @@ internal unsafe struct DenseMaxsimCall(
                 Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome, Completion = completion,
                 Count = (nuint)(queries.Rows / rowsPerQuery), Queries = queries.AsView(rows),
                 RowsPerQuery = (nuint)rowsPerQuery, Matches = (NativeMatchesTapeView*)landing->View,
-                Arena = lent.Pointer, Wanted = bound, ExpansionFactor = (nuint)expansionFactor,
+                Written = &landing->Written, Required = &landing->Required, Arena = lent.Pointer, Wanted = bound,
+                ExpansionFactor = (nuint)expansionFactor,
                 Stats = (NativeDenseTraversalStats*)landing->Report,
             };
             usearch_dense_maxsim(&arguments);
@@ -1442,10 +1443,9 @@ internal unsafe struct DenseMaxsimCall(
     {
         landing->Outcome.ThrowIfFailed();
         stats?.Adopt(*(NativeDenseTraversalStats*)landing->Report);
-        NativeMatchesTapeView view = *(NativeMatchesTapeView*)landing->View;
-        int count = queries.Rows / rowsPerQuery;
-        nuint landed = arena.Residency == Residency.Vram || view.Offsets == null ? 0 : view.Offsets[count];
-        this.Result = new DenseProducts(arena, this._generation, view, count, landed);
+        this.Result = new DenseProducts(
+            arena, this._generation, *(NativeMatchesTapeView*)landing->View, queries.Rows / rowsPerQuery,
+            landing->Required);
     }
 }
 
@@ -1879,9 +1879,8 @@ public readonly unsafe struct DenseProducts
     /// <summary>How many left rows were multiplied, or queries scored.</summary>
     public int Queries { get; }
 
-    /// <summary>The pairs the walks scored across every row, before the wanted bound cut any; a
-    /// <see cref="DenseIndex.Maxsim"/> reports no such count, so it holds the keys landed across
-    /// every query, zero over device memory.</summary>
+    /// <summary>The pairs the walks scored across every row, or the keys scored across every query,
+    /// before the wanted bound cut any.</summary>
     public ulong Required { get; }
 
     /// <summary>The keys naming each indexed row one left row reached, in traversal order, or the
@@ -2638,8 +2637,11 @@ internal unsafe struct NativeDenseMaxsim
     public Completion Completion;
     public nuint Count;
     public NativeRowsView Queries;
+    public nuint* QueryOffsets;
     public nuint RowsPerQuery;
     public NativeMatchesTapeView* Matches;
+    public nuint* Written;
+    public nuint* Required;
     public IntPtr Arena;
     public nuint Wanted;
     public nuint ExpansionFactor;
@@ -2647,7 +2649,6 @@ internal unsafe struct NativeDenseMaxsim
     public NativeDenseTraversalStats* Stats;
     public Traversal Traversal;
     public NativePredicate Predicate;
-    public nuint* QueryOffsets;
 }
 
 #endregion Native Vocabulary

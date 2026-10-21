@@ -1154,6 +1154,7 @@ struct vram_amd_indexes {
      *      width.
      *  @param[out] scores Their summed maxima, largest first, parallel to @p keys.
      *  @param[out] counts Keys written per query, at most the width of @p keys.
+     *  @param[out] scored Keys scored per query, before the width of @p keys cut any.
      *
      *  A key some row never ranked misses that row's maximum, so with non-negative per-row maxima a
      *  score lands below its exact value, never above. Whole queries cross @c window_rows_k rows at
@@ -1163,14 +1164,15 @@ struct vram_amd_indexes {
     template <typename score_type_>
     expected<search_result_t> maxsim(rows_view_t queries, std::size_t rows_per_query, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys,
-                                     nk::matrix_span<score_type_> scores, std::span<std::size_t> counts) noexcept {
+                                     nk::matrix_span<score_type_> scores, std::span<std::size_t> counts,
+                                     std::span<std::size_t> scored) noexcept {
         std::size_t const rows_count = queries.rows;
         if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); paired != status_t::success_k)
             return {{}, paired};
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
         std::size_t const groups_count = rows_count / rows_per_query;
-        if (counts.size() != groups_count) return {{}, status_t::config_mismatch_k};
+        if (counts.size() != groups_count || scored.size() != groups_count) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = rankings_refusal(groups_count, keys, scores); failed(refusal))
             return {{}, refusal};
         if (!groups_count) return {{}, status_t::success_k};
@@ -1201,7 +1203,8 @@ struct vram_amd_indexes {
             std::size_t const first_group = first / rows_per_query, groups = taking / rows_per_query;
             nk::range_t const window_groups = nk::range(first_group, first_group + groups);
             ranked.value.count = reduce(ranked_keys, ranked_distances, ranked_counts, keys(window_groups, nk::slice),
-                                        scores(window_groups, nk::slice), counts.subspan(first_group, groups));
+                                        scores(window_groups, nk::slice), counts.subspan(first_group, groups),
+                                        scored.subspan(first_group, groups));
             return ranked;
         };
         return for_each_window<search_result_t>(rows_count, window_rows, maxsim_window);
