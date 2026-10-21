@@ -7,21 +7,22 @@
 #
 # The file names match what `c/` produces - `libusearch_shared` and `libusearch_static` - and land in a directory of
 # their own, so a suite chooses an implementation with one `-L` and the two libraries can never shadow one another.
-set(USEARCH_STUB_SOURCES types.cpp dense.cpp sequence.cpp shapes.cpp geospatial.cpp)
+set(usearch_stub_sources_ types.cpp dense.cpp sequence.cpp shapes.cpp geospatial.cpp)
 
 find_package(Threads REQUIRED)
 
-add_library(usearch_shared_stub SHARED ${USEARCH_STUB_SOURCES})
-add_library(usearch_static_stub STATIC ${USEARCH_STUB_SOURCES})
+add_library(usearch_shared_stub SHARED ${usearch_stub_sources_})
+add_library(usearch_static_stub STATIC ${usearch_stub_sources_})
 add_library(${PROJECT_NAME}::shared_stub ALIAS usearch_shared_stub)
+add_library(${PROJECT_NAME}::static_stub ALIAS usearch_static_stub)
 
-foreach (TARGET_NAME usearch_shared_stub usearch_static_stub)
+foreach (target_ usearch_shared_stub usearch_static_stub)
     target_include_directories(
-        ${TARGET_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/c ${PROJECT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}
+        ${target_} PRIVATE ${PROJECT_SOURCE_DIR}/c ${PROJECT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}
     )
-    target_link_libraries(${TARGET_NAME} PRIVATE Threads::Threads)
+    target_link_libraries(${target_} PRIVATE Threads::Threads)
     set_target_properties(
-        ${TARGET_NAME}
+        ${target_}
         PROPERTIES PREFIX "lib"
                    POSITION_INDEPENDENT_CODE ON
                    CXX_STANDARD 20
@@ -31,12 +32,12 @@ foreach (TARGET_NAME usearch_shared_stub usearch_static_stub)
                    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/stub"
     )
     # The root pins every configuration's directory too, and those outrank the plain ones above.
-    foreach (STUB_CONFIGURATION DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    foreach (configuration_ DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
         set_target_properties(
-            ${TARGET_NAME}
-            PROPERTIES LIBRARY_OUTPUT_DIRECTORY_${STUB_CONFIGURATION} "${CMAKE_BINARY_DIR}/stub"
-                       ARCHIVE_OUTPUT_DIRECTORY_${STUB_CONFIGURATION} "${CMAKE_BINARY_DIR}/stub"
-                       RUNTIME_OUTPUT_DIRECTORY_${STUB_CONFIGURATION} "${CMAKE_BINARY_DIR}/stub"
+            ${target_}
+            PROPERTIES LIBRARY_OUTPUT_DIRECTORY_${configuration_} "${CMAKE_BINARY_DIR}/stub"
+                       ARCHIVE_OUTPUT_DIRECTORY_${configuration_} "${CMAKE_BINARY_DIR}/stub"
+                       RUNTIME_OUTPUT_DIRECTORY_${configuration_} "${CMAKE_BINARY_DIR}/stub"
         )
     endforeach ()
 endforeach ()

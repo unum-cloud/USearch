@@ -25,14 +25,14 @@ set(CMAKE_CXX_COMPILER_TARGET aarch64-linux-gnu)
 # The routines themselves are `libgcc_eh.a`'s, and NumKong compiles `-fvisibility=hidden`, so the references are hidden
 # and only a static definition can answer them - `-u` forces the archive members in rather than letting either linker
 # decide it has no reason to look.
-set(USEARCH_AARCH64_LINK_FLAGS_ "-fuse-ld=lld -Wl,-u,__arm_tpidr2_save -Wl,-u,__arm_tpidr2_restore -lgcc_eh")
-set(CMAKE_EXE_LINKER_FLAGS_INIT "${USEARCH_AARCH64_LINK_FLAGS_}")
-set(CMAKE_MODULE_LINKER_FLAGS_INIT "${USEARCH_AARCH64_LINK_FLAGS_}")
-set(CMAKE_SHARED_LINKER_FLAGS_INIT "${USEARCH_AARCH64_LINK_FLAGS_}")
+set(usearch_aarch64_link_flags_ "-fuse-ld=lld -Wl,-u,__arm_tpidr2_save -Wl,-u,__arm_tpidr2_restore -lgcc_eh")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "${usearch_aarch64_link_flags_}")
+set(CMAKE_MODULE_LINKER_FLAGS_INIT "${usearch_aarch64_link_flags_}")
+set(CMAKE_SHARED_LINKER_FLAGS_INIT "${usearch_aarch64_link_flags_}")
 
-find_program(USEARCH_QEMU_AARCH64_ qemu-aarch64)
-if (USEARCH_QEMU_AARCH64_)
-    set(CMAKE_CROSSCOMPILING_EMULATOR "${USEARCH_QEMU_AARCH64_};-L;/usr/aarch64-linux-gnu;-cpu;max")
+find_program(usearch_qemu_aarch64_ qemu-aarch64)
+if (usearch_qemu_aarch64_)
+    set(CMAKE_CROSSCOMPILING_EMULATOR "${usearch_qemu_aarch64_};-L;/usr/aarch64-linux-gnu;-cpu;max")
 endif ()
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

@@ -667,13 +667,13 @@ dotnet test -c Release
 ## Wolfram
 
 USearch reaches the Wolfram Language through LibraryLink, whose boundary is `wolfram/lib.c`.
-It builds from the repository root, and `WOLFRAM_PATH` names the Mathematica installation when it is not in the default place.
+It builds from the repository root, and `USEARCH_WOLFRAM_PATH` names the Mathematica installation when it is not in the default place.
 
 ```sh
 brew install --cask wolfram-engine
 
 cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11 -D USEARCH_BUILD_LIB_WOLFRAM=1 \
-    -D WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
+    -D USEARCH_WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
 cmake --build build_release --config Release --target usearch_wolfram
 
 wolframscript -file wolfram/Test.wls

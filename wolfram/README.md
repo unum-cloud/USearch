@@ -10,7 +10,7 @@ The library is a subdirectory of the root project rather than a project of its o
 
 ```sh
 cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_LIB_WOLFRAM=1 -D USEARCH_DENSE_DTYPES=11 \
-    -D WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
+    -D USEARCH_WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
 cmake --build build_release --config Release --target usearch_wolfram
 
 # Resulting artifact will be named like:
@@ -19,7 +19,7 @@ cmake --build build_release --config Release --target usearch_wolfram
 #   build_release/usearch_wolfram.dll    on Windows
 ```
 
-Set `WOLFRAM_PATH` to your installation when it is not `/usr/local/Wolfram/Mathematica`; the SDK contributes only the `LibraryLink` headers under it.
+Set `USEARCH_WOLFRAM_PATH` to your installation when it is not `/usr/local/Wolfram/Mathematica`; the SDK contributes only the `LibraryLink` headers under it.
 `USEARCH_DENSE_DTYPES=11` compiles every dense storage type; the default four, `bf16`, `u1x8`, `i8` and `e4m3`, build faster but refuse the other seven.
 `usearch_wolfram` is the one library here without a `lib` prefix, because Wolfram finds a library dropped into `LibraryResources/$SystemID` by its bare name.
 

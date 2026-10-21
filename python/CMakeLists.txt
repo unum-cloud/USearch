@@ -2,9 +2,9 @@
 # wheel carries one shared object. `scikit-build-core` drives this from `pyproject.toml`.
 
 if (TARGET usearch_static)
-    set(USEARCH_PYTHON_LIBRARY usearch_static)
+    set(usearch_python_library_ usearch_static)
 elseif (TARGET usearch_static_stub)
-    set(USEARCH_PYTHON_LIBRARY usearch_static_stub)
+    set(usearch_python_library_ usearch_static_stub)
 else ()
     message(FATAL_ERROR "The Python SDK links the C interface; configure with `-DUSEARCH_BUILD_LIB_C=1`.")
 endif ()
@@ -34,7 +34,7 @@ set_target_properties(
 )
 
 target_include_directories(usearch_python PRIVATE ${PROJECT_SOURCE_DIR}/c ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(usearch_python PRIVATE ${USEARCH_PYTHON_LIBRARY})
+target_link_libraries(usearch_python PRIVATE ${usearch_python_library_})
 
 # CPython's own symbols come from the interpreter, so they are absent at link time and the linker must not insist.
 if (APPLE)

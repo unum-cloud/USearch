@@ -57,7 +57,7 @@ add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_
 
 # The VRAM test shards compile once per vendor, so each unit sees the SDK facts of the one vendor it composes over: the
 # per-dtype shards, the sharded suite and, for the vendors that have them, the modalities' units after `SOURCES`, each
-# instantiated for the executor of @p vendor alone, whose `USEARCH_ARCH_<VENDOR>_` is @p architecture_macro and the
+# instantiated for the executor of @p vendor_ alone, whose `USEARCH_ARCH_<VENDOR>_` is @p architecture_macro_ and the
 # others' are zero, with the `DEFINITIONS` the vendor's kits read. The vendor's `ENTRY` registers with the runner, which
 # names none of them. NVIDIA and AMD shards compile host-only through Clang's CUDA or HIP mode, as the vendor's entry
 # does, so the vendor's headers define the index members and NumKong keeps the vendor's `NUMKONG_TARGET_*`; the entry,
@@ -65,9 +65,9 @@ add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_
 # kernels and the attends over its device value lookups. A vendor naming its `DTYPES`, in ladder order, compiles each of
 # the first `USEARCH_DENSE_DTYPES` from `dense/vram_<vendor>_<dtype>.cu` into a bundle of its own instead. Apple's
 # kernels compile from embedded source at first use, so its entry is a plain C++ unit.
-function (usearch_test_vram_shards vendor architecture_macro)
-    cmake_parse_arguments(arg "" "ENTRY;DEVICE" "SOURCES;DEFINITIONS;CODES;DTYPES" ${ARGN})
-    set(target_ usearch_test_vram_shards_${vendor})
+function (usearch_test_vram_shards vendor_ architecture_macro_)
+    cmake_parse_arguments(PARSE_ARGV 2 arg "" "ENTRY;DEVICE" "SOURCES;DEFINITIONS;CODES;DTYPES")
+    set(target_ usearch_test_vram_shards_${vendor_})
     set(entry_ ${CMAKE_CURRENT_SOURCE_DIR}/${arg_ENTRY})
     add_library(${target_} OBJECT dense/vram_indexes.cpp)
     usearch_dense_dtype_sources(
@@ -88,7 +88,7 @@ function (usearch_test_vram_shards vendor architecture_macro)
     usearch_setup_target(${target_} HOST)
     target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     foreach (macro_ IN ITEMS USEARCH_ARCH_CUDA_ USEARCH_ARCH_ROCM_ USEARCH_ARCH_METAL_)
-        if (macro_ STREQUAL architecture_macro)
+        if (macro_ STREQUAL architecture_macro_)
             target_compile_definitions(${target_} PRIVATE ${macro_}=1)
         else ()
             target_compile_definitions(${target_} PRIVATE ${macro_}=0)
@@ -102,23 +102,23 @@ function (usearch_test_vram_shards vendor architecture_macro)
             if (position_ LESS USEARCH_DENSE_DTYPES)
                 usearch_gpu_bundle(
                     ${target_}
-                    ${vendor}
-                    test_vram_${vendor}_${dtype_}
+                    ${vendor_}
+                    test_vram_${vendor_}_${dtype_}
                     ${entry_}
                     ${arg_CODES}
                     DEVICE
-                    ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_${vendor}_${dtype_}.cu
+                    ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_${vendor_}_${dtype_}.cu
                 )
             endif ()
             math(EXPR position_ "${position_} + 1")
         endforeach ()
         usearch_gpu_host_only(${target_} ${entry_})
-    elseif (vendor STREQUAL "nvidia" OR vendor STREQUAL "amd")
+    elseif (vendor_ STREQUAL "nvidia" OR vendor_ STREQUAL "amd")
         set(device_)
         if (arg_DEVICE)
             set(device_ DEVICE ${CMAKE_CURRENT_SOURCE_DIR}/${arg_DEVICE})
         endif ()
-        usearch_gpu_bundle(${target_} ${vendor} test_vram_${vendor} ${entry_} ${arg_CODES} ${device_})
+        usearch_gpu_bundle(${target_} ${vendor_} test_vram_${vendor_} ${entry_} ${arg_CODES} ${device_})
         usearch_gpu_host_only(${target_} ${entry_})
     endif ()
     set(usearch_test_vram_shards_

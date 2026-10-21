@@ -15,9 +15,9 @@ set(CMAKE_SYSTEM_PROCESSOR aarch64)
 find_program(CMAKE_C_COMPILER aarch64-linux-gnu-gcc REQUIRED)
 find_program(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++ REQUIRED)
 
-find_program(USEARCH_QEMU_AARCH64_ qemu-aarch64)
-if (USEARCH_QEMU_AARCH64_)
-    set(CMAKE_CROSSCOMPILING_EMULATOR "${USEARCH_QEMU_AARCH64_};-L;/usr/aarch64-linux-gnu;-cpu;max")
+find_program(usearch_qemu_aarch64_ qemu-aarch64)
+if (usearch_qemu_aarch64_)
+    set(CMAKE_CROSSCOMPILING_EMULATOR "${usearch_qemu_aarch64_};-L;/usr/aarch64-linux-gnu;-cpu;max")
 endif ()
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

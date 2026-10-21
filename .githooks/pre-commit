@@ -18,6 +18,9 @@ export LC_ALL=C # Byte-wise regexes, immune to the committer's locale
 
 rejection_count=0
 project_include_prefix="usearch"
+sibling_projects='numkong|stringzilla|forkunion|smashtable|ucall|ustore|uform'
+cmake_published_variables="USEARCH_PUNNED_LIBRARIES USEARCH_PUNNED_OBJECTS USEARCH_IS_MAIN_PROJECT"
+cmake_third_party_variables="YYJSON_INSTALL THREADS_PREFER_PTHREAD_FLAG WASI_SDK_PATH WASI_SDK_PREFIX EMSCRIPTEN_SYSTEM_PROCESSOR"
 
 # Prints the reason and the first offending lines, and counts the rejection.
 fail() { # fail <matches> <message-line>...
@@ -1588,6 +1591,76 @@ check_cmake_string_surgery() {
         "            an argument, as \`usearch_dense_dtype_sources(target BF16 a_bf16.cpp F16 a_f16.cpp)\` does:"
 }
 
+# Rejects CMake spellings the projects agreed on: parsed arguments through `PARSE_ARGV <n> arg`, functions under the
+# project prefix, lowercase locals, loop variables and internals with a trailing underscore, uppercase non-cache names
+# only for CMake's own, a sibling's options, the published values or third-party inputs, and caches written once.
+check_cmake_conventions() { # check_cmake_conventions <path> <staged-text> <added-line-numbers>
+    local findings
+    findings=$(awk -v path="$1" -v prefix="$project_include_prefix" -v siblings="$sibling_projects" \
+        -v published=" $cmake_published_variables $cmake_third_party_variables " '
+        function hit(rule, message) {
+            if (!(rule in messages)) { order[++rules] = rule; messages[rule] = message }
+            if (++hits[rule] <= 5) found[rule] = found[rule] first ": " opening "\n"
+        }
+        function judge(    name, arguments, tokens, count, variable, cached, forced, index_) {
+            match(bare, /[A-Za-z_][A-Za-z0-9_]*/); name = tolower(substr(bare, RSTART, RLENGTH))
+            arguments = substr(bare, index(bare, "(") + 1)
+            sub(/\)[[:space:]]*$/, "", arguments); sub(/^[[:space:]]+/, "", arguments)
+            count = split(arguments, tokens, /[[:space:]]+/)
+            if (index(code, "${${")) hit("indirect", "reads a name through `${${`; return through an output parameter")
+            if (name == "macro") hit("macro", "defines a `macro()`; write a `function()`")
+            if (name == "cmake_parse_arguments" && arguments !~ /^PARSE_ARGV[[:space:]]+[0-9]+[[:space:]]+arg( |$)/)
+                hit("parse", "parses arguments other than through `PARSE_ARGV <n> arg`")
+            if (name == "function" && (index(tokens[1], prefix "_") != 1 || tokens[1] ~ /_$/))
+                hit("function", "names a function without the `" prefix "_` prefix or with a trailing `_`")
+            if (name == "foreach" && tokens[1] !~ /_$/) hit("foreach", "names a loop variable without a trailing `_`")
+            if (name != "set" || tokens[1] ~ /^(\$|ENV\{)/) return
+            variable = tokens[1]
+            for (index_ = 2; index_ <= count; ++index_) {
+                cached = cached || tokens[index_] == "CACHE"
+                forced = forced || tokens[index_] == "FORCE"
+            }
+            if (cached && forced) hit("force", "forces a cache entry, which is written once")
+            if (cached) return
+            if (variable ~ /^[a-z_](.*[^_])?$/) hit("lowercase", "sets a lowercase local without a trailing `_`")
+            if (variable ~ /^[A-Z]/ && variable !~ "^(CMAKE|" toupper(siblings) ")_" &&
+                !index(published, " " variable " "))
+                hit("uppercase", "sets an uppercase name outside CMake, the siblings, and the published and third-party lists")
+        }
+        NR == FNR { added[$1 + 0]; next }
+        {
+            line_code = ""; line_bare = ""
+            for (position = 1; position <= length($0); ++position) {
+                character = substr($0, position, 1)
+                if (character == "\\") {
+                    line_code = line_code substr($0, position, 2)
+                    if (!quoted) line_bare = line_bare substr($0, position, 2)
+                    ++position; continue
+                }
+                if (character == "\"") quoted = !quoted
+                else if (character == "#" && !quoted) break
+                else if (character == "(" && !quoted) ++depth
+                else if (character == ")" && !quoted) --depth
+                line_code = line_code character
+                if (!quoted || character == "\"") line_bare = line_bare character
+            }
+            if (!open) {
+                if (line_bare !~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/) { depth = 0; next }
+                open = 1; first = FNR; opening = $0; code = ""; bare = ""; touched = 0
+            }
+            code = code " " line_code; bare = bare " " line_bare; touched = touched || (FNR in added)
+            if (depth <= 0) { if (touched) judge(); open = 0; depth = 0 }
+        }
+        END {
+            for (index_ = 1; index_ <= rules; ++index_)
+                printf "pre-commit: %s %s:\n%s", path, messages[order[index_]], found[order[index_]]
+        }' \
+        "$3" "$2")
+    [ -z "$findings" ] && return 0
+    printf '%s\n' "$findings"
+    return 1
+}
+
 # The CPython bindings parse arguments and build results by hand: `PyArg_Parse*` and `Py_BuildValue` interpret a
 # format string at runtime, so a wrong specifier is a crash rather than a compile error, and their error paths are
 # the interpreter's rather than ours.
@@ -1882,7 +1955,10 @@ judge_path() {
         ;;
     python/*.c | python/*.h) check_cpython_format_shortcuts ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
-    CMakeLists.txt | */CMakeLists.txt | *.cmake) check_cmake_string_surgery ;;
+    CMakeLists.txt | */CMakeLists.txt | *.cmake)
+        check_cmake_string_surgery
+        check_cmake_conventions "$file" "$staged_blob" "$staged_lines_path" || rejection_count=$((rejection_count + 1))
+        ;;
     esac
     case "$file" in
     test/harness.hpp | test/main.cpp | test/dense_vram.cpp | test/dense/vram_nvidia.cpp | test/dense/vram_amd.hip | \
@@ -2100,13 +2176,18 @@ run_tree_checks() {
     fi
 
     if command -v cmake-format > /dev/null 2>&1 && [ -f .cmake-format.py ]; then
+        # The index holds what the commit records, while the working tree may carry the next group's edits.
+        local staged_copy
+        staged_copy=$(mktemp)
         while IFS= read -r -d '' file; do
-            if ! cmake-format --check "$file" > /dev/null 2>&1; then
+            git show ":$file" > "$staged_copy"
+            if ! cmake-format -c .cmake-format.py --check "$staged_copy" > /dev/null 2>&1; then
                 echo "pre-commit: $file is not cmake-format clean - run \`cmake-format -i $file\` with the repo profile"
                 rejection_count=$((rejection_count + 1))
             fi
             # A bare `CMakeLists.txt` pattern matches the whole path, so every SDK's own list needs its prefix.
         done < <(staged_matching 'CMakeLists.txt' '*/CMakeLists.txt' '*.cmake')
+        rm -f "$staged_copy"
     fi
     # A `usearch_sibling` pin, a Cargo git `rev` and the submodule's gitlink name the same commit, or a recursive clone,
     # a plain one and a crate build different code. Every side is read from the index, so the comparison is against

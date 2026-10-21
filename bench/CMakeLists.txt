@@ -3,25 +3,25 @@
 # `_algebra` binaries measure graph products and graph attention over the same builds, so they take the dot kernel's
 # dtypes alone, and the NVMe benches carry no f32 shard, since f32 is never a stored dtype.
 
-# A dense bench, @p target on @p backend, from the units before the first dtype keyword, the entry first, and the dtype
-# shards after them, as `usearch_dense_dtype_sources` takes them. A CPU bench inlines the kits its host flags pick. An
-# NVIDIA bench compiles host-only through Clang's CUDA mode, shards and entry unit alike, and links the kernels of
-# `usearch_bench_dense_vram_kernels`; its device listing names its classes through the C interface's own probes,
+# A dense bench, @p target_ on @p backend_, from the units before the first dtype keyword, the entry first, and the
+# dtype shards after them, as `usearch_dense_dtype_sources` takes them. A CPU bench inlines the kits its host flags
+# pick. An NVIDIA bench compiles host-only through Clang's CUDA mode, shards and entry unit alike, and links the kernels
+# of `usearch_bench_dense_vram_kernels`; its device listing names its classes through the C interface's own probes,
 # compiled in as the tests do.
-function (usearch_dense_bench target backend)
+function (usearch_dense_bench target_ backend_)
     cmake_parse_arguments(PARSE_ARGV 2 arg "" "ENTRY" "UNITS;SHARDS")
-    add_executable(${target} ${arg_ENTRY} ${arg_UNITS})
-    usearch_dense_dtype_sources(${target} ${arg_SHARDS})
-    usearch_setup_target(${target} HOST)
-    target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(${target} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static)
-    if (backend STREQUAL "nvidia")
-        target_sources(${target} PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
-        target_compile_definitions(${target} PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_bench_cuda_capabilities_})
-        target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS} usearch_bench_dense_vram_kernels)
-        target_include_directories(${target} SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    add_executable(${target_} ${arg_ENTRY} ${arg_UNITS})
+    usearch_dense_dtype_sources(${target_} ${arg_SHARDS})
+    usearch_setup_target(${target_} HOST)
+    target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(${target_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static)
+    if (backend_ STREQUAL "nvidia")
+        target_sources(${target_} PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
+        target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_bench_cuda_capabilities_})
+        target_link_libraries(${target_} PRIVATE ${CMAKE_DL_LIBS} usearch_bench_dense_vram_kernels)
+        target_include_directories(${target_} SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
         foreach (flag_ IN LISTS usearch_bench_cuda_host_only_)
-            target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${flag_}>")
+            target_compile_options(${target_} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${flag_}>")
         endforeach ()
     endif ()
 endfunction ()
@@ -225,15 +225,15 @@ if (USEARCH_BUILD_CUDA)
     )
 endif ()
 
-# A bench over the C interface, @p target from its one unit @p source, linking the library as users do; only its exact
+# A bench over the C interface, @p target_ from its one unit @p source_, linking the library as users do; only its exact
 # oracles inline kits, which the host flags pick.
-function (usearch_c_interface_bench target source)
-    add_executable(${target} ${source})
-    usearch_setup_target(${target} HOST)
-    target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+function (usearch_c_interface_bench target_ source_)
+    add_executable(${target_} ${source_})
+    usearch_setup_target(${target_} HOST)
+    target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(
-        ${target} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header ${USEARCH_PUNNED_LIBRARIES}
-                          ${CMAKE_DL_LIBS}
+        ${target_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header ${USEARCH_PUNNED_LIBRARIES}
+                           ${CMAKE_DL_LIBS}
     )
 endfunction ()
 usearch_c_interface_bench(usearch_bench_sequence_index_search sequence_index_search.cpp)

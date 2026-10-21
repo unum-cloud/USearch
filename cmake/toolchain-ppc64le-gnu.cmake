@@ -13,9 +13,9 @@ set(CMAKE_SYSTEM_PROCESSOR ppc64le)
 find_program(CMAKE_C_COMPILER powerpc64le-linux-gnu-gcc REQUIRED)
 find_program(CMAKE_CXX_COMPILER powerpc64le-linux-gnu-g++ REQUIRED)
 
-find_program(USEARCH_QEMU_PPC64LE_ qemu-ppc64le)
-if (USEARCH_QEMU_PPC64LE_)
-    set(CMAKE_CROSSCOMPILING_EMULATOR "${USEARCH_QEMU_PPC64LE_};-L;/usr/powerpc64le-linux-gnu")
+find_program(usearch_qemu_ppc64le_ qemu-ppc64le)
+if (usearch_qemu_ppc64le_)
+    set(CMAKE_CROSSCOMPILING_EMULATOR "${usearch_qemu_ppc64le_};-L;/usr/powerpc64le-linux-gnu")
 endif ()
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

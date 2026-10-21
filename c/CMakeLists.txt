@@ -30,6 +30,8 @@ if (USEARCH_BUILD_LIB_C)
         usearch_static STATIC ${USEARCH_PUNNED_OBJECTS} $<TARGET_OBJECTS:yyjson> $<TARGET_OBJECTS:numkong_static>
                               $<TARGET_OBJECTS:forkunion_static>
     )
+    add_library(${PROJECT_NAME}::shared ALIAS usearch_shared)
+    add_library(${PROJECT_NAME}::static ALIAS usearch_static)
     set_target_properties(usearch_shared usearch_static PROPERTIES LINKER_LANGUAGE CXX)
 
     # Set the compile options for the static library
@@ -47,7 +49,7 @@ if (USEARCH_BUILD_LIB_C)
     # The shared flavor brings JeMalloc into the processes that load it, as `usearch_setup_target` does for executables;
     # an archive links nothing.
     if (USEARCH_USE_JEMALLOC)
-        target_link_libraries(usearch_shared PRIVATE ${JEMALLOC_LIBRARIES})
+        target_link_libraries(usearch_shared PRIVATE ${USEARCH_JEMALLOC_LIBRARY})
     endif ()
 
     # Outside the export set, and unconditional: `USEARCH_INSTALL` governs the CMake config, not whether a built library

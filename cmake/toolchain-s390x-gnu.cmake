@@ -14,9 +14,9 @@ set(CMAKE_SYSTEM_PROCESSOR s390x)
 find_program(CMAKE_C_COMPILER s390x-linux-gnu-gcc REQUIRED)
 find_program(CMAKE_CXX_COMPILER s390x-linux-gnu-g++ REQUIRED)
 
-find_program(USEARCH_QEMU_S390X_ qemu-s390x)
-if (USEARCH_QEMU_S390X_)
-    set(CMAKE_CROSSCOMPILING_EMULATOR "${USEARCH_QEMU_S390X_};-L;/usr/s390x-linux-gnu")
+find_program(usearch_qemu_s390x_ qemu-s390x)
+if (usearch_qemu_s390x_)
+    set(CMAKE_CROSSCOMPILING_EMULATOR "${usearch_qemu_s390x_};-L;/usr/s390x-linux-gnu")
 endif ()
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

@@ -13,9 +13,9 @@ set(CMAKE_SYSTEM_PROCESSOR armv7)
 find_program(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc REQUIRED)
 find_program(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++ REQUIRED)
 
-find_program(USEARCH_QEMU_ARM_ qemu-arm)
-if (USEARCH_QEMU_ARM_)
-    set(CMAKE_CROSSCOMPILING_EMULATOR "${USEARCH_QEMU_ARM_};-L;/usr/arm-linux-gnueabihf")
+find_program(usearch_qemu_arm_ qemu-arm)
+if (usearch_qemu_arm_)
+    set(CMAKE_CROSSCOMPILING_EMULATOR "${usearch_qemu_arm_};-L;/usr/arm-linux-gnueabihf")
 endif ()
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

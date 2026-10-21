@@ -28,24 +28,24 @@ endif ()
 # own Clang as the C++ compiler, as the `rocm_*` presets name it. Apple needs only an Apple silicon target, since Metal
 # ships with macOS and its kernels compile at first use.
 include(CheckLanguage)
-set(USEARCH_CAN_BUILD_CUDA OFF)
+set(usearch_can_build_cuda_ OFF)
 if (NOT DEFINED USEARCH_BUILD_CUDA AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     check_language(CUDA)
     if (CMAKE_CUDA_COMPILER)
-        set(USEARCH_CAN_BUILD_CUDA ON)
+        set(usearch_can_build_cuda_ ON)
     endif ()
 endif ()
-set(USEARCH_CAN_BUILD_ROCM OFF)
+set(usearch_can_build_rocm_ OFF)
 if (NOT DEFINED USEARCH_BUILD_ROCM AND CMAKE_CXX_COMPILER MATCHES "/rocm[^/]*/llvm/bin/clang")
-    set(USEARCH_CAN_BUILD_ROCM ON)
+    set(usearch_can_build_rocm_ ON)
 endif ()
-set(USEARCH_CAN_BUILD_METAL OFF)
+set(usearch_can_build_metal_ OFF)
 if (NOT DEFINED USEARCH_BUILD_METAL
     AND APPLE
     AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64"
     AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
 )
-    set(USEARCH_CAN_BUILD_METAL ON)
+    set(usearch_can_build_metal_ ON)
 endif ()
 
 # Options
@@ -61,9 +61,11 @@ option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Langu
 option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
 option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
 option(USEARCH_BUILD_TOOLS "Compile the command-line tools in tools/, and their MPI build where MPI is found" OFF)
-option(USEARCH_BUILD_CUDA "Compile the NVIDIA index variants, tests and benchmarks with NVCC" ${USEARCH_CAN_BUILD_CUDA})
-option(USEARCH_BUILD_ROCM "Compile the AMD index variants and tests with ROCm's Clang" ${USEARCH_CAN_BUILD_ROCM})
-option(USEARCH_BUILD_METAL "Compile the Apple index variants and tests over Metal" ${USEARCH_CAN_BUILD_METAL})
+option(USEARCH_BUILD_CUDA "Compile the NVIDIA index variants, tests and benchmarks with NVCC"
+       ${usearch_can_build_cuda_}
+)
+option(USEARCH_BUILD_ROCM "Compile the AMD index variants and tests with ROCm's Clang" ${usearch_can_build_rocm_})
+option(USEARCH_BUILD_METAL "Compile the Apple index variants and tests over Metal" ${usearch_can_build_metal_})
 option(USEARCH_BUILD_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
 
 # Clang keeps a unit's host and device halves apart, through the host-only passes of its CUDA and HIP modes, where other
@@ -177,7 +179,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Include roots that add no path component: the C interface in `c/`, the templates in `include/`, and the C++ wrappers
 # over the C interface in `cpp/`, which only the compiled libraries carry.
-set(USEARCH_INCLUDE_BUILD_DIRS "${PROJECT_SOURCE_DIR}/c/" "${PROJECT_SOURCE_DIR}/include/")
+set(usearch_include_build_dirs_ "${PROJECT_SOURCE_DIR}/c/" "${PROJECT_SOURCE_DIR}/include/")
 
 # The core: the basic graph index and the utilities it stands on - six headers on the standard library alone, no sibling
 # library in sight. Concepts are the main reason C++20 is the base language level, with `std::atomic_ref` and the
@@ -191,7 +193,7 @@ target_sources(
     INTERFACE FILE_SET
               HEADERS
               BASE_DIRS
-              ${USEARCH_INCLUDE_BUILD_DIRS}
+              ${usearch_include_build_dirs_}
               FILES
               c/usearch/types.h
               include/usearch/utilities/types.hpp
@@ -209,7 +211,7 @@ add_library(${PROJECT_NAME}::header ALIAS usearch_header)
 set_target_properties(usearch_header PROPERTIES EXPORT_NAME header)
 target_link_libraries(usearch_header INTERFACE usearch_core)
 target_include_directories(
-    usearch_header INTERFACE "$<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIRS}>" $<INSTALL_INTERFACE:include>
+    usearch_header INTERFACE "$<BUILD_INTERFACE:${usearch_include_build_dirs_}>" $<INSTALL_INTERFACE:include>
 )
 
 # The package files: a pkg-config file, so other tools can find this, and the CMake config with its version file. A
@@ -217,20 +219,17 @@ target_include_directories(
 # template needed.
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
-set(USEARCH_CONFIG_INSTALL_DIR
-    "${CMAKE_INSTALL_DATADIR}/cmake/${PROJECT_NAME}"
-    CACHE INTERNAL ""
-)
-set(USEARCH_TARGETS_EXPORT_NAME "${PROJECT_NAME}Targets")
-set(USEARCH_CMAKE_VERSION_CONFIG_FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake")
-set(USEARCH_CMAKE_PROJECT_CONFIG_FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake")
+set(usearch_config_install_dir_ "${CMAKE_INSTALL_DATADIR}/cmake/${PROJECT_NAME}")
+set(usearch_targets_export_name_ "${PROJECT_NAME}Targets")
+set(usearch_cmake_version_config_file_ "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake")
+set(usearch_cmake_project_config_file_ "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc")
 write_basic_package_version_file(
-    ${USEARCH_CMAKE_VERSION_CONFIG_FILE}
+    ${usearch_cmake_version_config_file_}
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY AnyNewerVersion ARCH_INDEPENDENT
 )
-configure_file(cmake/config.cmake.in ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} @ONLY)
+configure_file(cmake/config.cmake.in ${usearch_cmake_project_config_file_} @ONLY)
 
 # Dependencies, each acquired by its own `cmake/<dependency>.cmake`, and each only for the builds that compile against
 # it.
@@ -253,33 +252,35 @@ find_package(Threads REQUIRED)
 # pretending otherwise. Include directories are copied onto the interface target, because `usearch_setup_target` reads
 # `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target declares, not what its link
 # interface would carry - to keep the C++20 feature requirement off the pure-C targets.
-function (usearch_sibling name link_target repository tag)
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name}/CMakeLists.txt")
-        add_subdirectory(${name})
+function (usearch_sibling name_ link_target_ repository_ tag_)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name_}/CMakeLists.txt")
+        add_subdirectory(${name_})
     else ()
-        message(STATUS "usearch: ${name} submodule absent, fetching ${tag}")
+        message(STATUS "usearch: ${name_} submodule absent, fetching ${tag_}")
         FetchContent_Declare(
-            ${name}
-            GIT_REPOSITORY ${repository}
-            GIT_TAG ${tag}
+            ${name_}
+            GIT_REPOSITORY ${repository_}
+            GIT_TAG ${tag_}
         )
-        FetchContent_MakeAvailable(${name})
+        FetchContent_MakeAvailable(${name_})
     endif ()
 
-    target_link_libraries(usearch_header INTERFACE ${link_target})
+    target_link_libraries(usearch_header INTERFACE ${link_target_})
 
     # Collected for the export set: their interfaces carry a language level and `Threads::Threads`, which the paths
     # copied below do not.
-    get_target_property(sibling_target_ ${link_target} ALIASED_TARGET)
+    get_target_property(sibling_target_ ${link_target_} ALIASED_TARGET)
     if (NOT sibling_target_)
-        set(sibling_target_ ${link_target})
+        set(sibling_target_ ${link_target_})
     endif ()
     set(usearch_sibling_targets_
         ${usearch_sibling_targets_} ${sibling_target_}
         PARENT_SCOPE
     )
 
-    target_include_directories(usearch_header INTERFACE $<TARGET_PROPERTY:${link_target},INTERFACE_INCLUDE_DIRECTORIES>)
+    target_include_directories(
+        usearch_header INTERFACE $<TARGET_PROPERTY:${link_target_},INTERFACE_INCLUDE_DIRECTORIES>
+    )
 endfunction ()
 
 set(usearch_sibling_targets_)
@@ -301,8 +302,8 @@ if (USEARCH_USE_JEMALLOC)
 endif ()
 if (USEARCH_BUILD_SPDK)
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(USEARCH_SPDK REQUIRED spdk_nvme spdk_env_dpdk)
-    pkg_check_modules(USEARCH_SPDK_SYSTEM REQUIRED spdk_syslibs)
+    pkg_check_modules(usearch_spdk REQUIRED spdk_nvme spdk_env_dpdk)
+    pkg_check_modules(usearch_spdk_system REQUIRED spdk_syslibs)
 endif ()
 
 # NVCC is only a device compiler here, so the toolkit is found for its paths alone, and every NVIDIA and AMD unit links
@@ -319,12 +320,12 @@ endif ()
 # trail every target that belongs to it.
 if (USEARCH_INSTALL)
     install(DIRECTORY c/usearch include/usearch cpp/usearch DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-    install(FILES ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} ${USEARCH_CMAKE_VERSION_CONFIG_FILE}
-            DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
+    install(FILES ${usearch_cmake_project_config_file_} ${usearch_cmake_version_config_file_}
+            DESTINATION ${usearch_config_install_dir_}
     )
     install(
         TARGETS usearch_core usearch_header
-        EXPORT ${USEARCH_TARGETS_EXPORT_NAME}
+        EXPORT ${usearch_targets_export_name_}
         FILE_SET HEADERS
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
         INCLUDES
@@ -332,7 +333,7 @@ if (USEARCH_INSTALL)
     )
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc" DESTINATION "${CMAKE_INSTALL_DATADIR}/pkgconfig")
     if (usearch_sibling_targets_)
-        install(TARGETS ${usearch_sibling_targets_} EXPORT ${USEARCH_TARGETS_EXPORT_NAME})
+        install(TARGETS ${usearch_sibling_targets_} EXPORT ${usearch_targets_export_name_})
     endif ()
     export(
         TARGETS usearch_core usearch_header ${usearch_sibling_targets_}
@@ -340,9 +341,9 @@ if (USEARCH_INSTALL)
         FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Targets.cmake"
     )
     install(
-        EXPORT ${USEARCH_TARGETS_EXPORT_NAME}
+        EXPORT ${usearch_targets_export_name_}
         NAMESPACE ${PROJECT_NAME}::
-        DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
+        DESTINATION ${usearch_config_install_dir_}
     )
 endif ()
 
@@ -351,18 +352,18 @@ endif ()
 # themselves skipped. Apple Clang's `-march=native` advertises only a subset of the host's features - no FP16 arithmetic
 # & FML, no SME - leaving NumKong's f16 kits serial; `-mcpu=native` is the complete AArch64 knob.
 if (MSVC OR CMAKE_CROSSCOMPILING)
-    set(USEARCH_HOST_TUNING "")
+    set(usearch_host_tuning_ "")
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
-    set(USEARCH_HOST_TUNING -mcpu=native)
+    set(usearch_host_tuning_ -mcpu=native)
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    set(USEARCH_HOST_TUNING -march=native)
+    set(usearch_host_tuning_ -march=native)
 else ()
-    set(USEARCH_HOST_TUNING "")
+    set(usearch_host_tuning_ "")
 endif ()
 
 # Debug builds take each sanitizer whose instrumented load the toolchain compiles and links; WASI links no sanitizer
 # runtime at all.
-set(USEARCH_SANITIZERS "")
+set(usearch_sanitizers_ "")
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     include(CheckCXXSourceCompiles)
     include(CMakePushCheckState)
@@ -371,10 +372,10 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set(CMAKE_REQUIRED_FLAGS "-fsanitize=${usearch_sanitizer_}")
         check_cxx_source_compiles(
             "int main(int argc, char **argv) { return *(int *)(void *)argv[0] + argc; }"
-            USEARCH_SANITIZER_${usearch_sanitizer_}_
+            usearch_sanitizer_${usearch_sanitizer_}_compiles_
         )
-        if (USEARCH_SANITIZER_${usearch_sanitizer_}_)
-            list(APPEND USEARCH_SANITIZERS "-fsanitize=${usearch_sanitizer_}")
+        if (usearch_sanitizer_${usearch_sanitizer_}_compiles_)
+            list(APPEND usearch_sanitizers_ "-fsanitize=${usearch_sanitizer_}")
         endif ()
     endforeach ()
     cmake_pop_check_state()
@@ -385,14 +386,14 @@ endif ()
 # depends on - fast math, the diagnostics, the sanitizers - is pinned here, and only for the host languages, so a unit
 # the CUDA driver compiles is not handed flags it rejects. `HOST` tunes for the machine at hand and takes no probe
 # verdict, since the compiler's own feature macros then say exactly what the host has.
-function (usearch_setup_target target)
-    cmake_parse_arguments(arg "HOST" "" "" ${ARGN})
+function (usearch_setup_target target_)
+    cmake_parse_arguments(PARSE_ARGV 1 arg "HOST" "" "")
     # Compiler-specific options List of all possible compiler IDs:
     # https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_ID.html
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_options(
-            ${target}
-            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}>
+            ${target_}
+            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${usearch_sanitizers_}>
                     -ffast-math
                     -fno-finite-math-only
                     -fPIC
@@ -404,14 +405,14 @@ function (usearch_setup_target target)
                     -pedantic
                     -fdiagnostics-color=always>
         )
-        target_link_options(${target} PRIVATE $<$<CONFIG:DEBUG>:-g ${USEARCH_SANITIZERS}> -fPIC)
+        target_link_options(${target_} PRIVATE $<$<CONFIG:DEBUG>:-g ${usearch_sanitizers_}> -fPIC)
 
-        target_link_libraries(${target} PRIVATE Threads::Threads)
+        target_link_libraries(${target_} PRIVATE Threads::Threads)
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(
-            ${target}
-            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}>
+            ${target_}
+            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${usearch_sanitizers_}>
                     -ffast-math
                     -fno-finite-math-only
                     -fPIC
@@ -419,69 +420,70 @@ function (usearch_setup_target target)
                     -Wfatal-errors
                     -fcolor-diagnostics>
         )
-        target_link_options(${target} PRIVATE $<$<CONFIG:DEBUG>:-g ${USEARCH_SANITIZERS}> -fPIC)
+        target_link_options(${target_} PRIVATE $<$<CONFIG:DEBUG>:-g ${usearch_sanitizers_}> -fPIC)
 
         if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
-            target_link_libraries(${target} PRIVATE "-framework CoreFoundation" "-framework Security" Threads::Threads)
+            target_link_libraries(${target_} PRIVATE "-framework CoreFoundation" "-framework Security" Threads::Threads)
         else ()
-            target_link_libraries(${target} PRIVATE Threads::Threads)
+            target_link_libraries(${target_} PRIVATE Threads::Threads)
         endif ()
 
     elseif (CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
-        target_compile_options(${target} PRIVATE -w -ferror-limit=${USEARCH_MAX_ERRORS})
+        target_compile_options(${target_} PRIVATE -w -ferror-limit=${USEARCH_MAX_ERRORS})
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
         # MSVC has no O3 optimization level
-        target_compile_options(${target} PRIVATE /wd4068 /wd4996)
+        target_compile_options(${target_} PRIVATE /wd4068 /wd4996)
         target_compile_options(
-            ${target} PRIVATE $<$<CONFIG:DEBUG>:/DEBUG> $<$<CONFIG:RELEASE>:/O2> $<$<CONFIG:RELWITHDEBINFO>:/O2 /DEBUG>
+            ${target_} PRIVATE $<$<CONFIG:DEBUG>:/DEBUG> $<$<CONFIG:RELEASE>:/O2> $<$<CONFIG:RELWITHDEBINFO>:/O2
+                               /DEBUG>
         )
     endif ()
 
     # One source of truth for header paths: whatever the interface target advertises, including what the dependencies
     # carry, without inheriting its compile features onto pure-C targets.
-    target_include_directories(${target} PRIVATE $<TARGET_PROPERTY:usearch_header,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_include_directories(${target_} PRIVATE $<TARGET_PROPERTY:usearch_header,INTERFACE_INCLUDE_DIRECTORIES>)
     # Host-tuned units read the compiler; every other unit takes each sibling's compiled capabilities and instantiates
     # its kits per CPU class, never by a template's default capability, so the class units and the dispatch unit name
     # the same rungs.
     if (arg_HOST)
-        target_compile_options(${target} PRIVATE ${USEARCH_HOST_TUNING})
+        target_compile_options(${target_} PRIVATE ${usearch_host_tuning_})
     else ()
         target_link_libraries(
-            ${target}
+            ${target_}
             PRIVATE $<BUILD_INTERFACE:numkong::cpu_capabilities_compiled>
                     $<BUILD_INTERFACE:stringzilla::cpu_capabilities_compiled>
                     $<BUILD_INTERFACE:forkunion::cpu_capabilities_compiled>
         )
     endif ()
-    set_target_properties(${target} PROPERTIES CXX_STANDARD 20)
+    set_target_properties(${target_} PROPERTIES CXX_STANDARD 20)
 
     # Every library carries the `lib` prefix, Windows included, so one file name serves every platform.
-    get_target_property(target_type_ ${target} TYPE)
+    get_target_property(target_type_ ${target_} TYPE)
     if (target_type_ STREQUAL "SHARED_LIBRARY" OR target_type_ STREQUAL "STATIC_LIBRARY")
-        set_target_properties(${target} PROPERTIES PREFIX "lib")
+        set_target_properties(${target_} PROPERTIES PREFIX "lib")
     endif ()
 
     # Header-only NumKong: each unit inlines the kernels its CPU class runs, and USearch dispatches by CPU class, so no
     # artifact needs NumKong's library or its dispatch points.
-    target_link_libraries(${target} PRIVATE numkong::header)
+    target_link_libraries(${target_} PRIVATE numkong::header)
 
     # SPDK's transports, socket layers and DPDK drivers register from static constructors, so their archives link whole.
     if (USEARCH_BUILD_SPDK)
-        target_compile_definitions(${target} PRIVATE USEARCH_BUILD_SPDK=1)
-        target_include_directories(${target} SYSTEM PRIVATE ${USEARCH_SPDK_INCLUDE_DIRS})
+        target_compile_definitions(${target_} PRIVATE USEARCH_BUILD_SPDK=1)
+        target_include_directories(${target_} SYSTEM PRIVATE ${usearch_spdk_INCLUDE_DIRS})
         # An object library hands its link items to every consumer, which links the archives whole once already.
         if (NOT target_type_ STREQUAL "OBJECT_LIBRARY")
             target_link_libraries(
-                ${target} PRIVATE "-Wl,--whole-archive" "-Wl,-Bstatic" ${USEARCH_SPDK_LDFLAGS} "-Wl,-Bdynamic"
-                                  "-Wl,--no-whole-archive" ${USEARCH_SPDK_SYSTEM_STATIC_LDFLAGS}
+                ${target_} PRIVATE "-Wl,--whole-archive" "-Wl,-Bstatic" ${usearch_spdk_LDFLAGS} "-Wl,-Bdynamic"
+                                   "-Wl,--no-whole-archive" ${usearch_spdk_system_STATIC_LDFLAGS}
             )
         endif ()
     endif ()
 
     # JeMalloc serves the processes this project starts, its executables; the C library links it in `c/`.
     if (USEARCH_USE_JEMALLOC AND target_type_ STREQUAL "EXECUTABLE")
-        target_link_libraries(${target} PRIVATE ${JEMALLOC_LIBRARIES})
+        target_link_libraries(${target_} PRIVATE ${USEARCH_JEMALLOC_LIBRARY})
     endif ()
 endfunction ()
 
@@ -501,15 +503,21 @@ set(usearch_dense_dtypes_ladder_
     E3M2
     E2M3
 )
-function (usearch_dense_dtype_sources target)
-    cmake_parse_arguments(PARSE_ARGV 1 shards "" "" "${usearch_dense_dtypes_ladder_}")
-    if (shards_UNPARSED_ARGUMENTS)
-        message(FATAL_ERROR "${target} lists \"${shards_UNPARSED_ARGUMENTS}\" under no dense dtype of the ladder")
-    endif ()
+function (usearch_dense_dtype_sources target_)
+    set(dtype_)
+    foreach (argument_ IN LISTS ARGN)
+        if (argument_ IN_LIST usearch_dense_dtypes_ladder_)
+            set(dtype_ ${argument_})
+        elseif (dtype_)
+            list(APPEND sources_${dtype_}_ ${argument_})
+        else ()
+            message(FATAL_ERROR "${target_} lists \"${argument_}\" under no dense dtype of the ladder")
+        endif ()
+    endforeach ()
     set(position_ 0)
     foreach (dtype_ IN LISTS usearch_dense_dtypes_ladder_)
         if (position_ LESS USEARCH_DENSE_DTYPES)
-            target_sources(${target} PRIVATE ${shards_${dtype_}})
+            target_sources(${target_} PRIVATE ${sources_${dtype_}_})
         endif ()
         math(EXPR position_ "${position_} + 1")
     endforeach ()

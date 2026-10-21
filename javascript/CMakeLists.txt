@@ -2,9 +2,9 @@
 # `usearch.node` carries the engine inside it. `cmake-js` drives this from `package.json`.
 
 if (TARGET usearch_static)
-    set(USEARCH_NODE_LIBRARY usearch_static)
+    set(usearch_node_library_ usearch_static)
 elseif (TARGET usearch_static_stub)
-    set(USEARCH_NODE_LIBRARY usearch_static_stub)
+    set(usearch_node_library_ usearch_static_stub)
 else ()
     message(FATAL_ERROR "The Node SDK links the C interface; configure with `-DUSEARCH_BUILD_LIB_C=1`.")
 endif ()
@@ -29,7 +29,7 @@ set_target_properties(
 
 target_include_directories(usearch_node PRIVATE ${CMAKE_JS_INC} ${PROJECT_SOURCE_DIR}/c ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(usearch_node PRIVATE NAPI_VERSION=8)
-target_link_libraries(usearch_node PRIVATE ${CMAKE_JS_LIB} ${USEARCH_NODE_LIBRARY})
+target_link_libraries(usearch_node PRIVATE ${CMAKE_JS_LIB} ${usearch_node_library_})
 
 if (MSVC)
     target_compile_options(usearch_node PRIVATE /Zc:preprocessor)
