@@ -192,13 +192,13 @@ struct geospatial_ladder<caps_> {
  *  naming it.
  *
  *  @tparam kit_type_ The kernels, as one @c geospatial_ladder names them.
- *  @tparam allocator_type_ Places the staging and the kernel's squares.
+ *  @tparam allocator_type_ Places the staging and the queries' axes.
  */
 template <typename kit_type_, typename allocator_type_ = forkunion_allocator_t>
 class chord_metric {
   public:
     using kit_t = kit_type_;
-    using distance_t = i64_t;
+    using distance_t = nk_u64_t;
     using allocator_t = allocator_type_;
     using is_transparent = void;
 
@@ -213,9 +213,6 @@ class chord_metric {
     /** The round's candidate positions, three axes each, in push order. */
     growing_buffer<i32_t, allocator_t> staged_;
 
-    /** The kernel's exact @b [queries,candidates] squares. */
-    growing_buffer<nk_u64_t, allocator_t> squares_;
-
     /** Candidates the round holds, and the most it may. */
     std::size_t staged_count_ = 0;
     std::size_t staging_limit_ = 0;
@@ -227,14 +224,14 @@ class chord_metric {
 
   public:
     explicit chord_metric(allocator_t const& allocator = {}) noexcept
-        : query_coordinates_(allocator), staged_(allocator), squares_(allocator) {}
+        : query_coordinates_(allocator), staged_(allocator) {}
     chord_metric(chord_metric const&) = delete;
     chord_metric& operator=(chord_metric const&) = delete;
     chord_metric(chord_metric&&) noexcept = default;
     chord_metric& operator=(chord_metric&&) noexcept = default;
 
     /**
-     *  @brief Sizes the staging and the squares.
+     *  @brief Sizes the staging.
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at
      *      least the index's round capacity, or rounds saturate rather than fail.
      */
@@ -242,7 +239,6 @@ class chord_metric {
         if (!staging_limit) return status_t::config_mismatch_k;
         if (status_t const queried = query_coordinates_.reserve(3); failed(queried)) return queried;
         if (status_t const staged = staged_.resize_uninitialized(staging_limit * 3); failed(staged)) return staged;
-        if (status_t const squared = squares_.resize_uninitialized(staging_limit); failed(squared)) return squared;
         staging_limit_ = staging_limit;
         return status_t::success_k;
     }
@@ -275,9 +271,7 @@ class chord_metric {
     void reset(std::span<query_type_ const> queries) noexcept {
         query_coordinates_.clear();
         staged_count_ = 0;
-        if (failed(query_coordinates_.reserve(queries.size() * 3)) ||
-            failed(squares_.resize_uninitialized(queries.size() * staging_limit_)))
-            return;
+        if (failed(query_coordinates_.reserve(queries.size() * 3))) return;
         for (query_type_ const& query : queries) append_query_(fixed_of_(query));
         if (!queries.empty()) query_ = fixed_of_(queries.front());
     }
@@ -293,19 +287,17 @@ class chord_metric {
         return basic::metric_staging_t::staged_k;
     }
 
-    /** Scores the round in one N×M call and closes it, writing @b [queries,candidates]; squared
-     *  chords between Earth positions stay below 2⁶³, and a failed round reports the largest
-     *  distance. */
-    void drain(std::span<i64_t> distances, i64_t) noexcept {
+    /** Scores the round in one N×M call straight into @p distances and closes it, writing
+     *  @b [queries,candidates]; a failed round reports the largest distance. */
+    void drain(std::span<nk_u64_t> distances, nk_u64_t) noexcept {
         std::size_t const queries = query_coordinates_.size() / 3;
         nk_status_t const scored = queries * staged_count_ != distances.size()
                                        ? nk_unexpected_dimensions_k
                                        : kit_t::sqeuclideans3d(query_coordinates_.data(), queries, staged_.data(),
-                                                               staged_count_, squares_.data(),
+                                                               staged_count_, distances.data(),
                                                                sizeof(nk_u64_t) * staged_count_, nullptr);
-        for (std::size_t lane = 0; lane != distances.size(); ++lane)
-            distances[lane] = scored == nk_success_k ? static_cast<i64_t>(squares_[lane])
-                                                     : (std::numeric_limits<i64_t>::max)();
+        if (scored != nk_success_k)
+            for (nk_u64_t& distance : distances) distance = (std::numeric_limits<nk_u64_t>::max)();
         staged_count_ = 0;
     }
 
@@ -321,7 +313,7 @@ class chord_metric {
 
 using chord_metric_t = chord_metric<i32_serial_geospatial_kit_t>;
 
-static_assert(basic::metric<chord_metric_t, earth_observation_t, i64_t>);
+static_assert(basic::metric<chord_metric_t, earth_observation_t, nk_u64_t>);
 static_assert(basic::transparent_metric<chord_metric_t>);
 
 #pragma endregion Metric

@@ -101,6 +101,7 @@ struct vram_nvidia_index {
     using reserve_capacity_t = typename graph_t::reserve_capacity_t;
     using insert_config_t = typename graph_t::insert_config_t;
     using insert_result_t = typename graph_t::insert_result_t;
+    using insert_plan_t = typename graph_t::insert_plan_t;
     using search_config_t = typename graph_t::search_config_t;
     using search_result_t = typename graph_t::search_result_t;
     using refine_config_t = typename graph_t::refine_config_t;
@@ -132,6 +133,7 @@ struct vram_nvidia_index {
                                        insert_config_t config = {}) const noexcept {
         return graph_.traversal_memory_usage(values, offsets, config);
     }
+    expected<insert_plan_t> plan_insert(std::size_t rows) noexcept { return graph_.plan_insert(rows); }
     expected<insert_result_t> insert(byte_t const* values, std::span<std::size_t const> offsets,
                                      traversal_context_t& context, insert_config_t config = {}) noexcept {
         return graph_.insert(values, offsets, context, config);

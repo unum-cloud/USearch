@@ -416,34 +416,105 @@ struct vram_ragged_graph {
                aligned_(build_staging_bytes_(rows, claimed_() + rows));
     }
 
+    /**
+     *  @brief One batch's rows claimed ahead of their launch, as the IDs
+     *      @b [first_id,first_id+rows), so a caller lands whatever it keys by them before they turn
+     *      visible.
+     *
+     *  The claim holds until the drain, since a wave's merges rewrite rows another batch's walks
+     *  would read. A plan that dies before @ref insert gives its rows back, and @ref insert spends
+     *  it whatever it answers.
+     */
+    struct [[nodiscard]] insert_plan_t {
+
+        /** The first claimed ID. */
+        node_id_t first_id = std::numeric_limits<node_id_t>::max();
+
+        /** Rows claimed. */
+        std::size_t rows = 0;
+
+        insert_plan_t() noexcept = default;
+        insert_plan_t(insert_plan_t&& other) noexcept
+            : first_id(other.first_id), rows(other.rows), index_(std::exchange(other.index_, nullptr)) {}
+        insert_plan_t& operator=(insert_plan_t&&) = delete;
+        insert_plan_t(insert_plan_t const&) = delete;
+        insert_plan_t& operator=(insert_plan_t const&) = delete;
+        ~insert_plan_t() noexcept {
+            if (index_ && rows) index_->unclaim_(first_id, rows);
+        }
+
+        /** Launches the claimed rows the tape @p values and @p offsets lay out, one row a claimed
+         *  ID, as the one-shot @ref vram_ragged_graph::insert describes. */
+        expected<insert_result_t> insert(byte_t const* values, std::span<std::size_t const> offsets,
+                                         traversal_context_t& context, insert_config_t config = {}) noexcept {
+            if (!index_) return {{}, status_t::uninitialized_k};
+            if (offsets.size() != rows + 1) return {{}, status_t::config_mismatch_k};
+            return std::exchange(index_, nullptr)->launch_claimed_(first_id, values, offsets, context, config);
+        }
+
+      private:
+        friend vram_ragged_graph;
+
+        /** The index whose claim word holds the rows; null once spent. */
+        vram_ragged_graph* index_ = nullptr;
+    };
+
+    /** Claims @p rows for one batch, exposing their first ID before any of them launches; refuses a
+     *  kept failure, rows past @c max_node_count_k, and another batch in flight with
+     *  @c contended_k. */
+    expected<insert_plan_t> plan_insert(std::size_t rows) noexcept {
+        insert_plan_t plan;
+        if (status_t const kept = status(); failed(kept)) return {std::move(plan), kept};
+        if (!rows) {
+            plan.first_id = static_cast<node_id_t>(claimed_());
+            return {std::move(plan), status_t::success_k};
+        }
+        auto const [first_id, claim_status] = claim_(rows);
+        if (failed(claim_status)) return {std::move(plan), claim_status};
+        plan.first_id = first_id;
+        plan.rows = rows;
+        plan.index_ = this;
+        return {std::move(plan), status_t::success_k};
+    }
+
     /** Inserts the rows @p values and @p offsets lay out, row @c i spanning bytes @c offsets[i] up
      *  to @c offsets[i+1] past @p values, as the contiguous IDs @b [first_id,first_id+rows), in
      *  admission waves riding the context's stream, then drains it and turns the watermark over
-     *  the range. Another batch in flight answers @c contended_k. */
+     *  the range: @ref plan_insert, then its plan's @c insert. Another batch in flight answers
+     *  @c contended_k. */
     expected<insert_result_t> insert(byte_t const* values, std::span<std::size_t const> offsets,
                                      traversal_context_t& context, insert_config_t config = {}) noexcept {
         std::size_t const rows = offsets.empty() ? 0 : offsets.size() - 1;
         if (!rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
-        if (!connectivity()) return {{}, status_t::uninitialized_k};
-        if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
-        if (status_t const kept = status(); failed(kept)) return {{}, kept};
+        auto [plan, plan_status] = plan_insert(rows);
+        if (failed(plan_status)) return {{}, plan_status};
+        return plan.insert(values, offsets, context, config);
+    }
+
+  private:
+
+    /** Launches the rows claimed from @p first_id, as @ref insert describes; every refusal before
+     *  the launch gives the claim back. */
+    expected<insert_result_t> launch_claimed_(node_id_t first_id, byte_t const* values,
+                                              std::span<std::size_t const> offsets, traversal_context_t& context,
+                                              insert_config_t config) noexcept {
+        std::size_t const rows = offsets.size() - 1;
+        auto const refuse = [&](status_t failure) noexcept -> expected<insert_result_t> {
+            unclaim_(first_id, rows);
+            return {{}, failure};
+        };
+        if (!connectivity()) return refuse(status_t::uninitialized_k);
+        if (context.device() != device_.ordinal || !context) return refuse(status_t::config_mismatch_k);
+        if (status_t const kept = status(); failed(kept)) return refuse(kept);
         cuda_stream_handle_t const stream = context.stream();
 
         // Walks prepare stored rows as much as the batch's, so the rung and spans cover both.
         std::size_t longest = longest_row_;
         u32_t const span_bytes = static_cast<u32_t>(max_of(span_bytes_, span_bytes_of_(values, offsets, longest)));
         std::size_t const rung = kits_.rung_serving_(longest);
-        if (rung == kits_type_::rungs_k) return {{}, status_t::unsupported_k};
+        if (rung == kits_type_::rungs_k) return refuse(status_t::unsupported_k);
         std::size_t const batch_bytes = offsets[rows] - offsets[0];
-
-        // Held until the drain: a wave's merges rewrite rows another batch's walks would read.
-        auto const [first_id, claim_status] = claim_(rows);
-        if (failed(claim_status)) return {{}, claim_status};
         std::size_t const total_rows = first_id + rows;
-        auto const refuse = [&](status_t failure) noexcept -> expected<insert_result_t> {
-            unclaim_(first_id, rows);
-            return {{}, failure};
-        };
 
         // Every carve and growth precedes the first launch, so a refusal publishes nothing.
         build_shape_t const shape = build_shape_(config.expansion_factor, span_bytes, rung);
@@ -504,6 +575,8 @@ struct vram_ragged_graph {
         result.visited_saturations = spent.visited_saturations;
         return {result, status_t::success_k};
     }
+
+  public:
 
 #pragma endregion Insertion
 

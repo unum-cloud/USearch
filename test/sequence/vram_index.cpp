@@ -110,10 +110,10 @@ static auto make_sequence_metric(std::size_t staging, std::size_t& failures) {
 
 /** Matches, of @p wanted at most, whose distances reach no further than the @p wanted -th exact
  *  one: ties make the IDs ambiguous, the distances never. */
-static std::size_t matched_count(std::span<i64_t const> found, std::vector<i64_t> exact, std::size_t wanted) {
+static std::size_t matched_count(std::span<sz_size_t const> found, std::vector<sz_size_t> exact, std::size_t wanted) {
     std::nth_element(exact.begin(), exact.begin() + (wanted - 1), exact.end());
     std::size_t matched = 0;
-    for (i64_t const distance : found) matched += distance <= exact[wanted - 1];
+    for (sz_size_t const distance : found) matched += distance <= exact[wanted - 1];
     return min_of(matched, wanted);
 }
 
@@ -140,12 +140,12 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     byte_t const* const tape_bytes = reinterpret_cast<byte_t const*>(tape.data());
 
     // The exact distances of every query to every stored string, through the serial kit.
-    std::vector<std::vector<i64_t>> exact(queries_count, std::vector<i64_t>(count));
+    std::vector<std::vector<sz_size_t>> exact(queries_count, std::vector<sz_size_t>(count));
     auto serial_metric = make_sequence_metric<metric_, sz_cap_serial_k>(count, failures);
     for (std::size_t query = 0; query != queries_count; ++query) {
         serial_metric.reset(std::string_view {strings[count + query]});
         for (std::size_t row = 0; row != count; ++row) serial_metric.push(std::string_view {strings[row]});
-        serial_metric.drain(exact[query], us::basic::unbounded_radius<i64_t>());
+        serial_metric.drain(exact[query], us::basic::unbounded_radius<sz_size_t>());
     }
 
     // The RAM index over the same rows, at the same breadth.
@@ -168,7 +168,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
         failures += expect_eq(
             ram_index.search(std::string_view {strings[count + query]}, metric, ram_context, {expansion_k}).status,
             status_t::success_k);
-        std::vector<i64_t> found;
+        std::vector<sz_size_t> found;
         for (std::size_t rank = 0; rank != min_of(wanted_k, ram_context.results.size()); ++rank)
             found.push_back(ram_context.results[rank].distance);
         ram_matched += matched_count(found, exact[query], wanted_k);
@@ -214,7 +214,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
                               status_t::success_k);
     std::size_t vram_matched = 0;
     for (std::size_t query = 0; query != queries_count && !failures; ++query) {
-        std::vector<i64_t> found;
+        std::vector<sz_size_t> found;
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             node_id_type_ const id = ids[query * wanted_k + rank];
             if (id == std::numeric_limits<node_id_type_>::max()) break;

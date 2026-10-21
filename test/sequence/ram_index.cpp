@@ -115,12 +115,13 @@ static std::vector<sequence_value_t> generate_values(std::size_t count, u64_t se
 
 /** Unit-cost edits between @p first and @p second over @p symbol through the two-row Wagner-Fischer
  *  recurrence: the Levenshtein oracle, sharing no code with the metric's kernels or decoder. */
-static i64_t levenshtein_oracle(std::string_view first, std::string_view second, sz_levenshtein_symbol_t symbol) {
+static sz_size_t levenshtein_oracle(std::string_view first, std::string_view second, sz_levenshtein_symbol_t symbol) {
     std::vector<std::string_view> const rows = split_symbols(first, symbol), columns = split_symbols(second, symbol);
-    std::vector<i64_t> previous_row(columns.size() + 1), current_row(columns.size() + 1);
-    for (std::size_t column = 0; column <= columns.size(); ++column) previous_row[column] = static_cast<i64_t>(column);
+    std::vector<sz_size_t> previous_row(columns.size() + 1), current_row(columns.size() + 1);
+    for (std::size_t column = 0; column <= columns.size(); ++column)
+        previous_row[column] = static_cast<sz_size_t>(column);
     for (std::size_t row = 1; row <= rows.size(); ++row) {
-        current_row[0] = static_cast<i64_t>(row);
+        current_row[0] = static_cast<sz_size_t>(row);
         for (std::size_t column = 1; column <= columns.size(); ++column)
             current_row[column] = std::min({previous_row[column - 1] + (rows[row - 1] != columns[column - 1]),
                                             previous_row[column] + 1, current_row[column - 1] + 1});
@@ -131,7 +132,7 @@ static i64_t levenshtein_oracle(std::string_view first, std::string_view second,
 
 /** The overlap distance by brute force: a window of @p stored at one width is a hit when @p query
  *  holds its bytes, and the misses over the side with more windows scale to the fixed point. */
-static i64_t overlap_oracle(std::string_view query, std::string_view stored) noexcept {
+static sz_size_t overlap_oracle(std::string_view query, std::string_view stored) noexcept {
     std::size_t query_windows = 0, stored_windows = 0, hits = 0;
     for (std::size_t const width : sequence_window_widths_k) {
         if (width <= query.size()) query_windows += query.size() - width + 1;
@@ -140,13 +141,13 @@ static i64_t overlap_oracle(std::string_view query, std::string_view stored) noe
     }
     if (query_windows == 0) return overlap_resolution_k;
     u64_t const longer = std::max<u64_t>(query_windows, stored_windows);
-    return static_cast<i64_t>((longer - hits) * static_cast<u64_t>(overlap_resolution_k) / longer);
+    return static_cast<sz_size_t>((longer - hits) * static_cast<u64_t>(overlap_resolution_k) / longer);
 }
 
 /** Three stored strings and their pairwise distances, stated by hand. */
 struct sequence_handmade_t {
     std::array<sequence_value_t, 3> values;
-    std::array<std::array<i64_t, 3>, 3> distances;
+    std::array<std::array<sz_size_t, 3>, 3> distances;
 };
 
 template <sz_levenshtein_symbol_t symbol_>
@@ -166,15 +167,15 @@ struct levenshtein_fixture {
     }
     static codec_t make_codec() noexcept { return {}; }
     static us::utilities::uuid_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x5E0E0CE0ull + ordinal); }
-    static i64_t oracle(std::string_view query, std::string_view stored) noexcept {
+    static sz_size_t oracle(std::string_view query, std::string_view stored) noexcept {
         return levenshtein_oracle(query, stored, symbol_);
     }
     static bool value_equals(std::string_view first, std::string_view second) noexcept { return first == second; }
 
     /** "naïve", "naive" and "nave": the diaeresis is one rune of two bytes. */
     static sequence_handmade_t make_handmade(allocator_t const& allocator) {
-        constexpr std::array<std::array<i64_t, 3>, 3> bytes_k {{{0, 2, 2}, {2, 0, 1}, {2, 1, 0}}};
-        constexpr std::array<std::array<i64_t, 3>, 3> runes_k {{{0, 1, 1}, {1, 0, 1}, {1, 1, 0}}};
+        constexpr std::array<std::array<sz_size_t, 3>, 3> bytes_k {{{0, 2, 2}, {2, 0, 1}, {2, 1, 0}}};
+        constexpr std::array<std::array<sz_size_t, 3>, 3> runes_k {{{0, 1, 1}, {1, 0, 1}, {1, 1, 0}}};
         return {{make_value("na\xC3\xAFve", allocator), make_value("naive", allocator), make_value("nave", allocator)},
                 symbol_ == sz_levenshtein_bytes_k ? bytes_k : runes_k};
     }
@@ -202,15 +203,15 @@ struct overlap_fixture_t {
     }
     static codec_t make_codec() noexcept { return {}; }
     static us::utilities::uuid_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0E7E1A90ull + ordinal); }
-    static i64_t oracle(std::string_view query, std::string_view stored) noexcept {
+    static sz_size_t oracle(std::string_view query, std::string_view stored) noexcept {
         return overlap_oracle(query, stored);
     }
     static bool value_equals(std::string_view first, std::string_view second) noexcept { return first == second; }
 
     /** "abcd" and "abce" share three of their five windows, "xyzw" none of either's. */
     static sequence_handmade_t make_handmade(allocator_t const& allocator) {
-        constexpr i64_t shared_k = overlap_resolution_k * 2 / 5;
-        constexpr i64_t disjoint_k = overlap_resolution_k;
+        constexpr sz_size_t shared_k = overlap_resolution_k * 2 / 5;
+        constexpr sz_size_t disjoint_k = overlap_resolution_k;
         return {{make_value("abcd", allocator), make_value("abce", allocator), make_value("xyzw", allocator)},
                 {{{0, shared_k, disjoint_k}, {shared_k, 0, disjoint_k}, {disjoint_k, disjoint_k, 0}}}};
     }
@@ -220,9 +221,9 @@ struct overlap_fixture_t {
 };
 
 static_assert(value<sequence_value_t>);
-static_assert(metric<levenshtein_bytes_fixture_t::metric_t, sequence_value_t, i64_t>);
-static_assert(metric<levenshtein_runes_fixture_t::metric_t, sequence_value_t, i64_t>);
-static_assert(metric<overlap_fixture_t::metric_t, sequence_value_t, i64_t>);
+static_assert(metric<levenshtein_bytes_fixture_t::metric_t, sequence_value_t, sz_size_t>);
+static_assert(metric<levenshtein_runes_fixture_t::metric_t, sequence_value_t, sz_size_t>);
+static_assert(metric<overlap_fixture_t::metric_t, sequence_value_t, sz_size_t>);
 static_assert(query<std::string_view, levenshtein_runes_fixture_t::metric_t, sequence_value_t>);
 static_assert(query<std::string_view, overlap_fixture_t::metric_t, sequence_value_t>);
 static_assert(value_codec<codec_t, sequence_value_t>);
@@ -234,7 +235,7 @@ template <sz_capability_t capability_, sz_levenshtein_symbol_t symbol_>
 std::size_t check_levenshtein_kit(u64_t seed) {
     constexpr std::size_t generated_k = 36, parts_per_join_k = 6, joined_k = generated_k / parts_per_join_k;
     constexpr std::size_t candidates_k = generated_k + joined_k;
-    constexpr i64_t tight_radius_k = 3;
+    constexpr sz_size_t tight_radius_k = 3;
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
@@ -251,16 +252,16 @@ std::size_t check_levenshtein_kit(u64_t seed) {
 
         levenshtein_metric<typename levenshtein_ladder<symbol_, capability_>::kit_t> metric;
         failures += expect_eq(metric.init(candidates_k), status_t::success_k);
-        for (i64_t const radius : {unbounded_radius<i64_t>(), tight_radius_k}) {
+        for (sz_size_t const radius : {unbounded_radius<sz_size_t>(), tight_radius_k}) {
             for (std::size_t const query : {std::size_t {0}, generated_k}) {
                 metric.reset(candidates[query]);
                 for (sequence_value_t const& candidate : candidates)
                     failures += expect(metric.push(candidate) == metric_staging_t::staged_k);
-                std::array<i64_t, candidates_k> distances;
+                std::array<sz_size_t, candidates_k> distances;
                 metric.drain(distances, radius);
                 failures += expect_eq(metric.status(), status_t::success_k);
                 for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
-                    i64_t const truth = levenshtein_oracle(candidates[query], candidates[candidate], symbol_);
+                    sz_size_t const truth = levenshtein_oracle(candidates[query], candidates[candidate], symbol_);
                     failures += truth <= radius ? expect_eq(distances[candidate], truth)
                                                 : expect(distances[candidate] > radius);
                 }
@@ -289,29 +290,29 @@ std::size_t check_overlap_kit(u64_t seed) {
 
         overlap_metric<typename overlap_ladder<capability_>::kit_t> metric;
         failures += expect_eq(metric.init(candidates_k, sequence_window_widths_k), status_t::success_k);
-        for (i64_t const radius : {unbounded_radius<i64_t>(), overlap_resolution_k / 2}) {
+        for (sz_size_t const radius : {unbounded_radius<sz_size_t>(), overlap_resolution_k / 2}) {
             // A batch scores every query's row as that query alone would, and the empty query
             // reopened right after it is prepared anew rather than taken for the batch.
             std::array<std::string_view, 2> const batch {candidates[0], candidates[candidates_k - 1]};
             metric.reset(std::span<std::string_view const>(batch));
             for (sequence_value_t const& candidate : candidates)
                 failures += expect(metric.push(candidate) == metric_staging_t::staged_k);
-            std::array<i64_t, candidates_k * 2> batched;
+            std::array<sz_size_t, candidates_k * 2> batched;
             metric.drain(batched, radius);
             failures += expect_eq(metric.status(), status_t::success_k);
             for (std::size_t slot = 0; slot != batched.size(); ++slot) {
-                i64_t const truth = overlap_oracle(batch[slot / candidates_k], candidates[slot % candidates_k]);
+                sz_size_t const truth = overlap_oracle(batch[slot / candidates_k], candidates[slot % candidates_k]);
                 failures += truth <= radius ? expect_eq(batched[slot], truth) : expect(batched[slot] > radius);
             }
             for (std::size_t const query : {candidates_k - 1, std::size_t {0}}) {
                 metric.reset(candidates[query]);
                 for (sequence_value_t const& candidate : candidates)
                     failures += expect(metric.push(candidate) == metric_staging_t::staged_k);
-                std::array<i64_t, candidates_k> distances;
+                std::array<sz_size_t, candidates_k> distances;
                 metric.drain(distances, radius);
                 failures += expect_eq(metric.status(), status_t::success_k);
                 for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
-                    i64_t const truth = overlap_oracle(candidates[query], candidates[candidate]);
+                    sz_size_t const truth = overlap_oracle(candidates[query], candidates[candidate]);
                     failures += truth <= radius ? expect_eq(distances[candidate], truth)
                                                 : expect(distances[candidate] > radius);
                 }
@@ -327,7 +328,8 @@ std::size_t check_overlap_kit(u64_t seed) {
 std::size_t check_sequence_nvme(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = levenshtein_metric<levenshtein_ladder<sz_levenshtein_bytes_k, sz_cap_any_k>::kit_t, scratch_t>;
-    using nvme_index_t = us::basic::nvme_index<codec_t, us::utilities::uuid_t, u32_t, i64_t, blocking_files_engine<>>;
+    using nvme_index_t =
+        us::basic::nvme_index<codec_t, us::utilities::uuid_t, u32_t, sz_size_t, blocking_files_engine<>>;
     std::vector<std::string> texts;
     {
         allocation_ledger_t ledger;
@@ -370,9 +372,10 @@ struct levenshtein_wide_fixture_t : levenshtein_bytes_fixture_t {
 std::size_t check_sequence_nvme_node_ids(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = levenshtein_metric<levenshtein_ladder<sz_levenshtein_bytes_k, sz_cap_any_k>::kit_t, scratch_t>;
-    using nvme_index_t = us::basic::nvme_index<codec_t, us::utilities::uuid_t, u64_t, i64_t, blocking_files_engine<>>;
+    using nvme_index_t =
+        us::basic::nvme_index<codec_t, us::utilities::uuid_t, u64_t, sz_size_t, blocking_files_engine<>>;
     using mismatched_nvme_index_t =
-        us::basic::nvme_index<codec_t, us::utilities::uuid_t, u32_t, i64_t, blocking_files_engine<>>;
+        us::basic::nvme_index<codec_t, us::utilities::uuid_t, u32_t, sz_size_t, blocking_files_engine<>>;
     std::vector<std::string> texts;
     {
         allocation_ledger_t ledger;

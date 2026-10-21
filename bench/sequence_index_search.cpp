@@ -62,15 +62,16 @@ inline tape_t lines_of(bytes_view_t text, std::string& characters) {
 template <typename metric_type_>
 void scan_exactly(metric_type_& metric, std::string_view characters, std::span<std::size_t const> offsets,
                   std::size_t query, std::span<double> distances, double unit) {
+    using distance_t = typename metric_type_::distance_t;
     auto const text_of = [&](std::size_t row) noexcept {
         return characters.substr(offsets[row], offsets[row + 1] - offsets[row]);
     };
-    std::array<i64_t, oracle_round_k> round;
+    std::array<distance_t, oracle_round_k> round;
     metric.reset(text_of(query));
     for (std::size_t first = 0; first < distances.size(); first += oracle_round_k) {
         std::size_t const count = std::min(oracle_round_k, distances.size() - first);
         for (std::size_t row = first; row != first + count; ++row) static_cast<void>(metric.push(text_of(row)));
-        metric.drain(std::span {round}.first(count), (std::numeric_limits<i64_t>::max)());
+        metric.drain(std::span {round}.first(count), (std::numeric_limits<distance_t>::max)());
         for (std::size_t slot = 0; slot != count; ++slot)
             distances[first + slot] = static_cast<double>(round[slot]) * unit;
     }

@@ -1777,7 +1777,7 @@ struct claim_word_t {
         if (!standard_atomic_ref<std::size_t>(claimed_rows)
                  .compare_exchange_strong(first, first + rows, std::memory_order_acq_rel, std::memory_order_relaxed))
             return {{}, status_t::contended_k};
-        return {static_cast<node_id_t>(first), status_t::success_k};
+        return {first, status_t::success_k};
     }
 
     /** Gives back the claim over @p rows from @p first, which launched nothing; a word that moved

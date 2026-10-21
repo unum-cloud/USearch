@@ -389,11 +389,8 @@ struct shapes_vram_nvidia_variant
     /** Points across every stored entry, added to by insertions through @c atomic_ref. */
     std::size_t total_points = 0;
 
-    /** Claimed by the one batch packing its clouds, landing its keys and inserting its rows,
-     *  which another answers with @c contended_k meanwhile. */
-    claim_word_t claims;
-
-    /** The host pages a batch packs its clouds into, rewound per batch. */
+    /** The host pages a batch packs its clouds into, rewound per batch while its plan holds the
+     *  index's claim, so no other batch touches them. */
     growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
 
     /** Reserves the entries and points @p arguments name, a pack taking a header and a partial
@@ -474,18 +471,17 @@ expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, kernel_
     usearch_shapes_insert_t const& arguments, progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
     usearch_tape_view_t const& shapes = arguments.shapes;
     std::size_t const count = arguments.count;
-    auto const claimed = claims.claim(this->index.size(), count, this->index.max_node_count_k);
-    if (failed(claimed.status)) return {{}, claimed.status};
-    expected<traversal_telemetry_t> const landed = [&]() noexcept -> expected<traversal_telemetry_t> {
-        staging.clear();
-        byte_t* packed = nullptr;
-        std::size_t* offsets = nullptr;
-        if (status_t const packed_status = pack_(shapes, count, staging, packed, offsets); failed(packed_status))
-            return {{}, packed_status};
-        return this->insert_(arguments.keys, packed, {offsets, count + 1}, claimed.value, geometry.connectivity,
-                             arguments.expansion_factor, ticks, executor);
-    }();
-    if (failed(landed.status)) return claims.unclaim(claimed.value, count), landed;
+    auto [plan, plan_status] = this->index.plan_insert(count);
+    if (failed(plan_status)) return {{}, plan_status};
+    staging.clear();
+    byte_t* packed = nullptr;
+    std::size_t* offsets = nullptr;
+    if (status_t const packed_status = pack_(shapes, count, staging, packed, offsets); failed(packed_status))
+        return {{}, packed_status};
+    expected<traversal_telemetry_t> const landed = this->insert_(arguments.keys, packed, {offsets, count + 1}, plan,
+                                                                 geometry.connectivity, arguments.expansion_factor,
+                                                                 ticks, executor);
+    if (failed(landed.status)) return landed;
     standard_atomic_ref<std::size_t>(total_points)
         .fetch_add(shapes.offsets[count] - shapes.offsets[0], std::memory_order_relaxed);
     return landed;

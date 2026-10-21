@@ -16,7 +16,6 @@
 
 #include <array>       // `std::array` - a quad of stored observations, a sight line's points
 #include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
-#include <mutex>       // `std::lock_guard` - one batch lands its keys and rows at a time on a GPU
 #include <span>        // `std::span` - a quad's entries and verdicts
 #include <string_view> // `std::string_view` - tokens and paths
 
@@ -789,7 +788,7 @@ status_t geospatial_ram_variant<cpu_class_>::load(std::string_view path, executo
 template <cpu_class_t cpu_class_>
 struct geospatial_nvme_variant : geospatial_terrain<cpu_class_> {
     using executor_t = nvme_executor_t;
-    using index_t = basic::nvme_index<us::geospatial::earth_observation_codec_t, us::utilities::uuid_t, u32_t, i64_t,
+    using index_t = basic::nvme_index<us::geospatial::earth_observation_codec_t, us::utilities::uuid_t, u32_t, nk_u64_t,
                                       default_io_engine_t, row_kit_of<cpu_class_>>;
     using value_t = us::geospatial::earth_observation_t;
     using relation_t = us::geospatial::relation_t;
@@ -1037,10 +1036,8 @@ struct geospatial_vram_nvidia_variant
 
     geospatial_geometry_t geometry;
 
-    /** Held by the one batch encoding its observations, landing its keys and inserting its rows. */
-    std::mutex inserting;
-
-    /** The host pages a batch encodes its observations into, rewound per batch. */
+    /** The host pages a batch encodes its observations into, rewound per batch while its plan holds
+     *  the index's claim, so no other batch touches them. */
     growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
 
     /** The index's fatbin, loaded once more for the kernel judging the walks' candidates, and that
@@ -1112,13 +1109,14 @@ struct geospatial_vram_nvidia_variant
 inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::insert(
     usearch_geospatial_insert_t const& arguments, progress_ticks_t& ticks, executor_t& executor) noexcept {
     std::size_t const count = arguments.count;
-    std::lock_guard<std::mutex> held {inserting};
+    auto [plan, plan_status] = index.plan_insert(count);
+    if (failed(plan_status)) return {{}, plan_status};
     staging.clear();
     value_t* values = nullptr;
     std::size_t* offsets = nullptr;
     if (status_t const encoded = encode_(arguments.observations, count, staging, values, offsets); failed(encoded))
         return {{}, encoded};
-    return insert_(arguments.keys, reinterpret_cast<byte_t const*>(values), {offsets, count + 1}, index.size(),
+    return insert_(arguments.keys, reinterpret_cast<byte_t const*>(values), {offsets, count + 1}, plan,
                    geometry.connectivity, arguments.expansion_factor, ticks, executor);
 }
 

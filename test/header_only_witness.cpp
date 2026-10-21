@@ -36,7 +36,7 @@ using namespace unum::usearch;
 using namespace unum::usearch::utilities;
 
 /** The geospatial tier's witnesses: its metric, codec & index alias satisfy the basic concepts. */
-static_assert(basic::metric<geospatial::chord_metric_t, geospatial::earth_observation_t, i64_t>);
+static_assert(basic::metric<geospatial::chord_metric_t, geospatial::earth_observation_t, nk_u64_t>);
 static_assert(basic::value_codec<geospatial::earth_observation_codec_t, geospatial::earth_observation_t>);
 static_assert(basic::selector<geospatial::surface_keep_octants_t, geospatial::ram_index_t, geospatial::chord_metric_t>);
 

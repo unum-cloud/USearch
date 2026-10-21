@@ -640,7 +640,7 @@ static_assert(basic::value_codec<earth_observation_codec_t, earth_observation_t>
 template <typename key_type_ = uuid_t, typename wait_type_ = dummy_waiter_t,
           template <typename> class atomic_ref_template_ = standard_atomic_ref,
           typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = dummy_cache_hints_t>
-using ram_index = basic::ram_index<earth_observation_t, key_type_, u32_t, i64_t, wait_type_, atomic_ref_template_,
+using ram_index = basic::ram_index<earth_observation_t, key_type_, u32_t, nk_u64_t, wait_type_, atomic_ref_template_,
                                    allocator_type_, cache_hints_type_>;
 
 using ram_index_t = ram_index<>;
@@ -753,11 +753,12 @@ template <typename index_type_, typename metric_type_, typename query_type_, typ
 radius_result_t within(index_type_& index, query_type_ const& query, i64_t radius_centimetres, radius_margin_t margin,
                        std::size_t widest_row, metric_type_& metric, context_type_& context) noexcept {
     using search_config_t = typename index_type_::search_config_t;
+    using distance_t = typename index_type_::distance_t;
     if (metric.staging_limit() < widest_row) return {status_t::config_mismatch_k, 0, 0};
     f64_t const radius = static_cast<f64_t>(radius_centimetres);
     f64_t const widened = margin == radius_margin_t::spanner_k ? radius * (1.0 + 2.0 * cone_graph_stretch_k) : radius;
     f64_t const widened_squared = widened * widened;
-    i64_t const radius_squared = radius_centimetres * radius_centimetres;
+    distance_t const radius_squared = static_cast<distance_t>(radius_centimetres * radius_centimetres);
     std::size_t const published = index.size();
 
     std::size_t expansion = index.non_zero_expansion_factor(search_config_t {});

@@ -34,11 +34,11 @@ using namespace unum::usearch::geospatial;
 constexpr std::size_t geospatial_staging_limit_k = 4096;
 
 /** The squared chord in plain double arithmetic - the independent oracle. */
-static i64_t scalar_chord_squared(earth_fixed_t first, earth_fixed_t second) noexcept {
+static nk_u64_t scalar_chord_squared(earth_fixed_t first, earth_fixed_t second) noexcept {
     f64_t const delta_x = static_cast<f64_t>(first.x_centimetres) - static_cast<f64_t>(second.x_centimetres);
     f64_t const delta_y = static_cast<f64_t>(first.y_centimetres) - static_cast<f64_t>(second.y_centimetres);
     f64_t const delta_z = static_cast<f64_t>(first.z_centimetres) - static_cast<f64_t>(second.z_centimetres);
-    return static_cast<i64_t>(delta_x * delta_x + delta_y * delta_y + delta_z * delta_z);
+    return static_cast<nk_u64_t>(delta_x * delta_x + delta_y * delta_y + delta_z * delta_z);
 }
 
 /** The metric every check scores with: serial squares, staging rounds wider than any scenario
@@ -59,7 +59,7 @@ static earth_observation_t observed_at(earth_fixed_t position) noexcept {
 /** Three positions on two axes, so every pairwise squared chord is a Pythagorean integer. */
 struct positions_handmade_t {
     std::array<earth_observation_t, 3> values;
-    std::array<std::array<i64_t, 3>, 3> distances;
+    std::array<std::array<nk_u64_t, 3>, 3> distances;
 };
 
 struct positions_fixture_t {
@@ -77,7 +77,7 @@ struct positions_fixture_t {
         return std::bit_cast<us::utilities::uuid_t>(
             std::array<u64_t, 2> {mix_bits(ordinal ^ 0x6E0ull), 0x6E05ull ^ ordinal});
     }
-    static i64_t oracle(earth_observation_t const& query, earth_observation_t const& stored) noexcept {
+    static nk_u64_t oracle(earth_observation_t const& query, earth_observation_t const& stored) noexcept {
         return scalar_chord_squared(query.position, stored.position);
     }
     static bool value_equals(earth_observation_t const& first, earth_observation_t const& second) noexcept {
@@ -104,7 +104,7 @@ struct positions_fixture_t {
 };
 
 static_assert(us::basic::value<earth_observation_t>);
-static_assert(us::basic::metric<chord_metric_t, earth_observation_t, i64_t>);
+static_assert(us::basic::metric<chord_metric_t, earth_observation_t, nk_u64_t>);
 static_assert(us::basic::transparent_metric<chord_metric_t>);
 static_assert(us::basic::query<geodetic_t, chord_metric_t, earth_observation_t>);
 static_assert(us::basic::value_codec<earth_observation_codec_t, earth_observation_t>);
@@ -227,7 +227,8 @@ static std::size_t check_positions_selector(u64_t seed) {
             for (std::size_t candidate = 0; candidate != nodes_k; ++candidate)
                 if (candidate != base)
                     context.results.insert_reserved(scored_node_t {
-                        assigned_ids[candidate], chord_squared(stored[base].position, stored[candidate].position)});
+                        assigned_ids[candidate],
+                        static_cast<nk_u64_t>(chord_squared(stored[base].position, stored[candidate].position))});
             metric.reset(stored[base]);
             selector(index, metric, context);
 
@@ -449,8 +450,8 @@ static std::size_t check_observations_admits() {
 static std::size_t check_positions_nvme(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
-    using nvme_index_t =
-        us::basic::nvme_index<earth_observation_codec_t, us::utilities::uuid_t, u32_t, i64_t, blocking_files_engine<>>;
+    using nvme_index_t = us::basic::nvme_index<earth_observation_codec_t, us::utilities::uuid_t, u32_t, nk_u64_t,
+                                               blocking_files_engine<>>;
     allocation_ledger_t ledger;
     std::vector<earth_observation_t> const values = positions_fixture_t::make_values(64, stream_key(seed, "nvme"),
                                                                                      counting_allocator_t {ledger});
@@ -473,8 +474,8 @@ static std::size_t check_positions_nvme(u64_t seed) {
 static std::size_t check_positions_nvme_within(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
-    using nvme_index_t =
-        us::basic::nvme_index<earth_observation_codec_t, us::utilities::uuid_t, u32_t, i64_t, blocking_files_engine<>>;
+    using nvme_index_t = us::basic::nvme_index<earth_observation_codec_t, us::utilities::uuid_t, u32_t, nk_u64_t,
+                                               blocking_files_engine<>>;
     using index_t = positions_fixture_t::index_t;
     using key_t = index_t::key_t;
     constexpr std::size_t nodes_k = 256, probes_k = 6;
@@ -534,18 +535,18 @@ static std::size_t check_positions_nvme_within(u64_t seed) {
             return expected<earth_observation_t> {queries[query], status_t::success_k};
         };
         // Every reach is exclusive, so a row exactly at the radius lands as the walk keeps it.
-        std::vector<i64_t> reaches(queries_count);
+        std::vector<nk_u64_t> reaches(queries_count);
         for (std::size_t query = 0; query != queries_count; ++query) {
             i64_t const radius = radii_centimetres[query % radii_centimetres.size()];
-            reaches[query] = radius * radius + 1;
+            reaches[query] = static_cast<nk_u64_t>(radius * radius + 1);
         }
         std::vector<std::vector<key_t>> scanned(queries_count);
         auto land = [&]<std::size_t extent_>(std::size_t, std::size_t query, std::span<key_t const, extent_> keys,
                                              std::span<earth_observation_t const, extent_>,
-                                             std::span<i64_t const, extent_>) noexcept {
+                                             std::span<nk_u64_t const, extent_>) noexcept {
             for (key_t const& key : keys) scanned[query].push_back(key);
         };
-        auto const [found, status] = viewed.scan_within(std::span<i64_t const> {reaches}, make_metric, query_of,
+        auto const [found, status] = viewed.scan_within(std::span<nk_u64_t const> {reaches}, make_metric, query_of,
                                                         executor, land);
         failures += expect_eq(status, status_t::success_k);
         for (std::size_t query = 0; query != queries_count; ++query) {

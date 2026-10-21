@@ -237,8 +237,8 @@ status_t sequence_ram_variant<cpu_class_>::load(std::string_view path, executor_
 template <cpu_class_t cpu_class_>
 struct sequence_nvme_variant {
     using executor_t = nvme_executor_t;
-    using index_t = basic::nvme_index<us::sequence::codec_t, us::utilities::uuid_t, u32_t, i64_t, default_io_engine_t,
-                                      row_kit_of<cpu_class_>>;
+    using index_t = basic::nvme_index<us::sequence::codec_t, us::utilities::uuid_t, u32_t, sz_size_t,
+                                      default_io_engine_t, row_kit_of<cpu_class_>>;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr sz_capability_t capability_k = stringzilla_capabilities_of(cpu_class_);
@@ -308,10 +308,6 @@ struct sequence_vram_nvidia_variant
 
     sequence_geometry_t geometry;
 
-    /** Claimed by the one batch landing its keys and rows, which another answers with
-     *  @c contended_k meanwhile. */
-    claim_word_t claims;
-
     status_t reserve(usearch_sequence_reserve_t const& arguments) noexcept {
         return this->reserve_(arguments.entries, geometry.connectivity, arguments.payload_bytes);
     }
@@ -319,14 +315,11 @@ struct sequence_vram_nvidia_variant
     expected<traversal_telemetry_t> insert(usearch_sequence_insert_t const& arguments, progress_ticks_t& ticks,
                                            cuda_executor_t& executor) noexcept {
         std::size_t const count = arguments.count;
-        auto const claimed = claims.claim(this->index.size(), count, this->index.max_node_count_k);
-        if (failed(claimed.status)) return {{}, claimed.status};
-        expected<traversal_telemetry_t> const landed = this->insert_(
-            arguments.keys, static_cast<byte_t const*>(arguments.sequences.data),
-            {arguments.sequences.offsets, count + 1}, claimed.value, geometry.connectivity, arguments.expansion_factor,
-            ticks, executor);
-        if (failed(landed.status)) claims.unclaim(claimed.value, count);
-        return landed;
+        auto [plan, plan_status] = this->index.plan_insert(count);
+        if (failed(plan_status)) return {{}, plan_status};
+        return this->insert_(arguments.keys, static_cast<byte_t const*>(arguments.sequences.data),
+                             {arguments.sequences.offsets, count + 1}, plan, geometry.connectivity,
+                             arguments.expansion_factor, ticks, executor);
     }
 
     /** A device walk takes no host predicate. */

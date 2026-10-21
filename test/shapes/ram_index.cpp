@@ -266,9 +266,8 @@ std::size_t score_round(typename fixture_type_::metric_t& metric,
     return failures;
 }
 
-/** Every kind through the fixture's kit against the serial oracle: exact at an unbounded radius,
- *  never above the oracle at a zero radius, where the bounded kinds report their bounds, and near
- *  zero for the query's mirror image. */
+/** Every kind through the fixture's kit against the serial oracle: exact at an unbounded radius and
+ *  at a zero one, and near zero for the query's mirror image. */
 template <typename fixture_type_>
 std::size_t check_shapes_kernels(u64_t seed) {
     using scalar_t = typename fixture_type_::scalar_t;
@@ -294,14 +293,14 @@ std::size_t check_shapes_kernels(u64_t seed) {
         for (nk_kernel_kind_t const kernel : shapes_kernels_k) {
             metric_t metric(kernel, forkunion_allocator_t {});
             failures += expect_eq(metric.init(candidates_k), status_t::success_k);
-            std::array<distance_t, candidates_k> exact, bounded;
+            std::array<distance_t, candidates_k> exact, zero_radius;
             failures += score_round<fixture_type_>(metric, packs, exact, unbounded_radius<distance_t>());
-            failures += score_round<fixture_type_>(metric, packs, bounded, distance_t {});
+            failures += score_round<fixture_type_>(metric, packs, zero_radius, distance_t {});
             failures += expect(exact[0] <= mirror_tolerance);
             for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
                 distance_t const truth = serial_distance<scalar_t>(kernel, packs[0][0], packs[1 + candidate][0]);
                 failures += expect_near(exact[candidate], truth);
-                failures += expect(bounded[candidate] <= truth + 1e-3 * std::fmax(truth, 1.0));
+                failures += expect_near(zero_radius[candidate], truth);
             }
         }
     }

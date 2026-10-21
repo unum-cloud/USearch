@@ -28,8 +28,9 @@
  *  - Hausdorff ≥ |Rq − Rs|, since the farthest point of one cloud is at least that far from every
  *    point of the other
  *
- *  Both hold for the exact definitions and are symmetric, so a candidate whose bound alone clears
- *  the round's radius reports the bound and never reaches the kernel.
+ *  Both hold for the exact definitions and are symmetric. The GPU metric settles a Hausdorff
+ *  candidate whose bound alone clears the round's radius without reaching the kernel; this one
+ *  scores every candidate, since on real walks the bounds settled about 2% of them.
  */
 #pragma once
 
@@ -485,16 +486,16 @@ struct shapes_ladder<nk::f32_t, caps_> {
 #pragma region Metric
 
 /**
- *  @brief One of NumKong's four shape kinds over one round of candidates: @c reset reads the query
- *      packs' constants, @c push stages candidate packs, and @c drain bounds what it can and scores
- *      the rest in one N×M call over the N queries, exact up to the radius.
+ *  @brief One of NumKong's four shape kinds over one round of candidates: @c reset borrows the
+ *      query packs, @c push stages candidate packs, and @c drain scores them all in one N×M call
+ *      over the N queries.
  *
  *  One instance belongs to one thread and owns its staging and the transport workspace; the C
  *  variants place them in the executor thread's arena. Packs are read in place, never copied: a
  *  candidate stays valid until its round drains, and the query until the next @c reset.
  *
  *  @tparam kit_type_ The kernels, as one @c shapes_ladder names them.
- *  @tparam allocator_type_ Places the staging, the kernel's distances and the workspace.
+ *  @tparam allocator_type_ Places the staging and the workspace.
  */
 template <typename kit_type_, typename allocator_type_ = forkunion_allocator_t>
 class shapes_metric {
@@ -509,47 +510,22 @@ class shapes_metric {
 
   private:
 
-    /** The type of a pack's constants: @c nk::f32_t for @c f16 clouds, @c nk::f64_t for @c f32
-     *  ones. */
-    using constant_t = typename scalar_t::shapes_distance_t;
-    using raw_constant_t = typename constant_t::raw_t;
-
-    /** What one pack's constants put into the bounds. */
-    struct pack_bounds_t {
-
-        /** Roots of the descending spreads, a side of the Gelbrich bound. */
-        constant_t spread_roots[3] {};
-
-        /** The largest packed point norm, a side of the Hausdorff bound. */
-        constant_t max_radius {};
-    };
-
     /** Which of the four shape kernels scores the rounds. */
     nk_kernel_kind_t kernel_;
 
-    /** The queries' packs, borrowed from @c reset. */
+    /** A batched @c reset's query packs, gathered into one table the kernels read. */
     growing_buffer<void const*, allocator_t> queries_;
 
-    /** Each query's side of the bounds, read once per @c reset. */
-    growing_buffer<pack_bounds_t, allocator_t> query_bounds_;
+    /** The queries' pack table the kernels read: a single query's own, or @c queries_ for a
+     *  batch. */
+    std::span<void const* const> query_packs_;
 
-    /** Points in the largest query cloud, the transport workspace's row side. */
-    std::size_t queries_max_points_ = 0;
-
-    /** The round's candidate packs in push order; @c drain closes up the ones no bound settles at
-     *  the front. */
+    /** The round's candidate packs in push order. */
     growing_buffer<void const*, allocator_t> staged_;
 
     /** The packs of the round's landed clouds, each on NumKong's boundary; it grows only while it
      *  holds none, so a staged pack never moves. */
     growing_buffer<byte_t, allocator_t> packed_;
-
-    /** Points in the round's largest candidate, the transport workspace's column side. */
-    std::size_t staged_max_points_ = 0;
-
-    /** The kernel's @b [queries,candidates] distances to the candidates no bound settled, in push
-     *  order. */
-    growing_buffer<distance_t, allocator_t> scored_;
 
     /** The transport kernels' scratch, one boundary wider than they ask, so its start rounds up to
      *  their boundary whatever this allocator aligns to. */
@@ -560,15 +536,14 @@ class shapes_metric {
 
   public:
     explicit shapes_metric(nk_kernel_kind_t kernel, allocator_t const& allocator) noexcept
-        : kernel_(kernel), queries_(allocator), query_bounds_(allocator), staged_(allocator), packed_(allocator),
-          scored_(allocator), workspace_(allocator) {}
+        : kernel_(kernel), queries_(allocator), staged_(allocator), packed_(allocator), workspace_(allocator) {}
     shapes_metric(shapes_metric const&) = delete;
     shapes_metric& operator=(shapes_metric const&) = delete;
     shapes_metric(shapes_metric&&) noexcept = default;
     shapes_metric& operator=(shapes_metric&&) noexcept = default;
 
     /**
-     *  @brief Sizes the staging and the kernel's distances.
+     *  @brief Sizes the staging.
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at
      *      least the index's round capacity, @c max(⌈expansion / connectivity⌉ × connectivity,
      *      connectivity + 1), or rounds saturate rather than fail.
@@ -579,8 +554,7 @@ class shapes_metric {
         if (kernel_ != nk_kernel_chamfers_packed_k && kernel_ != nk_kernel_hausdorffs_packed_k &&
             kernel_ != nk_kernel_wassersteinprocrustes_packed_k && kernel_ != nk_kernel_gromovwassersteins_packed_k)
             return status_t::unknown_kind_k;
-        if (status_t const staged = staged_.reserve_exactly(staging_limit); failed(staged)) return staged;
-        last_status_ = scored_.resize_uninitialized(staged_.capacity());
+        last_status_ = staged_.reserve_exactly(staging_limit);
         return last_status_;
     }
 
@@ -589,32 +563,26 @@ class shapes_metric {
     status_t status() const noexcept { return last_status_; }
 
     /** Opens a round for @p query, which must hold exactly one cloud, discarding whatever the
-     *  previous round staged. */
+     *  previous round staged; the query's own pack table is borrowed. */
     template <typename query_allocator_type_>
     void reset(nk::shapes_packed<scalar_t, query_allocator_type_> const& query) noexcept {
-        reset(std::span<nk::shapes_packed<scalar_t, query_allocator_type_> const>(&query, 1));
+        staged_.clear(), packed_.clear();
+        last_status_ = query.size() == 1 ? status_t::success_k : status_t::shape_mismatch_k;
+        query_packs_ = to_span(query);
     }
 
     /** Opens rounds scoring every query of @p queries at once, each holding exactly one cloud, so
-     *  each @ref drain writes @b [queries,candidates]; every pack's bounds are read here once. */
+     *  each @ref drain writes @b [queries,candidates]. */
     template <typename query_allocator_type_>
     void reset(std::span<nk::shapes_packed<scalar_t, query_allocator_type_> const> queries) noexcept {
-        staged_.clear(), packed_.clear(), staged_max_points_ = 0;
-        queries_.clear(), query_bounds_.clear(), queries_max_points_ = 0;
+        if (queries.size() == 1) return reset(queries.front());
+        staged_.clear(), packed_.clear(), queries_.clear();
         last_status_ = queries_.reserve(queries.size());
-        if (succeeded(last_status_)) last_status_ = query_bounds_.reserve(queries.size());
-        if (succeeded(last_status_)) last_status_ = scored_.resize_uninitialized(queries.size() * staged_.capacity());
         for (std::size_t query = 0; succeeded(last_status_) && query != queries.size(); ++query) {
-            if (queries[query].size() != 1) {
-                last_status_ = status_t::shape_mismatch_k;
-                break;
-            }
-            pack_bounds_t bounds;
-            last_status_ = status_of(read_bounds_(queries[query][0], bounds));
-            queries_.push_back_reserved(queries[query][0]);
-            query_bounds_.push_back_reserved(bounds);
-            queries_max_points_ = max_of(queries_max_points_, queries[query].max_points());
+            if (queries[query].size() != 1) last_status_ = status_t::shape_mismatch_k;
+            else queries_.push_back_reserved(queries[query][0]);
         }
+        query_packs_ = to_span(queries_);
     }
 
     /** Stages one candidate's pack, or refuses once the round is full. */
@@ -622,7 +590,6 @@ class shapes_metric {
     basic::metric_staging_t push(nk::shapes_packed<scalar_t, value_allocator_type_> const& candidate) noexcept {
         if (staged_.size() == staged_.capacity()) return basic::metric_staging_t::refused_k;
         staged_.push_back_reserved(candidate[0]);
-        staged_max_points_ = max_of(staged_max_points_, candidate.max_points());
         return basic::metric_staging_t::staged_k;
     }
 
@@ -651,92 +618,45 @@ class shapes_metric {
             failed(packed))
             last_status_ = packed;
         staged_.push_back_reserved(pack);
-        staged_max_points_ = max_of(staged_max_points_, points);
         return basic::metric_staging_t::staged_k;
     }
 
     /**
-     *  @brief Scores everything staged and closes the round.
+     *  @brief Scores everything staged, exactly, straight into @p distances, and closes the round.
      *
-     *  Distances up to and including @p radius are exact; above it a bounded kind may report a
-     *  candidate's lower bound instead. A failed round reports the largest finite distance, so a
-     *  full candidates reject it and unfilled ones admit it last; @ref status is the only signal.
+     *  A failed round reports the largest finite distance, so full candidates reject it and
+     *  unfilled ones admit it last; @ref status is the only signal.
      *
      *  @param[out] distances One slot per staged candidate, in push order, for every query,
      *      query-major.
-     *  @param[in] radius The furthest distance the caller still tells apart.
      */
-    void drain(std::span<distance_t> distances, distance_t radius) noexcept {
-        std::size_t const count = staged_.size(), queries = queries_.size();
-        // A candidate some query's bound leaves within reach is scored against every query.
-        auto reachable = [&](std::size_t slot) noexcept {
-            bool within = false;
-            for (std::size_t query = 0; query != queries; ++query)
-                within |= !(distances[query * count + slot] > radius);
-            return within;
-        };
-        if (succeeded(last_status_)) {
-            // Bounds land in place, and the reachable candidates close up at the front, in push
-            // order.
-            std::size_t reached = 0;
-            for (std::size_t slot = 0; slot != count; ++slot) {
-                pack_bounds_t candidate;
-                [[maybe_unused]] nk_status_t const read = read_bounds_(staged_[slot], candidate);
-                for (std::size_t query = 0; query != queries; ++query)
-                    distances[query * count + slot] = bound_(query_bounds_[query], candidate);
-                if (reachable(slot)) staged_[reached++] = staged_[slot];
-            }
-            if (reached) last_status_ = score_(reached);
-            for (std::size_t slot = 0, scored = 0; succeeded(last_status_) && slot != count; ++slot) {
-                if (!reachable(slot)) continue;
-                for (std::size_t query = 0; query != queries; ++query)
-                    distances[query * count + slot] = scored_[query * reached + scored];
-                ++scored;
-            }
-        }
+    void drain(std::span<distance_t> distances, distance_t) noexcept {
+        if (succeeded(last_status_) && !staged_.empty()) last_status_ = score_(distances.data());
         if (failed(last_status_))
             for (distance_t& distance : distances) distance = (std::numeric_limits<distance_t>::max)();
-        staged_.clear(), packed_.clear(), staged_max_points_ = 0;
+        staged_.clear(), packed_.clear();
     }
 
   private:
 
-    /** The root of one spread, clamped at zero, where a flat cloud's smallest spread may round
-     *  below it. */
-    static constant_t spread_root_(constant_t spread) noexcept {
-        return (spread < constant_t {} ? constant_t {} : spread).sqrt();
-    }
-
-    /** Reads @p pack 's side of the bounds into @p bounds. */
-    static nk_status_t read_bounds_(void const* pack, pack_bounds_t& bounds) noexcept {
-        raw_constant_t spreads[3], max_radius;
-        nk_status_t const read = kit_t::packed_shape(pack, nullptr, nullptr, nullptr, nullptr, spreads, &max_radius,
-                                                     nullptr);
-        bounds.max_radius = constant_t::from_raw(max_radius);
-        for (std::size_t axis = 0; axis != 3; ++axis)
-            bounds.spread_roots[axis] = spread_root_(constant_t::from_raw(spreads[axis]));
-        return read;
-    }
-
-    /** A lower bound of the distance between two packs from their bounds alone, or zero for the
-     *  kinds the constants do not bound. */
-    distance_t bound_(pack_bounds_t const& query, pack_bounds_t const& candidate) const noexcept {
-        if (kernel_ == nk_kernel_hausdorffs_packed_k) return (query.max_radius - candidate.max_radius).abs();
-        if (kernel_ != nk_kernel_wassersteinprocrustes_packed_k) return 0;
-        constant_t gaps {};
-        for (std::size_t axis = 0; axis != 3; ++axis) {
-            constant_t const gap = query.spread_roots[axis] - candidate.spread_roots[axis];
-            gaps = gaps + gap * gap;
+    /** Points in the largest of @p packs. */
+    static std::size_t largest_points_(std::span<void const* const> packs) noexcept {
+        std::size_t largest = 0;
+        for (void const* pack : packs) {
+            nk_size_t points = 0;
+            [[maybe_unused]] nk_status_t const read = kit_t::packed_shape(pack, &points, nullptr, nullptr, nullptr,
+                                                                          nullptr, nullptr, nullptr);
+            largest = max_of<std::size_t>(largest, points);
         }
-        return gaps.sqrt();
+        return largest;
     }
 
-    /** Scores every query against the first @p count staged packs in one call into @ref scored_. */
-    status_t score_(std::size_t count) noexcept {
-        void const* const* const queries = queries_.data();
+    /** Scores every query against every staged pack in one call into @p results,
+     *  @b [queries,candidates]. */
+    status_t score_(distance_t* results) noexcept {
+        void const* const* const queries = query_packs_.data();
         void const* const* const candidates = staged_.data();
-        std::size_t const queries_count = queries_.size();
-        distance_t* const results = scored_.data();
+        std::size_t const queries_count = query_packs_.size(), count = staged_.size();
         std::size_t const stride = count * sizeof(distance_t);
         if (kernel_ == nk_kernel_chamfers_packed_k)
             return status_of(
@@ -746,10 +666,12 @@ class shapes_metric {
                 kit_t::hausdorffs(queries, queries_count, candidates, count, results, stride, nullptr, nullptr));
 
         bool const procrustes = kernel_ == nk_kernel_wassersteinprocrustes_packed_k;
+        std::size_t const query_points = largest_points_(query_packs_),
+                          staged_points = largest_points_(to_span(staged_));
         nk_size_t bytes = 0;
-        nk_status_t const sized =
-            procrustes ? kit_t::wassersteinprocrustes_workspace_size(queries_max_points_, staged_max_points_, &bytes)
-                       : kit_t::gromovwassersteins_workspace_size(queries_max_points_, staged_max_points_, &bytes);
+        nk_status_t const sized = procrustes
+                                      ? kit_t::wassersteinprocrustes_workspace_size(query_points, staged_points, &bytes)
+                                      : kit_t::gromovwassersteins_workspace_size(query_points, staged_points, &bytes);
         if (sized != nk_success_k) return status_of(sized);
         // Grows only past the widest pair seen.
         if (status_t const grown = workspace_.resize_uninitialized(bytes + nk_default_alignment_k); failed(grown))

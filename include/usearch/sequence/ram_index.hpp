@@ -92,7 +92,7 @@ template <typename key_type_ = uuid_t, typename node_id_type_ = u32_t, typename 
           typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = dummy_cache_hints_t>
 using ram_index =
     basic::ram_index<sz::string<typename std::allocator_traits<allocator_type_>::template rebind_alloc<char>>,
-                     key_type_, node_id_type_, i64_t, wait_type_, atomic_ref_template_, allocator_type_,
+                     key_type_, node_id_type_, sz_size_t, wait_type_, atomic_ref_template_, allocator_type_,
                      cache_hints_type_>;
 
 using ram_index_t = ram_index<>;
