@@ -62,10 +62,11 @@ add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_
 # names none of them. NVIDIA and AMD shards compile host-only through Clang's CUDA or HIP mode, as the vendor's entry
 # does, so the vendor's headers define the index members and NumKong keeps the vendor's `NUMKONG_TARGET_*`; the entry,
 # or its `DEVICE` entry, compiles once more device-only into the suite's own bundle of the `CODES`, holding the shards'
-# kernels and the attends over its device value lookups. Apple's kernels compile from embedded source at first use, so
-# its entry is a plain C++ unit.
+# kernels and the attends over its device value lookups. A vendor naming its `DTYPES`, in ladder order, compiles each of
+# the first `USEARCH_DENSE_DTYPES` from `dense/vram_<vendor>_<dtype>.cu` into a bundle of its own instead. Apple's
+# kernels compile from embedded source at first use, so its entry is a plain C++ unit.
 function (usearch_test_vram_shards vendor architecture_macro)
-    cmake_parse_arguments(arg "" "ENTRY;DEVICE" "SOURCES;DEFINITIONS;CODES" ${ARGN})
+    cmake_parse_arguments(arg "" "ENTRY;DEVICE" "SOURCES;DEFINITIONS;CODES;DTYPES" ${ARGN})
     set(target_ usearch_test_vram_shards_${vendor})
     set(entry_ ${CMAKE_CURRENT_SOURCE_DIR}/${arg_ENTRY})
     add_library(${target_} OBJECT dense/vram_indexes.cpp)
@@ -95,7 +96,24 @@ function (usearch_test_vram_shards vendor architecture_macro)
     endforeach ()
     target_compile_definitions(${target_} PRIVATE ${arg_DEFINITIONS})
     target_link_libraries(${target_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header)
-    if (vendor STREQUAL "nvidia" OR vendor STREQUAL "amd")
+    if (arg_DTYPES)
+        set(position_ 0)
+        foreach (dtype_ IN LISTS arg_DTYPES)
+            if (position_ LESS USEARCH_DENSE_DTYPES)
+                usearch_gpu_bundle(
+                    ${target_}
+                    ${vendor}
+                    test_vram_${vendor}_${dtype_}
+                    ${entry_}
+                    ${arg_CODES}
+                    DEVICE
+                    ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_${vendor}_${dtype_}.cu
+                )
+            endif ()
+            math(EXPR position_ "${position_} + 1")
+        endforeach ()
+        usearch_gpu_host_only(${target_} ${entry_})
+    elseif (vendor STREQUAL "nvidia" OR vendor STREQUAL "amd")
         set(device_)
         if (arg_DEVICE)
             set(device_ DEVICE ${CMAKE_CURRENT_SOURCE_DIR}/${arg_DEVICE})
@@ -117,10 +135,22 @@ if (USEARCH_BUILD_CUDA)
     usearch_cuda_codes(usearch_test_cuda_codes_ "${USEARCH_CUDA_ARCHITECTURES}")
     usearch_test_vram_shards(
         nvidia USEARCH_ARCH_CUDA_
-        ENTRY dense/vram_nvidia.cu
+        ENTRY dense/vram_nvidia.cpp
         SOURCES sequence/vram_index.cpp shapes/vram_index.cpp geospatial/vram_index.cpp
         DEFINITIONS ${usearch_test_cuda_capabilities_}
         CODES ${usearch_test_cuda_codes_}
+              DTYPES
+              bf16
+              u1
+              i8
+              e4m3
+              f16
+              u8
+              e5m2
+              i4
+              u4
+              e3m2
+              e2m3
     )
 endif ()
 if (USEARCH_BUILD_ROCM)

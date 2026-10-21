@@ -352,8 +352,10 @@ expected<traversal_telemetry_t> shapes_nvme_variant<scalar_type_, cpu_class_>::s
 
 #if USEARCH_ARCH_CUDA_
 
-/** The fatbin of every shapes kit, defined in @c src/shapes/vram_variants_nvidia.cu. */
-struct shapes_nvidia_fatbin_t {
+/** One dtype's shapes kits as a fatbin, defined in @c src/shapes/vram_variants_nvidia.cpp beside
+ *  the bytes it embeds. */
+template <nk_dtype_t dtype_>
+struct shapes_nvidia_fatbin {
     static bytes_view_t bytes() noexcept;
 };
 
@@ -361,28 +363,26 @@ struct shapes_nvidia_fatbin_t {
  *  class carries. */
 inline constexpr nk_capability_t shapes_nvidia_capabilities_k = nk_cap_cuda_k | nk_cap_ampere_k;
 
-/** The faces' members reading the kits, defined in @c src/shapes/vram_variants_nvidia.cu. */
+/** The faces' members reading the kits, defined in @c src/shapes/vram_variants_nvidia.cpp. */
 extern template struct us::shapes::vram_nvidia_index<nk::f16_t, u32_t, shapes_nvidia_capabilities_k,
-                                                     shapes_nvidia_fatbin_t>;
+                                                     shapes_nvidia_fatbin<nk_f16_k>>;
 extern template struct us::shapes::vram_nvidia_index<nk::f32_t, u32_t, shapes_nvidia_capabilities_k,
-                                                     shapes_nvidia_fatbin_t>;
+                                                     shapes_nvidia_fatbin<nk_f32_k>>;
 
 /** The shapes alternative on one NVIDIA GPU: the basic VRAM index over packs of @p scalar_type_
  *  under the kernel kind @p kernel_, Chamfer or Hausdorff, with 32-bit node IDs. A batch packs its
  *  clouds on the host end to end through the serial kit, as the RAM variants pack them. */
 template <nk::shapes_dtype scalar_type_, nk_kernel_kind_t kernel_>
 struct shapes_vram_nvidia_variant
-    : vram_nvidia_variant<
-          us::shapes::vram_nvidia_index<scalar_type_, u32_t, shapes_nvidia_capabilities_k, shapes_nvidia_fatbin_t>> {
+    : vram_nvidia_variant<us::shapes::vram_nvidia_index<scalar_type_, u32_t, shapes_nvidia_capabilities_k,
+                                                        shapes_nvidia_fatbin<scalar_type_::dtype()>>> {
     using scalar_t = scalar_type_;
     using pack_kit_t = typename us::shapes::shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
 
     /** Places the index on CUDA device @p device, scoring under @p kernel_. */
     explicit shapes_vram_nvidia_variant(int device) noexcept
-        : vram_nvidia_variant<
-              us::shapes::vram_nvidia_index<scalar_type_, u32_t, shapes_nvidia_capabilities_k, shapes_nvidia_fatbin_t>>(
-              device, kernel_) {}
+        : shapes_vram_nvidia_variant::vram_nvidia_variant(device, kernel_) {}
 
     shapes_geometry_t geometry;
 

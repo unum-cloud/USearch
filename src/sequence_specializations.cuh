@@ -280,8 +280,10 @@ expected<traversal_telemetry_t> sequence_nvme_variant<cpu_class_>::search(usearc
 
 #if USEARCH_ARCH_CUDA_
 
-/** The fatbin of every sequence kit, defined in @c src/sequence/vram_variants_nvidia.cu. */
-struct sequence_nvidia_fatbin_t {
+/** One kind's sequence kits as a fatbin, defined in @c src/sequence/vram_variants_nvidia.cpp beside
+ *  the bytes it embeds. */
+template <usearch_sequence_metric_t metric_>
+struct sequence_nvidia_fatbin {
     static bytes_view_t bytes() noexcept;
 };
 
@@ -289,22 +291,24 @@ struct sequence_nvidia_fatbin_t {
  *  cubin per class carries. */
 inline constexpr sz_capability_t sequence_nvidia_capabilities_k = sz_cap_cuda_k;
 
-/** The faces' members reading the kits, defined in @c src/sequence/vram_variants_nvidia.cu. */
-extern template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_levenshtein_bytes_k, u32_t,
-                                                       sequence_nvidia_capabilities_k, sequence_nvidia_fatbin_t>;
-extern template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_levenshtein_utf8_k, u32_t,
-                                                       sequence_nvidia_capabilities_k, sequence_nvidia_fatbin_t>;
+/** The faces' members reading the kits, defined in @c src/sequence/vram_variants_nvidia.cpp. */
+extern template struct us::sequence::vram_nvidia_index<
+    usearch_sequence_metric_levenshtein_bytes_k, u32_t, sequence_nvidia_capabilities_k,
+    sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
+extern template struct us::sequence::vram_nvidia_index<
+    usearch_sequence_metric_levenshtein_utf8_k, u32_t, sequence_nvidia_capabilities_k,
+    sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>>;
 extern template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_overlap_k, u32_t,
-                                                       sequence_nvidia_capabilities_k, sequence_nvidia_fatbin_t>;
+                                                       sequence_nvidia_capabilities_k,
+                                                       sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
 
 /** The sequence alternative on one NVIDIA GPU: the basic VRAM index under the sequence kind
  *  @p metric_ - Levenshtein over bytes or UTF-8 runes, or overlap - with 32-bit node IDs. */
 template <usearch_sequence_metric_t metric_>
 struct sequence_vram_nvidia_variant
-    : vram_nvidia_variant<
-          us::sequence::vram_nvidia_index<metric_, u32_t, sequence_nvidia_capabilities_k, sequence_nvidia_fatbin_t>> {
-    using vram_nvidia_variant<us::sequence::vram_nvidia_index<metric_, u32_t, sequence_nvidia_capabilities_k,
-                                                              sequence_nvidia_fatbin_t>>::vram_nvidia_variant;
+    : vram_nvidia_variant<us::sequence::vram_nvidia_index<metric_, u32_t, sequence_nvidia_capabilities_k,
+                                                          sequence_nvidia_fatbin<metric_>>> {
+    using sequence_vram_nvidia_variant::vram_nvidia_variant::vram_nvidia_variant;
 
     sequence_geometry_t geometry;
 

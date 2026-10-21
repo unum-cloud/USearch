@@ -39,7 +39,7 @@ with section("parse"):
     }
     additional_commands |= {
         "usearch_object_library": {"pargs": 1, "kwargs": {"SOURCES": "*", "DEFINITIONS": "*", "LIBRARIES": "*"}},
-        "usearch_variants": {"pargs": "3+", "kwargs": {"DEFINITIONS": "*", "LIBRARIES": "*"}},
+        "usearch_variants": {"pargs": "3+", "kwargs": {"KERNELS": "*", "DEFINITIONS": "*", "LIBRARIES": "*"}},
         "usearch_test_vram_shards": {
             "pargs": 2,
             "kwargs": {"ENTRY": 1, "DEVICE": 1, "SOURCES": "*", "DEFINITIONS": "*", "CODES": "*"},

@@ -180,13 +180,12 @@ usearch_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed)
 # page-aligned in a read-only section through an assembler stub, under `<name>_bundle_start` and `<name>_bundle_end`, so
 # it travels into archives too. With no codes the bundle is empty, and its devices refuse to load it. NVCC pairs with
 # `CMAKE_CUDA_HOST_COMPILER` when set, splits its optimizations across every CPU, and `CMAKE_CUDA_FLAGS` reach its pass.
-# The device pass compiles @p source, or the `DEVICE` source when the unit keeps its kernels apart, as an AMD unit must:
-# HIP-Clang refuses a kernel's address in device code, so a host function takes it, which the host pass may never
-# compile, or it would emit launch stubs and a fat-binary registration. Device passes run one at a time, each spreading
-# its own work across every CPU: NVCC's split assemblers take about 9 GB on the largest units, so two at once would
-# exhaust a laptop. The GPU helpers here serve the tests and benchmarks too, which bundle their own kernels through
-# them.
-set_property(GLOBAL APPEND PROPERTY JOB_POOLS usearch_gpu_device_pass=1)
+# The device pass compiles @p source, or the `DEVICE` source when the unit keeps its kernels apart, as a dense unit does
+# per dtype and an AMD unit must: HIP-Clang refuses a kernel's address in device code, so a host function takes it,
+# which the host pass may never compile, or it would emit launch stubs and a fat-binary registration. A device pass of
+# one dtype takes NVCC's assemblers about 2 GB, so eight run at once, each spreading its own work across the CPUs. The
+# GPU helpers here serve the tests and benchmarks too, which bundle their own kernels through them.
+set_property(GLOBAL APPEND PROPERTY JOB_POOLS usearch_gpu_device_pass=8)
 function (usearch_gpu_bundle target vendor name source)
     cmake_parse_arguments(arg "" "DEVICE" "" ${ARGN})
     set(device_source_ ${source})
@@ -477,10 +476,12 @@ endfunction ()
 # CPU or Apple backend builds one library, `usearch_<modality>_<residency>_variants`, with `_apple` for Apple, of a unit
 # per class compiled with its class's flags. An NVIDIA or AMD backend builds one library per class,
 # `usearch_<modality>_<residency>_variants_<class>`, since each bundles its own device codes under its own NumKong
-# target, and links the dynamic loader its runtime opens through; an AMD class keeps its kernels in the device entry
-# `<modality>/<residency>_kernels_<class>.hip` beside the host unit, which names none of them.
+# target, and links the dynamic loader its runtime opens through. A modality naming its `KERNELS`, the dtypes or metrics
+# its kernels specialize on, keeps the host variants in the class unit, `.cpp` on NVIDIA and `.hip` on AMD, and compiles
+# each from `<modality>/<residency>_kernels_<backend>_<kernel>` into a bundle of its own, once per class, dense taking
+# only its first `USEARCH_DENSE_DTYPES`; the others compile their one `.cu` class unit both ways.
 function (usearch_variants modality residency backend)
-    cmake_parse_arguments(arg "" "" "DEFINITIONS;LIBRARIES" ${ARGN})
+    cmake_parse_arguments(arg "" "" "DEFINITIONS;LIBRARIES;KERNELS" ${ARGN})
     set(library_ usearch_${modality}_${residency}_variants)
     set(unit_ ${modality}/${residency}_variants)
     set(classes_)
@@ -512,12 +513,14 @@ function (usearch_variants modality residency backend)
     else ()
         foreach (class_ IN LISTS classes_)
             set(target_ ${library_}_${class_})
-            if (backend STREQUAL "nvidia")
+            if (NOT arg_KERNELS)
                 set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${class_}.cu)
-                set(device_)
+            elseif (backend STREQUAL "nvidia")
+                set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${class_}.cpp)
+                set(extension_ cu)
             else ()
                 set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${class_}.hip)
-                set(device_ DEVICE ${CMAKE_CURRENT_SOURCE_DIR}/${modality}/${residency}_kernels_${class_}.hip)
+                set(extension_ hip)
             endif ()
             usearch_object_library(
                 ${target_}
@@ -527,9 +530,26 @@ function (usearch_variants modality residency backend)
                 LIBRARIES ${arg_LIBRARIES}
             )
             target_link_libraries(${target_} PUBLIC ${CMAKE_DL_LIBS})
-            usearch_gpu_bundle(
-                ${target_} ${backend} ${modality}_${class_} ${source_} ${usearch_class_${class_}_flags_} ${device_}
-            )
+            if (NOT arg_KERNELS)
+                usearch_gpu_bundle(
+                    ${target_} ${backend} ${modality}_${class_} ${source_} ${usearch_class_${class_}_flags_}
+                )
+            endif ()
+            set(position_ 0)
+            foreach (kernel_ IN LISTS arg_KERNELS)
+                if (NOT modality STREQUAL "dense" OR position_ LESS USEARCH_DENSE_DTYPES)
+                    usearch_gpu_bundle(
+                        ${target_}
+                        ${backend}
+                        ${modality}_${class_}_${kernel_}
+                        ${source_}
+                        ${usearch_class_${class_}_flags_}
+                        DEVICE
+                        ${CMAKE_CURRENT_SOURCE_DIR}/${modality}/${residency}_kernels_${backend}_${kernel_}.${extension_}
+                    )
+                endif ()
+                math(EXPR position_ "${position_} + 1")
+            endforeach ()
             list(APPEND libraries_ ${target_})
         endforeach ()
     endif ()
@@ -573,8 +593,34 @@ set(usearch_basic_cpu_classes_
 # row over the classes of a vendor this tree does not build declares nothing.
 usearch_variants(dense ram cpu ${usearch_cpu_classes_})
 usearch_variants(dense nvme cpu ${usearch_dense_nvme_classes_})
-usearch_variants(dense vram nvidia ${usearch_nvidia_classes_})
-usearch_variants(dense vram amd ${usearch_amd_classes_})
+usearch_variants(
+    dense vram nvidia ${usearch_nvidia_classes_}
+    KERNELS bf16
+            u1
+            i8
+            e4m3
+            f16
+            u8
+            e5m2
+            i4
+            u4
+            e3m2
+            e2m3
+)
+usearch_variants(
+    dense vram amd ${usearch_amd_classes_}
+    KERNELS bf16
+            u1
+            i8
+            e4m3
+            f16
+            u8
+            e5m2
+            i4
+            u4
+            e3m2
+            e2m3
+)
 usearch_variants(dense vram apple ${usearch_apple_classes_})
 usearch_variants(
     sequence ram cpu ${usearch_basic_cpu_classes_}
@@ -583,11 +629,12 @@ usearch_variants(
 )
 usearch_variants(
     sequence vram nvidia nvidia
+    KERNELS levenshtein_bytes levenshtein_utf8 overlap
     DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
     LIBRARIES stringzilla::header
 )
 usearch_variants(shapes ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
-usearch_variants(shapes vram nvidia nvidia)
+usearch_variants(shapes vram nvidia nvidia KERNELS f16 f32)
 usearch_variants(geospatial ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
 usearch_variants(geospatial vram nvidia nvidia)
 usearch_variants(basic vram nvidia nvidia)

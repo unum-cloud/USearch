@@ -13,9 +13,9 @@
  *  shard translation units split. The cascade ends in a workload, so one pipeline serves the search
  *  and algebra families, and the multi-device binaries reuse its streaming.
  *
- *  Every unit compiles host-only through Clang's CUDA mode, and each binary's entry unit once more
- *  with NVCC device-only, into the binary's own fatbin of every ceiling's kernels, which every
- *  unit's indexes find through @c cuda_bench_fatbin.
+ *  Every unit compiles host-only through Clang's CUDA mode, while NVCC compiles each dtype's
+ *  kernels device-only, once for every binary, from @c vram_kernels_<dtype>.cu, and every unit's
+ *  indexes find them through @c cuda_bench_fatbin.
  */
 #pragma once
 
@@ -23,7 +23,6 @@
 #include <chrono>    // `std::chrono::steady_clock`
 #include <memory>    // `std::unique_ptr`
 #include <span>      // `std::span`
-#include <utility>   // `std::index_sequence` - every compiled dtype of the device pass
 #include <vector>    // `std::vector`
 
 #include <fmt/format.h>
@@ -32,60 +31,22 @@
 #include "usearch/dense/vram_nvidia_indexes.hpp"
 #include "usearch/utilities/vram_device.hpp"
 
+#include "dense/vram_kernels.cuh"
 #include "dense_search.cuh"
 #include "utilities/persisted_dataset.hpp"
-
-/** The binary's own fatbin, linked in as raw bytes from its entry unit's device pass. */
-extern "C" us::utilities::byte_t const bench_vram_nvidia_bundle_start[], bench_vram_nvidia_bundle_end[];
 
 namespace unum::usearch::bench::dense {
 
 #pragma region Options and Styling
 
-/** NumKong's NVIDIA capabilities the device kit chains adapt, ascending; the floor the table never
- *  lists is the Ampere kits, and @c cuda_ceiling_of turns a row into the mask it instantiates. */
+/** NumKong's NVIDIA capabilities the device kit chains adapt, ascending, by name; the floor the
+ *  table never lists is the Ampere kits, and a build instantiates only Ampere's ceiling and
+ *  @c cuda_compiled_generation_k 's. */
 inline constexpr capability_choice<nk_capability_t> cuda_compute_choices_k[] = {
     {"ada", nk_cap_ada_k},
     {"hopper", nk_cap_hopper_k},
     {"blackwell", nk_cap_blackwell_k},
     {"blackwellrtx", nk_cap_blackwellrtx_k},
-};
-
-/** The NVIDIA capabilities one row instantiates: the Ampere & Ada bits accumulate, as NumKong
- *  detects them, while @p generation alone stands for Hopper, Blackwell or RTX Blackwell, which run
- *  only their own kits. */
-constexpr nk_capability_t cuda_ceiling_of(nk_capability_t generation) noexcept {
-    nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k;
-    return generation == nk_cap_ampere_k ? ampere : ampere | nk_cap_ada_k | generation;
-}
-
-/** The binary's fatbin, which carries every ceiling's kernels, named under the ceiling
- *  @p capability_ a benchmarked index runs. */
-template <nk_capability_t capability_>
-struct cuda_bench_fatbin {
-    inline static constexpr nk_capability_t capability_k = capability_;
-    static bytes_view_t bytes() noexcept {
-        return {bench_vram_nvidia_bundle_start,
-                static_cast<std::size_t>(bench_vram_nvidia_bundle_end - bench_vram_nvidia_bundle_start)};
-    }
-};
-
-/** The storage dtypes in the library's ladder order, of which a build compiles the first
- *  @c USEARCH_DENSE_DTYPES. */
-inline constexpr nk_dtype_t cuda_dtypes_ladder_k[] = {nk_bf16_k, nk_u1_k, nk_i8_k, nk_e4m3_k, nk_f16_k, nk_u8_k,
-                                                      nk_e5m2_k, nk_i4_k, nk_u4_k, nk_e3m2_k, nk_e2m3_k};
-
-/** Resolves an ID, a node on one device or a key across the shards, to its value row in a device
- *  table of rows @c pitch bytes apart, the table starting at ID @c first_id; the entries'
- *  @c kernel_attention_lookup_t adds the call. */
-struct attention_value_lookup_t {
-
-    /** Names the lookup to the attend kernels the binary's fatbin carries. */
-    inline static constexpr u32_t device_lookup_k = 1;
-
-    byte_t const* rows;
-    std::size_t pitch;
-    std::size_t first_id = 0;
 };
 
 /** The device knobs the CUDA binaries parse beside @c settings_t, before any dtype is known; the
@@ -551,7 +512,7 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability
           typename storage_allocator_, typename workload_type_>
 int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                   int device, nk_kernel_kind_t kernel, workload_type_ const& workload) {
-    using index_t = vram_nvidia_index<stored_dtype_, cuda_bench_fatbin<capability_>, dummy_cache_hints_t,
+    using index_t = vram_nvidia_index<stored_dtype_, cuda_bench_fatbin<capability_, stored_dtype_>, dummy_cache_hints_t,
                                       storage_allocator_, storage_allocator_, cuda_device_allocator_t>;
     cuda_bench_context<index_t> bench {settings, device, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
@@ -582,23 +543,17 @@ int run_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& da
             });
 }
 
-/** Compute axis: the named table row's ceiling instantiates every cell below, so two runs on one device
- *  compare generations side by side; past the tail sit the Ampere kits every GPU runs. */
+/** Compute axis: the build's newest generation's ceiling instantiates every cell below, or the
+ *  Ampere kits every GPU runs when @p max_compute names Ampere, so two runs on one device compare
+ *  them side by side. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename storage_allocator_, typename workload_type_>
 int run_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                      int device, nk_capability_t max_compute, workload_type_ const& workload) {
-    auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<nk_capability_t>::bit);
-    return dispatch_index<std::size(cuda_compute_choices_k)>(
-        static_cast<std::size_t>(named - std::begin(cuda_compute_choices_k)),
-        [&](auto row) {
-            return run_with_metric<dataset_scalar_type_, stored_dtype_,
-                                   cuda_ceiling_of(cuda_compute_choices_k[row.value].bit), storage_allocator_>(
-                dataset, settings, device, workload);
-        },
-        [&] {
-            return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_ceiling_of(nk_cap_ampere_k),
-                                   storage_allocator_>(dataset, settings, device, workload);
-        });
+    if (max_compute == cuda_compiled_generation_k)
+        return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_ceiling_of(cuda_compiled_generation_k),
+                               storage_allocator_>(dataset, settings, device, workload);
+    return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_ceiling_of(nk_cap_ampere_k), storage_allocator_>(
+        dataset, settings, device, workload);
 }
 
 /**
@@ -643,19 +598,16 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
     parse_or_exit(argc, argv, fmt::format("{} --base-vectors <path> [flags]", binary_name), flags);
     resolve_common_names(settings);
 
-    // A named ceiling caps which kit-chain rows the cascade may select; "ampere" keeps just the floor.
-    // Capping above what this binary compiled is harmless: a row also needs its tier compiled in.
-    nk_capability_t max_compute = nk_cap_ampere_k;
-    if (!device_cli.max_compute_name.empty() && device_cli.max_compute_name != "ampere") {
+    // A build compiles Ampere's ceiling and its newest generation's, which runs by default.
+    nk_capability_t max_compute = cuda_compiled_generation_k;
+    if (device_cli.max_compute_name == "ampere") max_compute = nk_cap_ampere_k;
+    else if (!device_cli.max_compute_name.empty()) {
         std::size_t const named = index_of_name(cuda_compute_choices_k, device_cli.max_compute_name);
-        if (named == std::size(cuda_compute_choices_k)) {
-            fmt::println(
-                stderr, "--max-compute=\"{}\" does not parse, expected one of ampere, {}", device_cli.max_compute_name,
-                fmt::join(cuda_compute_choices_k | std::views::transform(&capability_choice<nk_capability_t>::name),
-                          ", "));
+        if (named == std::size(cuda_compute_choices_k) || cuda_compute_choices_k[named].bit != max_compute) {
+            fmt::println(stderr, "--max-compute=\"{}\" is not compiled, expected ampere or {}",
+                         device_cli.max_compute_name, bit_name(cuda_compute_choices_k, max_compute, "ampere"));
             std::exit(1);
         }
-        max_compute = cuda_compute_choices_k[named].bit;
     }
 
     // `USEARCH_DEVICES` names USearch ordinals; the driver takes each NVIDIA device's own.
@@ -680,15 +632,6 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
                          listed[position].vendor_ordinal);
         return 1;
     }
-    // Unnamed, the ceiling is the first device's own generation, as Hopper and both Blackwells run
-    // only their own kits.
-    if (device_cli.max_compute_name.empty()) switch (engaged.front().gpu_class) {
-        case gpu_class_t::nvidia_ada_k: max_compute = nk_cap_ada_k; break;
-        case gpu_class_t::nvidia_hopper_k: max_compute = nk_cap_hopper_k; break;
-        case gpu_class_t::nvidia_blackwell_k: max_compute = nk_cap_blackwell_k; break;
-        case gpu_class_t::nvidia_blackwellrtx_k: max_compute = nk_cap_blackwellrtx_k; break;
-        default: break;
-        }
     cuda_set_device(devices.front());
     for (gpu_device_t const& device : engaged) settings.cores += device.compute_units;
     fmt::println("USearch {}.{}.{}", USEARCH_VERSION_MAJOR, USEARCH_VERSION_MINOR, USEARCH_VERSION_PATCH);

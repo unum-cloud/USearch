@@ -28,8 +28,10 @@
 
 #if USEARCH_ARCH_CUDA_
 
-/** The library's fatbin of every shapes kit, defined in @c src/shapes/vram_variants_nvidia.cu. */
-struct shapes_nvidia_fatbin_t {
+/** The library's fatbin of one dtype's shapes kits, defined in
+ *  @c src/shapes/vram_variants_nvidia.cpp. */
+template <nk_dtype_t dtype_>
+struct shapes_nvidia_fatbin {
     static us::utilities::bytes_view_t bytes() noexcept;
 };
 
@@ -117,8 +119,8 @@ static std::size_t matched_count(std::span<f64_t const> found, std::vector<dista
 template <typename scalar_type_>
 static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& executor, nk_kernel_kind_t kernel,
                                                 cloud_kind_t kind, std::size_t count, std::size_t queries_count) {
-    using vram_index_t =
-        vram_nvidia_index<scalar_type_, u32_t, nk_cap_cuda_k | nk_cap_ampere_k, shapes_nvidia_fatbin_t>;
+    using vram_index_t = vram_nvidia_index<scalar_type_, u32_t, nk_cap_cuda_k | nk_cap_ampere_k,
+                                           shapes_nvidia_fatbin<scalar_type_::dtype()>>;
     using kit_t = typename shapes_ladder<scalar_type_, nk_cap_any_k>::kit_t;
     using serial_kit_t = typename shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     using ram_index_t = ram_index<kit_t>;

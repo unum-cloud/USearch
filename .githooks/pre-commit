@@ -1885,7 +1885,7 @@ judge_path() {
     CMakeLists.txt | */CMakeLists.txt | *.cmake) check_cmake_string_surgery ;;
     esac
     case "$file" in
-    test/harness.hpp | test/main.cpp | test/dense_vram.cpp | test/dense/vram_nvidia.cu | test/dense/vram_amd.hip | \
+    test/harness.hpp | test/main.cpp | test/dense_vram.cpp | test/dense/vram_nvidia.cpp | test/dense/vram_amd.hip | \
         test/dense/vram_apple.cpp) ;;
     test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh) check_test_bodies_quiet ;;
     esac

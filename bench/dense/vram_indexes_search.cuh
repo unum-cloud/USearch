@@ -426,8 +426,8 @@ struct indexes_search_workload_t {
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
 int stage_indexes_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                           std::span<int const> devices, nk_kernel_kind_t kernel, workload_type_ const& workload) {
-    cuda_indexes_context<vram_nvidia_indexes<u32_t, stored_dtype_, cuda_bench_fatbin<capability_>>> bench {
-        settings, devices, kernel};
+    cuda_indexes_context<vram_nvidia_indexes<u32_t, stored_dtype_, cuda_bench_fatbin<capability_, stored_dtype_>>>
+        bench {settings, devices, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare_indexes(streamed) && run_indexes_insertion(streamed) && run_indexes_merge(streamed) &&
                run_indexes_refinement(streamed) && (settings.save_name.empty() || save_indexes(streamed)) &&
@@ -456,24 +456,19 @@ int run_indexes_with_metric(utilities::persisted_dataset<dataset_scalar_type_> c
             });
 }
 
-/** Compute axis: the named table row's ceiling instantiates every cell below; past the tail sit the Ampere kits
- *  every GPU runs. Every shard keeps its flat matrices in VRAM. */
+/** Compute axis: the build's newest generation's ceiling instantiates every cell below, or the
+ *  Ampere kits every GPU runs when @p max_compute names Ampere. Every shard keeps its flat matrices
+ *  in VRAM. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename workload_type_>
 int run_indexes_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
                              settings_t const& settings, std::span<int const> devices, nk_capability_t max_compute,
                              workload_type_ const& workload) {
-    auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<nk_capability_t>::bit);
-    return dispatch_index<std::size(cuda_compute_choices_k)>(
-        static_cast<std::size_t>(named - std::begin(cuda_compute_choices_k)),
-        [&](auto row) {
-            return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_,
-                                           cuda_ceiling_of(cuda_compute_choices_k[row.value].bit)>(dataset, settings,
-                                                                                                   devices, workload);
-        },
-        [&] {
-            return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_, cuda_ceiling_of(nk_cap_ampere_k)>(
-                dataset, settings, devices, workload);
-        });
+    if (max_compute == cuda_compiled_generation_k)
+        return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_,
+                                       cuda_ceiling_of(cuda_compiled_generation_k)>(dataset, settings, devices,
+                                                                                    workload);
+    return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_, cuda_ceiling_of(nk_cap_ampere_k)>(
+        dataset, settings, devices, workload);
 }
 
 /** The shard hop: the compute ceiling and the metric below one stored dtype, so the per-dtype shard translation

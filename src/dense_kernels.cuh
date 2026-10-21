@@ -2,10 +2,11 @@
  *  @file src/dense_kernels.cuh
  *  @author Ash Vardanian
  *  @date October 16, 2026
- *  @brief The device half every dense GPU unit adds to @c dense_specializations.cuh: the C value
- *      lookup's call, and the traits naming it to each vendor's attend kernels.
+ *  @brief The device half every dense GPU device unit adds to @c dense_specializations.cuh: the C
+ *      value lookup's call, the traits naming it to each vendor's attend kernels, and the ceiling
+ *      of the class a pass compiles for.
  *
- *  Only the NVIDIA and AMD class units include it, so the dispatch units, which compile as plain
+ *  Only the NVIDIA and AMD device units include it, so the dispatch units, which compile as plain
  *  C++, see the lookup as the record they fill and never a device function.
  */
 #pragma once
@@ -41,3 +42,19 @@ struct dense::amd_value_lookup_of<vram_attend_lookup_t::device_lookup_k> {
     using type = kernel_attend_lookup_t;
 };
 #endif
+
+/** The ceiling an NVIDIA device pass instantiates: its class's, read off the one NumKong target the
+ *  class compiles under. */
+inline constexpr nk_capability_t cuda_class_capabilities_k = numkong_capabilities_of(
+    NUMKONG_TARGET_BLACKWELLRTX ? gpu_class_t::nvidia_blackwellrtx_k
+    : NUMKONG_TARGET_BLACKWELL  ? gpu_class_t::nvidia_blackwell_k
+    : NUMKONG_TARGET_HOPPER     ? gpu_class_t::nvidia_hopper_k
+    : NUMKONG_TARGET_ADA        ? gpu_class_t::nvidia_ada_k
+                                : gpu_class_t::nvidia_ampere_k);
+
+/** The ceiling an AMD device pass instantiates: its class's, read off the one NumKong target the
+ *  class compiles under. */
+inline constexpr nk_capability_t amd_class_capabilities_k = numkong_capabilities_of(
+    NUMKONG_TARGET_CDNA5   ? gpu_class_t::amd_cdna5_k
+    : NUMKONG_TARGET_CDNA4 ? gpu_class_t::amd_cdna4_k
+                           : gpu_class_t::amd_cdna3_k);

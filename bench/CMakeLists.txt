@@ -5,10 +5,9 @@
 
 # A dense bench, @p target on @p backend, from the units before the first dtype keyword, the entry first, and the dtype
 # shards after them, as `usearch_dense_dtype_sources` takes them. A CPU bench inlines the kits its host flags pick. An
-# NVIDIA bench compiles host-only through Clang's CUDA mode, shards and entry unit alike, and the entry once more with
-# NVCC device-only, into the binary's own fatbin of every listed architecture's kernels; a generation's kits join it
-# only when every listed architecture runs them, and its device listing names its classes through the C interface's own
-# probes, compiled in as the tests do.
+# NVIDIA bench compiles host-only through Clang's CUDA mode, shards and entry unit alike, and links the kernels of
+# `usearch_bench_dense_vram_kernels`; its device listing names its classes through the C interface's own probes,
+# compiled in as the tests do.
 function (usearch_dense_bench target backend)
     cmake_parse_arguments(PARSE_ARGV 2 arg "" "ENTRY" "UNITS;SHARDS")
     add_executable(${target} ${arg_ENTRY} ${arg_UNITS})
@@ -17,13 +16,13 @@ function (usearch_dense_bench target backend)
     target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(${target} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static)
     if (backend STREQUAL "nvidia")
-        usearch_cuda_capabilities(capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
-        usearch_cuda_codes(codes_ "${USEARCH_CUDA_ARCHITECTURES}")
         target_sources(${target} PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
-        target_compile_definitions(${target} PRIVATE "USEARCH_ARCH_CUDA_=1" ${capabilities_})
-        target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
-        usearch_gpu_bundle(${target} nvidia bench_vram_nvidia ${CMAKE_CURRENT_SOURCE_DIR}/${arg_ENTRY} ${codes_})
-        usearch_gpu_host_only(${target} ${CMAKE_CURRENT_SOURCE_DIR}/${arg_ENTRY})
+        target_compile_definitions(${target} PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_bench_cuda_capabilities_})
+        target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS} usearch_bench_dense_vram_kernels)
+        target_include_directories(${target} SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+        foreach (flag_ IN LISTS usearch_bench_cuda_host_only_)
+            target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${flag_}>")
+        endforeach ()
     endif ()
 endfunction ()
 
@@ -120,9 +119,53 @@ usearch_dense_bench(
            U1 dense/nvme_indexes_algebra_u1.cpp
 )
 if (USEARCH_BUILD_CUDA)
+    # The kernels every NVIDIA bench loads: one bundle per compiled dtype, of every listed architecture's codes,
+    # compiled once whatever bench links it. A generation's kits join only when every listed architecture runs them, and
+    # each dtype instantiates Ampere's ceiling and the newest such generation's.
+    usearch_cuda_capabilities(usearch_bench_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
+    usearch_cuda_codes(usearch_bench_cuda_codes_ "${USEARCH_CUDA_ARCHITECTURES}")
+    add_library(usearch_bench_dense_vram_kernels OBJECT dense/vram_kernels.cpp)
+    usearch_setup_target(usearch_bench_dense_vram_kernels HOST)
+    target_include_directories(usearch_bench_dense_vram_kernels PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(
+        usearch_bench_dense_vram_kernels PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_bench_cuda_capabilities_}
+    )
+    target_link_libraries(usearch_bench_dense_vram_kernels PRIVATE forkunion::static)
+    set(position_ 0)
+    foreach (
+        dtype_ IN
+        ITEMS bf16
+              u1
+              i8
+              e4m3
+              f16
+              u8
+              e5m2
+              i4
+              u4
+              e3m2
+              e2m3
+    )
+        if (position_ LESS USEARCH_DENSE_DTYPES)
+            usearch_gpu_bundle(
+                usearch_bench_dense_vram_kernels
+                nvidia
+                bench_vram_nvidia_${dtype_}
+                ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_kernels.cpp
+                ${usearch_bench_cuda_codes_}
+                DEVICE
+                ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_kernels_${dtype_}.cu
+            )
+        endif ()
+        math(EXPR position_ "${position_} + 1")
+    endforeach ()
+    get_source_file_property(
+        usearch_bench_cuda_host_only_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_kernels.cpp COMPILE_OPTIONS
+    )
+
     usearch_dense_bench(
         usearch_bench_dense_vram_index_search nvidia
-        ENTRY dense_vram_index_search.cu
+        ENTRY dense_vram_index_search.cpp
         SHARDS BF16 dense/vram_index_search_bf16.cpp
                F16 dense/vram_index_search_f16.cpp
                E5M2 dense/vram_index_search_e5m2.cpp
@@ -137,7 +180,7 @@ if (USEARCH_BUILD_CUDA)
     )
     usearch_dense_bench(
         usearch_bench_dense_vram_indexes_search nvidia
-        ENTRY dense_vram_indexes_search.cu
+        ENTRY dense_vram_indexes_search.cpp
         SHARDS BF16 dense/vram_indexes_search_bf16.cpp
                F16 dense/vram_indexes_search_f16.cpp
                E5M2 dense/vram_indexes_search_e5m2.cpp
@@ -152,7 +195,7 @@ if (USEARCH_BUILD_CUDA)
     )
     usearch_dense_bench(
         usearch_bench_dense_vram_index_algebra nvidia
-        ENTRY dense_vram_index_algebra.cu
+        ENTRY dense_vram_index_algebra.cpp
         SHARDS BF16 dense/vram_index_algebra_bf16.cpp
                F16 dense/vram_index_algebra_f16.cpp
                E5M2 dense/vram_index_algebra_e5m2.cpp
@@ -167,7 +210,7 @@ if (USEARCH_BUILD_CUDA)
     )
     usearch_dense_bench(
         usearch_bench_dense_vram_indexes_algebra nvidia
-        ENTRY dense_vram_indexes_algebra.cu
+        ENTRY dense_vram_indexes_algebra.cpp
         SHARDS BF16 dense/vram_indexes_algebra_bf16.cpp
                F16 dense/vram_indexes_algebra_f16.cpp
                E5M2 dense/vram_indexes_algebra_e5m2.cpp

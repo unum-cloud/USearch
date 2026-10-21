@@ -1,5 +1,5 @@
 /**
- *  @file bench/dense_vram_indexes_algebra.cu
+ *  @file bench/dense_vram_indexes_algebra.cpp
  *  @author Ash Vardanian
  *  @date October 9, 2026
  *  @brief The entry of the multi-device CUDA algebra benchmark: the algebra flags and the device group over the
@@ -8,24 +8,12 @@
  *  The workload lives in @c dense/vram_indexes_algebra.cuh, over the cascade of @c dense/vram_indexes_search.cuh and
  *  the process setup of @c dense/vram_index_search.cuh; this translation unit stays dtype-free by extern-declaring
  *  the @c run_indexes_algebra_with_stored_dtype instantiations the per-dtype host shards carry, so
- *  they build in parallel. Its NVCC device-only pass compiles the binary's fatbin, with the attends
- *  over the keyed value lookup.
+ *  they build in parallel. The kernels, the attends over the keyed value lookup among them, come
+ *  from the shared @c dense/vram_kernels_<dtype>.cu device units.
  */
 #include <fmt/format.h>
 
 #include "dense/vram_indexes_algebra.cuh"
-#include "dense/vram_kernels.cuh"
-
-/** The key-level lookup each shard's attend kernels resolve rows through. */
-using attention_lookup_t =
-    us::dense::vram_keyed_lookup<us::utilities::u32_t, us::bench::dense::attention_value_lookup_t>;
-
-template <>
-struct us::dense::cuda_value_lookup_of<attention_lookup_t::device_lookup_k> {
-    using type = us::dense::vram_keyed_lookup<us::utilities::u32_t, us::bench::dense::kernel_attention_lookup_t>;
-};
-
-template __device__ void us::bench::dense::instantiate_cuda_kernels<attention_lookup_t::device_lookup_k>();
 
 namespace unum::usearch::bench {
 

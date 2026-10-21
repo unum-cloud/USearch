@@ -139,36 +139,36 @@ using nvme_indexes =
     dense::nvme_indexes<us::utilities::uuid_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
                         elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>>;
 
-/** One NVIDIA class's fatbin, carrying every compiled dtype's kernels; the class's unit defines
- *  @c bytes beside the bytes it embeds. */
+/** One NVIDIA class's fatbin of one dtype's kernels; the class's host unit defines @c bytes beside
+ *  the bytes it embeds. */
 #if USEARCH_ARCH_CUDA_
-template <gpu_class_t gpu_class_>
+template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct cuda_fatbin {
     inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
     static bytes_view_t bytes() noexcept;
 };
 
-/** One NVIDIA alternative: the class names the rung, its capability ceiling and the fatbin its unit
- *  holds the kernels in. */
+/** One NVIDIA alternative: the class names the rung and its capability ceiling, and with the dtype
+ *  the fatbin its kernels sit in. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_nvidia_indexes =
-    dense::vram_nvidia_indexes<us::utilities::uuid_t, dtype_, cuda_fatbin<gpu_class_>, fu::preferred_cache_hints_t>;
+using vram_nvidia_indexes = dense::vram_nvidia_indexes<us::utilities::uuid_t, dtype_, cuda_fatbin<gpu_class_, dtype_>,
+                                                       fu::preferred_cache_hints_t>;
 #endif
 
-/** One AMD class's code object, an offload bundle of its listed processors carrying every compiled
- *  dtype; the class's host unit defines @c bytes beside the bytes it embeds. */
+/** One AMD class's code object of one dtype's kernels, an offload bundle of its listed processors;
+ *  the class's host unit defines @c bytes beside the bytes it embeds. */
 #if USEARCH_ARCH_ROCM_
-template <gpu_class_t gpu_class_>
+template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct hip_code_object {
     inline static constexpr nk_capability_t capability_k = numkong_capabilities_of(gpu_class_);
     static bytes_view_t bytes() noexcept;
 };
 
-/** One AMD alternative: the class names the rung, its capability ceiling and the code object its
- *  unit holds the kernels in. */
+/** One AMD alternative: the class names the rung and its capability ceiling, and with the dtype the
+ *  code object its kernels sit in. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_amd_indexes =
-    dense::vram_amd_indexes<us::utilities::uuid_t, dtype_, hip_code_object<gpu_class_>, fu::preferred_cache_hints_t>;
+using vram_amd_indexes = dense::vram_amd_indexes<us::utilities::uuid_t, dtype_, hip_code_object<gpu_class_, dtype_>,
+                                                 fu::preferred_cache_hints_t>;
 #endif
 
 /** One Apple alternative: the class names the rung and the capability ceiling its kernels compile

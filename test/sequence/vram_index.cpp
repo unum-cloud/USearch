@@ -30,9 +30,10 @@
 
 #if USEARCH_ARCH_CUDA_
 
-/** The library's fatbin of every sequence kit, defined in
- *  @c src/sequence/vram_variants_nvidia.cu. */
-struct sequence_nvidia_fatbin_t {
+/** The library's fatbin of one kind's sequence kits, defined in
+ *  @c src/sequence/vram_variants_nvidia.cpp. */
+template <usearch_sequence_metric_t metric_>
+struct sequence_nvidia_fatbin {
     static us::utilities::bytes_view_t bytes() noexcept;
 };
 
@@ -128,7 +129,7 @@ template <usearch_sequence_metric_t metric_, typename node_id_type_ = u32_t>
 static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& executor, std::size_t count,
                                                   std::size_t length, std::size_t queries_count) {
     using ram_index_t = ram_index<us::utilities::uuid_t, u32_t>;
-    using vram_index_t = vram_nvidia_index<metric_, node_id_type_, sz_cap_cuda_k, sequence_nvidia_fatbin_t>;
+    using vram_index_t = vram_nvidia_index<metric_, node_id_type_, sz_cap_cuda_k, sequence_nvidia_fatbin<metric_>>;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3, origin_k = 3;
     std::size_t failures = 0;
 

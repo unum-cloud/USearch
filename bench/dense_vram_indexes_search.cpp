@@ -1,5 +1,5 @@
 /**
- *  @file bench/dense_vram_indexes_search.cu
+ *  @file bench/dense_vram_indexes_search.cpp
  *  @author Ash Vardanian
  *  @date October 7, 2026
  *  @brief The entry of the multi-device CUDA search benchmark - one shard per device, built, refined and searched:
@@ -8,14 +8,11 @@
  *  The sharded pipeline lives in @c dense/vram_indexes_search.cuh, and the process setup it shares with every CUDA
  *  binary in @c dense/vram_index_search.cuh; this translation unit stays dtype-free by extern-declaring the
  *  @c run_indexes_with_stored_dtype instantiations the per-dtype host shards carry, so they build
- *  in parallel. Its NVCC device-only pass compiles the binary's fatbin.
+ *  in parallel. The kernels come from the shared @c dense/vram_kernels_<dtype>.cu device units.
  */
 #include <fmt/format.h>
 
 #include "dense/vram_indexes_search.cuh"
-#include "dense/vram_kernels.cuh"
-
-template __device__ void us::bench::dense::instantiate_cuda_kernels<>();
 
 namespace unum::usearch::bench {
 
