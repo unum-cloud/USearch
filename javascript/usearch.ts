@@ -189,14 +189,25 @@ function normalizeVectors(
         ? vectors
         : new targetType(vectors as Vector);
   } else if (Array.isArray(vectors)) {
-    let totalLength = 0;
-    for (const vec of vectors) totalLength += vec.length;
+    // Every row must be a vector of its own, otherwise a flat `number[]` would
+    // silently turn into an empty batch and ragged rows would be glued together.
+    for (const vec of vectors as unknown[]) {
+      if (!Array.isArray(vec) && !isVector(vec)) {
+        throw new Error("Vectors must be a TypedArray or an array of arrays.");
+      }
+      const length = (vec as ArrayLike<number>).length;
+      if (length !== dimensions) {
+        throw new Error(
+          `Every vector must have ${dimensions} dimensions, but got one with ${length}.`
+        );
+      }
+    }
 
-    flattenedVectors = new targetType(totalLength);
+    flattenedVectors = new targetType(vectors.length * dimensions);
     let offset = 0;
     for (const vec of vectors) {
       flattenedVectors.set(vec, offset);
-      offset += vec.length;
+      offset += dimensions;
     }
   } else {
     throw new Error("Vectors must be a TypedArray or an array of arrays.");
