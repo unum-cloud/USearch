@@ -312,6 +312,10 @@ test("Operations with invalid values", () => {
 
   // Vectors must be a TypedArray or an array of arrays
   assert.throws(() => indexBatch.search(NaN, 2));
+
+  // Every row must hold exactly `dimensions` values, not just their total
+  assert.throws(() => indexBatch.search([10, 30], 2));
+  assert.throws(() => indexBatch.search([[10], [30, 1, 5]], 2));
 });
 
 test("Invalid operations", async (t) => {

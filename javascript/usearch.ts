@@ -195,14 +195,17 @@ function normalizeVectors(
         ? vectors
         : new targetType(vectors as Vector);
   } else if (Array.isArray(vectors)) {
-    let totalLength = 0;
-    for (const vec of vectors) totalLength += vec.length;
-
-    flattenedVectors = new targetType(totalLength);
+    flattenedVectors = new targetType(vectors.length * dimensions);
     let offset = 0;
     for (const vec of vectors) {
+      if (!Array.isArray(vec) && !isVector(vec))
+        throw new Error("Vectors must be a TypedArray or an array of arrays.");
+      if (vec.length !== dimensions)
+        throw new Error(
+          `Every vector must have ${dimensions} dimensions, but got one with ${vec.length}.`
+        );
       flattenedVectors.set(vec, offset);
-      offset += vec.length;
+      offset += dimensions;
     }
   } else {
     throw new Error("Vectors must be a TypedArray or an array of arrays.");
