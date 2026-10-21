@@ -144,6 +144,11 @@ inline std::string_view chars_at(usearch_tape_view_t tape, std::size_t row) noex
     return {static_cast<char const*>(tape.data) + tape.offsets[row], tape.offsets[row + 1] - tape.offsets[row]};
 }
 
+/** The @p count entries of the caller's byte tape @p tape, as the engines read tapes. */
+inline tape_view<byte_t const> bytes_tape_of(usearch_tape_view_t tape, std::size_t count) noexcept {
+    return {static_cast<byte_t const*>(tape.data), {tape.offsets, count + 1}};
+}
+
 /** Whether a tape's @p count + 1 offsets never fall; they may start anywhere, as an Arrow slice's
  *  do. */
 inline bool monotone_offsets(usearch_tape_view_t tape, std::size_t count) noexcept {
@@ -935,34 +940,36 @@ struct vram_nvidia_variant {
                 status_t::success_k};
     }
 
-    /** Lands the keys of the rows from @p first, then inserts the tape @p values and @p offsets
-     *  lay out, freezing @p connectivity first unless a reservation did. */
-    expected<traversal_telemetry_t> insert_(usearch_keys_view_t keys_view, byte_t const* values,
-                                            std::span<std::size_t const> offsets, std::size_t first,
-                                            std::size_t connectivity, std::size_t expansion, progress_ticks_t& ticks,
+    /** Lands the keys of the rows @p plan claimed at its first ID, then launches through it the
+     *  rows of @p tape, freezing @p connectivity first unless a reservation did. */
+    expected<traversal_telemetry_t> insert_(usearch_keys_view_t keys_view, tape_view<byte_t const> tape,
+                                            typename index_t::insert_plan_t& plan, std::size_t connectivity,
+                                            std::size_t expansion, progress_ticks_t& ticks,
                                             executor_t& executor) noexcept {
-        std::size_t const count = offsets.size() - 1;
+        std::size_t const count = tape.size(), first = plan.first_id;
         if (!index.connectivity())
-            if (status_t const reserved =
-                    index.reserve({count, static_cast<connectivity_t>(connectivity), offsets[count] - offsets[0]})
-                        .status;
+            if (status_t const reserved = index
+                                              .reserve({count, static_cast<connectivity_t>(connectivity),
+                                                        tape.offsets[count] - tape.offsets[0]})
+                                              .status;
                 failed(reserved))
                 return {{}, reserved};
         if (status_t const covered = keys.cover(first + count); failed(covered)) return {{}, covered};
         for (std::size_t row = 0; row != count; ++row) keys[first + row] = uuid_of(key_at(keys_view, row));
         typename index_t::insert_config_t const config {static_cast<u32_t>(expansion)};
-        return walk_(executor, index.traversal_memory_usage(values, offsets, config), count, ticks,
+        return walk_(executor, index.traversal_memory_usage(tape, config), count, ticks,
                      [&](typename index_t::traversal_context_t& context, cuda_arena_allocator_t&) noexcept {
-                         return index.insert(values, offsets, context, config);
+                         return plan.insert(tape, context, config);
                      });
     }
 
-    /** Searches the @p count queries of the tape @p queries and @p offsets lay out a progress step
-     *  at a time, one launch a step over one context, landing each row's matches in @p landing on
-     *  host pages; a handler answering cancel stops the steps not begun. */
-    expected<traversal_telemetry_t> search_(byte_t const* queries, std::size_t const* offsets, std::size_t count,
-                                            std::size_t wanted, std::size_t expansion, matches_landing_t& landing,
-                                            progress_ticks_t& ticks, executor_t& executor) noexcept {
+    /** Searches the queries of @p queries a progress step at a time, one launch a step over one
+     *  context, landing each row's matches in @p landing on host pages; a handler answering cancel
+     *  stops the steps not begun. A search wanting no matches answers before reading a query. */
+    expected<traversal_telemetry_t> search_(tape_view<byte_t const> queries, std::size_t wanted, std::size_t expansion,
+                                            matches_landing_t& landing, progress_ticks_t& ticks,
+                                            executor_t& executor) noexcept {
+        std::size_t const count = queries.size();
         if (!wanted) {
             for (std::size_t row = 0; row != count; ++row) landing.counts[row] = 0;
             return {{}, status_t::success_k};
@@ -970,7 +977,6 @@ struct vram_nvidia_variant {
         using node_id_t = typename index_t::node_id_t;
         using distance_t = typename index_t::distance_t;
         using search_result_t = typename index_t::search_result_t;
-        std::span<std::size_t const> const tape {offsets, count + 1};
         typename index_t::search_config_t const config {static_cast<u32_t>(expansion), static_cast<u32_t>(wanted)};
         std::size_t const step = ticks.slice();
         auto search_steps = [&](typename index_t::traversal_context_t& context, cuda_arena_allocator_t&) noexcept {
@@ -982,9 +988,8 @@ struct vram_nvidia_variant {
                 // widen backward.
                 node_id_t* const ids = reinterpret_cast<node_id_t*>(landing.keys + first_match);
                 distance_t* const distances = reinterpret_cast<distance_t*>(landing.scores + first_match);
-                auto const [found, status] = index.search(queries, tape.subspan(first, taking + 1),
-                                                          {ids, {taking, wanted}}, {distances, {taking, wanted}},
-                                                          context, config);
+                auto const [found, status] = index.search(queries.subview(first, taking), {ids, {taking, wanted}},
+                                                          {distances, {taking, wanted}}, context, config);
                 if (failed(status)) return expected<search_result_t> {total, status};
                 total.visited_members += found.visited_members;
                 total.computed_distances += found.computed_distances;
@@ -1006,7 +1011,7 @@ struct vram_nvidia_variant {
             }
             return expected<search_result_t> {total, status_t::success_k};
         };
-        return walk_(executor, index.traversal_memory_usage(queries, tape, config), count, ticks, search_steps);
+        return walk_(executor, index.traversal_memory_usage(queries, config), count, ticks, search_steps);
     }
 };
 

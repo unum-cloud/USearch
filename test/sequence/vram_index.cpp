@@ -187,11 +187,11 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
         std::span<std::size_t const> const batch_offsets {offsets.data() + first, bound - first + 1};
         failures += expect_eq(
-            executor.reserve(vram_index.traversal_memory_usage(tape_bytes, batch_offsets, insert_config)),
+            executor.reserve(vram_index.traversal_memory_usage({tape_bytes, batch_offsets}, insert_config)),
             status_t::success_k);
         typename vram_index_t::traversal_context_t context {
             cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
-        auto const [inserted, status] = vram_index.insert(tape_bytes, batch_offsets, context, insert_config);
+        auto const [inserted, status] = vram_index.insert({tape_bytes, batch_offsets}, context, insert_config);
         failures += expect_eq(status, status_t::success_k);
         failures += expect_eq(inserted.first_id, first);
         failures += expect_eq(inserted.new_size, bound);
@@ -203,13 +203,14 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     std::vector<f32_t> distances(queries_count * wanted_k);
     std::span<std::size_t const> const query_offsets {offsets.data() + count, queries_count + 1};
     typename vram_index_t::search_config_t const search_config {expansion_k, wanted_k};
-    failures += expect_eq(executor.reserve(vram_index.traversal_memory_usage(tape_bytes, query_offsets, search_config)),
-                          status_t::success_k);
+    failures += expect_eq(
+        executor.reserve(vram_index.traversal_memory_usage({tape_bytes, query_offsets}, search_config)),
+        status_t::success_k);
     typename vram_index_t::traversal_context_t context {
         cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
     if (!failures)
         failures += expect_eq(vram_index
-                                  .search(tape_bytes, query_offsets, {ids.data(), {queries_count, wanted_k}},
+                                  .search({tape_bytes, query_offsets}, {ids.data(), {queries_count, wanted_k}},
                                           {distances.data(), {queries_count, wanted_k}}, context, search_config)
                                   .status,
                               status_t::success_k);

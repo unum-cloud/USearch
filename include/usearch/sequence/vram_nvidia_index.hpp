@@ -176,24 +176,21 @@ struct vram_nvidia_index {
     basic::vram_ragged_storage<node_id_t> storage() const noexcept { return graph_.storage(); }
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return graph_.reserve(config); }
 
-    std::size_t traversal_memory_usage(byte_t const* values, std::span<std::size_t const> offsets,
-                                       insert_config_t config = {}) const noexcept {
-        return graph_.traversal_memory_usage(values, offsets, config);
+    std::size_t traversal_memory_usage(tape_view<byte_t const> tape, insert_config_t config = {}) const noexcept {
+        return graph_.traversal_memory_usage(tape, config);
     }
     expected<insert_plan_t> plan_insert(std::size_t rows) noexcept { return graph_.plan_insert(rows); }
-    expected<insert_result_t> insert(byte_t const* values, std::span<std::size_t const> offsets,
-                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
-        return graph_.insert(values, offsets, context, config);
+    expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
+                                     insert_config_t config = {}) noexcept {
+        return graph_.insert(tape, context, config);
     }
-    std::size_t traversal_memory_usage(byte_t const* queries, std::span<std::size_t const> offsets,
-                                       search_config_t config) const noexcept {
-        return graph_.traversal_memory_usage(queries, offsets, config);
+    std::size_t traversal_memory_usage(tape_view<byte_t const> queries, search_config_t config) const noexcept {
+        return graph_.traversal_memory_usage(queries, config);
     }
-    expected<search_result_t> search(byte_t const* queries, std::span<std::size_t const> offsets,
-                                     nk::matrix_span<node_id_t> result_ids,
+    expected<search_result_t> search(tape_view<byte_t const> queries, nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
-        return graph_.search(queries, offsets, result_ids, result_distances, context, config);
+        return graph_.search(queries, result_ids, result_distances, context, config);
     }
 
     std::size_t traversal_memory_usage(refine_config_t config, std::size_t rows) const noexcept {

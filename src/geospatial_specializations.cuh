@@ -1092,20 +1092,19 @@ struct geospatial_vram_nvidia_variant
 
   private:
 
-    /** Encodes the @p count observations into @p pages as a tape of rows at @p values, their byte
-     *  starts at @p offsets. */
-    static status_t encode_(usearch_geospatial_observation_t const* observations, std::size_t count,
-                            growing_arena<forkunion_allocator_t>& pages, value_t*& values,
-                            std::size_t*& offsets) noexcept {
-        values = carve<value_t>(pages, count);
-        offsets = carve<std::size_t>(pages, count + 1);
-        if (!values || !offsets) return status_t::bad_alloc_k;
+    /** The @p count observations encoded on @p pages as staged rows. */
+    static expected<tape_view<byte_t const>> encode_(usearch_geospatial_observation_t const* observations,
+                                                     std::size_t count,
+                                                     growing_arena<forkunion_allocator_t>& pages) noexcept {
+        value_t* const values = carve<value_t>(pages, count);
+        std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
+        if (!values || !offsets) return {{}, status_t::bad_alloc_k};
         for (std::size_t row = 0; row != count; ++row) {
             values[row] = us::geospatial::to_earth_observation(geodetic_of(observations[row]));
             offsets[row] = row * sizeof(value_t);
         }
         offsets[count] = count * sizeof(value_t);
-        return status_t::success_k;
+        return {{reinterpret_cast<byte_t const*>(values), {offsets, count + 1}}, status_t::success_k};
     }
 };
 
@@ -1115,12 +1114,9 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::insert(
     auto [plan, plan_status] = index.plan_insert(count);
     if (failed(plan_status)) return {{}, plan_status};
     staging.clear();
-    value_t* values = nullptr;
-    std::size_t* offsets = nullptr;
-    if (status_t const encoded = encode_(arguments.observations, count, staging, values, offsets); failed(encoded))
-        return {{}, encoded};
-    return insert_(arguments.keys, reinterpret_cast<byte_t const*>(values), {offsets, count + 1}, plan,
-                   geometry.connectivity, arguments.expansion_factor, ticks, executor);
+    auto const [rows, encode_status] = encode_(arguments.observations, count, staging);
+    if (failed(encode_status)) return {{}, encode_status};
+    return insert_(arguments.keys, rows, plan, geometry.connectivity, arguments.expansion_factor, ticks, executor);
 }
 
 inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
@@ -1131,12 +1127,8 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
         for (std::size_t row = 0; row != count; ++row) landing.counts[row] = 0;
         return {{}, status_t::success_k};
     }
-    value_t* values = nullptr;
-    std::size_t* offsets = nullptr;
-    if (status_t const encoded = encode_(arguments.queries, count, pages, values, offsets); failed(encoded))
-        return {{}, encoded};
-    byte_t const* const bytes = reinterpret_cast<byte_t const*>(values);
-    std::span<std::size_t const> const tape {offsets, count + 1};
+    auto const [queries, encode_status] = encode_(arguments.queries, count, pages);
+    if (failed(encode_status)) return {{}, encode_status};
     // Candidates fewer than the row they fill would short every row.
     std::size_t const candidates_count = max_of(expansion ? expansion : default_expansion_factor(index.connectivity()),
                                                 wanted);
@@ -1147,7 +1139,7 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
     std::size_t const listed_count = count * candidates_count, judged = count * wanted;
     std::size_t const judging_bytes = count * (sizeof(value_t) + sizeof(u64_t)) + judged * sizeof(f64_t) +
                                       listed_count * (sizeof(node_id_t) + sizeof(f32_t)) + judged * sizeof(node_id_t);
-    std::size_t const bytes_per_stream = index.traversal_memory_usage(bytes, tape, config) +
+    std::size_t const bytes_per_stream = index.traversal_memory_usage(queries, config) +
                                          round_up_to_multiple(judging_bytes, default_alignment_k);
     // IDs land narrow at the front of the keys, then widen backward; metres and counts land whole.
     node_id_t* const ids = reinterpret_cast<node_id_t*>(landing.keys);
@@ -1173,9 +1165,10 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
         admitting.relation = static_cast<us::geospatial::relation_t>(arguments.relation);
         admitting.radius_metres = arguments.tolerance.metres;
         admitting.slack_milliseconds = arguments.tolerance.seconds * 1000.0;
-        if (cuda_copy_async(device_queries, values, count * sizeof(value_t), context.stream()) != cuda_success_k)
+        if (cuda_copy_async(device_queries, queries.elements, count * sizeof(value_t), context.stream()) !=
+            cuda_success_k)
             return {{}, status_t::device_error_k};
-        auto const [found, status] = index.search(bytes, tape, {candidate_ids, {count, candidates_count}},
+        auto const [found, status] = index.search(queries, {candidate_ids, {count, candidates_count}},
                                                   {candidate_distances, {count, candidates_count}}, context, config);
         if (failed(status)) return {{}, status};
         u32_t const blocks = static_cast<u32_t>(

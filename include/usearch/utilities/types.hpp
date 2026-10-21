@@ -218,6 +218,27 @@ inline std::string_view chars_of(bytes_view_t bytes) noexcept {
     return {reinterpret_cast<char const*>(bytes.data()), bytes.size()};
 }
 
+/** A borrowed tape: entries end to end in @c elements, entry @c i spanning @c offsets[i] up to
+ *  @c offsets[i+1], so one offset more than entries closes the last. */
+template <typename element_type_>
+struct tape_view {
+    element_type_* elements = nullptr;
+    std::span<std::size_t const> offsets;
+
+    /** Entries the tape holds. */
+    std::size_t size() const noexcept { return offsets.empty() ? 0 : offsets.size() - 1; }
+
+    /** Entry @p row. */
+    std::span<element_type_> operator[](std::size_t row) const noexcept {
+        return {elements + offsets[row], offsets[row + 1] - offsets[row]};
+    }
+
+    /** The @p count entries from @p first, their offsets still counting from @c elements. */
+    tape_view subview(std::size_t first, std::size_t count) const noexcept {
+        return {elements, offsets.subspan(first, count + 1)};
+    }
+};
+
 /** The process-wide allocator, named rather than defaulted: a container takes this when
  *  no arena, memory domain or device owns its bytes, so every such placement is one grep
  *  away instead of hiding in an omitted argument. */

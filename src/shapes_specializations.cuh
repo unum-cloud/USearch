@@ -422,37 +422,34 @@ struct shapes_vram_nvidia_variant
 
   private:
 
-    /** Packs the @p count clouds of @p tape end to end into @p pages at @p packed, their byte
-     *  starts at @p offsets, casting the caller's scalar there too where it is not the stored one;
-     *  refuses a count other than a frozen one. */
-    status_t pack_(usearch_tape_view_t tape, std::size_t count, growing_arena<forkunion_allocator_t>& pages,
-                   byte_t*& packed, std::size_t*& offsets) const noexcept;
+    /** The @p count clouds of @p tape packed end to end on @p pages, cast to the stored scalar
+     *  where the caller's differs; refuses a count other than a frozen one. */
+    expected<tape_view<byte_t const>> pack_(usearch_tape_view_t tape, std::size_t count,
+                                            growing_arena<forkunion_allocator_t>& pages) const noexcept;
 };
 
 template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
-status_t shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::pack_(usearch_tape_view_t tape, std::size_t count,
-                                                                     growing_arena<forkunion_allocator_t>& pages,
-                                                                     byte_t*& packed,
-                                                                     std::size_t*& offsets) const noexcept {
+expected<tape_view<byte_t const>> shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::pack_(
+    usearch_tape_view_t tape, std::size_t count, growing_arena<forkunion_allocator_t>& pages) const noexcept {
     using raw_t = typename scalar_type_::raw_t;
     nk_dtype_t const from = nk_dtype_of(tape.scalar);
     std::size_t const from_bytes = nk_dtype_bits(from) / 8;
-    offsets = carve<std::size_t>(pages, count + 1);
-    if (!offsets) return status_t::bad_alloc_k;
+    std::size_t* const offsets = carve<std::size_t>(pages, count + 1);
+    if (!offsets) return {{}, status_t::bad_alloc_k};
     offsets[0] = 0;
     std::size_t largest = 0;
     for (std::size_t row = 0; row != count; ++row) {
         std::size_t const cloud = tape.offsets[row + 1] - tape.offsets[row];
-        if (geometry.points && cloud != geometry.points) return status_t::shape_mismatch_k;
+        if (geometry.points && cloud != geometry.points) return {{}, status_t::shape_mismatch_k};
         largest = max_of(largest, cloud);
         nk_size_t bytes = 0;
         if (status_t const sized = us::shapes::status_of(pack_kit_t::pack_size(cloud, &bytes)); failed(sized))
-            return sized;
+            return {{}, sized};
         offsets[row + 1] = offsets[row] + bytes;
     }
-    packed = carve<byte_t>(pages, offsets[count]);
+    byte_t* const packed = carve<byte_t>(pages, offsets[count]);
     raw_t* const converted = from == dtype_k ? nullptr : carve<raw_t>(pages, largest * 3);
-    if (!packed || (from != dtype_k && !converted)) return status_t::bad_alloc_k;
+    if (!packed || (from != dtype_k && !converted)) return {{}, status_t::bad_alloc_k};
     for (std::size_t row = 0; row != count; ++row) {
         std::size_t const cloud = tape.offsets[row + 1] - tape.offsets[row];
         void const* const coordinates = static_cast<byte_t const*>(tape.data) + tape.offsets[row] * 3 * from_bytes;
@@ -461,15 +458,15 @@ status_t shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::pack_(usearch_tap
             if (status_t const cast = us::shapes::status_of(
                     nk_cast_serial(coordinates, from, converted, dtype_k, cloud * 3, nullptr));
                 failed(cast))
-                return cast;
+                return {{}, cast};
             cloud_points = converted;
         }
         if (status_t const made = us::shapes::status_of(
                 pack_kit_t::pack(cloud_points, cloud, packed + offsets[row], nullptr));
             failed(made))
-            return made;
+            return {{}, made};
     }
-    return status_t::success_k;
+    return {{packed, {offsets, count + 1}}, status_t::success_k};
 }
 
 template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
@@ -480,13 +477,10 @@ expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, gpu_cla
     auto [plan, plan_status] = this->index.plan_insert(count);
     if (failed(plan_status)) return {{}, plan_status};
     staging.clear();
-    byte_t* packed = nullptr;
-    std::size_t* offsets = nullptr;
-    if (status_t const packed_status = pack_(shapes, count, staging, packed, offsets); failed(packed_status))
-        return {{}, packed_status};
-    expected<traversal_telemetry_t> const landed = this->insert_(arguments.keys, packed, {offsets, count + 1}, plan,
-                                                                 geometry.connectivity, arguments.expansion_factor,
-                                                                 ticks, executor);
+    auto const [packs, pack_status] = pack_(shapes, count, staging);
+    if (failed(pack_status)) return {{}, pack_status};
+    expected<traversal_telemetry_t> const landed = this->insert_(arguments.keys, packs, plan, geometry.connectivity,
+                                                                 arguments.expansion_factor, ticks, executor);
     if (failed(landed.status)) return landed;
     standard_atomic_ref<std::size_t>(total_points)
         .fetch_add(shapes.offsets[count] - shapes.offsets[0], std::memory_order_relaxed);
@@ -497,15 +491,9 @@ template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
 expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::search(
     usearch_shapes_search_t const& arguments, growing_arena<forkunion_allocator_t>& pages, matches_landing_t& landing,
     progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
-    byte_t* packed = nullptr;
-    std::size_t* offsets = nullptr;
-    // Packs only when a match is wanted, as a walk for none answers before reading any query.
-    if (arguments.wanted)
-        if (status_t const packed_status = pack_(arguments.queries, arguments.count, pages, packed, offsets);
-            failed(packed_status))
-            return {{}, packed_status};
-    return this->search_(packed, offsets, arguments.count, arguments.wanted, arguments.expansion_factor, landing, ticks,
-                         executor);
+    auto const [queries, pack_status] = pack_(arguments.queries, arguments.count, pages);
+    if (failed(pack_status)) return {{}, pack_status};
+    return this->search_(queries, arguments.wanted, arguments.expansion_factor, landing, ticks, executor);
 }
 
 #endif

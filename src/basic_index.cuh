@@ -694,8 +694,8 @@ void basic_search(arguments_type_* arguments) noexcept {
             if (!arena) return;
             if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
             if (!traits_t::accepts(variant, *arguments, outcome)) return;
-            matches_landing_t landing;
-            if (!carve_matches(arena->memory, count, wanted, landing, outcome)) return;
+            auto [landing, carve_status] = carve_matches(arena->memory, count, wanted);
+            if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
             usearch_executor_handle_t call_executor;
             typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
                                                                              call_executor, outcome);
@@ -707,9 +707,11 @@ void basic_search(arguments_type_* arguments) noexcept {
                     return variant.search(*arguments, arena->memory, landing, ticks, *executor);
                 else return variant.search(*arguments, landing, ticks, *executor);
             }();
-            if (!crossed(searched, arguments->stats, outcome) || !publish_matches(*arena, count, landing, outcome))
-                return;
-            *arguments->matches = landing.view();
+            if (!crossed(searched, arguments->stats, outcome)) return;
+            auto const [matches, publish_status] = publish_matches(*arena, landing, count);
+            if (failed(publish_status))
+                return propagate_error(publish_status, outcome, "Failed to land the matches on the device"), void();
+            *arguments->matches = matches;
             propagate_error(usearch_status_success_k, outcome, nullptr);
         },
         arguments->index->variant);

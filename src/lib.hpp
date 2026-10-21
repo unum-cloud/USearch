@@ -1144,18 +1144,21 @@ inline value_type_* carve(gpu_arena_t& device_memory, std::size_t count) noexcep
     return device_memory.template allocate<value_type_>(count);
 }
 
-/** Hands out the @p count values @ref carve put at @p output in @p arena: in place on host pages,
- *  or re-pointed at one upload to its device queued on its executor's first stream, which the call
- *  awaits once through @c gpu_arena_t::drain, the host pages it reads living until then. */
+/** Where the @p count values @ref carve put at @p output reach the caller: in place on host pages,
+ *  or one upload to the arena's device queued on its executor's first stream, which the call
+ *  awaits once through @ref drained, the host pages it reads living until then. */
 template <typename value_type_>
-inline status_t publish(usearch_arena_handle_t& arena, value_type_*& output, std::size_t count) noexcept {
-    if (!arena.device_memory || !output || !count) return status_t::success_k;
+inline expected<value_type_*> publish(usearch_arena_handle_t& arena, value_type_* output, std::size_t count) noexcept {
+    if (!arena.device_memory || !output || !count) return {output, status_t::success_k};
     value_type_* const landed = carve<value_type_>(arena.device_memory, count);
-    if (!landed) return status_t::bad_alloc_k;
-    if (status_t const uploaded = arena.device_memory.upload(landed, output, count * sizeof(value_type_));
-        failed(uploaded))
-        return uploaded;
-    output = landed;
+    if (!landed) return {nullptr, status_t::bad_alloc_k};
+    return {landed, arena.device_memory.upload(landed, output, count * sizeof(value_type_))};
+}
+
+/** The first failure of the steps of one call, or success. */
+inline status_t first_failure(std::initializer_list<status_t> statuses) noexcept {
+    for (status_t const status : statuses)
+        if (failed(status)) return status;
     return status_t::success_k;
 }
 
@@ -1207,31 +1210,45 @@ struct matches_landing_t {
     usearch_matches_view_t view() const noexcept { return {keys, scores, counts, wanted}; }
 };
 
-/** Carves @p count rows of @p wanted matches out of a claimed arena's host pages or device memory,
- *  @p memory; a zero @p wanted carves only the counts. False once @p outcome records why not. */
+/** The landing of @p count rows of @p wanted matches, carved out of a claimed arena's host pages or
+ *  device memory, @p memory; a zero @p wanted carves only the counts. */
 template <typename memory_type_>
-inline bool carve_matches(memory_type_& memory, std::size_t count, std::size_t wanted, matches_landing_t& landing,
-                          usearch_outcome_t* outcome) noexcept {
+inline expected<matches_landing_t> carve_matches(memory_type_& memory, std::size_t count, std::size_t wanted) noexcept {
+    matches_landing_t landing;
     landing.wanted = wanted;
     landing.counts = carve<std::size_t>(memory, count);
     if (wanted) {
         landing.keys = carve<usearch_key_t>(memory, count * wanted);
         landing.scores = carve<usearch_distance_t>(memory, count * wanted);
     }
-    if (landing.counts && (!wanted || (landing.keys && landing.scores))) return true;
-    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+    bool const carved = landing.counts && (!wanted || (landing.keys && landing.scores));
+    return {landing, carved ? status_t::success_k : status_t::bad_alloc_k};
 }
 
-/** Hands out the @p count rows @ref carve_matches put in @p landing where @p arena hands outputs
- *  out, awaiting the uploads once. False once @p outcome records why not. */
-inline bool publish_matches(usearch_arena_handle_t& arena, std::size_t count, matches_landing_t& landing,
-                            usearch_outcome_t* outcome) noexcept {
+/** The @p count rows @ref carve_matches put in @p landing as the caller reads them, where @p arena
+ *  hands outputs out, once its uploads drained. */
+inline expected<usearch_matches_view_t> publish_matches(usearch_arena_handle_t& arena, matches_landing_t const& landing,
+                                                        std::size_t count) noexcept {
     std::size_t const entries = count * landing.wanted;
-    status_t status = publish(arena, landing.counts, count);
-    if (succeeded(status)) status = publish(arena, landing.keys, entries);
-    if (succeeded(status)) status = publish(arena, landing.scores, entries);
-    status = drained(arena, status);
-    return succeeded(status) || propagate_error(status, outcome, "Failed to land the matches on the device");
+    auto const [counts, counts_status] = publish(arena, landing.counts, count);
+    auto const [keys, keys_status] = publish(arena, landing.keys, entries);
+    auto const [scores, scores_status] = publish(arena, landing.scores, entries);
+    status_t const landed = drained(arena, first_failure({counts_status, keys_status, scores_status}));
+    return {{keys, scores, counts, landing.wanted}, landed};
+}
+
+/** The ragged run of @p count rows @ref carve put on host pages, @p keys and @p scores cut by
+ *  @p offsets, as the caller reads it where @p arena hands outputs out, once its uploads drained;
+ *  an empty run hands out no keys or scores. */
+inline expected<usearch_matches_tape_view_t> publish_matches(usearch_arena_handle_t& arena, usearch_key_t* keys,
+                                                             usearch_distance_t* scores, std::size_t* offsets,
+                                                             std::size_t count) noexcept {
+    std::size_t const written = offsets[count];
+    auto const [landed_keys, keys_status] = publish(arena, written ? keys : nullptr, written);
+    auto const [landed_scores, scores_status] = publish(arena, written ? scores : nullptr, written);
+    auto const [landed_offsets, offsets_status] = publish(arena, offsets, count + 1);
+    status_t const landed = drained(arena, first_failure({keys_status, scores_status, offsets_status}));
+    return {{landed_keys, landed_scores, landed_offsets}, landed};
 }
 
 /** The run read as text - a path, which is bytes that happen to decode. The ABI spells a byte

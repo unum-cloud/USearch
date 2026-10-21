@@ -3363,22 +3363,21 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 if (!wanted) {
                     // No walk serves zero matches; the counts are zeros staged on the host.
-                    std::size_t* counts = carve<std::size_t>(arena->memory, count);
-                    if (!counts)
-                        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"),
-                               void();
-                    for (std::size_t row = 0; row != count; ++row) counts[row] = 0;
-                    if (status_t const landed = drained(*arena, publish(*arena, counts, count)); failed(landed))
-                        return propagate_error(landed, outcome), void();
-                    *arguments->matches = {nullptr, nullptr, counts, 0};
+                    auto const [zeros, carve_status] = carve_matches(arena->memory, count, 0);
+                    if (failed(carve_status))
+                        return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
+                    for (std::size_t row = 0; row != count; ++row) zeros.counts[row] = 0;
+                    auto const [matches, publish_status] = publish_matches(*arena, zeros, count);
+                    if (failed(publish_status)) return propagate_error(publish_status, outcome), void();
+                    *arguments->matches = matches;
                     return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 }
                 // A VRAM arena's matches are carved on its device, where the shards' rankings merge
                 // in place.
-                matches_landing_t landing;
-                if (!(arena->device_memory ? carve_matches(arena->device_memory, count, wanted, landing, outcome)
-                                           : carve_matches(arena->memory, count, wanted, landing, outcome)))
-                    return;
+                auto [landing, carve_status] = arena->device_memory ? carve_matches(arena->device_memory, count, wanted)
+                                                                    : carve_matches(arena->memory, count, wanted);
+                if (failed(carve_status))
+                    return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
                 auto search_with = [&](auto&& predicate) noexcept {
                     return match_dense_rows(variant, arguments->executor, count, arguments->queries, 1, landing,
                                             arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
@@ -3452,9 +3451,10 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
                 for (std::size_t row = 0; row != min_of(total, entries); ++row)
                     us::dense::export_row<us::dense::serial_elementwise_kit_t>(stored + row * stored_bytes,
                                                                                stored_dtype, target, row);
-            if (status_t const landed = drained(*arena, publish(*arena, rows, entries * row_bytes)); failed(landed))
+            auto const [published, publish_status] = publish(*arena, rows, entries * row_bytes);
+            if (status_t const landed = drained(*arena, publish_status); failed(landed))
                 return propagate_error(landed, outcome, "Failed to land the rows on the device"), void();
-            *arguments->vectors = {rows, row_bytes, dimensions, scalar};
+            *arguments->vectors = {published, row_bytes, dimensions, scalar};
             if (arguments->written) *arguments->written = min_of(total, entries);
             propagate_error(usearch_status_success_k, outcome, nullptr);
         },
@@ -3853,16 +3853,12 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                     std::memmove(keys + offsets[row], keys + row * width, kept * sizeof(usearch_key_t));
                     std::memmove(scores + offsets[row], scores + row * width, kept * sizeof(usearch_distance_t));
                 }
-                std::size_t const written = offsets[count];
-                if (!written) keys = nullptr, scores = nullptr;
-                status_t landed = publish(*arena, keys, written);
-                if (succeeded(landed)) landed = publish(*arena, scores, written);
-                if (succeeded(landed)) landed = publish(*arena, offsets, count + 1);
-                landed = drained(*arena, landed);
-                if (failed(landed))
-                    return propagate_error(landed, outcome, "Failed to land the products on the device"), void();
-                *arguments->products = {keys, scores, offsets};
-                if (arguments->written) *arguments->written = written;
+                auto const [products, publish_status] = publish_matches(*arena, keys, scores, offsets, count);
+                if (failed(publish_status))
+                    return propagate_error(publish_status, outcome, "Failed to land the products on the device"),
+                           void();
+                *arguments->products = products;
+                if (arguments->written) *arguments->written = offsets[count];
                 if (arguments->required) *arguments->required = required;
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3992,15 +3988,11 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                 if (!maxsim_queries(variant, *arguments, query_offsets, keyed, *arena, keys, scores, offsets, required,
                                     outcome))
                     return;
-                std::size_t const landed = offsets[count];
-                if (!landed) keys = nullptr, scores = nullptr;
-                status_t published = publish(*arena, keys, landed);
-                if (succeeded(published)) published = publish(*arena, scores, landed);
-                if (succeeded(published)) published = publish(*arena, offsets, count + 1);
-                if (failed(published = drained(*arena, published)))
-                    return propagate_error(published, outcome, "Failed to land the matches on the device"), void();
-                *arguments->matches = {keys, scores, offsets};
-                if (arguments->written) *arguments->written = landed;
+                auto const [matches, publish_status] = publish_matches(*arena, keys, scores, offsets, count);
+                if (failed(publish_status))
+                    return propagate_error(publish_status, outcome, "Failed to land the matches on the device"), void();
+                *arguments->matches = matches;
+                if (arguments->written) *arguments->written = offsets[count];
                 if (arguments->required) *arguments->required = required;
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -4087,9 +4079,10 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
             if (failed(saved)) return propagate_error(saved, outcome), void();
             // A VRAM monolith is written on the host, then lands on the arena's device in one
             // upload.
-            if (status_t const landed = drained(*arena, publish(*arena, monolith, length)); failed(landed))
+            auto const [published, publish_status] = publish(*arena, monolith, length);
+            if (status_t const landed = drained(*arena, publish_status); failed(landed))
                 return propagate_error(landed, outcome, "Failed to land the monolith on the device"), void();
-            *arguments->monolith = {reinterpret_cast<uint8_t const*>(monolith), length};
+            *arguments->monolith = {reinterpret_cast<uint8_t const*>(published), length};
             propagate_error(usearch_status_success_k, outcome, nullptr);
         },
         arguments->index->variant);

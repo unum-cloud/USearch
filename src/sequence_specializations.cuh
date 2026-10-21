@@ -332,16 +332,15 @@ struct sequence_vram_nvidia_variant
         std::size_t const count = arguments.count;
         auto [plan, plan_status] = this->index.plan_insert(count);
         if (failed(plan_status)) return {{}, plan_status};
-        return this->insert_(arguments.keys, static_cast<byte_t const*>(arguments.sequences.data),
-                             {arguments.sequences.offsets, count + 1}, plan, geometry.connectivity,
+        return this->insert_(arguments.keys, bytes_tape_of(arguments.sequences, count), plan, geometry.connectivity,
                              arguments.expansion_factor, ticks, executor);
     }
 
     /** A device walk takes no host predicate. */
     expected<traversal_telemetry_t> search(usearch_sequence_search_t const& arguments, matches_landing_t& landing,
                                            progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
-        return this->search_(static_cast<byte_t const*>(arguments.queries.data), arguments.queries.offsets,
-                             arguments.count, arguments.wanted, arguments.expansion_factor, landing, ticks, executor);
+        return this->search_(bytes_tape_of(arguments.queries, arguments.count), arguments.wanted,
+                             arguments.expansion_factor, landing, ticks, executor);
     }
 };
 

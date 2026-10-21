@@ -399,14 +399,13 @@ struct vram_ragged_graph {
     };
 
     /** The bytes an executor's run must hold before a context carved over it can insert the rows
-     *  @p values and @p offsets lay out, one aligned term per carve the verb makes; zero before
-     *  @c reserve freezes the geometry. */
-    std::size_t traversal_memory_usage(byte_t const* values, std::span<std::size_t const> offsets,
-                                       insert_config_t config = {}) const noexcept {
-        if (!connectivity() || !device_.multiprocessor_count || offsets.empty()) return 0;
-        std::size_t const rows = offsets.size() - 1;
+     *  of @p tape, one aligned term per carve the verb makes; zero before @c reserve freezes the
+     *  geometry. */
+    std::size_t traversal_memory_usage(tape_view<byte_t const> tape, insert_config_t config = {}) const noexcept {
+        if (!connectivity() || !device_.multiprocessor_count || tape.offsets.empty()) return 0;
+        std::size_t const rows = tape.size();
         std::size_t longest = longest_row_;
-        u32_t const span_bytes = static_cast<u32_t>(max_of(span_bytes_, span_bytes_of_(values, offsets, longest)));
+        u32_t const span_bytes = static_cast<u32_t>(max_of(span_bytes_, span_bytes_of_(tape, longest)));
         std::size_t const rung = kits_.rung_serving_(longest);
         std::size_t const slices = std::size_t {device_.multiprocessor_count} *
                                    cuda_resident_blocks(vram_kernel_t::insert_k, 0) * vram_warps_per_block_k;
@@ -443,13 +442,13 @@ struct vram_ragged_graph {
             if (index_ && rows) index_->unclaim_(first_id, rows);
         }
 
-        /** Launches the claimed rows the tape @p values and @p offsets lay out, one row a claimed
-         *  ID, as the one-shot @ref vram_ragged_graph::insert describes. */
-        expected<insert_result_t> insert(byte_t const* values, std::span<std::size_t const> offsets,
-                                         traversal_context_t& context, insert_config_t config = {}) noexcept {
+        /** Launches the claimed rows of @p tape, one row a claimed ID, as the one-shot
+         *  @ref vram_ragged_graph::insert describes. */
+        expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
+                                         insert_config_t config = {}) noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
-            if (offsets.size() != rows + 1) return {{}, status_t::config_mismatch_k};
-            return std::exchange(index_, nullptr)->launch_claimed_(first_id, values, offsets, context, config);
+            if (tape.offsets.size() != rows + 1) return {{}, status_t::config_mismatch_k};
+            return std::exchange(index_, nullptr)->launch_claimed_(first_id, tape, context, config);
         }
 
       private:
@@ -477,28 +476,26 @@ struct vram_ragged_graph {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Inserts the rows @p values and @p offsets lay out, row @c i spanning bytes @c offsets[i] up
-     *  to @c offsets[i+1] past @p values, as the contiguous IDs @b [first_id,first_id+rows), in
+    /** Inserts the rows of @p tape as the contiguous IDs @b [first_id,first_id+rows), in
      *  admission waves riding the context's stream, then drains it and turns the watermark over
      *  the range: @ref plan_insert, then its plan's @c insert. Another batch in flight answers
      *  @c contended_k. */
-    expected<insert_result_t> insert(byte_t const* values, std::span<std::size_t const> offsets,
-                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
-        std::size_t const rows = offsets.empty() ? 0 : offsets.size() - 1;
+    expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
+                                     insert_config_t config = {}) noexcept {
+        std::size_t const rows = tape.size();
         if (!rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
         auto [plan, plan_status] = plan_insert(rows);
         if (failed(plan_status)) return {{}, plan_status};
-        return plan.insert(values, offsets, context, config);
+        return plan.insert(tape, context, config);
     }
 
   private:
 
     /** Launches the rows claimed from @p first_id, as @ref insert describes; every refusal before
      *  the launch gives the claim back. */
-    expected<insert_result_t> launch_claimed_(node_id_t first_id, byte_t const* values,
-                                              std::span<std::size_t const> offsets, traversal_context_t& context,
-                                              insert_config_t config) noexcept {
-        std::size_t const rows = offsets.size() - 1;
+    expected<insert_result_t> launch_claimed_(node_id_t first_id, tape_view<byte_t const> tape,
+                                              traversal_context_t& context, insert_config_t config) noexcept {
+        std::size_t const rows = tape.size();
         auto const refuse = [&](status_t failure) noexcept -> expected<insert_result_t> {
             unclaim_(first_id, rows);
             return {{}, failure};
@@ -510,10 +507,10 @@ struct vram_ragged_graph {
 
         // Walks prepare stored rows as much as the batch's, so the rung and spans cover both.
         std::size_t longest = longest_row_;
-        u32_t const span_bytes = static_cast<u32_t>(max_of(span_bytes_, span_bytes_of_(values, offsets, longest)));
+        u32_t const span_bytes = static_cast<u32_t>(max_of(span_bytes_, span_bytes_of_(tape, longest)));
         std::size_t const rung = kits_.rung_serving_(longest);
         if (rung == kits_type_::rungs_k) return refuse(status_t::unsupported_k);
-        std::size_t const batch_bytes = offsets[rows] - offsets[0];
+        std::size_t const batch_bytes = tape.offsets[rows] - tape.offsets[0];
         std::size_t const total_rows = first_id + rows;
 
         // Every carve and growth precedes the first launch, so a refusal publishes nothing.
@@ -527,9 +524,9 @@ struct vram_ragged_graph {
         if (status_t const grown = grow_rows_(total_rows, stream); failed(grown)) return refuse(grown);
         if (status_t const mapped = values_tape_.commit(tape_bytes_ + batch_bytes + tape_margin_k); failed(mapped))
             return refuse(mapped);
-        if (cuda_copy_async(values_tape_.base() + tape_bytes_, values + offsets[0], batch_bytes, stream) !=
+        if (cuda_copy_async(values_tape_.base() + tape_bytes_, tape.elements + tape.offsets[0], batch_bytes, stream) !=
                 cuda_success_k ||
-            cuda_copy_async(staging, offsets.data(), (rows + 1) * sizeof(u64_t), stream) != cuda_success_k ||
+            cuda_copy_async(staging, tape.offsets.data(), (rows + 1) * sizeof(u64_t), stream) != cuda_success_k ||
             cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != cuda_success_k)
             return refuse(status_t::device_error_k);
         // Every row walks twice, to insert and to re-select, each walk under an epoch of its own.
@@ -554,7 +551,7 @@ struct vram_ragged_graph {
         build.touched_count = reinterpret_cast<u32_t*>(build.touched_ids + rows * connectivity());
         if (cuda_fill_async(build.link_heads, 0xFF, total_rows * sizeof(node_id_t), stream) != cuda_success_k)
             return refuse(status_t::device_error_k);
-        status_t const launched = launch_insert_(build, shape, offsets, first_id, rung, stream);
+        status_t const launched = launch_insert_(build, shape, tape.offsets, first_id, rung, stream);
         if (failed(launched)) return refuse(launched);
 
         tape_bytes_ += batch_bytes;
@@ -604,38 +601,37 @@ struct vram_ragged_graph {
         std::size_t visited_saturations = 0;
     };
 
-    /** The bytes an executor's run must hold before a context carved over it can search the queries
-     *  @p queries and @p offsets lay out under @p config, one aligned term per carve. */
-    std::size_t traversal_memory_usage(byte_t const* queries, std::span<std::size_t const> offsets,
-                                       search_config_t config) const noexcept {
-        if (!connectivity() || !device_.multiprocessor_count || offsets.empty()) return 0;
-        std::size_t const queries_count = offsets.size() - 1;
+    /** The bytes an executor's run must hold before a context carved over it can search the
+     *  @p queries under @p config, one aligned term per carve. */
+    std::size_t traversal_memory_usage(tape_view<byte_t const> queries, search_config_t config) const noexcept {
+        if (!connectivity() || !device_.multiprocessor_count || queries.offsets.empty()) return 0;
+        std::size_t const queries_count = queries.size();
         std::size_t longest = 0;
-        u32_t const span_bytes = static_cast<u32_t>(span_bytes_of_(queries, offsets, longest));
+        u32_t const span_bytes = static_cast<u32_t>(span_bytes_of_(queries, longest));
         std::size_t const rung = kits_.rung_serving_(longest);
         gpu_arena_shape_t const arena_shape = walk_arena_shape_(config, span_bytes, rung);
         u32_t const slots = arena_shape.tail_entries ? 0u : walk_slots_(config);
         std::size_t const slices = std::size_t {walk_blocks_(queries_count, rung, slots)} * vram_warps_per_block_k;
         return aligned_(sizeof(vram_telemetry_block_t)) + 2 * aligned_(sizeof(u32_t)) +
                aligned_(slices * arena_shape.template slice_bytes<node_id_t>()) +
-               aligned_(search_staging_bytes_(queries_count, offsets[queries_count] - offsets[0], config.count));
+               aligned_(search_staging_bytes_(queries_count, queries.offsets[queries_count] - queries.offsets[0],
+                                              config.count));
     }
 
     /**
      *  @brief Finds the nearest published neighbors of every query, ascending by distance with
      *      sentinel IDs marking absent matches. Safe to overlap with insertions on other streams.
      *
-     *  @param[in] queries The bytes query @c i spans from @c offsets[i] up to @c offsets[i+1].
+     *  @param[in] queries The queries, one tape entry of bytes each.
      *  @param[out] result_ids IDs of the matches, @b [queries,count], in host or device memory.
      *  @param[out] result_distances Distances of the same matches, in host or device memory.
      *  @param[inout] context The stream every transfer and the launch ride; drained before
      *      returning.
      */
-    expected<search_result_t> search(byte_t const* queries, std::span<std::size_t const> offsets,
-                                     nk::matrix_span<node_id_t> result_ids,
+    expected<search_result_t> search(tape_view<byte_t const> queries, nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
-        std::size_t const queries_count = offsets.empty() ? 0 : offsets.size() - 1;
+        std::size_t const queries_count = queries.size();
         if (!queries_count) return {{}, status_t::success_k};
         if (!connectivity()) return {{}, status_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
@@ -644,13 +640,13 @@ struct vram_ragged_graph {
             return {{}, status_t::config_mismatch_k};
         std::size_t const visible = size();
         std::size_t longest = 0;
-        u32_t const span_bytes = static_cast<u32_t>(span_bytes_of_(queries, offsets, longest));
+        u32_t const span_bytes = static_cast<u32_t>(span_bytes_of_(queries, longest));
         std::size_t const rung = kits_.rung_serving_(longest);
         if (rung == kits_type_::rungs_k) return {{}, status_t::unsupported_k};
         cuda_stream_handle_t const stream = context.stream();
 
         // The staging holds the queries' bytes from a word boundary, their offsets, the landing.
-        std::size_t const batch_bytes = offsets[queries_count] - offsets[0];
+        std::size_t const batch_bytes = queries.offsets[queries_count] - queries.offsets[0];
         std::size_t const results_count = queries_count * config.count;
         gpu_arena_shape_t const arena_shape = walk_arena_shape_(config, span_bytes, rung);
         u32_t const slots = arena_shape.tail_entries ? 0u : walk_slots_(config);
@@ -666,8 +662,8 @@ struct vram_ragged_graph {
         distance_t* const device_distances = reinterpret_cast<distance_t*>(device_ids + results_count);
         auto const [epoch_base, epochs_status] = context.take_epochs(queries_count, arena_bytes_before);
         if (failed(epochs_status)) return {{}, epochs_status};
-        if (cuda_copy_async(staging, queries + offsets[0], batch_bytes, stream) != cuda_success_k ||
-            cuda_copy_async(staged_offsets, offsets.data(), (queries_count + 1) * sizeof(u64_t), stream) !=
+        if (cuda_copy_async(staging, queries.elements + queries.offsets[0], batch_bytes, stream) != cuda_success_k ||
+            cuda_copy_async(staged_offsets, queries.offsets.data(), (queries_count + 1) * sizeof(u64_t), stream) !=
                 cuda_success_k ||
             cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != cuda_success_k ||
             cuda_fill_async(context.assigned_rows_.get(), 0, 2 * sizeof(u32_t), stream) != cuda_success_k)
@@ -2035,15 +2031,14 @@ struct vram_ragged_graph {
                                 scratch_bytes);
     }
 
-    /** The widest span any row of @p values and @p offsets prepares into, raising @p longest to the
-     *  longest row among them. */
-    std::size_t span_bytes_of_(byte_t const* values, std::span<std::size_t const> offsets,
-                               std::size_t& longest) const noexcept {
+    /** The widest span any row of @p tape prepares into, raising @p longest to the longest row
+     *  among them. */
+    std::size_t span_bytes_of_(tape_view<byte_t const> tape, std::size_t& longest) const noexcept {
         std::size_t widest = 0;
-        for (std::size_t row = 0; row + 1 < offsets.size(); ++row) {
-            std::size_t const bytes = offsets[row + 1] - offsets[row];
-            longest = max_of(longest, bytes);
-            widest = max_of(widest, kits_.span_bytes_(values + offsets[row], bytes));
+        for (std::size_t row = 0; row != tape.size(); ++row) {
+            bytes_view_t const entry = tape[row];
+            longest = max_of(longest, entry.size());
+            widest = max_of(widest, kits_.span_bytes_(entry.data(), entry.size()));
         }
         return widest;
     }
