@@ -217,6 +217,11 @@ def _search_in_compiled(
     assert vectors.ndim == 1 or vectors.ndim == 2, "Expects a matrix or vector"
     assert not progress or _match_signature(progress, [int, int], bool), "Invalid callback"
 
+    # Asking the native extension for zero matches crashes the interpreter, so reject it up front.
+    count = kwargs.get("count")
+    if count is not None and count < 1:
+        raise ValueError(f"`count` must be a positive integer, got {count}")
+
     if vectors.ndim == 1:
         vectors = vectors.reshape(1, len(vectors))
     count_vectors = vectors.shape[0]
