@@ -5,8 +5,8 @@
  *  @brief The AMD index's kernels: one template over the kernel, the capability ceiling, the dtype,
  *      the rung and the attend value lookup.
  *
- *  Included only by the class units, which HIP-Clang compiles device-only, once per class over
- *  every compiled dtype. Each @c amd_kernel instantiation turns the plain records of
+ *  Included by the per-dtype kernel units, which HIP-Clang compiles device-only once per class,
+ *  and by the class units host-only. Each @c amd_kernel instantiation turns the plain records of
  *  @c vram_index.hpp into the shared views of @c vram_index.cuh and runs the shared bodies there
  *  through its schedule's @ref hip_warp, and the host finds it by the symbol @c vram_kernel_symbol
  *  spells.
@@ -67,10 +67,11 @@ bool vram_amd_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_a
 #pragma region Kernels
 
 /** Every AMD kernel: @p kernel_ picks the body, @p capability_ and @p dtype_ the kit,
- *  @p capability_ alone the schedule and its warp, @p slots_ the rung, and @p lookup_ an attend's
- *  value lookup through @ref amd_value_lookup_of. The blocks @ref hip_resident_blocks keeps per
- *  compute unit bound its registers and reach the body, which sizes its load window by them. */
-template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_, u32_t lookup_>
+ *  @p capability_ alone the schedule and its warp, @p slots_ the rung, and @p lookup_type_ an
+ *  attend's value lookup record, @c void for every other kernel. The blocks
+ *  @ref hip_resident_blocks keeps per compute unit bound its registers and reach the body, which
+ *  sizes its load window by them. */
+template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_, typename lookup_type_>
 __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capability_),
                                   hip_waves_per_simd(hip_resident_blocks<capability_, dtype_>(kernel_, slots_)))
     amd_kernel(vram_arguments_t arguments) {
@@ -103,26 +104,19 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
                                                                    vram_view<kit_t, warp_t>(arguments.multiply_sink),
                                                                    vram_no_rescoring {});
     else if constexpr (kernel_ == vram_kernel_t::attend_k) {
-        using value_lookup_t = typename amd_value_lookup_of<lookup_>::type;
         vram_attend_t const& attend = arguments.attend;
         vram_rescoring_t const& heads = arguments.rescoring;
-        value_lookup_t value_lookup;
-        warp_t::copy_bytes(&value_lookup, attend.value_lookup, sizeof(value_lookup_t));
+        lookup_type_ value_lookup;
+        warp_t::copy_bytes(&value_lookup, attend.value_lookup, sizeof(lookup_type_));
         vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
             vram_view<kit_t>(arguments.search),
-            vram_attend_sink<kit_t, warp_t, value_lookup_t> {value_lookup, attend.outputs, attend.states, attend.missed,
-                                                             attend.logit_scale, attend.heads_count, attend.columns},
+            vram_attend_sink<kit_t, warp_t, lookup_type_> {value_lookup, attend.outputs, attend.states, attend.missed,
+                                                           attend.logit_scale, attend.heads_count, attend.columns},
             vram_heads_rescoring<kit_t, warp_t> {reinterpret_cast<typename kit_t::fragment_t const*>(heads.heads),
                                                  nullptr, heads.heads_count, heads.row_fragments});
     }
     else if constexpr (kernel_ == vram_kernel_t::merge_back_links_k)
-        vram_merge_back_links<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.refine), graph.bucket_ids,
-                                                                  graph.bucket_counts, graph.bucket_width,
-                                                                  graph.touched);
-    else if constexpr (kernel_ == vram_kernel_t::scatter_back_links_k)
-        vram_scatter_back_links<warp_t>(graph.neighbors, graph.rows_count, graph.first_id, graph.walk_count,
-                                        graph.node_ids, graph.connectivity, graph.bucket_width, graph.bucket_ids,
-                                        graph.bucket_counts, graph.touched);
+        vram_merge_back_links<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.refine));
     else if constexpr (kernel_ == vram_kernel_t::derive_norms_k)
         vram_derive_norms<kit_t, warp_t>(vram_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
     else if constexpr (kernel_ == vram_kernel_t::rebase_links_k)
@@ -172,25 +166,25 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
 
 template <nk_capability_t capability_, nk_dtype_t dtype_, std::size_t... rungs_>
 void amd_instantiate_rungs(std::index_sequence<rungs_...>) {
-    (static_cast<void>(&amd_kernel<amd_rungs[rungs_].kernel, capability_, dtype_, amd_rungs[rungs_].slots, 0>), ...);
+    (static_cast<void>(&amd_kernel<amd_rungs[rungs_].kernel, capability_, dtype_, amd_rungs[rungs_].slots, void>), ...);
 }
 
-template <nk_capability_t capability_, nk_dtype_t dtype_, u32_t lookup_, std::size_t... rungs_>
+template <nk_capability_t capability_, nk_dtype_t dtype_, typename lookup_type_, std::size_t... rungs_>
 void amd_instantiate_attends(std::index_sequence<rungs_...>) {
-    (static_cast<void>(&amd_kernel<vram_kernel_t::attend_k, capability_, dtype_, amd_walk_rungs[rungs_], lookup_>),
+    (static_cast<void>(&amd_kernel<vram_kernel_t::attend_k, capability_, dtype_, amd_walk_rungs[rungs_], lookup_type_>),
      ...);
 }
 
 /** Instantiates every kernel one dtype exports under one ceiling, and its attends over each of
- *  @p lookups_; a unit compiling a code object names it once per compiled dtype. Host-side, since
- *  HIP-Clang refuses a kernel's address in device code, while a host reference still makes the
- *  device pass emit it. Only a device-only entry names it: on a host pass the addresses would emit
- *  launch stubs and a fat-binary registration the library never links, since it loads the class's
+ *  @p lookup_types_; a unit compiling a code object names it once per compiled dtype. Host-side,
+ *  since HIP-Clang refuses a kernel's address in device code, while a host reference still makes
+ *  the device pass emit it. Only a device-only entry names it: on a host pass the addresses would
+ *  emit launch stubs and a fat-binary registration the library never links, since it loads each
  *  code object itself. */
-template <nk_capability_t capability_, nk_dtype_t dtype_, u32_t... lookups_>
+template <nk_capability_t capability_, nk_dtype_t dtype_, typename... lookup_types_>
 void amd_instantiate() {
     amd_instantiate_rungs<capability_, dtype_>(std::make_index_sequence<sizeof(amd_rungs) / sizeof(amd_rungs[0])> {});
-    (amd_instantiate_attends<capability_, dtype_, lookups_>(
+    (amd_instantiate_attends<capability_, dtype_, lookup_types_>(
          std::make_index_sequence<sizeof(amd_walk_rungs) / sizeof(amd_walk_rungs[0])> {}),
      ...);
 }

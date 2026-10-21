@@ -31,6 +31,7 @@
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfet_t` & waiter kin
 #include <forkunion/types.hpp>        // `fu::spin_mutex_t` - the ticks' lock
 #include <numkong/capabilities.h>     // `nk_capability_t`, `nk_cpu_configure_thread` - compute masks, AMX grant
+#include <numkong/vector.hpp>         // `nk::vector_view` - the rows a value lookup resolves
 
 #include "usearch/usearch.h"                 // every modality's argument structures
 #include "usearch/utilities/nvme_device.hpp" // `nvme_executor_t`, `io_engine_config_t`
@@ -171,6 +172,34 @@ struct predicate_t {
             admissions[lane] = static_cast<admission_t>(c_admissions[lane]);
     }
 };
+
+/** The C value lookup lifted onto the index's key vocabulary: one callback per scored batch, at
+ *  the batch's static extent, a NULL row answering an empty view that refuses the call. A GPU walk
+ *  takes it as bytes and calls it one key at a time on the device. */
+struct value_lookup_t {
+    usearch_value_lookup_t callback;
+    void* state;
+    usearch_scalar_t scalar;
+    std::size_t dimensions;
+
+    template <typename scalar_type_, std::size_t extent_>
+    void operator()(std::span<us::utilities::uuid_t const, extent_> keys,
+                    std::span<nk::vector_view<scalar_type_>, extent_> rows) const noexcept {
+        std::array<usearch_key_t, extent_> batch;
+        std::array<void const*, extent_> found;
+        for (std::size_t lane = 0; lane != extent_; ++lane) batch[lane] = std::bit_cast<usearch_key_t>(keys[lane]);
+        callback(state, batch.data(), extent_, scalar, dimensions, found.data());
+        for (std::size_t lane = 0; lane != extent_; ++lane)
+            rows[lane] = found[lane]
+                             ? nk::vector_view<scalar_type_> {static_cast<scalar_type_ const*>(found[lane]), dimensions}
+                             : nk::vector_view<scalar_type_> {};
+    }
+};
+
+/** Spells @c value_lookup_t into the name of an attend kernel instantiated over it. */
+inline void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<value_lookup_t>) noexcept {
+    symbol.append_name("value_lookup_t");
+}
 
 /** The allocator every per-call buffer of one executor thread comes from: its arena, rewound per
  *  verb. */
@@ -739,6 +768,32 @@ inline constexpr bool variant_carries = false;
 template <typename alternative_type_, typename... alternative_types_>
 inline constexpr bool variant_carries<alternative_type_, std::variant<alternative_types_...>> =
     (std::is_same_v<alternative_type_, alternative_types_> || ...);
+
+/** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, the Ampere & Ada bits
+ *  accumulate, while Hopper, Blackwell & RTX Blackwell each run only their own kits, and Rubin
+ *  rides the Blackwell kits until its own land. AMD and Apple generations accumulate over their
+ *  vendor's floor. */
+constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcept {
+    nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k, ada = ampere | nk_cap_ada_k;
+    nk_capability_t const cdna3 = nk_cap_rocm_k | nk_cap_cdna3_k, cdna4 = cdna3 | nk_cap_cdna4_k;
+    nk_capability_t const metal9 = nk_cap_metal_k | nk_cap_apple9_k;
+    switch (gpu_class) {
+    case gpu_class_t::nvidia_ada_k: return ada;
+    case gpu_class_t::nvidia_hopper_k: return ada | nk_cap_hopper_k;
+    case gpu_class_t::nvidia_blackwell_k:
+    case gpu_class_t::nvidia_rubin_k: return ada | nk_cap_blackwell_k;
+    case gpu_class_t::nvidia_blackwellrtx_k: return ada | nk_cap_blackwellrtx_k;
+    case gpu_class_t::amd_cdna3_k: return cdna3;
+    case gpu_class_t::amd_cdna4_k: return cdna4;
+    case gpu_class_t::amd_cdna5_k: return cdna4 | nk_cap_cdna5_k;
+    case gpu_class_t::apple_metal7_k: return nk_cap_metal_k;
+    case gpu_class_t::apple_metal9_k: return metal9;
+    case gpu_class_t::apple_metal10_k: return metal9 | nk_cap_apple10_k;
+    case gpu_class_t::nvidia_ampere_k: return ampere;
+    case gpu_class_t::unknown_k: return nk_cap_serial_k;
+    }
+    return nk_cap_serial_k;
+}
 
 // The device listing crosses the ABI by casts, so the C vendors and classes mirror the engine's.
 static_assert(static_cast<u32_t>(gpu_vendor_t::apple_k) == usearch_gpu_vendor_apple_k);

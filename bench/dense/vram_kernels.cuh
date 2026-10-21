@@ -15,8 +15,6 @@
 
 #include "usearch/dense/vram_nvidia_index.cuh"
 
-namespace us = unum::usearch;
-
 namespace unum::usearch::bench::dense {
 using namespace unum::usearch::utilities;
 using namespace unum::usearch::dense;
@@ -51,24 +49,25 @@ struct cuda_bench_fatbin {
 };
 
 /** Resolves an ID, a node on one device or a key across the shards, to its value row in a device
- *  table of rows @c pitch bytes apart, the table starting at ID @c first_id;
- *  @c kernel_attention_lookup_t adds the call. */
+ *  table of rows @c pitch bytes apart, the table starting at ID @c first_id. */
 struct attention_value_lookup_t {
-
-    /** Names the lookup to the attend kernels the benchmarks' fatbins carry. */
-    inline static constexpr u32_t device_lookup_k = 1;
-
     byte_t const* rows;
     std::size_t pitch;
     std::size_t first_id = 0;
 };
 
-/** The attention lookup as the kernels call it: the host's record, byte for byte, which an attend
- *  kernel copies its argument into. */
-struct kernel_attention_lookup_t : attention_value_lookup_t {
-    __device__ void const* operator()(std::size_t id) const noexcept { return rows + (id - first_id) * pitch; }
-};
-static_assert(sizeof(kernel_attention_lookup_t) == sizeof(attention_value_lookup_t));
+/** Points at the value row of @p id in the table of @p lookup. */
+__device__ inline void const* vram_value_row(attention_value_lookup_t const& lookup, std::size_t id) noexcept {
+    return lookup.rows + (id - lookup.first_id) * lookup.pitch;
+}
+
+/** Spells @c attention_value_lookup_t into an attend kernel's name, @c S0_ being
+ *  @c unum::usearch. */
+inline void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<attention_value_lookup_t>) noexcept {
+    symbol.append("NS0_5bench5dense");
+    symbol.append_name("attention_value_lookup_t");
+    symbol.append("E");
+}
 
 /** The lookup each shard of the multi-device algebra benchmark attends through, by its keys. */
 using keyed_attention_lookup_t = vram_keyed_lookup<u32_t, attention_value_lookup_t>;
@@ -77,23 +76,10 @@ using keyed_attention_lookup_t = vram_keyed_lookup<u32_t, attention_value_lookup
  *  with the attends over both algebra lookups. */
 template <nk_dtype_t dtype_>
 __device__ void instantiate_cuda_ceilings() noexcept {
-    cuda_instantiate<cuda_ceiling_of(nk_cap_ampere_k), dtype_, attention_value_lookup_t::device_lookup_k,
-                     keyed_attention_lookup_t::device_lookup_k>();
+    cuda_instantiate<cuda_ceiling_of(nk_cap_ampere_k), dtype_, attention_value_lookup_t, keyed_attention_lookup_t>();
     if constexpr (cuda_compiled_generation_k != nk_cap_ampere_k)
-        cuda_instantiate<cuda_ceiling_of(cuda_compiled_generation_k), dtype_, attention_value_lookup_t::device_lookup_k,
-                         keyed_attention_lookup_t::device_lookup_k>();
+        cuda_instantiate<cuda_ceiling_of(cuda_compiled_generation_k), dtype_, attention_value_lookup_t,
+                         keyed_attention_lookup_t>();
 }
 
 } // namespace unum::usearch::bench::dense
-
-/** The attend kernels resolve rows by node ID on the one device. */
-template <>
-struct us::dense::cuda_value_lookup_of<us::bench::dense::attention_value_lookup_t::device_lookup_k> {
-    using type = us::bench::dense::kernel_attention_lookup_t;
-};
-
-/** The key-level lookup each shard's attend kernels resolve rows through. */
-template <>
-struct us::dense::cuda_value_lookup_of<us::bench::dense::keyed_attention_lookup_t::device_lookup_k> {
-    using type = us::dense::vram_keyed_lookup<us::utilities::u32_t, us::bench::dense::kernel_attention_lookup_t>;
-};

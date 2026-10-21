@@ -849,6 +849,21 @@ __device__ __forceinline__ void vram_insert_one( //
     warp_t::sync();
 }
 
+/** Whether @p bitset - a reachability audit's reached set or frontier, a refinement pass's walked
+ *  rows - holds @p row. Every access is relaxed: the launch boundary orders the marks before any
+ *  later launch or host copy reads them. */
+template <typename warp_type_>
+__device__ __forceinline__ bool vram_bitset_contains(vram_bitset_t bitset, u32_t row) noexcept {
+    return (warp_type_::load_relaxed(bitset.words[row >> 5]) >> (row & 31u)) & 1u;
+}
+
+/** Sets the bit of @p row, answering whether this call was the one that set it. */
+template <typename warp_type_>
+__device__ __forceinline__ bool vram_bitset_insert(vram_bitset_t bitset, u32_t row) noexcept {
+    u32_t const bit = 1u << (row & 31u);
+    return !(warp_type_::fetch_or_relaxed(bitset.words[row >> 5], bit) & bit);
+}
+
 /** Geometry & storage pointers one refinement launch operates on: the live storage it reads, and
  *  the shadow neighbors matrix it writes - same @b [rows,connectivity] shape, observed by no
  *  reader. */
@@ -903,13 +918,24 @@ struct vram_refine_view {
     u32_t const* part_bases = nullptr;
     u32_t parts = 0;
     u32_t round = 0;
+
+    /** Each node's last walker of the pass that picked it, @b [rows], unknown for none: the chain
+     *  the merge folds back, as an insertion's back-link does. */
+    u32_t* link_heads = nullptr;
+
+    /** The walker each walker was chained before, beside its pick, @b [rows,connectivity] like the
+     *  shadow neighbors. */
+    u32_t* link_next = nullptr;
+
+    /** The rows the pass walked, whose forward picks the merge folds in first. */
+    vram_bitset_t walked;
 };
 
 /** Re-selects the neighbors of @p node_id: the node's own vector is the query, its current
- *  neighbors seed the walk so every one already wired competes in the re-selection, and the diverse
- *  selection lands in the shadow slots. Over several parts the node first walks across the
- *  neighboring group of parts from empty candidates, so that group's nearest compete too. Read-only
- *  on the live storage. */
+ *  neighbors seed the walk so every one already wired competes in the re-selection, the diverse
+ *  selection lands in the shadow slots, and the node chains itself onto every pick for the merge.
+ *  Over several parts the node first walks across the neighboring group of parts from empty
+ *  candidates, so that group's nearest compete too. Read-only on the live storage. */
 template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_, vram_frontier frontier_>
 __device__ __forceinline__ void vram_refine_one( //
     vram_refine_view<kit_> const& view, node_id_t node_id,
@@ -986,17 +1012,31 @@ __device__ __forceinline__ void vram_refine_one( //
         shadow_slots[slot] = slot < selected_count ? selection.selected_ids[slot]
                              : slot == 0           ? node_id
                                                    : node_id_unknown_k;
+    if (lane == 0) vram_bitset_insert<warp_t>(view.walked, node_id);
+    // Chain this walker onto every node it picked, beside that pick, for the merge to fold back. A
+    // heal's islands chain nowhere: re-judging the rows they pick would drop the links that
+    // reconnected earlier islands.
+    u32_t* const own_links = vram_row(view.link_next, node_id, storage.connectivity);
+    if (!view.node_ids)
+        for (u32_t slot = lane; slot < selected_count; slot += warp_t::width_k)
+            own_links[slot] = warp_t::exchange_acquire(view.link_heads[selection.selected_ids[slot]], node_id);
     warp_t::sync();
 }
 
-/** Re-selects one node's neighbors from the @p candidates_count distinct candidates staged in
- *  @c selection.candidate_ids, the diversity heuristic over them ascending by distance to the
- *  node, backfilled with the nearest pruned ones, and lands them in its live row slot by slot, so
- *  a concurrent walk reads every slot whole. The node's own row is the cache's @p query_row, its
- *  last. */
+/**
+ *  @brief Re-selects one node's neighbors from the @p candidates_count distinct candidates staged
+ *      in @c selection.candidate_ids.
+ *
+ *  The diversity heuristic runs over them ascending by distance to the node, backfilled with the
+ *  nearest pruned ones, and lands them in its live row slot by slot, so a concurrent walk reads
+ *  every slot whole. The node's own row is the cache's @p query_row, its last, and the first
+ *  @p incumbents candidates are the members its live row holds.
+ *
+ *  @return Whether a candidate past them was kept: a member the row lacked.
+ */
 template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
-__device__ __forceinline__ void vram_reselect_staged( //
-    vram_flat_view<kit_> const& storage, node_id_t node_id, u32_t candidates_count,
+__device__ __forceinline__ bool vram_reselect_staged( //
+    vram_flat_view<kit_> const& storage, node_id_t node_id, u32_t candidates_count, u32_t incumbents,
     vram_vector_cache<typename kit_::fragment_t> cache, u32_t query_row, schedule_& schedule,
     typename kit_::norms_t* candidate_norms, vram_selection_scratch<node_id_t> selection,
     vram_gathered<kit_, typename schedule_::warp_t>& gathered, vram_telemetry_t& telemetry, u32_t lane) noexcept {
@@ -1084,101 +1124,61 @@ __device__ __forceinline__ void vram_reselect_staged( //
         warp_t::sync();
     }
 
-    // Land the final neighbors in the live matrix - the insertion's slot convention. The pass owns
-    // the graph, so a slot-wise comparison is the settling signal.
+    // Land the final neighbors in the live matrix - the insertion's slot convention - rewriting
+    // only the slots that differ.
     warp_t::sync();
     vram_neighbors_ref<warp_t, node_id_t> const live_row {storage.neighbors_for(node_id), storage.connectivity};
-    typename warp_t::mask_t changed_mask = 0;
+    typename warp_t::mask_t gained_mask = 0;
     for (u32_t slot_base = 0; slot_base < storage.connectivity; slot_base += warp_t::width_k) { // Warp-uniform.
         u32_t const slot = slot_base + lane;
         u32_t const value = slot < refined_count ? candidate_ids[kept_positions[slot]]
                             : slot == 0          ? node_id
                                                  : node_id_unknown_k;
-        bool const differs = slot < storage.connectivity && live_row.load_slot(slot) != value;
-        changed_mask |= warp_t::ballot(differs);
-        if (differs) live_row.store_slot(slot, value);
+        // The incumbents lead the cache rows, so a kept row past them is a member the row lacked.
+        gained_mask |= warp_t::ballot(slot < refined_count && kept_positions[slot] >= incumbents);
+        if (slot < storage.connectivity && live_row.load_slot(slot) != value) live_row.store_slot(slot, value);
     }
-    telemetry.changed_nodes += changed_mask != 0;
     warp_t::sync();
+    return gained_mask != 0;
 }
 
-/** Selects one node's final neighbors from its forward picks and its reverse bucket through
- *  @ref vram_reselect_staged. */
+/**
+ *  @brief Back-links one node in rounds, so no newcomer is dropped.
+ *
+ *  Each round caches the live row and as many newcomers as fit before the node's own row at
+ *  @p query_row - a refinement's @p forward_picks first, then the chain from @p link_heads through
+ *  @p link_next - skipping any the round already holds, appends them into the free slots when they
+ *  all fit, and otherwise re-selects over both through @ref vram_reselect_staged; the next round
+ *  starts from the row the last one wrote. An insertion's chain links picks, pick @b p naming
+ *  newcomer @b first_id+p/connectivity; a refinement's links walkers, each found beside its pick in
+ *  @p walker_rows, so the chain spans any row count.
+ *
+ *  @return Whether a round kept a member its live row lacked.
+ */
 template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
-__device__ __forceinline__ void vram_merge_back_links_one( //
-    vram_refine_view<kit_> const& view, u32_t const* bucket_ids, u32_t const* bucket_counts, u32_t bucket_width,
-    node_id_t node_id, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
+__device__ __forceinline__ bool vram_back_link_one( //
+    vram_flat_view<kit_> const& storage, node_id_t node_id, u32_t const* forward_picks, u32_t const* walker_rows,
+    u32_t const* link_heads, u32_t const* link_next, node_id_t first_id,
+    vram_vector_cache<typename kit_::fragment_t> cache, u32_t query_row, schedule_& schedule,
     typename kit_::norms_t* candidate_norms, vram_selection_scratch<node_id_t> selection,
     vram_gathered<kit_, typename schedule_::warp_t>& gathered, vram_telemetry_t& telemetry, u32_t lane) noexcept {
 
     using warp_t = typename schedule_::warp_t;
-    vram_flat_view<kit_> const& storage = view.storage;
+    u32_t const connectivity = storage.connectivity;
     u32_t* const candidate_ids = selection.candidate_ids;
-    // The last cache row hosts the node's own vector, past a row of forward picks and a bucket.
-    u32_t const query_row = view.selection_rows - 1;
+    vram_neighbors_ref<warp_t, node_id_t> const live_row {storage.neighbors_for(node_id), connectivity};
 
-    // Stage the forward picks; the shadow neighbors are this pass's own output, already distinct.
-    u32_t candidates_count = 0;
-    u32_t const* const shadow_slots = vram_row(view.shadow_neighbors, node_id, storage.connectivity);
-    for (u32_t slot_base = 0; slot_base < storage.connectivity; slot_base += warp_t::width_k) {
-        u32_t const slot = slot_base + lane;
-        u32_t const forward_id = slot < storage.connectivity ? shadow_slots[slot] : node_id_unknown_k;
-        bool const usable = forward_id != node_id_unknown_k && forward_id != node_id;
-        typename warp_t::mask_t const usable_mask = warp_t::ballot(usable);
-        u32_t const ordinal = warp_t::count(usable_mask & warp_t::below(lane));
-        if (usable) candidate_ids[candidates_count + ordinal] = forward_id;
-        candidates_count += warp_t::count(usable_mask);
-        warp_t::sync();
-    }
-    u32_t const forward_count = candidates_count;
-
-    // Stage the reverse bucket, dropping IDs the forward prefix already holds - mutual picks land
-    // in both.
-    u32_t const landed = min_of(bucket_counts[node_id], bucket_width);
-    u32_t const* const reverse_slots = vram_row(bucket_ids, node_id, bucket_width);
-    for (u32_t slot_base = 0; slot_base < landed; slot_base += warp_t::width_k) {
-        u32_t const slot = slot_base + lane;
-        u32_t const reverse_id = slot < landed ? reverse_slots[slot] : node_id_unknown_k;
-        bool usable = reverse_id != node_id_unknown_k && reverse_id != node_id;
-        for (u32_t forward_index = 0; usable && forward_index != forward_count; ++forward_index)
-            usable = candidate_ids[forward_index] != reverse_id;
-        typename warp_t::mask_t const usable_mask = warp_t::ballot(usable);
-        u32_t const ordinal = warp_t::count(usable_mask & warp_t::below(lane));
-        if (usable) candidate_ids[candidates_count + ordinal] = reverse_id;
-        candidates_count += warp_t::count(usable_mask);
-        warp_t::sync();
-    }
-    vram_reselect_staged<kit_, schedule_, resident_blocks_>(storage, node_id, candidates_count, cache, query_row,
-                                                            schedule, candidate_norms, selection, gathered, telemetry,
-                                                            lane);
-}
-
-/** Back-links one node a wave of newcomers picked, chasing their picks from @p link_heads through
- *  @p link_next in rounds: each round caches the live row and as many newcomers as fit before the
- *  node's own row at @p query_row, appends them into the free slots when they all fit, and
- *  otherwise re-selects over both through @ref vram_reselect_staged; the next round starts from
- *  the row the last one wrote, so no newcomer is dropped. Pick @b p is newcomer
- *  @b first_id+p/connectivity. */
-template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
-__device__ __forceinline__ void vram_back_link_one( //
-    vram_flat_view<kit_> const& storage, node_id_t node_id, u32_t const* link_heads, u32_t const* link_next,
-    node_id_t first_id, vram_vector_cache<typename kit_::fragment_t> cache, u32_t query_row, schedule_& schedule,
-    typename kit_::norms_t* candidate_norms, vram_selection_scratch<node_id_t> selection,
-    vram_gathered<kit_, typename schedule_::warp_t>& gathered, vram_telemetry_t& telemetry, u32_t lane) noexcept {
-
-    using warp_t = typename schedule_::warp_t;
-    u32_t* const candidate_ids = selection.candidate_ids;
-    vram_neighbors_ref<warp_t, node_id_t> const live_row {storage.neighbors_for(node_id), storage.connectivity};
-
-    // A chain is serial, so one lane follows it, and the rounds resume where it stopped; no lane
-    // writes the head before the call returns, so every lane reads it.
-    u32_t pick = link_heads[node_id];
-    while (pick != node_id_unknown_k) {
+    // Every lane follows the serial chain in step, reading the same words; the rounds resume where
+    // it stopped.
+    u32_t forward_slot = forward_picks ? 0 : connectivity;
+    u32_t link = link_heads[node_id];
+    bool gained = false;
+    while (forward_slot != connectivity || link != node_id_unknown_k) {
         // The live neighbors first, a self-loop in slot 0 meaning none, then the newcomers.
         u32_t live_count = 0;
-        for (u32_t slot_base = 0; slot_base < storage.connectivity; slot_base += warp_t::width_k) {
+        for (u32_t slot_base = 0; slot_base < connectivity; slot_base += warp_t::width_k) {
             u32_t const slot = slot_base + lane;
-            u32_t const live_id = slot < storage.connectivity ? live_row.load_slot(slot) : node_id_unknown_k;
+            u32_t const live_id = slot < connectivity ? live_row.load_slot(slot) : node_id_unknown_k;
             bool const usable = live_id != node_id_unknown_k && live_id != node_id;
             typename warp_t::mask_t const usable_mask = warp_t::ballot(usable);
             if (usable) candidate_ids[live_count + warp_t::count(usable_mask & warp_t::below(lane))] = live_id;
@@ -1186,26 +1186,52 @@ __device__ __forceinline__ void vram_back_link_one( //
             warp_t::sync();
         }
         u32_t candidates_count = live_count;
-        if (lane == 0)
-            for (; pick != node_id_unknown_k && candidates_count != query_row; pick = link_next[pick])
-                candidate_ids[candidates_count++] = first_id + pick / storage.connectivity;
-        candidates_count = warp_t::shuffle(candidates_count, 0);
-        pick = warp_t::shuffle(pick, 0);
-        warp_t::sync();
+        while (candidates_count != query_row) {
+            u32_t newcomer = node_id_unknown_k;
+            if (forward_slot != connectivity) newcomer = forward_picks[forward_slot++];
+            else if (link == node_id_unknown_k) break;
+            else if (!walker_rows) newcomer = first_id + link / connectivity, link = link_next[link];
+            else {
+                // The walker threaded its link beside its pick of this node.
+                u32_t const* const picks = vram_row(walker_rows, link, connectivity);
+                u32_t slot = 0;
+                for (u32_t slot_base = 0;; slot_base += warp_t::width_k) {
+                    typename warp_t::mask_t const found = warp_t::ballot(slot_base + lane < connectivity &&
+                                                                         picks[slot_base + lane] == node_id);
+                    if (found) {
+                        slot = slot_base + warp_t::first(found);
+                        break;
+                    }
+                }
+                u32_t const* const links = vram_row(link_next, link, connectivity);
+                newcomer = link, link = links[slot];
+            }
+            if (newcomer == node_id_unknown_k || newcomer == node_id) continue;
+            // Mutual picks reach a node twice: through its live row or forward picks, and through
+            // its chain.
+            bool held = false;
+            for (u32_t index = lane; index < candidates_count; index += warp_t::width_k)
+                held |= candidate_ids[index] == newcomer;
+            if (warp_t::any(held)) continue;
+            if (lane == 0) candidate_ids[candidates_count] = newcomer;
+            ++candidates_count;
+            warp_t::sync();
+        }
 
         // Room for every newcomer left: append them past the live neighbors, a published-empty
         // row's self-loop giving way to the first, and nothing to re-judge.
-        if (candidates_count <= storage.connectivity) {
+        if (candidates_count <= connectivity) {
             for (u32_t slot = live_count + lane; slot < candidates_count; slot += warp_t::width_k)
                 live_row.store_slot(slot, candidate_ids[slot]);
             warp_t::sync();
-            return;
+            return gained || candidates_count != live_count;
         }
         ++telemetry.reselections;
-        vram_reselect_staged<kit_, schedule_, resident_blocks_>(storage, node_id, candidates_count, cache, query_row,
-                                                                schedule, candidate_norms, selection, gathered,
-                                                                telemetry, lane);
+        gained |= vram_reselect_staged<kit_, schedule_, resident_blocks_>(
+            storage, node_id, candidates_count, live_count, cache, query_row, schedule, candidate_norms, selection,
+            gathered, telemetry, lane);
     }
+    return gained;
 }
 
 /** Writes each query's nearest @c count IDs and distances out of a search walk, ascending, with
@@ -1562,7 +1588,10 @@ __device__ __forceinline__ vram_refine_view<kit_> vram_view(vram_refine_t const&
             refine.sampling_bound,
             refine.part_bases,
             refine.parts,
-            refine.round};
+            refine.round,
+            refine.link_heads,
+            refine.link_next,
+            refine.walked};
 }
 template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_search_sink<kit_> vram_view(vram_search_sink_t const& sink) noexcept {
@@ -1586,21 +1615,6 @@ __device__ __forceinline__ vram_ranking_view vram_view(vram_ranking_t const& ran
 #pragma endregion Views
 
 #pragma region Builders
-
-/** Whether @p bitset - a reachability audit's reached set or frontier, a refinement pass's touched
- *  rows - holds @p row. Every access is relaxed: the launch boundary orders the marks before any
- *  later launch or host copy reads them. */
-template <typename warp_type_>
-__device__ __forceinline__ bool vram_bitset_contains(vram_bitset_t bitset, u32_t row) noexcept {
-    return (warp_type_::load_relaxed(bitset.words[row >> 5]) >> (row & 31u)) & 1u;
-}
-
-/** Sets the bit of @p row, answering whether this call was the one that set it. */
-template <typename warp_type_>
-__device__ __forceinline__ bool vram_bitset_insert(vram_bitset_t bitset, u32_t row) noexcept {
-    u32_t const bit = 1u << (row & 31u);
-    return !(warp_type_::fetch_or_relaxed(bitset.words[row >> 5], bit) & bit);
-}
 
 /**
  *  @brief One warp inserts one node, and warps never synchronize beyond per-neighbor slot-0
@@ -1694,8 +1708,8 @@ __device__ __forceinline__ void vram_back_link(vram_build_view<kit_> const& view
         node_id_t const node_id = view.touched_ids[offset];
         vram_telemetry_t telemetry;
         vram_back_link_one<kit_, schedule_, resident_blocks_>( //
-            view.storage, node_id, view.link_heads, view.link_next, view.first_id, cache, selection_rows - 1, schedule,
-            candidate_norms, selection, gathered[warp], telemetry, lane);
+            view.storage, node_id, nullptr, nullptr, view.link_heads, view.link_next, view.first_id, cache,
+            selection_rows - 1, schedule, candidate_norms, selection, gathered[warp], telemetry, lane);
         if (lane == 0) view.link_heads[node_id] = node_id_unknown_k;
         telemetry.template flush<warp_t, vram_traversal_t::inserting_k>(view.telemetry, lane);
     }
@@ -1749,37 +1763,11 @@ __device__ __forceinline__ void vram_refine(vram_refine_view<kit_> const& view) 
     }
 }
 
-/** Scatters the walked rows' shadow neighbors in reverse: every forward pick @b u → @b v lands
- *  @b u in @b v's reverse bucket, and marks both rows in @p touched - the rows the merge
- *  re-selects. The walked rows are the range from @p first_id, or a heal round's islands listed in
- *  @p node_ids, which mark only themselves and land in no bucket; appends past @p bucket_width are
- *  counted, never written. */
-template <typename warp_type_>
-__device__ __forceinline__ void vram_scatter_back_links(u32_t const* shadow_neighbors, u32_t rows_count, u32_t first_id,
-                                                        u32_t walk_count, u32_t const* node_ids, u32_t connectivity,
-                                                        u32_t bucket_width, u32_t* bucket_ids, u32_t* bucket_counts,
-                                                        vram_bitset_t touched) {
-    vram_grid_warp_t const warp = vram_grid_warp<warp_type_>();
-    for (u32_t offset = warp.index; offset < walk_count; offset += warp.count) {
-        u32_t const row = node_ids ? node_ids[offset] : first_id + offset;
-        if (warp.lane == 0) vram_bitset_insert<warp_type_>(touched, row);
-        if (node_ids) continue;
-        vram_for_each_link<warp_type_>(
-            shadow_neighbors, connectivity, rows_count, row, warp.lane, [&](u32_t target) noexcept {
-                vram_bitset_insert<warp_type_>(touched, target);
-                u32_t const landing = warp_type_::fetch_add_relaxed(bucket_counts[target], 1u);
-                u32_t* const bucket = vram_row(bucket_ids, target, bucket_width);
-                if (landing < bucket_width) bucket[landing] = row;
-            });
-    }
-}
-
-/** One warp merges one node's forward & reverse candidates into its final neighbors, assigning
- *  itself node IDs from the pass counter. */
+/** One warp folds one node's forward picks and the walkers chained onto it into its live row
+ *  through @ref vram_back_link_one, assigning itself node IDs from the pass counter; only a walked
+ *  row that gained a member counts as changed. */
 template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
-__device__ __forceinline__ void vram_merge_back_links(vram_refine_view<kit_> const& view, u32_t const* bucket_ids,
-                                                      u32_t const* bucket_counts, u32_t bucket_width,
-                                                      vram_bitset_t touched) {
+__device__ __forceinline__ void vram_merge_back_links(vram_refine_view<kit_> const& view) {
     using warp_t = typename schedule_::warp_t;
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ vram_gathered<kit_, warp_t> gathered[vram_warps_per_block_k];
@@ -1799,14 +1787,17 @@ __device__ __forceinline__ void vram_merge_back_links(vram_refine_view<kit_> con
         u32_t node_id = lane == 0 ? warp_t::fetch_add_relaxed(*view.assigned_rows, 1u) : 0;
         node_id = view.first_id + warp_t::shuffle(node_id, 0);
         if (node_id >= view.end_id) return;
-        // A row the walk neither re-selected nor picked keeps its neighbors: re-judging it could
-        // only drop links.
-        if (!vram_bitset_contains<warp_t>(touched, node_id)) continue;
+        // A row the pass neither walked nor picked keeps its neighbors.
+        bool const walked = vram_bitset_contains<warp_t>(view.walked, node_id);
+        if (!walked && view.link_heads[node_id] == node_id_unknown_k) continue;
 
         vram_telemetry_t telemetry;
-        vram_merge_back_links_one<kit_, schedule_, resident_blocks_>( //
-            view, bucket_ids, bucket_counts, bucket_width, node_id, cache, schedule, candidate_norms, selection,
-            gathered[warp], telemetry, lane);
+        u32_t const* const forward_picks = walked ? vram_row(view.shadow_neighbors, node_id, view.storage.connectivity)
+                                                  : nullptr;
+        bool const gained = vram_back_link_one<kit_, schedule_, resident_blocks_>( //
+            view.storage, node_id, forward_picks, view.shadow_neighbors, view.link_heads, view.link_next, 0, cache,
+            selection_rows - 1, schedule, candidate_norms, selection, gathered[warp], telemetry, lane);
+        telemetry.changed_nodes += walked && gained;
         telemetry.template flush<warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
     }
 }
@@ -1957,16 +1948,12 @@ __device__ __forceinline__ void vram_gather_weighted_rows( //
     }
 }
 
-/** Resolves @p node_id to its value row: through a shard's device key column and then the caller's
- *  key-level lookup when @p value_lookup is a keyed one, otherwise on the node ID itself. */
-template <typename value_lookup_type_>
-__device__ __forceinline__ auto vram_value_row(value_lookup_type_ const& value_lookup, node_id_t node_id) noexcept {
-    if constexpr (requires {
-                      value_lookup.keys;
-                      value_lookup.value_lookup;
-                  })
-        return value_lookup.value_lookup(value_lookup.keys[node_id]);
-    else return value_lookup(node_id);
+/** Resolves @p node_id through the shard's device key column, then the caller's key-level lookup,
+ *  whose own @c vram_value_row overload sits beside its record. */
+template <typename key_type_, typename value_lookup_type_>
+__device__ __forceinline__ void const* vram_value_row(vram_keyed_lookup<key_type_, value_lookup_type_> const& lookup,
+                                                      node_id_t node_id) noexcept {
+    return vram_value_row(lookup.value_lookup, lookup.keys[node_id]);
 }
 
 /**

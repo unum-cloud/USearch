@@ -11,4 +11,4 @@
 #include "dense_kernels.cuh"
 #include "usearch/dense/vram_amd_index.hip"
 
-template void dense::amd_instantiate<amd_class_capabilities_k, nk_e2m3_k, vram_attend_lookup_t::device_lookup_k>();
+template void dense::amd_instantiate<amd_class_capabilities_k, nk_e2m3_k, vram_attend_lookup_t>();

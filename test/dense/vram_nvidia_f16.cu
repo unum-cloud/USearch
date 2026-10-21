@@ -9,6 +9,6 @@
 #include "vram_nvidia_kernels.cuh"
 
 namespace unum::usearch::dense {
-template __device__ void cuda_instantiate<test::dense::dense_nvidia_capabilities_k, nk_f16_k,
-                                          test::dense::cuda_test_lookup_t::device_lookup_k>();
+template __device__ void
+cuda_instantiate<test::dense::dense_nvidia_capabilities_k, nk_f16_k, test::dense::cuda_test_lookup_t>();
 } // namespace unum::usearch::dense

@@ -680,6 +680,14 @@ check_file_header() {
         "            contiguously, with any prose below them:"
 }
 
+# A header's @date records when the code first appeared, so an edit to an existing file never rewrites it.
+check_header_date_kept() {
+    local rewritten
+    rewritten=$(grep -E '^-.*@date([[:space:]]|$)' "$results_directory/$ordinal.diff" 2> /dev/null || true)
+    [ -z "$rewritten" ] || fail "$rewritten" \
+        "$file rewrites its @date - keep the date the code first appeared, never the last edit:"
+}
+
 check_docblock_brackets() {
     local shape
     shape=$(awk '
@@ -1830,6 +1838,7 @@ judge_path() {
     [ ! -f "$results_directory/$ordinal.added" ] || added=$(< "$results_directory/$ordinal.added")
     [ -s "$staged_lines_path" ] || echo > "$staged_lines_path"
     added_lines=$(< "$staged_lines_path")
+    check_header_date_kept
     case " $core_files " in
     *" $file "*) check_dependency_free_core ;;
     esac

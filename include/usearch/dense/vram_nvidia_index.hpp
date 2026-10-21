@@ -34,12 +34,6 @@
 
 namespace unum::usearch::dense {
 
-/** The device value lookup an attend kernel resolves rows through, by the @c device_lookup_k a
- *  lookup type names itself with: whichever unit compiles a fatbin specializes it with @c type for
- *  every lookup that fatbin's attend kernels take. */
-template <u32_t lookup_>
-struct cuda_value_lookup_of;
-
 #pragma region Kernels
 
 /** Queries and rows a scanning block multiplies per step, the edge of its square tile, which four
@@ -86,7 +80,6 @@ constexpr u32_t cuda_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept
     case vram_kernel_t::scan_k: return 3;
     // The attend fold carries per-head state, which spills at 8 slots under four blocks' budget.
     case vram_kernel_t::attend_k: return slots <= 4 ? 4 : 3;
-    case vram_kernel_t::scatter_back_links_k:
     case vram_kernel_t::derive_norms_k:
     case vram_kernel_t::rebase_links_k:
     case vram_kernel_t::reachability_sweep_k:
@@ -135,7 +128,6 @@ inline constexpr cuda_rung_t cuda_rungs[] = {
     {vram_kernel_t::multiply_k, 8},
     {vram_kernel_t::multiply_k, 16},
     {vram_kernel_t::merge_back_links_k, 0},
-    {vram_kernel_t::scatter_back_links_k, 0},
     {vram_kernel_t::derive_norms_k, 0},
     {vram_kernel_t::rebase_links_k, 0},
     {vram_kernel_t::mark_landmarks_k, 0},
@@ -593,14 +585,13 @@ struct vram_nvidia_kernels {
         /** The shadow neighbors the walks land, @b [rows,connectivity]. */
         u32_t* shadow_neighbors = nullptr;
 
-        /** The reverse buckets @b [rows,bucket_width], their fill counters, and the bitset of rows
-         *  the merge re-selects. */
-        u32_t* buckets = nullptr;
-        u32_t* bucket_counts = nullptr;
-        vram_bitset_t touched;
-        u32_t bucket_width = 0;
+        /** The heads of the walkers' chains @b [rows], their links @b [rows,connectivity], and the
+         *  bitset of rows the pass walked. */
+        u32_t* link_heads = nullptr;
+        u32_t* link_next = nullptr;
+        vram_bitset_t walked;
 
-        /** The walk's and the merge's claim counters, zeroed with the buckets', read once the pass
+        /** The walk's and the merge's claim counters, zeroed with the chains, read once the pass
          *  landed. */
         u32_t* claims = nullptr;
 
@@ -624,9 +615,9 @@ struct vram_nvidia_kernels {
     /** Queues one pass of the three-pass refinement engine behind @c refine_plan_t into its carved
      *  @p scratch: the walk covers @p nodes, or under a device-resident @p node_ids the listed IDs
      *  with @p nodes spanning the array's offsets, each node first walking across the neighboring
-     *  group in round @p round when @p parts parts are given; the back-link passes re-select the
-     *  walked rows and the rows they pick, and leave every other row as it was. Nothing waits: the
-     *  landing queued after it checks its claims. */
+     *  group in round @p round when @p parts parts are given; the merge folds the walked rows'
+     *  forward picks and the walkers chained onto every picked row into the live rows, and leaves
+     *  every other row as it was. Nothing waits: the landing queued after it checks its claims. */
     status_t refine_pass_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
                           refine_config_t config, iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
                           u32_t parts = 0, u32_t round = 0) noexcept {
@@ -635,12 +626,11 @@ struct vram_nvidia_kernels {
         std::size_t const walk_count = nodes.size();
         cuda_stream_handle_t const stream = context.stream();
         vram_refine_passes_t const passes = core.refine_passes_(context);
-        if (!passes.bucket_counts) return status_t::bad_alloc_k;
-        // The reverse buckets' counters and the bitset of rows the merge re-selects lie back to
-        // back.
+        if (!passes.link_heads) return status_t::bad_alloc_k;
+        // Every chain starts empty and no row walked yet.
         if (cuda_fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != cuda_success_k ||
-            cuda_fill_async(passes.bucket_counts, 0, (nodes_count + scratch.words) * sizeof(u32_t), stream) !=
-                cuda_success_k)
+            cuda_fill_async(passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) != cuda_success_k ||
+            cuda_fill_async(passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the candidate sizes
@@ -664,11 +654,10 @@ struct vram_nvidia_kernels {
         launch.node_ids = node_ids.data();
         launch.nodes_count = static_cast<u32_t>(nodes_count);
         launch.shadow_neighbors = passes.shadow_neighbors;
-        launch.buckets = passes.buckets;
-        launch.bucket_counts = passes.bucket_counts;
-        launch.touched = passes.touched;
+        launch.link_heads = passes.link_heads;
+        launch.link_next = passes.link_next;
+        launch.walked = passes.walked;
         launch.claims = scratch.claims;
-        launch.bucket_width = static_cast<u32_t>(core.connectivity());
         launch.arena = arena;
         launch.arena_shape = arena_shape;
         launch.expansion = expansion;
@@ -677,20 +666,10 @@ struct vram_nvidia_kernels {
         launch.part_bases = parts > 1 ? scratch.part_bases : nullptr;
         launch.parts = parts > 1 ? parts : 0;
         launch.round = round;
-        // A range short of the whole graph starts from the live neighbors copied into the shadow
-        // verbatim, so a row it never rewrites but one of its picks lands in merges its own
-        // neighbors with the new reverse links; islands scatter nothing, so only their own rows
-        // merge.
-        if (node_ids.empty() && walk_count != nodes_count)
-            if (cuda_copy_async(passes.shadow_neighbors, core.neighbors_matrix_.base(),
-                                nodes_count * core.connectivity() * sizeof(u32_t), stream) != cuda_success_k)
-                return status_t::device_error_k;
         if (status_t const launched = launch_refine_(core, launch, context); failed(launched)) return launched;
 
-        // Scatter the walked rows' shadow neighbors in reverse, then merge each touched node's
-        // forward & reverse candidates into its final live row. A heal round over island IDs
-        // re-selects the islands' own rows alone: re-judging the rows they pick would drop the
-        // links that reconnected earlier islands.
+        // Fold every walked row's forward picks and every chain of walkers into the live rows; a
+        // heal round's islands chain nowhere, so only their own rows merge.
         return launch_refine_back_links_(core, launch, context);
     }
 
@@ -755,7 +734,7 @@ struct vram_nvidia_kernels {
                               u32_t islands) noexcept {
         std::size_t const rows = core.size();
         cuda_stream_handle_t const stream = context.stream();
-        u32_t* const in_links = core.refine_passes_(context).bucket_counts;
+        u32_t* const in_links = core.refine_passes_(context).link_heads;
         if (!in_links) return status_t::bad_alloc_k;
         if (cuda_fill_async(in_links, 0, rows * sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
@@ -815,7 +794,7 @@ struct vram_nvidia_kernels {
         vram_kernel_symbol_t symbol;
         for (cuda_rung_t const rung : cuda_rungs) {
             vram_kernel_symbol(symbol, "dense", "cuda_kernel", "cuda_arguments_t", rung.kernel, capability_k,
-                               vector_dtype_, rung.slots, u32_t {0});
+                               vector_dtype_, rung.slots, itanium_type<void> {});
             cuda_function_handle_t& function = kernels_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)];
             if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
         }
@@ -934,7 +913,10 @@ struct vram_nvidia_kernels {
                             launch.nodes_count,
                             launch.part_bases,
                             launch.parts,
-                            launch.round};
+                            launch.round,
+                            launch.link_heads,
+                            launch.link_next,
+                            launch.walked};
         return launch_(
             kernel_function_(vram_kernel_t::refine_k, launch.candidate_slots),
             core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.candidate_slots),
@@ -942,31 +924,14 @@ struct vram_nvidia_kernels {
             rows_map_(core));
     }
 
-    /** Scatters the walked rows' shadow neighbors into the reverse buckets, then merges every
-     *  touched row's forward and reverse candidates into its live neighbors. */
+    /** Merges every walked row's forward picks and every chain of walkers the walks of @p launch
+     *  threaded into the live neighbors. */
     status_t launch_refine_back_links_(core_t& core, refine_launch_t const& launch,
                                        traversal_context_t& context) noexcept {
-        cuda_stream_handle_t const stream = context.stream();
         vram_arguments_t arguments {};
-        vram_graph_t& graph = arguments.graph;
-        graph.neighbors = launch.shadow_neighbors;
-        graph.rows_count = launch.nodes_count;
-        graph.connectivity = static_cast<u32_t>(core.connectivity());
-        graph.first_id = launch.nodes.first;
-        graph.walk_count = static_cast<u32_t>(launch.nodes.size());
-        graph.node_ids = launch.node_ids;
-        graph.bucket_width = launch.bucket_width;
-        graph.bucket_ids = launch.buckets;
-        graph.bucket_counts = launch.bucket_counts;
-        graph.touched = launch.touched;
-        if (status_t const launched = launch_(
-                kernel_function_(vram_kernel_t::scatter_back_links_k, 0),
-                core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::scatter_back_links_k, 0), 0, stream,
-                arguments);
-            failed(launched))
-            return launched;
-        // The merge sweeps the whole ID space and skips the rows the scatter left untouched,
-        // carving its slices from the arena sized for the refine's grid, so it launches that grid.
+        // The merge sweeps the whole ID space and skips the rows the pass neither walked nor
+        // picked, carving its slices from the arena sized for the refine's grid, so it launches
+        // that grid.
         static_assert(resident_blocks_(vram_kernel_t::merge_back_links_k, 0) ==
                       resident_blocks_(vram_kernel_t::refine_k, 0));
         arguments.refine = {
@@ -984,11 +949,16 @@ struct vram_nvidia_kernels {
             launch.claims + 1,
             nullptr,
             launch.nodes_count,
-            0};
+            nullptr,
+            0,
+            0,
+            launch.link_heads,
+            launch.link_next,
+            launch.walked};
         return launch_(
             kernel_function_(vram_kernel_t::merge_back_links_k, 0),
             core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.candidate_slots),
-            vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, stream, arguments);
+            vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments);
     }
 
     /** The search view every walking verb launches over. */
@@ -1076,7 +1046,7 @@ struct vram_nvidia_kernels {
 
     /** Walks every token of @p walk under its staged heads, folding the value rows @p value_lookup
      *  resolves into the normalized @p outputs and their @p states; the lookup travels as bytes to
-     *  the attend kernel its @c device_lookup_k names, found in the fatbin by name. */
+     *  the attend kernel instantiated over its type, found in the fatbin by name. */
     template <typename value_lookup_type_>
     status_t launch_attend_(core_t& core, walk_launch_t const& walk, value_lookup_type_ const& value_lookup,
                             f32_t* outputs, softmax_state_t* states, f32_t logit_scale,
@@ -1099,7 +1069,7 @@ struct vram_nvidia_kernels {
         std::memcpy(attend.value_lookup, &value_lookup, sizeof(value_lookup));
         vram_kernel_symbol_t symbol;
         vram_kernel_symbol(symbol, "dense", "cuda_kernel", "cuda_arguments_t", vram_kernel_t::attend_k, capability_k,
-                           vector_dtype_, walk_slots_(walk), u32_t {value_lookup_type_::device_lookup_k});
+                           vector_dtype_, walk_slots_(walk), itanium_type<value_lookup_type_> {});
         return launch_walk_(core, vram_kernel_t::attend_k, module_.function(symbol.text), walk, arguments, context);
     }
 

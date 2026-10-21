@@ -36,12 +36,6 @@ namespace unum::usearch::dense {
 
 #pragma region Kernels
 
-/** The device value lookup an attend kernel resolves rows through, by the @c device_lookup_k a
- *  lookup type names itself with: whichever unit compiles a code object specializes it with
- *  @c type for every lookup that code object's attend kernels take. */
-template <u32_t lookup_>
-struct amd_value_lookup_of;
-
 /** Blocks of @p kernel on its @p slots rung resident per compute unit under @p capability_ over
  *  @p dtype_ - the register budget its launch bounds set, the load window its body sizes, and its
  *  grid's share of every compute unit: three for the builders and the back-links riding their grid
@@ -60,7 +54,6 @@ constexpr u32_t hip_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept 
     case vram_kernel_t::multiply_k: return slots <= 8 ? 4 : 3;
     // The attend fold carries per-head state, which spills at 8 slots under four blocks' budget.
     case vram_kernel_t::attend_k: return slots <= 4 ? 4 : 3;
-    case vram_kernel_t::scatter_back_links_k:
     case vram_kernel_t::derive_norms_k:
     case vram_kernel_t::rebase_links_k:
     case vram_kernel_t::reachability_sweep_k:
@@ -115,7 +108,6 @@ inline constexpr amd_rung_t amd_rungs[] = {
     {vram_kernel_t::multiply_k, 8},
     {vram_kernel_t::multiply_k, 16},
     {vram_kernel_t::merge_back_links_k, 0},
-    {vram_kernel_t::scatter_back_links_k, 0},
     {vram_kernel_t::derive_norms_k, 0},
     {vram_kernel_t::rebase_links_k, 0},
     {vram_kernel_t::mark_landmarks_k, 0},
@@ -480,9 +472,9 @@ struct vram_amd_kernels {
     /** Queues one pass of the three-pass refinement engine behind @c refine_plan_t into its carved
      *  @p scratch: the walk covers @p nodes, or under a device-resident @p node_ids the listed IDs
      *  with @p nodes spanning the array's offsets, each node first walking across the neighboring
-     *  group in round @p round when @p parts parts are given; the back-link passes re-select the
-     *  walked rows and the rows they pick, and leave every other row as it was. Nothing waits: the
-     *  landing queued after it checks its claims. */
+     *  group in round @p round when @p parts parts are given; the merge folds the walked rows'
+     *  forward picks and the walkers chained onto every picked row into the live rows, and leaves
+     *  every other row as it was. Nothing waits: the landing queued after it checks its claims. */
     status_t refine_pass_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
                           refine_config_t config, iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
                           u32_t parts = 0, u32_t round = 0) noexcept {
@@ -491,12 +483,11 @@ struct vram_amd_kernels {
         std::size_t const walk_count = nodes.size();
         hip_stream_handle_t const stream = context.stream();
         vram_refine_passes_t const passes = core.refine_passes_(context);
-        if (!passes.bucket_counts) return status_t::bad_alloc_k;
-        // The reverse buckets' counters and the bitset of rows the merge re-selects lie back to
-        // back.
+        if (!passes.link_heads) return status_t::bad_alloc_k;
+        // Every chain starts empty and no row walked yet.
         if (hip_api().fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != hip_success_k ||
-            hip_api().fill_async(passes.bucket_counts, 0, (nodes_count + scratch.words) * sizeof(u32_t), stream) !=
-                hip_success_k)
+            hip_api().fill_async(passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) != hip_success_k ||
+            hip_api().fill_async(passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) != hip_success_k)
             return status_t::device_error_k;
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the candidate sizes
@@ -532,24 +523,16 @@ struct vram_amd_kernels {
                             static_cast<u32_t>(nodes_count),
                             parts > 1 ? scratch.part_bases : nullptr,
                             parts > 1 ? parts : 0,
-                            round};
-        // A range short of the whole graph starts from the live neighbors copied into the shadow
-        // verbatim, so a row it never rewrites but one of its picks lands in merges its own
-        // neighbors with the new reverse links; islands scatter nothing, so only their own rows
-        // merge.
-        if (node_ids.empty() && walk_count != nodes_count)
-            if (hip_api().copy_async(passes.shadow_neighbors, core.neighbors_matrix_.base(),
-                                     nodes_count * core.connectivity() * sizeof(u32_t), hip_copy_device_to_device_k,
-                                     stream) != hip_success_k)
-                return status_t::device_error_k;
+                            round,
+                            passes.link_heads,
+                            passes.link_next,
+                            passes.walked};
         if (status_t const launched = launch_refine_(core, view, candidate_slots, stream); failed(launched))
             return launched;
 
-        // Scatter the walked rows' shadow neighbors in reverse, then merge each touched node's
-        // forward & reverse candidates into its final live row. A heal round over island IDs
-        // re-selects the islands' own rows alone: re-judging the rows they pick would drop the
-        // links that reconnected earlier islands.
-        return launch_refine_back_links_(core, view, passes, static_cast<u32_t>(walk_count), stream);
+        // Fold every walked row's forward picks and every chain of walkers into the live rows; a
+        // heal round's islands chain nowhere, so only their own rows merge.
+        return launch_refine_back_links_(core, view, stream);
     }
 
     /** Queues a reachability audit from as many stride-spread landmarks as one search draws - the
@@ -632,7 +615,7 @@ struct vram_amd_kernels {
                               u32_t islands) noexcept {
         std::size_t const rows = core.size();
         hip_stream_handle_t const stream = context.stream();
-        u32_t* const in_links = core.refine_passes_(context).bucket_counts;
+        u32_t* const in_links = core.refine_passes_(context).link_heads;
         if (!in_links) return status_t::bad_alloc_k;
         if (hip_api().fill_async(in_links, 0, rows * sizeof(u32_t), stream) != hip_success_k)
             return status_t::device_error_k;
@@ -675,7 +658,7 @@ struct vram_amd_kernels {
         vram_kernel_symbol_t symbol;
         for (amd_rung_t const rung : amd_rungs) {
             vram_kernel_symbol(symbol, "dense", "amd_kernel", "vram_arguments_t", rung.kernel, capability_k,
-                               vector_dtype_, rung.slots, u32_t {0});
+                               vector_dtype_, rung.slots, itanium_type<void> {});
             hip_function_handle_t& function = kernels_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)];
             if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
         }
@@ -746,33 +729,15 @@ struct vram_amd_kernels {
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
 
-    /** Scatters the @p walk_count walked rows' shadow neighbors into the reverse buckets of
-     *  @p passes, then merges every touched row's forward and reverse candidates into its live
-     *  neighbors. */
-    status_t launch_refine_back_links_(core_t& core, vram_refine_t const& view, vram_refine_passes_t const& passes,
-                                       u32_t walk_count, hip_stream_handle_t stream) noexcept {
-        vram_arguments_t arguments {};
-        vram_graph_t& graph = arguments.graph;
-        graph.neighbors = passes.shadow_neighbors;
-        graph.rows_count = view.sampling_bound;
-        graph.first_id = view.first_id;
-        graph.walk_count = walk_count;
-        graph.node_ids = view.node_ids;
-        graph.connectivity = static_cast<u32_t>(core.connectivity());
-        graph.bucket_width = static_cast<u32_t>(core.connectivity());
-        graph.bucket_ids = passes.buckets;
-        graph.bucket_counts = passes.bucket_counts;
-        graph.touched = passes.touched;
-        if (status_t const launched = launch_(
-                vram_kernel_t::scatter_back_links_k, 0,
-                core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::scatter_back_links_k, 0), 0, stream,
-                arguments);
-            failed(launched))
-            return launched;
-        // The merge sweeps the whole ID space and skips the rows the scatter left untouched,
-        // carving its slices from the arena sized for the refine's grid, which its count matches.
+    /** Merges every walked row's forward picks and every chain of walkers the walks of @p view
+     *  threaded into the live neighbors. */
+    status_t launch_refine_back_links_(core_t& core, vram_refine_t const& view, hip_stream_handle_t stream) noexcept {
+        // The merge sweeps the whole ID space and skips the rows the pass neither walked nor
+        // picked, carving its slices from the arena sized for the refine's grid, which its count
+        // matches.
         static_assert(resident_blocks_(vram_kernel_t::merge_back_links_k, 0) ==
                       resident_blocks_(vram_kernel_t::refine_k, 0));
+        vram_arguments_t arguments {};
         arguments.refine = view;
         arguments.refine.scratch_bytes_per_warp = view.arena_shape.scratch_bytes
                                                       ? 0u
@@ -829,7 +794,7 @@ struct vram_amd_kernels {
 
     /** Walks every token of @p launch under its staged heads, folding the value rows
      *  @p value_lookup resolves into the normalized @p outputs and their @p states; the lookup
-     *  travels as bytes to the attend kernel its @c device_lookup_k names, found in the code object
+     *  travels as bytes to the attend kernel instantiated over its type, found in the code object
      *  by name. */
     template <typename value_lookup_type_>
     status_t launch_attend_(core_t& core, walk_launch_t const& launch, value_lookup_type_ const& value_lookup,
@@ -853,7 +818,7 @@ struct vram_amd_kernels {
         u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.candidate_slots;
         vram_kernel_symbol_t symbol;
         vram_kernel_symbol(symbol, "dense", "amd_kernel", "vram_arguments_t", vram_kernel_t::attend_k, capability_k,
-                           vector_dtype_, slots, u32_t {value_lookup_type_::device_lookup_k});
+                           vector_dtype_, slots, itanium_type<value_lookup_type_> {});
         return hip_launch(
             module_.function(symbol.text),
             core.walk_blocks_(launch.view.queries_count, resident_blocks_(vram_kernel_t::attend_k, slots)),

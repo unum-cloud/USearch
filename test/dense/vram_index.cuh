@@ -314,12 +314,46 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
         failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
         failures += expect_eq(index.size(), dense_growth_nodes_k);
         auto const [refined, refined_status] = index.refine({0, static_cast<node_id_t>(index.size())}, context);
-        failures += expect(refined_status == status_t::success_k && refined.changed_nodes > 0);
+        failures += expect(refined_status == status_t::success_k && refined.changed_nodes > 0 &&
+                           refined.changed_nodes <= refined.visited_nodes);
         // A dot graph's hubs can stall the heal short of every row.
         if constexpr (kernel_ != nk_kernel_dot_k) {
             failures += expect_eq(refined.health.reachable_nodes, dense_growth_nodes_k);
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
         }
+    }
+    return failures + expect_eq(ledger.live_bytes.load(), 0);
+}
+
+/** Builds and refines rows repeating four vectors, so every walk meets plateaus of equal distances
+ *  far wider than its ranks: a tie at the radius must displace no rank, as on the CPU, so each walk
+ *  ends near its ranks instead of expanding its whole plateau, and the ledger must balance. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+std::size_t test_dense_vram_tied_build(make_index_type_ const& make_index, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    constexpr std::size_t distinct_rows_k = 4;
+    constexpr std::size_t plateau_rows_k = dense_growth_nodes_k / distinct_rows_k;
+    allocation_ledger_t ledger;
+    std::size_t failures = 0;
+    {
+        std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+        index_type_& index = *index_ptr;
+        typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        auto const distinct = make_vectors<scalar_t>(distinct_rows_k, dimensions, stream_key(seed, "tied"));
+        auto tied = nk::matrix<scalar_t>::zeros({dense_growth_nodes_k, dimensions}).value;
+        for (std::size_t row = 0; row != dense_growth_nodes_k; ++row) {
+            auto const source = distinct.row(row % distinct_rows_k).as_vector();
+            auto target = tied.row(row).as_vector();
+            for (std::size_t dimension = 0; dimension != dimensions; ++dimension) target[dimension] = source[dimension];
+        }
+        failures += expect(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status ==
+                           status_t::success_k);
+        failures += expect(index.insert(tied.view(), {}, context).status == status_t::success_k);
+        auto const [refined, refined_status] = index.refine({0, static_cast<node_id_t>(index.size())}, context);
+        failures += expect(refined_status == status_t::success_k && refined.changed_nodes <= refined.visited_nodes);
+        // A walk flooding its plateau expands every one of its rows.
+        failures += expect(2 * refined.visited_members < refined.visited_nodes * plateau_rows_k);
     }
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
@@ -399,6 +433,7 @@ std::size_t test_vram_configuration(char const* name, u64_t seed, executor_type_
     if constexpr (!requires { cell_t::attends_k; }) failures_count += test_dense_vram_attend_refused<index_t>(cell);
     failures_count += test_dense_vram_indexer_search<index_t, kernel_>(cell, seed);
     failures_count += test_dense_vram_wide_build<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_vram_tied_build<index_t, kernel_>(cell, seed);
     failures_count += test_dense_vram_broad_build<index_t, kernel_>(cell, seed);
     return report(vendor_name.c_str(), failures_count);
 }

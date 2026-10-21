@@ -221,11 +221,8 @@ enum class vram_kernel_t : u32_t {
     /** A walk folding the values of the rows it attends to, per head. */
     attend_k,
 
-    /** Merges each node's forward and reverse candidates into its final neighbors. */
+    /** Folds each walked node's forward picks and the walkers chained onto it into its row. */
     merge_back_links_k,
-
-    /** Scatters the walked rows' forward picks into the reverse buckets of their targets. */
-    scatter_back_links_k,
 
     /** Rebuilds the norms column from the stored vectors. */
     derive_norms_k,
@@ -333,14 +330,16 @@ struct vram_kernel_symbol_t {
     }
 };
 
-/** The one-letter builtin spelling of the unsigned integer @p value_type_ - @c j, @c m or @c y, as
- *  the platform's widths name them, so @c u64_t spells as @c m on Linux and @c y elsewhere. */
+/** The one-letter builtin spelling of @c void or the unsigned integer @p value_type_ - @c v, then
+ *  @c j, @c m or @c y, as the platform's widths name them, so @c u64_t spells as @c m on Linux and
+ *  @c y elsewhere. */
 template <typename value_type_>
 constexpr char itanium_builtin() noexcept {
-    if constexpr (std::is_same_v<value_type_, unsigned int>) return 'j';
+    if constexpr (std::is_void_v<value_type_>) return 'v';
+    else if constexpr (std::is_same_v<value_type_, unsigned int>) return 'j';
     else if constexpr (std::is_same_v<value_type_, unsigned long>) return 'm';
     else {
-        static_assert(std::is_same_v<value_type_, unsigned long long>, "Kernels take unsigned integers alone");
+        static_assert(std::is_same_v<value_type_, unsigned long long>, "Kernels take unsigned integers or void");
         return 'y';
     }
 }
@@ -382,6 +381,12 @@ void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<value_ty
     symbol.append(builtin);
 }
 
+/** Spells @c uuid_t, @c S3_ being @c unum::usearch::utilities, which a kernel's leading
+ *  @ref vram_kernel_t argument introduces. */
+inline void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<uuid_t>) noexcept {
+    symbol.append("NS3_6uuid_tE");
+}
+
 /** Where the kernel's parameter struct lives: the kernel's own scope, or @c basic, whose arguments
  *  every modality kernel takes. */
 enum class itanium_scope_t { kernel_k, basic_k };
@@ -406,8 +411,8 @@ struct itanium_parameter_t {
  *
  *  The substitutions are fixed by that shape: @c S_ is @c unum, @c S0_ is @c unum::usearch, @c S1_
  *  is the scope and @c S2_ the kernel's template. A @ref vram_kernel_t argument spells as
- *  @c NS0_9utilities13vram_kernel_tE, adding @c S3_ and @c S4_, which no later name reuses. The
- *  parameter spells as @c NS1_<length><parameter>E for the scope's own struct and as
+ *  @c NS0_9utilities13vram_kernel_tE, adding @c S3_ and @c S4_, of which only a @c uuid_t reuses
+ *  @c S3_. The parameter spells as @c NS1_<length><parameter>E for the scope's own struct and as
  *  @c NS0_5basic<length><parameter>E for basic's - with @c I<T>E before the closing @c E when it
  *  reuses the kernel's template argument, @c T_ for the first and @c T<n-1>_ for the n-th. So
  *  @c sequence::cuda_kernel<vram_kernel_t::search_k, sz_cap_cuda_k, sz_levenshtein_bytes_k, 2,

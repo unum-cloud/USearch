@@ -14,8 +14,6 @@
 
 #include "usearch/dense/vram_nvidia_index.cuh"
 
-namespace us = unum::usearch;
-
 namespace unum::usearch::test::dense {
 using namespace unum::usearch::utilities;
 using namespace unum::usearch::dense;
@@ -38,30 +36,27 @@ struct dense_nvidia_fatbin {
     static bytes_view_t bytes() noexcept;
 };
 
-/** A device lookup over a value table whose rows sit a 16-byte pitch apart: an ID below @c count
- *  names its row, a node ID on one GPU and a key on shards, and any other has none. */
+/** A value table on the device whose rows sit a 16-byte pitch apart: an ID below @c count names
+ *  its row, a node ID on one GPU and a key on shards, and any other has none. */
 struct cuda_test_lookup_t {
-
-    /** Names the lookup to the attend kernels the suite's fatbins carry. */
-    inline static constexpr u32_t device_lookup_k = 1;
-
     byte_t const* rows;
     std::size_t pitch;
     std::size_t count;
-
-    __device__ void const* operator()(u32_t id) const noexcept { return id < count ? rows + id * pitch : nullptr; }
 };
+
+/** Points at the value row of @p id in the table of @p lookup, or at none past its rows. */
+__device__ inline void const* vram_value_row(cuda_test_lookup_t const& lookup, u32_t id) noexcept {
+    return id < lookup.count ? lookup.rows + id * lookup.pitch : nullptr;
+}
+
+/** Spells @c cuda_test_lookup_t into an attend kernel's name, @c S0_ being @c unum::usearch. */
+inline void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<cuda_test_lookup_t>) noexcept {
+    symbol.append("NS0_4test5dense");
+    symbol.append_name("cuda_test_lookup_t");
+    symbol.append("E");
+}
 
 /** The lookup the sharded suite's shards attend through, by their keys. */
 using cuda_test_keyed_lookup_t = vram_keyed_lookup<u32_t, cuda_test_lookup_t>;
 
 } // namespace unum::usearch::test::dense
-
-template <>
-struct us::dense::cuda_value_lookup_of<us::test::dense::cuda_test_lookup_t::device_lookup_k> {
-    using type = us::test::dense::cuda_test_lookup_t;
-};
-template <>
-struct us::dense::cuda_value_lookup_of<us::test::dense::cuda_test_keyed_lookup_t::device_lookup_k> {
-    using type = us::test::dense::cuda_test_keyed_lookup_t;
-};

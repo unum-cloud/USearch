@@ -109,7 +109,8 @@ struct [[nodiscard]] refine_result_t {
     /** Nodes re-selected: the planned range, then the islands of every round. */
     std::size_t visited_nodes = 0;
 
-    /** Of those, the nodes whose neighbors differ as a set from before - never more than @c visited_nodes. */
+    /** Of those, the nodes whose neighbors gained a member they lacked - never more than
+     *  @c visited_nodes. */
     std::size_t changed_nodes = 0;
 
     /** Nodes the first audit left unreached, counted once. */

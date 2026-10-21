@@ -162,12 +162,14 @@ struct metal_sorted_candidates {
         }
     }
     void push_batch(ulong staged, uint lane) {
-        // Only entries below the worst kept one can enter: a few take their ranks, a crowd takes the fold.
+        // Only entries strictly nearer than the worst kept one enter, as the CUDA frontier's do: a
+        // few take their ranks, a crowd takes the fold.
         constexpr uint few_k = 3;
         ulong const worst = warp_t::shuffle(entries[slots_ - 1], warp_t::width_k - 1);
-        uint const admitted = warp_t::ballot(staged < worst);
+        bool const nearer = metal_distance_bits(staged) < metal_distance_bits(worst);
+        uint const admitted = warp_t::ballot(nearer);
         if (popcount(admitted) <= few_k) insert_each(staged, admitted, lane);
-        else insert_batch(staged, lane);
+        else insert_batch(nearer ? staged : metal_sentinel_k, lane);
     }
     ulong pop_nearest(uint) {
         ulong const nearest = nearest_unexpanded();

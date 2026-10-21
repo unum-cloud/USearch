@@ -416,19 +416,21 @@ struct vram_register_frontier {
         return ranks_.deduplicate(scored_node_t::make(0, staged_id), lane) == scored_node_t::sentinel();
     }
 
-    /** The furthest kept rank, which nothing at or past enters; the sentinel until every rank
-     *  fills. */
+    /** The furthest kept rank, at or past whose distance nothing enters; the sentinel until every
+     *  rank fills. */
     __device__ __forceinline__ scored_node_t worst() const noexcept {
         return shuffle_from<warp_t>(ranks_.entries_[slots_ - 1], warp_t::width_k - 1);
     }
     __device__ __forceinline__ void insert_batch(scored_node_t staged, u32_t lane) noexcept {
-        // Only entries below the worst kept one can enter:
-        // a few take their ranks, a crowd takes the fold-merge.
+        // Only entries strictly nearer than the worst kept one enter, as on the CPU, so a plateau
+        // of equal distances never keeps a walk expanding: a few take their ranks, a crowd takes
+        // the fold-merge.
         constexpr u32_t few_k = 3;
         scored_node_t const worst = shuffle_from<warp_t>(ranks_.entries_[slots_ - 1], warp_t::width_k - 1);
-        typename warp_t::mask_t const admitted = warp_t::ballot(staged < worst);
+        bool const nearer = staged.distance_bits() < worst.distance_bits();
+        typename warp_t::mask_t const admitted = warp_t::ballot(nearer);
         if (warp_t::count(admitted) <= few_k) ranks_.insert_each(staged, admitted, lane);
-        else ranks_.insert_batch(staged, lane);
+        else ranks_.insert_batch(nearer ? staged : scored_node_t::sentinel(), lane);
     }
 
     /** The nearest undiscovered-from candidate, already marked expanded - or the

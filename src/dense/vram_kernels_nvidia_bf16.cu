@@ -11,5 +11,4 @@
 #include "dense_kernels.cuh"
 #include "usearch/dense/vram_nvidia_index.cuh"
 
-template __device__ void
-dense::cuda_instantiate<cuda_class_capabilities_k, nk_bf16_k, vram_attend_lookup_t::device_lookup_k>();
+template __device__ void dense::cuda_instantiate<cuda_class_capabilities_k, nk_bf16_k, vram_attend_lookup_t>();

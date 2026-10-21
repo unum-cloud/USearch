@@ -6,10 +6,10 @@
  *
  *  The kernel side of the index: the exact scan and the one kernel template over five arguments -
  *  the kernel, the capability ceiling, the dtype, the register rung and the attend value lookup -
- *  whose instantiations a fatbin carries. Only NVCC's device-only passes include it, once per
- *  ceiling over every compiled dtype; each @c cuda_kernel turns the plain records of
- *  @c vram_index.hpp into the shared views of @c vram_index.cuh, runs the shared bodies there
- *  through @ref cuda_warp_t, and the host finds it by the symbol @c vram_kernel_symbol spells.
+ *  whose instantiations a fatbin carries. NVCC's device-only passes include it, one per dtype
+ *  under one ceiling; each @c cuda_kernel turns the plain records of @c vram_index.hpp into the
+ *  shared views of @c vram_index.cuh, runs the shared bodies there through @ref cuda_warp_t, and
+ *  the host finds it by the symbol @c vram_kernel_symbol spells.
  */
 #pragma once
 
@@ -496,11 +496,12 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
 #pragma region Kernels
 
 /** Every NVIDIA kernel: @p kernel_ picks the body, @p capability_ and @p dtype_ the kit,
- *  @p capability_ alone the schedule and its warp, @p slots_ the rung, and @p lookup_ an attend's
- *  value lookup through @ref cuda_value_lookup_of. The blocks @ref cuda_resident_blocks keeps per
- *  multiprocessor bound its registers and reach the body, which sizes its load window by them. The
- *  arguments stay in the parameter space, where a walk's schedule may read the tensor map. */
-template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_, u32_t lookup_>
+ *  @p capability_ alone the schedule and its warp, @p slots_ the rung, and @p lookup_type_ an
+ *  attend's value lookup record, @c void for every other kernel. The blocks
+ *  @ref cuda_resident_blocks keeps per multiprocessor bound its registers and reach the body, which
+ *  sizes its load window by them. The arguments stay in the parameter space, where a walk's
+ *  schedule may read the tensor map. */
+template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_, typename lookup_type_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
                                   cuda_resident_blocks<capability_, dtype_>(kernel_, slots_))
     cuda_kernel(const __grid_constant__ cuda_arguments_t launch) {
@@ -557,26 +558,19 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
                                                                    vram_view<kit_t, warp_t>(arguments.multiply_sink),
                                                                    vram_no_rescoring {});
     else if constexpr (kernel_ == vram_kernel_t::attend_k) {
-        using value_lookup_t = typename cuda_value_lookup_of<lookup_>::type;
         vram_attend_t const& attend = arguments.attend;
         vram_rescoring_t const& heads = arguments.rescoring;
-        value_lookup_t value_lookup;
-        std::memcpy(&value_lookup, attend.value_lookup, sizeof(value_lookup_t));
+        lookup_type_ value_lookup;
+        std::memcpy(&value_lookup, attend.value_lookup, sizeof(lookup_type_));
         vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
             vram_view<kit_t>(arguments.search),
-            vram_attend_sink<kit_t, warp_t, value_lookup_t> {value_lookup, attend.outputs, attend.states, attend.missed,
-                                                             attend.logit_scale, attend.heads_count, attend.columns},
+            vram_attend_sink<kit_t, warp_t, lookup_type_> {value_lookup, attend.outputs, attend.states, attend.missed,
+                                                           attend.logit_scale, attend.heads_count, attend.columns},
             vram_heads_rescoring<kit_t, warp_t> {reinterpret_cast<typename kit_t::fragment_t const*>(heads.heads),
                                                  nullptr, heads.heads_count, heads.row_fragments});
     }
     else if constexpr (kernel_ == vram_kernel_t::merge_back_links_k)
-        vram_merge_back_links<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.refine), graph.bucket_ids,
-                                                                  graph.bucket_counts, graph.bucket_width,
-                                                                  graph.touched);
-    else if constexpr (kernel_ == vram_kernel_t::scatter_back_links_k)
-        vram_scatter_back_links<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.first_id, graph.walk_count,
-                                             graph.node_ids, graph.connectivity, graph.bucket_width, graph.bucket_ids,
-                                             graph.bucket_counts, graph.touched);
+        vram_merge_back_links<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.refine));
     else if constexpr (kernel_ == vram_kernel_t::derive_norms_k)
         vram_derive_norms<kit_t, warp_t>(vram_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
     else if constexpr (kernel_ == vram_kernel_t::rebase_links_k)
@@ -626,23 +620,26 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
 
 template <nk_capability_t capability_, nk_dtype_t dtype_, std::size_t... rungs_>
 __device__ void cuda_instantiate_rungs(std::index_sequence<rungs_...>) noexcept {
-    (static_cast<void>(&cuda_kernel<cuda_rungs[rungs_].kernel, capability_, dtype_, cuda_rungs[rungs_].slots, 0>), ...);
+    (static_cast<void>(&cuda_kernel<cuda_rungs[rungs_].kernel, capability_, dtype_, cuda_rungs[rungs_].slots, void>),
+     ...);
 }
 
-template <nk_capability_t capability_, nk_dtype_t dtype_, u32_t lookup_, std::size_t... rungs_>
+template <nk_capability_t capability_, nk_dtype_t dtype_, typename lookup_type_, std::size_t... rungs_>
 __device__ void cuda_instantiate_attends(std::index_sequence<rungs_...>) noexcept {
-    (static_cast<void>(&cuda_kernel<vram_kernel_t::attend_k, capability_, dtype_, cuda_walk_rungs[rungs_], lookup_>),
+    (static_cast<void>(
+         &cuda_kernel<vram_kernel_t::attend_k, capability_, dtype_, cuda_walk_rungs[rungs_], lookup_type_>),
      ...);
 }
 
 /** Instantiates every kernel one dtype exports under one ceiling, and its attends over each of
- *  @p lookups_; a unit compiling a fatbin names it once per compiled dtype. Taking the kernels'
- *  addresses in device code makes NVCC emit them, while a host-only pass emits no launch stub. */
-template <nk_capability_t capability_, nk_dtype_t dtype_, u32_t... lookups_>
+ *  @p lookup_types_; a unit compiling a fatbin names it once per compiled dtype. Taking the
+ *  kernels' addresses in device code makes NVCC emit them, while a host-only pass emits no launch
+ *  stub. */
+template <nk_capability_t capability_, nk_dtype_t dtype_, typename... lookup_types_>
 __device__ void cuda_instantiate() noexcept {
     cuda_instantiate_rungs<capability_, dtype_>(
         std::make_index_sequence<sizeof(cuda_rungs) / sizeof(cuda_rungs[0])> {});
-    (cuda_instantiate_attends<capability_, dtype_, lookups_>(
+    (cuda_instantiate_attends<capability_, dtype_, lookup_types_>(
          std::make_index_sequence<sizeof(cuda_walk_rungs) / sizeof(cuda_walk_rungs[0])> {}),
      ...);
 }

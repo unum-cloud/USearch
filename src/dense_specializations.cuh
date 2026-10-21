@@ -77,32 +77,6 @@ inline constexpr gpu_class_name_t gpu_class_names_k[] = {
     {gpu_class_t::apple_metal10_k, "apple-metal10"},
 };
 
-/** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, the Ampere & Ada bits
- *  accumulate, while Hopper, Blackwell & RTX Blackwell each run only their own kits, and Rubin
- *  rides the Blackwell kits until its own land. AMD and Apple generations accumulate over their
- *  vendor's floor. */
-constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcept {
-    nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k, ada = ampere | nk_cap_ada_k;
-    nk_capability_t const cdna3 = nk_cap_rocm_k | nk_cap_cdna3_k, cdna4 = cdna3 | nk_cap_cdna4_k;
-    nk_capability_t const metal9 = nk_cap_metal_k | nk_cap_apple9_k;
-    switch (gpu_class) {
-    case gpu_class_t::nvidia_ada_k: return ada;
-    case gpu_class_t::nvidia_hopper_k: return ada | nk_cap_hopper_k;
-    case gpu_class_t::nvidia_blackwell_k:
-    case gpu_class_t::nvidia_rubin_k: return ada | nk_cap_blackwell_k;
-    case gpu_class_t::nvidia_blackwellrtx_k: return ada | nk_cap_blackwellrtx_k;
-    case gpu_class_t::amd_cdna3_k: return cdna3;
-    case gpu_class_t::amd_cdna4_k: return cdna4;
-    case gpu_class_t::amd_cdna5_k: return cdna4 | nk_cap_cdna5_k;
-    case gpu_class_t::apple_metal7_k: return nk_cap_metal_k;
-    case gpu_class_t::apple_metal9_k: return metal9;
-    case gpu_class_t::apple_metal10_k: return metal9 | nk_cap_apple10_k;
-    case gpu_class_t::nvidia_ampere_k: return ampere;
-    case gpu_class_t::unknown_k: return nk_cap_serial_k;
-    }
-    return nk_cap_serial_k;
-}
-
 #pragma endregion Scaffolding
 
 #pragma region Specialized Index
@@ -177,47 +151,6 @@ using vram_amd_indexes = dense::vram_amd_indexes<us::utilities::uuid_t, dtype_, 
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
 using vram_apple_indexes =
     dense::vram_apple_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
-#endif
-
-/** The C value lookup lifted onto the index's key vocabulary: one callback per scored batch, at
- *  the batch's static extent, a NULL row answering an empty view that refuses the call. */
-struct value_lookup_t {
-    usearch_value_lookup_t callback;
-    void* state;
-    usearch_scalar_t scalar;
-    std::size_t dimensions;
-
-    template <typename scalar_type_, std::size_t extent_>
-    void operator()(std::span<us::utilities::uuid_t const, extent_> keys,
-                    std::span<nk::vector_view<scalar_type_>, extent_> rows) const noexcept {
-        std::array<usearch_key_t, extent_> batch;
-        std::array<void const*, extent_> found;
-        for (std::size_t lane = 0; lane != extent_; ++lane) batch[lane] = std::bit_cast<usearch_key_t>(keys[lane]);
-        callback(state, batch.data(), extent_, scalar, dimensions, found.data());
-        for (std::size_t lane = 0; lane != extent_; ++lane)
-            rows[lane] = found[lane]
-                             ? nk::vector_view<scalar_type_> {static_cast<scalar_type_ const*>(found[lane]), dimensions}
-                             : nk::vector_view<scalar_type_> {};
-    }
-};
-
-/** The C value lookup a GPU walk calls one scored key at a time, as the host records it; the GPU
- *  entries' @c kernel_value_lookup_t adds the call. */
-struct device_value_lookup_t {
-
-    /** Names the lookup to the attend kernels the NVIDIA and AMD units instantiate over it. */
-    inline static constexpr u32_t device_lookup_k = 1;
-
-    usearch_value_lookup_t callback;
-    void* state;
-    usearch_scalar_t scalar;
-    std::size_t dimensions;
-};
-
-#if USEARCH_ARCH_CUDA_ || USEARCH_ARCH_ROCM_
-
-/** What each shard of a VRAM attend resolves rows through: the C lookup behind the shard's keys. */
-using vram_attend_lookup_t = dense::vram_keyed_lookup<us::utilities::uuid_t, device_value_lookup_t>;
 #endif
 
 /** One traversal context per executor thread, carved after the call's one rewind from that
@@ -343,9 +276,6 @@ struct specialized_index {
     /** What the C layer carved for one call: the contexts on RAM, nothing elsewhere. */
     using scratch_t = dense_scratch<index_type_>;
 
-    /** What an attend resolves value rows through: a host callback per batch on RAM, a device call per key on GPU. */
-    using attend_lookup_t = std::conditional_t<is_vram_index<index_type_>, device_value_lookup_t, value_lookup_t>;
-
     index_type_& index;
 
     status_t emplace(fu_memory_domain_id_t memory_domain) noexcept
@@ -424,13 +354,13 @@ struct specialized_index {
                                         executor_t& executor, scratch_t& scratch, search_config_t config,
                                         std::size_t wanted, counts_span_t scored, maxsim_landing_t landing,
                                         predicate_t& predicate) noexcept;
-    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_t value_lookup,
                                      f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
                                      executor_t& executor, scratch_t& scratch, search_config_t config) noexcept;
 
     /** Narrows the folded keys by a host predicate, which a device walk cannot take, so a GPU index
      *  answers @c unsupported_k. */
-    expected<search_result_t> attend_if(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
+    expected<search_result_t> attend_if(rows_view_t queries, std::size_t head_count, value_lookup_t value_lookup,
                                         f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
                                         executor_t& executor, scratch_t& scratch, search_config_t config,
                                         predicate_t& predicate) noexcept;
@@ -679,7 +609,7 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
-    rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
+    rows_view_t queries, std::size_t head_count, value_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
     std::span<dense::softmax_state_t> carry, executor_t& executor, scratch_t& scratch,
     search_config_t config) noexcept {
     if constexpr (is_ram_index<index_type_>)
@@ -689,7 +619,7 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend_if(
-    rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
+    rows_view_t queries, std::size_t head_count, value_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
     std::span<dense::softmax_state_t> carry, executor_t& executor, scratch_t& scratch, search_config_t config,
     predicate_t& predicate) noexcept {
     if constexpr (is_vram_index<index_type_>) return {{}, status_t::unsupported_k};
@@ -764,7 +694,6 @@ struct specialized_index<index_type_> {
 
     /** What the C layer carved for one call: the contexts on RAM, nothing elsewhere. */
     using scratch_t = dense_scratch<index_type_>;
-    using attend_lookup_t = value_lookup_t;
 
     index_type_& index;
 
@@ -801,10 +730,10 @@ struct specialized_index<index_type_> {
                                         executor_t& executor, scratch_t& scratch, search_config_t config,
                                         std::size_t wanted, counts_span_t scored, maxsim_landing_t landing,
                                         predicate_t& predicate) noexcept;
-    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_t value_lookup,
                                      f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
                                      executor_t& executor, scratch_t& scratch, search_config_t config) noexcept;
-    expected<search_result_t> attend_if(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
+    expected<search_result_t> attend_if(rows_view_t queries, std::size_t head_count, value_lookup_t value_lookup,
                                         f32_t score_scale, rows_span_t outputs, std::span<dense::softmax_state_t> carry,
                                         executor_t& executor, scratch_t& scratch, search_config_t config,
                                         predicate_t& predicate) noexcept;
@@ -947,7 +876,7 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
-    rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
+    rows_view_t queries, std::size_t head_count, value_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
     std::span<dense::softmax_state_t> carry, executor_t& executor, scratch_t& scratch,
     search_config_t config) noexcept {
     return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
@@ -955,7 +884,7 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend_if(
-    rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
+    rows_view_t queries, std::size_t head_count, value_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
     std::span<dense::softmax_state_t> carry, executor_t& executor, scratch_t& scratch, search_config_t config,
     predicate_t& predicate) noexcept {
     return index.attend_if(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config, predicate);

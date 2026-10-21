@@ -119,6 +119,9 @@ struct vram_refine_t {
     u32_t const* part_bases = nullptr;
     u32_t parts = 0;
     u32_t round = 0;
+    u32_t* link_heads = nullptr;
+    u32_t* link_next = nullptr;
+    vram_bitset_t walked;
 };
 
 /** A search's landing, mirroring the shared search sink. */
@@ -147,8 +150,7 @@ struct vram_rescoring_t {
     u32_t row_fragments = 0;
 };
 
-/** What the graph kernels read: the scatter, the merge's buckets, the norms, the rebase and the
- *  audits. */
+/** What the graph kernels read: the norms, the rebase and the audits. */
 struct vram_graph_t {
     vram_flat_storage_t storage;
     u32_t* neighbors = nullptr;
@@ -158,12 +160,7 @@ struct vram_graph_t {
     u32_t source_first = 0;
     u32_t source_bound = 0;
     u32_t shift = 0;
-    u32_t walk_count = 0;
-    u32_t const* node_ids = nullptr;
-    u32_t bucket_width = 0;
-    u32_t* bucket_ids = nullptr;
-    u32_t* bucket_counts = nullptr;
-    vram_bitset_t touched, reached, frontier, next_frontier;
+    vram_bitset_t reached, frontier, next_frontier;
     u32_t* counter = nullptr;
 
     /** The count of the sweep before; zero sends a sweep queued past convergence home at entry. */
@@ -204,16 +201,10 @@ struct vram_ranking_t {
     u32_t score_bytes = 0;
 };
 
-/** Sets the keyed twin of a value lookup apart from the bare one in an attend kernel's name. */
-inline constexpr u32_t vram_keyed_lookup_k = 1u << 16;
-
 /** A key-level value lookup seen through one shard's device key column, so the shard's walks
- *  resolve node IDs: the kernels read a node's row as @c value_lookup(keys[node_id]). */
+ *  resolve node IDs: the kernels read a node's row through the key at @c keys[node_id]. */
 template <typename key_type_, typename value_lookup_type_>
 struct vram_keyed_lookup {
-
-    /** Names this lookup to the attend kernels, apart from the bare key-level one. */
-    inline static constexpr u32_t device_lookup_k = value_lookup_type_::device_lookup_k | vram_keyed_lookup_k;
 
     /** The shard's keys on its device, by node ID. */
     key_type_ const* keys;
@@ -221,6 +212,16 @@ struct vram_keyed_lookup {
     /** Resolves a key to its value row. */
     value_lookup_type_ value_lookup;
 };
+
+/** Spells a keyed lookup into a dense kernel's name, @c S1_ being @c unum::usearch::dense. */
+template <typename key_type_, typename value_lookup_type_>
+void append_itanium_argument(vram_kernel_symbol_t& symbol,
+                             itanium_type<vram_keyed_lookup<key_type_, value_lookup_type_>>) noexcept {
+    symbol.append("NS1_17vram_keyed_lookupI");
+    append_itanium_argument(symbol, itanium_type<key_type_> {});
+    append_itanium_argument(symbol, itanium_type<value_lookup_type_> {});
+    symbol.append("EE");
+}
 
 /** The one argument every dense kernel takes, each reading the records its kernel names: the casts
  *  read NumKong's own plans, and @c matches holds a sharded search's rankings - a shard's
@@ -348,14 +349,14 @@ struct vram_refine_scratch {
 };
 
 /** The buffers one refinement pass uses up, carved from its context's staging when it queues: the
- *  reverse buckets' fill counters, then the bitset of rows the merge re-selects, the shadow
- *  neighbors the walks land and the reverse buckets, @b [rows,connectivity] each. A reconnection
- *  counts its in-links over the fill counters, since it queues after its pass. */
+ *  heads of the walkers' chains, then the bitset of rows the pass walked, the shadow neighbors the
+ *  walks land and the chains' links beside them, @b [rows,connectivity] each. A reconnection counts
+ *  its in-links over the chain heads, since it queues after its pass. */
 struct vram_refine_passes_t {
-    u32_t* bucket_counts = nullptr;
-    vram_bitset_t touched;
+    u32_t* link_heads = nullptr;
+    vram_bitset_t walked;
     u32_t* shadow_neighbors = nullptr;
-    u32_t* buckets = nullptr;
+    u32_t* link_next = nullptr;
 };
 
 #pragma endregion Shard Types
@@ -949,11 +950,11 @@ struct vram_shard_core {
      *  @param[in] head_count The query heads sharing this key-value head; it must divide the rows,
      *      and their per-warp softmax states and accumulator rows must fit in shared memory beside
      *      the query span.
-     *  @param[in] value_lookup Device-callable: `value_lookup(node_id)` points at the node's value
-     *      row on a 16-byte boundary, as wide as the keys and stored like them, in memory this
-     *      device reads; a null row refuses the call with @c shape_mismatch_k. Trivially copyable,
-     *      it names itself with a @c device_lookup_k the vendor's code object instantiates its
-     *      attend kernels over.
+     *  @param[in] value_lookup A trivially copyable record whose `vram_value_row(value_lookup,
+     *      node_id)` device overload points at the node's value row on a 16-byte boundary, as wide
+     *      as the keys and stored like them, in memory this device reads; a null row refuses the
+     *      call with @c shape_mismatch_k. The vendor's code object instantiates its attend kernels
+     *      over the record's type, which spells itself into their names.
      *  @param[in] score_scale The factor turning a dot into a logit.
      *  @param[out] outputs The attended rows, one per query row, as wide as the keys, in host or
      *      device memory; rows in any scalar but f32 cast on the device first, and must fill whole
@@ -1019,9 +1020,9 @@ struct vram_shard_core {
      *  The phases re-select every node of the planned range, once per round of walks across while
      *  the shard holds several parts, then audit reachability, then heal round by round while the
      *  islands shrink: re-select them, and reconnect whatever stays unreached into a reached pick
-     *  or the landmark covering it. A re-selection's walk lands shadow neighbors, the scatter
-     *  buckets every pick under its target, and the merge re-judges forward and reverse candidates
-     *  together, backfilling what diversity leaves empty.
+     *  or the landmark covering it. A re-selection's walk lands shadow neighbors and chains itself
+     *  onto every pick, as an insertion does, and the merge folds each walked row's forward picks,
+     *  then every walker chained onto it, into its live row, re-judging whatever overflows it.
      *
      *  A phase queues its launches and the landing of its counters behind the context's event and
      *  never waits; @ref plan_refine made every allocation, so no phase allocates, and only a
@@ -1439,6 +1440,8 @@ struct vram_shard_core {
          */
         status_t save(step_t const& step, nk::matrix_span<node_id_t>) noexcept {
             if (!index_) return status_t::uninitialized_k;
+            // Shards' steps interleave on one thread, so another shard's device may be current.
+            if (failed(vendor_t::select(index_->device_specs().ordinal))) return status_t::device_error_k;
             iota_view<node_id_t> const rows = step.index_rows;
             if (rows.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
@@ -1483,6 +1486,7 @@ struct vram_shard_core {
          *  missing steps can still land. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
+            if (failed(vendor_t::select(index_->device_specs().ordinal))) return status_t::device_error_k;
             if (status_t const landed = land_pending_(); failed(landed)) return landed;
             std::size_t const nodes = static_cast<std::size_t>(visible);
             if (standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != nodes)
@@ -1730,7 +1734,7 @@ struct vram_shard_core {
             // The part's rows land at this step's own index rows, so an ID's shift follows from
             // the step rather than from the plan's base - the two agree for a one-part plan.
             node_id_t const shift = static_cast<node_id_t>(range.first - step.source_rows.first + source_range.first);
-            // The device indexes its buckets by neighbor ID unchecked, so every rebased ID must
+            // The device indexes its chain heads by neighbor ID unchecked, so every rebased ID must
             // land in this plan.
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
                 return status_t::config_mismatch_k;
@@ -2261,10 +2265,10 @@ struct vram_shard_core {
         std::size_t const rows = size(), words = divide_round_up<std::size_t>(rows, 32);
         byte_t* const staging = context.ensure_staging(refine_staging_bytes_());
         if (!staging) return passes;
-        passes.bucket_counts = reinterpret_cast<u32_t*>(staging);
-        passes.touched.words = passes.bucket_counts + rows;
-        passes.shadow_neighbors = passes.touched.words + words;
-        passes.buckets = passes.shadow_neighbors + rows * connectivity();
+        passes.link_heads = reinterpret_cast<u32_t*>(staging);
+        passes.walked.words = passes.link_heads + rows;
+        passes.shadow_neighbors = passes.walked.words + words;
+        passes.link_next = passes.shadow_neighbors + rows * connectivity();
         return passes;
     }
 

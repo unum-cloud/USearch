@@ -3844,7 +3844,7 @@ struct ram_index {
      *      back-linked. No distance math runs under a lock.
      *
      *  A non-empty @p across fills the candidates first with a walk across into those rows alone.
-     *  @return Whether the new neighbors differ as a set from the ones read.
+     *  @return Whether the new neighbors gained a member the ones read lacked.
      */
     bool refine_one_(node_id_t node_id, node_id_t first_invisible_id, iota_view<node_id_t> across,
                      std::size_t expansion_factor, traversal_context_t& context) noexcept {
@@ -3880,12 +3880,13 @@ struct ram_index {
         context.computed_distances_in_refines += refine_distances;
         small_size_t const selected_count = static_cast<small_size_t>(selected.size());
 
-        // Neighbors are distinct, so equal sizes and one match per kept neighbor mean the same
-        // set. The slots are then rewritten, sentinel-terminated and republished through slot 0.
+        // Neighbors are distinct, so a kept neighbor matching none read is a member the row gained,
+        // the one change a pass counts. The slots are then rewritten, sentinel-terminated and
+        // republished through slot 0.
         small_size_t matches = 0;
         for (small_size_t selected_index = 0; selected_index != selected_count; ++selected_index)
             for (node_id_t const staged_id : seeds) matches += staged_id == selected[selected_index].node_id;
-        bool const changed = selected_count != staged_count || matches != selected_count;
+        bool const changed = matches != selected_count;
         small_size_t const slots_count = own_neighbors.capacity();
         [[maybe_unused]] node_id_t const displaced = own_neighbors.lock();
         for (small_size_t slot = 1; slot < selected_count; ++slot)

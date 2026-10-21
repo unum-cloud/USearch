@@ -3885,9 +3885,8 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                                : carve<std::byte>(arena->memory, count * row_bytes);
                 if (!landing)
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                typename specialized_index<variant_type_>::attend_lookup_t const value_lookup {
-                    arguments->value_lookup, arguments->value_lookup_state,
-                    usearch_scalar_of(variant_type_::vector_dtype_k), columns};
+                value_lookup_t const value_lookup {arguments->value_lookup, arguments->value_lookup_state,
+                                                   usearch_scalar_of(variant_type_::vector_dtype_k), columns};
                 us::dense::rows_span_t const outputs {landing, count, columns, row_bytes, outputs_dtype};
                 // The engine's carry mirrors the C one, so it writes the caller's states in place.
                 std::span<us::dense::softmax_state_t> const carried {
