@@ -515,7 +515,7 @@ USEARCH_EXPORT void usearch_exact_search(                             //
     exact_search_results_t result = search(                    //
         (byte_t const*)dataset, dataset_count, dataset_stride, //
         (byte_t const*)queries, queries_count, queries_stride, //
-        count, metric);
+        count, metric, executor);
 
     if (!result) {
         *error = "Out of memory, allocating a temporary buffer for batch results";

@@ -488,10 +488,67 @@ void test_mini_float_quantizations(size_t const collection_size, size_t const di
     printf("Test: Mini-float quantizations - PASSED\n");
 }
 
+void test_exact_search_threads(void) {
+    printf("Test: Exact Search Threads...\n");
+
+    enum { dataset_count = 64, dimensions = 3, queries_count = 7, wanted = 5 };
+    float dataset[dataset_count][dimensions + 1];
+    float queries[queries_count][dimensions + 1];
+    usearch_key_t keys[2][queries_count][wanted + 1];
+    usearch_distance_t distances[2][queries_count][wanted + 1];
+    size_t const threads[] = {1, 4};
+
+    // Padding checks the input and output row strides as well as the search results.
+    for (size_t i = 0; i < dataset_count; ++i) {
+        for (size_t j = 0; j < dimensions; ++j)
+            dataset[i][j] = (float)i * (float)(j + 1);
+        dataset[i][dimensions] = 12345.0f;
+    }
+    for (size_t i = 0; i < queries_count; ++i) {
+        for (size_t j = 0; j < dimensions; ++j)
+            queries[i][j] = ((float)(8 + i * 6) + 0.25f) * (float)(j + 1);
+        queries[i][dimensions] = -12345.0f;
+    }
+
+    memset(keys, 0xFF, sizeof(keys));
+    for (size_t run = 0; run < 2; ++run) {
+        for (size_t i = 0; i < queries_count; ++i)
+            for (size_t j = 0; j <= wanted; ++j)
+                distances[run][i][j] = -1.0f;
+
+        usearch_error_t error = NULL;
+        usearch_exact_search(dataset, dataset_count, sizeof(dataset[0]), queries, queries_count, sizeof(queries[0]),
+                             usearch_scalar_f32_k, dimensions, usearch_metric_l2sq_k, wanted, threads[run],
+                             &keys[run][0][0], sizeof(keys[run][0]), &distances[run][0][0], sizeof(distances[run][0]),
+                             &error);
+        expect(!error, error);
+
+        for (size_t i = 0; i < queries_count; ++i) {
+            int const base = 8 + (int)i * 6;
+            for (size_t j = 0; j < wanted; ++j) {
+                // Quarter-step queries have distinct, exactly representable squared distances.
+                int const offset = j % 2 ? (int)(j + 1) / 2 : -(int)j / 2;
+                float const delta = (float)offset - 0.25f;
+                expect_eq(keys[run][i][j], (usearch_key_t)(base + offset), "Incorrect exact search key");
+                expect_eq(distances[run][i][j], 14.0f * delta * delta, "Incorrect exact search distance");
+            }
+            expect_eq(keys[run][i][wanted], (usearch_key_t)-1, "Exact search overwrote key padding");
+            expect_eq(distances[run][i][wanted], -1.0f, "Exact search overwrote distance padding");
+        }
+    }
+
+    expect(!memcmp(keys[0], keys[1], sizeof(keys[0])), "Exact search keys differ across thread counts");
+    expect(!memcmp(distances[0], distances[1], sizeof(distances[0])),
+           "Exact search distances differ across thread counts");
+    printf("Test: Exact Search Threads - PASSED\n");
+}
+
 int main(int argc, char const* argv[]) {
     install_crash_handlers();
     printf("Running tests...\n");
     printf("USearch version: %s\n", usearch_version());
+
+    test_exact_search_threads();
 
     size_t collection_sizes[] = {11, 512};
     size_t dimensions[] = {83, 2}; // Not all distance functions make sense for 1 dimensional data
