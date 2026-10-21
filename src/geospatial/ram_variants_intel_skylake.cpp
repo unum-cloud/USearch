@@ -9,4 +9,3 @@
 
 template struct geospatial_terrain<cpu_class_t::intel_skylake_k>;
 template struct geospatial_ram_variant<cpu_class_t::intel_skylake_k>;
-template struct geospatial_nvme_variant<cpu_class_t::intel_skylake_k>;

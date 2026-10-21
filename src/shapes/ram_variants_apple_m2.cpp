@@ -9,5 +9,3 @@
 
 template struct shapes_ram_variant<nk::f32_t, cpu_class_t::apple_m2_k>;
 template struct shapes_ram_variant<nk::f16_t, cpu_class_t::apple_m2_k>;
-template struct shapes_nvme_variant<nk::f32_t, cpu_class_t::apple_m2_k>;
-template struct shapes_nvme_variant<nk::f16_t, cpu_class_t::apple_m2_k>;

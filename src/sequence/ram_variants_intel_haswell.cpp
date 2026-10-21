@@ -8,4 +8,3 @@
 #include "sequence_specializations.cuh"
 
 template struct sequence_ram_variant<cpu_class_t::intel_haswell_k>;
-template struct sequence_nvme_variant<cpu_class_t::intel_haswell_k>;

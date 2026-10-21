@@ -302,6 +302,12 @@ extern template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_o
                                                        sequence_nvidia_capabilities_k,
                                                        sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
 
+/** A GPU overlap index scores in the same fixed point as the RAM metric. */
+template <typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
+inline constexpr usearch_distance_t distance_unit<
+    us::sequence::vram_nvidia_index<usearch_sequence_metric_overlap_k, node_id_type_, capability_, kernels_type_>> =
+    1.0 / us::sequence::overlap_resolution_k;
+
 /** The sequence alternative on one NVIDIA GPU: the basic VRAM index under the sequence kind
  *  @p metric_ - Levenshtein over bytes or UTF-8 runes, or overlap - with 32-bit node IDs. */
 template <usearch_sequence_metric_t metric_>

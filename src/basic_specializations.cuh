@@ -358,7 +358,8 @@ status_t drive_refinement(typename index_type_::refine_plan_t& plan, thread_scra
 }
 
 /** What one unit of @p metric_type_'s distance is worth on the C scale: one, unless a modality's
- *  fixed-point metric specializes it so that its full scale lands as one. */
+ *  fixed-point metric, or a GPU index scoring with one, specializes it so that its full scale lands
+ *  as one. */
 template <typename metric_type_>
 inline constexpr usearch_distance_t distance_unit = 1;
 
@@ -991,7 +992,7 @@ struct vram_nvidia_variant {
                 for (std::size_t row = first; row != first + taking; ++row) landing.counts[row] = wanted;
                 for (std::size_t match = matches; match-- != 0;) {
                     node_id_t const id = ids[match];
-                    usearch_distance_t const distance = distances[match];
+                    usearch_distance_t const distance = distances[match] * distance_unit<index_t>;
                     if (id == std::numeric_limits<node_id_t>::max())
                         landing.counts[first + match / wanted] = match % wanted;
                     else {

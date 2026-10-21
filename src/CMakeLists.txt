@@ -559,11 +559,11 @@ function (usearch_variants modality residency backend)
     )
 endfunction ()
 
-# The NVMe variants compile for the CPU classes whose 4-way or tiles kits a storage walk or scan tells apart: they carry
-# no waiter or atomic reference, so aws_g5 and alibaba_c930, which advance only by those, take none, and a WebAssembly
-# module reads no storage directly. The sequence, shapes and geospatial variants compile for the CPU classes where any
-# of their StringZilla or NumKong kits advance, and a modality whose kits stay put at a class falls back down its kit
-# chain; on NVIDIA they need nothing past the Ampere floor, so they compile for the vendor-wide class.
+# The dense NVMe variants compile for the CPU classes whose 4-way or tiles kits a storage walk or scan tells apart: they
+# carry no waiter or atomic reference, so aws_g5 and alibaba_c930, which advance only by those, take none, and a
+# WebAssembly module reads no storage directly. The sequence, shapes and geospatial variants compile for the CPU classes
+# where any of their StringZilla or NumKong kits advance, and a modality whose kits stay put at a class falls back down
+# its kit chain; on NVIDIA they need nothing past the Ampere floor, so they compile for the vendor-wide class.
 set(usearch_dense_nvme_classes_
     serial
     intel_haswell
@@ -628,14 +628,21 @@ usearch_variants(
     LIBRARIES stringzilla::header
 )
 usearch_variants(
+    sequence nvme cpu ${usearch_basic_cpu_classes_}
+    DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
+    LIBRARIES stringzilla::header
+)
+usearch_variants(
     sequence vram nvidia nvidia
     KERNELS levenshtein_bytes levenshtein_utf8 overlap
     DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
     LIBRARIES stringzilla::header
 )
 usearch_variants(shapes ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
+usearch_variants(shapes nvme cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
 usearch_variants(shapes vram nvidia nvidia KERNELS f16 f32)
 usearch_variants(geospatial ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
+usearch_variants(geospatial nvme cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
 usearch_variants(geospatial vram nvidia nvidia)
 usearch_variants(basic vram nvidia nvidia)
 

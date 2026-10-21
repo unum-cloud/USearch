@@ -10,12 +10,12 @@ None of it is a public header: the C libraries, the C test and every binding lin
 - `dense_index.cuh` implements `dense_index.h`: the variant grid over every compiled alternative, the handle owning the chosen one, and every exported verb as one visit apiece.
 - `dense_index.cpp` compiles that header with the host compiler for every build, the VRAM variants joining the grid for each vendor built.
 - `dense_specializations.cuh` spells one variant: the scalar and capability tables, the GPU classes, and the `specialized_index` view every class unit instantiates.
-- `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.{cu,hip,cpp}` are the class units, each instantiating `specialized_index` over its class's variants, one per storage dtype the class advances.
+- `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.{hip,cpp}` are the class units, each instantiating `specialized_index` over its class's variants, one per storage dtype the class advances.
 - `basic_specializations.cuh` holds what the basic modalities' variants share: the fan-outs that insert and search through an executor, and the base of every variant on an NVIDIA GPU.
 - `sequence_specializations.cuh`, `shapes_specializations.cuh` and `geospatial_specializations.cuh` spell each modality's variants, such as `sequence_ram_variant<cpu_class>` and `shapes_ram_variant<scalar, cpu_class>`, with their NVMe and NVIDIA siblings and the geometry they freeze.
 - `basic_index.cuh` holds the one handle over a modality's variant, the CPU-class ladder, and every verb once, each modality's traits supplying only what differs.
 - `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp` implement `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`: one variant over the compiled alternatives, the traits, and one forward per verb.
-- `<modality>/ram_variants_<class>.cpp` are their class units, each instantiating its modality's variants for the class, and `<modality>/vram_variants_nvidia.cu` embeds the modality's NVIDIA fatbin.
+- `<modality>/ram_variants_<class>.cpp` and `<modality>/nvme_variants_<class>.cpp` are their class units, each instantiating its modality's variants of one residency for the class, and `<modality>/vram_variants_nvidia.cpp` holds the modality's NVIDIA host variants beside a `vram_kernels_nvidia_<key>.cu` per metric or dtype, where geospatial's one `vram_variants_nvidia.cu` compiles both ways.
 
 ## From a Verb to an Engine Template
 
@@ -85,8 +85,8 @@ The dispatch unit visits every variant yet compiles at the baseline instruction 
   Nothing links `libamdhip64`: `hip_api` opens it at first use through entry points it declares itself, so host units need no ROCm headers.
 - `usearch_dense_vram_variants_apple` compiles the Apple variants as plain C++, one unit per Apple class, their kernels compiled from embedded source at first use.
   Nothing links Metal, Foundation or `libobjc`: `metal_api` opens them at first use.
-- `usearch_sequence_ram_variants`, `usearch_shapes_ram_variants` and `usearch_geospatial_ram_variants` collect each modality's class units, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
-- `usearch_<modality>_vram_variants_nvidia` embeds one basic modality's NVIDIA fatbin, every kit compiled past the Ampere floor.
+- `usearch_sequence_ram_variants`, `usearch_shapes_ram_variants` and `usearch_geospatial_ram_variants` collect each modality's RAM class units, and their `_nvme_` twins the NVMe ones, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
+- `usearch_<modality>_vram_variants_nvidia` embeds a basic modality's NVIDIA fatbins, one per sequence metric or shapes dtype and one for geospatial, every kit compiled past the Ampere floor.
 - `usearch_punned` - `types.cpp` & the dispatch units, `dense_index.cpp`, `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp`.
 
 `USEARCH_PUNNED_LIBRARIES` and `USEARCH_PUNNED_OBJECTS` hand all of them to `usearch_shared`, `usearch_static` and `usearch_test_c`, and the static archive carries the yyjson, NumKong and ForkUnion objects too, so a binding links one library.
@@ -138,7 +138,7 @@ The NVMe class units score with the same kits as the RAM ones, since the transpo
 
 A sequence or shapes handle holds one `basic::ram_index`, one shard on the heap, with every value owned by its node record: a `sz::string` of the sequence's bytes, or an `nk::shapes_packed` of the shape's points in `f16` or `f32`.
 Their ladders are shorter than dense's, over the classes where StringZilla's Levenshtein and overlap kits or NumKong's shapes and geospatial kits advance on their parent's.
-Every basic class unit lists the same modalities, sequence, shapes and geospatial, each RAM then NVMe, and a modality whose kits do not advance at a class falls back through its kit chain to the next lower generation.
+Sequence, shapes and geospatial compile the same classes, each into a RAM and an NVMe unit, and a modality whose kits do not advance at a class falls back through its kit chain to the next lower generation.
 
 - `insert` builds the batch's values on every thread from the index's allocator, sizes every thread's context and metric, and only then plans the batch, so nothing fails after the dispense.
 - `search` lands each query's nearest from the walk's candidates, filtered by the predicate a quad of keys at a time.

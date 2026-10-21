@@ -1572,8 +1572,9 @@ void test_sequence_round_trip(void) {
 }
 
 /** A GPU sequence index takes byte and rune Levenshtein, inserts and describes its rows, and lands
- *  a search's matches in its executor's device arena; alignments and the verbs it lacks refuse.
- *  Skipped without a GPU. */
+ *  a search's matches in its executor's device arena; alignments and the verbs it lacks refuse. An
+ *  overlap index lands its scores in a host arena on the scale a RAM one does. Skipped without a
+ *  GPU. */
 void test_sequence_vram(void) {
     usearch_outcome_t outcome = {0};
     size_t devices_count = 0;
@@ -1646,6 +1647,40 @@ void test_sequence_vram(void) {
                                                           .wanted = 2});
     expect(!outcome.message, outcome.message);
     expect(matches.keys && matches.scores && matches.counts, "A GPU search lands its matches in the arena");
+
+    // "mitten" holds three of the four windows "kitten" has at three bytes.
+    size_t const widths[] = {3};
+    usearch_sequence_index_t overlap = NULL;
+    usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &overlap,
+                                                                .outcome = &outcome,
+                                                                .metric = usearch_sequence_metric_overlap_k,
+                                                                .window_widths = widths,
+                                                                .window_widths_count = 1,
+                                                                .vram = vram});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = overlap,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 4,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+    expect(!outcome.message, outcome.message);
+    usearch_arena_t const host_arena = create_arena(NULL);
+    usearch_matches_view_t overlaps = {0};
+    usearch_sequence_search(&(usearch_sequence_search_t) {.index = overlap,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 1,
+                                                          .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                          .matches = &overlaps,
+                                                          .arena = host_arena,
+                                                          .wanted = 2});
+    expect(!outcome.message, outcome.message);
+    expect(overlaps.counts[0] == 2 && value_of(overlaps.keys[0]) == 0 && overlaps.scores[0] == 0,
+           "A stored overlap query finds itself first");
+    expect(value_of(overlaps.keys[1]) == 2 && overlaps.scores[1] == 0.25, "Missing a quarter of windows scores 0.25");
+    usearch_arena_free(host_arena);
+    usearch_sequence_free(overlap);
 
     char const path[] = "usearch-test-c-sequence-vram.safegraphs";
     usearch_sequence_save(&(usearch_sequence_save_t) {.index = index,
