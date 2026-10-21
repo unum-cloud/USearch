@@ -1284,7 +1284,7 @@ struct ram_indexes {
     /**
      *  @brief Late-interaction scores of query groups against every shard: each query row takes its
      *      best dot within a key, and those maxima sum to that key's score, exact for every key the
-     *      call nominates.
+     *      call lands; a walk never folds the keys its own dots bound below the kept ones.
      *
      *  @param[in] queries The token rows of every query, laid end to end.
      *  @param[in] query_offsets Where every query's rows start in @p queries, then where the last
@@ -1881,6 +1881,19 @@ struct ram_indexes {
         }
     };
 
+    /** One key a MaxSim walk row kept, grouped by key to bound what the key can total. */
+    struct alignas(2 * sizeof(key_t)) maxsim_hit_t {
+
+        /** The key the row's walks ranked. */
+        key_t key;
+
+        /** The query row whose walks ranked it, counted within the block. */
+        u32_t row;
+
+        /** How far its dot rises above the row's worst kept one, in walk distances. */
+        distance_t gain;
+    };
+
     /** Larger totals first, ties by key bytes, so every thread count ranks alike. */
     static bool better_(total_t first_total, key_t const& first_key, total_t second_total,
                         key_t const& second_key) noexcept {
@@ -1889,23 +1902,26 @@ struct ram_indexes {
     }
 
     /** Keeps @p key at @p total among @p best and its keys, @p kept of them so far: appended while
-     *  there is room, else in place of the worst it beats. */
+     *  there is room, else in place of the @p worst slot it beats, which a full ranking keeps
+     *  current, so a rejected key costs one comparison. */
     static void rank_into_(std::span<maxsim_ranked<total_t>> best, std::span<key_t> best_keys, std::size_t& kept,
-                           key_t const& key, total_t total) noexcept {
+                           std::size_t& worst, key_t const& key, total_t total) noexcept {
         if (best.empty()) return;
         if (kept != best.size()) {
             best[kept] = {static_cast<u32_t>(kept), total};
             best_keys[kept++] = key;
-            return;
+            if (kept != best.size()) return;
         }
-        std::size_t worst = 0;
+        else {
+            if (!better_(total, key, best[worst].total, best_keys[best[worst].candidate])) return;
+            best[worst].total = total;
+            best_keys[best[worst].candidate] = key;
+        }
+        worst = 0;
         for (std::size_t slot = 1; slot != kept; ++slot)
             if (better_(best[worst].total, best_keys[best[worst].candidate], best[slot].total,
                         best_keys[best[slot].candidate]))
                 worst = slot;
-        if (!better_(total, key, best[worst].total, best_keys[best[worst].candidate])) return;
-        best[worst].total = total;
-        best_keys[best[worst].candidate] = key;
     }
 
     /** Hands each query's kept keys of @p best to @p land, largest first, the q-th query as query
@@ -1944,8 +1960,12 @@ struct ram_indexes {
                                   slice_t::reserved_bytes(queries_count * capacity * sizeof(maxsim_ranked<total_t>)) +
                                   slice_t::reserved_bytes(queries_count * capacity * sizeof(key_t)) +
                                   slice_t::reserved_bytes(queries_count * sizeof(std::size_t)) +
-                                  slice_t::reserved_bytes(rows * width * sizeof(key_t)) +
-                                  slice_t::reserved_bytes(width * sizeof(distance_t));
+                                  slice_t::reserved_bytes(queries_count * sizeof(std::size_t)) +
+                                  slice_t::reserved_bytes(width * sizeof(key_t)) +
+                                  slice_t::reserved_bytes(width * sizeof(distance_t)) +
+                                  slice_t::reserved_bytes(rows * width * sizeof(maxsim_hit_t)) +
+                                  slice_t::reserved_bytes(rows * width * sizeof(maxsim_ranked<total_t>)) +
+                                  slice_t::reserved_bytes(rows * sizeof(distance_t));
         if constexpr (index_t::has_tiles_k)
             if (rows >= tiles_kit_t::tile_columns_k) {
                 std::size_t const block_rows = block_rows_(config.cache_bytes);
@@ -1965,14 +1985,16 @@ struct ram_indexes {
      *
      *  Each query hands its best @p capacity keys to @p land, largest first, the first query as
      *  query @p first_query of thread @p thread, and counts every key it ranked in @p scored. A
-     *  walk serves one query, each of its rows ranking @p config's breadth of keys, which sort in
-     *  place and keep each key once; under a @c traversal_t::scan_k scan every key whose first
-     *  locator is a visible row is a candidate once for every query. @p predicate hears each
-     *  candidate before it folds. A tile's columns of rows or more fold through the tiles kit,
-     *  fewer a quad of rows at a time. Everything lives in the traversal's staged queries, laid out
-     *  as @ref maxsim_staged_bytes_ counts it: the rows, their norms, one maximum per row, each
-     *  query's ranking, its keys and its count, under walks the candidates and one row's merge
-     *  distances, then the tiled fold.
+     *  walk serves one query, each of its rows ranking @p config's breadth of keys, and visits each
+     *  key once in descending bound: its best walk dot per row, and the worst kept dot of every row
+     *  that missed it, until a full ranking's worst total beats the next bound; under a
+     *  @c traversal_t::scan_k scan every key whose first locator is a visible row is a candidate
+     *  once for every query. @p predicate hears each candidate before it folds. A tile's columns of
+     *  rows or more fold through the tiles kit, fewer a quad of rows at a time. Everything lives in
+     *  the traversal's staged queries, laid out as @ref maxsim_staged_bytes_ counts it: the rows,
+     *  their norms, one maximum per row, each query's ranking, its keys, its count and its worst
+     *  slot, under walks one row's merged keys and distances, every row's hits, the keys' bounds
+     *  and one gain per row, then the tiled fold.
      */
     template <typename predicate_type_, typename land_type_>
     status_t maxsim_block_(rows_view_t queries, std::span<std::size_t const> query_offsets, std::size_t first_query,
@@ -1992,8 +2014,12 @@ struct ram_indexes {
         std::span<maxsim_ranked<total_t>> const best = carve_<maxsim_ranked<total_t>>(staged, queries_count * capacity);
         std::span<key_t> const best_keys = carve_<key_t>(staged, queries_count * capacity);
         std::span<std::size_t> const kept = carve_<std::size_t>(staged, queries_count);
-        std::span<key_t> const candidates = carve_<key_t>(staged, rows * width);
+        std::span<std::size_t> const worst = carve_<std::size_t>(staged, queries_count);
+        std::span<key_t> const ranked = carve_<key_t>(staged, width);
         std::span<distance_t> const merged = carve_<distance_t>(staged, width);
+        std::span<maxsim_hit_t> const hits = carve_<maxsim_hit_t>(staged, rows * width);
+        std::span<maxsim_ranked<total_t>> const bounds = carve_<maxsim_ranked<total_t>>(staged, rows * width);
+        std::span<distance_t> const row_gains = carve_<distance_t>(staged, rows);
         for (std::size_t row = 0; row != rows; ++row)
             norms[row] = shards_[0].index->norms(query_rows.row(row).as_vector());
         std::memset(kept.data(), 0, kept.size_bytes());
@@ -2006,7 +2032,7 @@ struct ram_indexes {
                 total_t total {};
                 for (dot_result_t const maximum : key_maxima.subspan(begin, end - begin)) total += total_t(maximum);
                 rank_into_(best.subspan(query * capacity, capacity), best_keys.subspan(query * capacity, capacity),
-                           kept[query], key, total);
+                           kept[query], worst[query], key, total);
                 ++scored[query];
             }
         };
@@ -2056,11 +2082,13 @@ struct ram_indexes {
                 }
                 return status_t::success_k;
             }
-            // Each row's walks merge into the next `width` candidates, which then sort in place.
+            // Each row's walks merge into its best `width` keys, which land among the hits with
+            // how far each rose above the row's worst kept dot, the most a missed key can reach.
             std::size_t nominated = 0;
+            total_t floors {};
+            bool bounded = true;
             for (std::size_t row = 0; row != rows; ++row) {
                 vector_view_t const query = query_rows.row(row).as_vector();
-                std::span<key_t> const ranked = candidates.subspan(nominated, width);
                 std::size_t found = 0;
                 for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
                     shard_t const& one = shards_[shard];
@@ -2076,14 +2104,45 @@ struct ram_indexes {
                     if (!walked) return walked.status;
                     found = merge_search_results(to_span(traversal.results), one.keys, ranked, merged, found);
                 }
-                nominated += found;
+                if (!found) {
+                    bounded = false;
+                    continue;
+                }
+                distance_t const farthest = merged[found - 1];
+                floors += total_t(1 - farthest);
+                for (std::size_t hit = 0; hit != found; ++hit)
+                    hits[nominated++] = {ranked[hit], static_cast<u32_t>(row), farthest - merged[hit]};
             }
-            auto by_bytes = [](key_t const& first_key, key_t const& second_key) noexcept {
-                return std::memcmp(&first_key, &second_key, sizeof(key_t)) < 0;
-            };
-            partial_sort(candidates.first(nominated), nominated, by_bytes);
-            for (std::size_t position = 0; position != nominated; ++position)
-                if (!position || !(candidates[position] == candidates[position - 1])) visit(candidates[position]);
+
+            // Grouped by key, a key's bound adds its best gain per row to each row's floor dot.
+            for (distance_t& gain : row_gains) gain = 0;
+            radix_group(hits.first(nominated), &maxsim_hit_t::key);
+            std::size_t unique = 0;
+            for (std::size_t run = 0, end = 0; run != nominated; run = end) {
+                while (end != nominated && hits[end].key == hits[run].key) ++end;
+                for (std::size_t hit = run; hit != end; ++hit)
+                    row_gains[hits[hit].row] = max_of(row_gains[hits[hit].row], hits[hit].gain);
+                total_t bound = floors;
+                for (std::size_t hit = run; hit != end; ++hit)
+                    bound += total_t(row_gains[hits[hit].row]), row_gains[hits[hit].row] = 0;
+                hits[unique].key = hits[run].key;
+                bounds[unique] = {static_cast<u32_t>(unique), bound};
+                ++unique;
+            }
+            partial_sort(bounds.first(unique), unique,
+                         [](maxsim_ranked<total_t> const& first, maxsim_ranked<total_t> const& second) noexcept {
+                             return first.total > second.total;
+                         });
+            // The walk serves one query; once its ranking fills, bounds only fall, so the first
+            // below the worst kept total ends the visits. A tiled fold ranks late, so stops later.
+            for (std::size_t position = 0; position != unique; ++position) {
+                if (bounded && kept[0] == capacity && best[worst[0]].total > bounds[position].total) {
+                    // Skipped keys still count as scored, so `scored` sizes a call that keeps all.
+                    scored[0] += unique - position;
+                    break;
+                }
+                visit(hits[bounds[position].candidate].key);
+            }
             return status_t::success_k;
         };
 

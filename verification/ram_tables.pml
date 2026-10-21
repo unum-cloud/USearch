@@ -2,27 +2,27 @@
  *  @brief `chunked_multimap`'s probes: three inserters and a prober over one published chunk.
  *
  *  The insert-only linear-probe multimap from `include/usearch/utilities/ram_tables.hpp`, whose
- *  slot states advance `empty` → `building` → `published` once, whose entries each take a seat and
- *  cover its chunk before any slot is touched, and whose readers walk the control bytes with
- *  acquire loads, wait-free. `ram_tables_growth.pml` covers the chunks a claim publishes.
+ *  slot states advance `empty` → `building` → the key's probe tag once, whose entries each take a
+ *  seat and cover its chunk before any slot is touched, and whose readers walk the control bytes
+ *  with acquire loads, wait-free. `ram_tables_growth.pml` covers the chunks a claim publishes.
  *
  *  One published chunk of two seats, two slots and the constant terminator at position 2. Every
  *  inserter hashes to chain 0; inserters 0 and 1 carry key A and inserter 2 key B, so the cover
  *  refuses one of them and the other two contend for the two slots. An inserter takes a seat with
  *  a relaxed add, and probes: a relaxed load of the state, an acquire compare-exchange from `empty`
- *  to `building`, the key and the value stored relaxed, and the state stored `published` with a
- *  release. The prober walks the chain with acquire loads until the terminator, and on a published
- *  slot carrying key A reads the value.
+ *  to `building`, the key and the value stored relaxed, and the state stored as the tag with a
+ *  release. Both keys share one tag, the colliding case. The prober walks the chain with acquire
+ *  loads until the terminator, and on a slot holding the tag and carrying key A reads the value.
  *
  *  Invariants:
  *  - bound: no inserter probes past the terminator, and no insert lands past the published seats;
- *  - visibility: the value a prober reads beside a matching key on a published slot is that key's
+ *  - visibility: the value a prober reads beside a matching key on a tagged slot is that key's
  *    value, never the slot half-written;
  *  - completeness, under `sc`: a key published before the prober started is found, since a
  *    `building` slot is occupied and never the end of a chain.
  *
  *  @verify pass sc,rc11,far
- *  @verify fail rc11 publish_order=order_relaxed: the release on the `published_k` store carries
+ *  @verify fail rc11 publish_order=order_relaxed: the release on the tag store carries
  *      the key and the value, plain stores the state alone publishes; without it, the prober reads
  *      the new key beside the slot's initial value
  *  @verify fail rc11 probe_order=order_relaxed: the acquire on each probe of a control byte pairs
@@ -44,12 +44,13 @@
 #define claimed_seats 6
 #define terminator 2
 
-// The values: the published seats, the states of `slot_state_t`, the keys the inserters carry, and
-// the value each key maps to; the keys and values stay apart from the zero a word starts at.
+// The values: the published seats, the states of `slot_state_t` and the probe tag both keys share,
+// the keys the inserters carry, and the value each key maps to; the keys and values stay apart from
+// the zero a word starts at.
 #define published_seats 2
 #define empty 0
 #define building 1
-#define published 2
+#define tag 133
 #define key_a 1
 #define key_b 2
 #define key_carried(t) ((t) == 2 -> key_b : key_a)
@@ -99,7 +100,7 @@ claimed_slot:
     store(t, key(chain), order_relaxed, key_carried(t));
     store(t, value(chain), order_relaxed, value_for(key_carried(t)));
     atomic {
-        store(t, state(chain), publish_order, published);
+        store(t, state(chain), publish_order, tag);
         if :: key_carried(t) == key_a && !probing -> published_before_probe = true :: else fi
     };
 refused:
@@ -122,8 +123,8 @@ walk:
     };
     if
     :: seen == empty -> goto done
-    :: seen == published ->
-        // the payload, plain reads beside the published state: `find_each`'s callback
+    :: seen == tag ->
+        // the payload, plain reads beside a matching tag: `find_each`'s callback
         load(t, key(chain), order_relaxed, seen_key);
         if
         :: seen_key == key_a ->
@@ -132,7 +133,7 @@ walk:
             found = true
         :: else
         fi
-    :: else // building: occupied, never a match, never the end of the chain
+    :: else // building or another tag: occupied, never a match, never the end of the chain
     fi;
     chain++;
     goto walk;

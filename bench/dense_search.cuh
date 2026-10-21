@@ -150,10 +150,11 @@ inline void report_refinement_metrics(refinement_report_t const& report) {
     fmt::println("  reachable: {} of {} · {} sweeps", report.reachable_nodes, report.nodes, report.sweeps);
 }
 
-/** Prints the search phase's wall clock, throughput, latency percentiles and traversal
- *  telemetry; @p latencies_us reorders in place. */
+/** Prints the search phase's wall clock, throughput, latency percentiles, the searched index's own
+ *  @p index_bytes and traversal telemetry; @p latencies_us reorders in place. */
 inline void report_search_metrics(settings_t const& settings, std::size_t query_count, double seconds,
-                                  std::size_t threads, telemetry_lane_t const& sums, std::span<float> latencies_us) {
+                                  std::size_t threads, std::size_t index_bytes, telemetry_lane_t const& sums,
+                                  std::span<float> latencies_us) {
     auto percentile = [&](double share) {
         std::size_t const rank = std::min(query_count - 1, std::size_t(share * double(query_count)));
         std::nth_element(latencies_us.begin(), latencies_us.begin() + rank, latencies_us.end());
@@ -163,6 +164,7 @@ inline void report_search_metrics(settings_t const& settings, std::size_t query_
     fmt::println("  queries: {} at top-{}{}", query_count, settings.top_k.value,
                  settings.self_search == switch_t::present_k ? " · self-search" : "");
     fmt::println("  threads: {}", threads);
+    fmt::println("  memory: {:.2f} GB", gigabytes(index_bytes));
     fmt::println("  wall: {:.4f} s", seconds);
     fmt::println("  throughput: {} QPS", humanized(double(query_count) / seconds));
     // An empty latency span means a batch-shaped backend with no per-query clock.

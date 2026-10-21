@@ -237,18 +237,20 @@ class growing_hash_set {
  *  @brief Insert-only, linear-probe hash multimap that grows without moving an entry: its chunks are fixed tables
  *      appended on a doubling @ref chunk_schedule, so inserts and lookups run while it grows.
  *
- *  Duplicate keys coexist as separate slots, which is what makes concurrent insertion CAS-once instead of
- *  lock-and-chain: a slot's state advances @c empty_k → @c building_k → @c published_k exactly once.
+ *  Duplicate keys coexist as separate slots, which is what makes concurrent insertion CAS-once
+ *  instead of lock-and-chain: a slot's state advances @c empty_k → @c building_k → its key's probe
+ *  tag exactly once.
  *
  *  Every entry takes one seat, a global index a @ref claim hands out and covers before the entry exists, so
  *  recording it never fails; seat @c s lands in the chunk the schedule locates it in, whose slots are twice its
  *  seats, so every probe chain terminates. The chunks are two @ref chunked_column s - control bytes and slots - that
  *  cover publishes like any other column, so the claimed seats are the one word the map owns.
  *
- *  Slot states live in the control-byte column the probes scan - 64 states per cache line - so a slot's key & value
- *  are touched only on a published candidate, and no key or value bit-pattern is ever reserved. Readers are
- *  wait-free: they probe every published chunk with acquire loads, stop at @c empty_k, and treat @c building_k as
- *  occupied-but-mismatched - never as end-of-chain - so a half-published entry is merely invisible, never wrong.
+ *  Slot states live in the control-byte column the probes scan - 64 states per cache line - so a
+ *  slot's key & value are touched only on a published slot whose tag matches, and no key or value
+ *  bit-pattern is ever reserved. Readers are wait-free: they probe every published chunk with
+ *  acquire loads, stop at @c empty_k, and treat @c building_k as occupied-but-mismatched - never as
+ *  end-of-chain - so a half-published entry is merely invisible, never wrong.
  */
 template <typename key_type_, typename value_type_,                             //
           typename hash_type_ = std::hash<key_type_>,                           //
@@ -271,17 +273,16 @@ class chunked_multimap {
     /** Slots per chunk, twice its seats. */
     using slots_schedule_t = chunk_schedule<11, 41>;
 
-    /** Lifecycle of one slot, advanced monotonically by its one claiming inserter. */
+    /** Lifecycle of one slot, advanced monotonically by its one claiming inserter; a published
+     *  slot holds its key's @ref probe_tag_of instead, and its key & value are immutable from then
+     *  on. */
     enum class slot_state_t : u8_t {
 
         /** Never claimed - the probe chain terminator, and what a fresh chunk starts as. */
         empty_k = 0,
 
         /** Claimed; the key & value stores have not been released yet. */
-        building_k,
-
-        /** Fully published; the key & value are immutable from here on. */
-        published_k,
+        building_k = 1,
     };
 
     /** Seats one @ref claim handed out: the next to fill and the bound past the last. */
@@ -353,7 +354,8 @@ class chunked_multimap {
         std::size_t const index = seats_schedule_t::locate(seats.next++).chunk;
         std::span<slot_state_t> const states = states_.chunk(index);
         std::span<slot_t> const slots = slots_.chunk(index);
-        std::size_t position = first_probe_of(key, states.size());
+        u64_t const hash = mixed_hash_of(key);
+        std::size_t position = first_probe_of(hash, states.size());
         while (true) {
             atomic_ref<slot_state_t> state(states[position]);
             slot_state_t expected_empty = slot_state_t::empty_k;
@@ -361,7 +363,7 @@ class chunked_multimap {
                 state.compare_exchange_strong(expected_empty, slot_state_t::building_k, std::memory_order_acquire,
                                               std::memory_order_relaxed)) {
                 slots[position] = {key, value};
-                state.store(slot_state_t::published_k, std::memory_order_release);
+                state.store(probe_tag_of(hash), std::memory_order_release);
                 return;
             }
             position = (position + 1) & (states.size() - 1);
@@ -379,17 +381,18 @@ class chunked_multimap {
     /** The first value stored under @p key in chunk and probe order, stopping there, or
      *  @c malformed_k when absent; the same value every call once the key's inserts published. */
     expected<value_t> find_first(key_t const& key) const noexcept {
+        u64_t const hash = mixed_hash_of(key);
+        slot_state_t const tag = probe_tag_of(hash);
         for (std::size_t index = 0; index != max_chunks_k; ++index) {
             std::span<slot_state_t const> const states = states_.chunk(index);
             std::span<slot_t const> const slots = slots_.chunk(index);
             if (slots.empty()) break;
-            for (std::size_t position = first_probe_of(key, states.size());;
+            for (std::size_t position = first_probe_of(hash, states.size());;
                  position = (position + 1) & (states.size() - 1)) {
                 slot_state_t const state =
                     atomic_ref<slot_state_t const>(states[position]).load(std::memory_order_acquire);
                 if (state == slot_state_t::empty_k) break;
-                if (state == slot_state_t::published_k && slots[position].key == key)
-                    return {slots[position].value, status_t::success_k};
+                if (state == tag && slots[position].key == key) return {slots[position].value, status_t::success_k};
             }
         }
         return {value_t {}, status_t::malformed_k};
@@ -399,17 +402,19 @@ class chunked_multimap {
      *  whose slots are not published yet holds no entry, and neither does any after it. */
     template <typename callback_type_>
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
+        u64_t const hash = mixed_hash_of(key);
+        slot_state_t const tag = probe_tag_of(hash);
         for (std::size_t index = 0; index != max_chunks_k; ++index) {
             std::span<slot_state_t const> const states = states_.chunk(index);
             std::span<slot_t const> const slots = slots_.chunk(index);
             if (slots.empty()) return;
-            for (std::size_t position = first_probe_of(key, states.size());;
+            for (std::size_t position = first_probe_of(hash, states.size());;
                  position = (position + 1) & (states.size() - 1)) {
                 slot_state_t const state =
                     atomic_ref<slot_state_t const>(states[position]).load(std::memory_order_acquire);
                 if (state == slot_state_t::empty_k) break;
-                // A building slot's key is still in flight - occupied, but never a match.
-                if (state == slot_state_t::published_k && slots[position].key == key) callback(slots[position].value);
+                // A building slot's key is still in flight - occupied, and never equal to a tag.
+                if (state == tag && slots[position].key == key) callback(slots[position].value);
             }
         }
     }
@@ -447,10 +452,20 @@ class chunked_multimap {
         return slots_.cover(seats * 2);
     }
 
-    /** Avalanches the hash through @ref mix_bits before masking, so the identity hashes of sequential integer keys
-     *  still scatter across the table. */
-    std::size_t first_probe_of(key_t const& key, std::size_t slots_count) const noexcept {
-        return static_cast<std::size_t>(mix_bits(static_cast<u64_t>(hash_(key)))) & (slots_count - 1);
+    /** Avalanches the hash through @ref mix_bits, so the identity hashes of sequential integer
+     *  keys still scatter across the table: its low bits pick the first probe, its top seven the
+     *  probe tag. */
+    u64_t mixed_hash_of(key_t const& key) const noexcept { return mix_bits(static_cast<u64_t>(hash_(key))); }
+
+    /** The first slot the chain of @p mixed_hash probes in a chunk of @p slots_count. */
+    static std::size_t first_probe_of(u64_t mixed_hash, std::size_t slots_count) noexcept {
+        return static_cast<std::size_t>(mixed_hash) & (slots_count - 1);
+    }
+
+    /** The state a slot of @p mixed_hash publishes: the top bit, above every lifecycle state, then
+     *  the hash's top seven bits, so a probe skips most other keys without reading their slots. */
+    static slot_state_t probe_tag_of(u64_t mixed_hash) noexcept {
+        return static_cast<slot_state_t>(0x80u | (mixed_hash >> 57));
     }
 
     chunked_column<slot_state_t, slots_schedule_t, max_slots_k, allocator_t, atomic_ref_template_> states_;

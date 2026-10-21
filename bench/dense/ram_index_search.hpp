@@ -478,7 +478,8 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     telemetry_lane_t const sums = summed_lanes(bench.lanes);
     std::size_t searching_threads = 0;
     [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &searching_threads);
-    report_search_metrics(bench.settings, query_count, seconds, searching_threads, sums, bench.results.latencies_us);
+    report_search_metrics(bench.settings, query_count, seconds, searching_threads, bench.index->memory_usage(), sums,
+                          bench.results.latencies_us);
     judge_search(bench.settings, heads, bench.results, streamed.ground_truth, streamed.vectors, streamed.queries,
                  query_count);
     return true;

@@ -395,7 +395,8 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
             hit_rows[rank] = static_cast<u32_t>(*row);
         }
     }
-    report_search_metrics(settings, search_count, seconds, nvme.executor.size(), sums, std::span {latencies_us});
+    report_search_metrics(settings, search_count, seconds, nvme.executor.size(), nvme.viewed.memory_usage(), sums,
+                          std::span {latencies_us});
     report_storage_metrics("query", search_count, seconds, result, {});
     judge_search(settings, heads, nvme.results, truth, streamed.vectors, streamed.queries, search_count);
     return true;

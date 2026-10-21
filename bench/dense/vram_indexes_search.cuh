@@ -396,7 +396,7 @@ bool run_indexes_search(streamed_dataset_type_& streamed) {
     double const preparing = stdc::duration<double>(steady_clock_t::now() - phase_started).count() - seconds;
 
     // The empty latency span asks the shared report for the batch-uniform mean.
-    report_search_metrics(settings, query_count, seconds, 1, sums, {});
+    report_search_metrics(settings, query_count, seconds, 1, bench.indexes.memory_usage(), sums, {});
     fmt::println("  preparation: {:.4f} s", preparing);
     judge_search(settings, heads, bench.results, streamed.ground_truth, streamed.vectors, streamed.queries,
                  query_count);
