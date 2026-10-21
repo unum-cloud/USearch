@@ -347,9 +347,11 @@ endfunction ()
 # The NVIDIA classes: one per GPU generation, its fatbin compiled for its own architectures alone - the device twin of
 # the CPU classes' per-unit ISA flags - so no cubin carries another generation's kernels, and only once
 # `USEARCH_CUDA_ARCHITECTURES` names one of its @p selectors_ or "native", which keeps a one-generation tree to that
-# generation's kernels; an unnamed class still exists, over an empty bundle. Each class sees only its own NumKong GPU
-# target, as an AMD class does, since NumKong's own kernels compile under every target a unit names. NVCC is only a
-# device compiler here; the dispatch unit sees `USEARCH_ARCH_CUDA_` either way.
+# generation's kernels; an unnamed class still exists, over an empty bundle, but only a named one joins the dispatch
+# units' ladders, through its gate `USEARCH_TARGET_NVIDIA_<CLASS>` in `usearch_gpu_gates_`. Each class sees only its own
+# NumKong GPU target, as an AMD class does, since NumKong's own kernels compile under every target a unit names. NVCC is
+# only a device compiler here; the dispatch unit sees `USEARCH_ARCH_CUDA_` either way.
+set(usearch_gpu_gates_)
 if (USEARCH_BUILD_CUDA)
     set(usearch_nvidia_classes_)
     set(usearch_nvidia_definitions_ "USEARCH_ARCH_CUDA_=1")
@@ -375,6 +377,12 @@ if (USEARCH_BUILD_CUDA)
             "NUMKONG_TARGET_${target_macro_}=1"
             PARENT_SCOPE
         )
+        if (named_)
+            set(usearch_gpu_gates_
+                ${usearch_gpu_gates_} "USEARCH_TARGET_NVIDIA_${target_macro_}=1"
+                PARENT_SCOPE
+            )
+        endif ()
         set(usearch_nvidia_classes_
             ${usearch_nvidia_classes_} ${class_}
             PARENT_SCOPE
@@ -388,7 +396,8 @@ if (USEARCH_BUILD_CUDA)
 
     # The vendor-wide class `nvidia`, for kits that need nothing past the Ampere floor: one unit carrying a cubin for
     # each generation named above, every one under "native", and the floor's PTX with Ampere's. Ada runs the Ampere
-    # cubin, so an Ada build bundles the floor too.
+    # cubin, so an Ada build bundles the floor too. Its variants are Ampere's rung, so it gates them through
+    # `USEARCH_TARGET_NVIDIA_AMPERE` whenever it carries any generation, as a named Ampere class would.
     set(usearch_nvidia_architectures_)
     if (usearch_class_nvidia_ampere_named_ OR usearch_class_nvidia_ada_named_)
         list(APPEND usearch_nvidia_architectures_ 80)
@@ -404,6 +413,9 @@ if (USEARCH_BUILD_CUDA)
     endif ()
     set(usearch_class_nvidia_exists_ TRUE)
     usearch_cuda_codes(usearch_class_nvidia_flags_ "${usearch_nvidia_architectures_}")
+    if (usearch_nvidia_architectures_ AND NOT usearch_class_nvidia_ampere_named_)
+        list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_NVIDIA_AMPERE=1")
+    endif ()
     set(usearch_class_nvidia_definitions_ "NUMKONG_TARGET_AMPERE=1")
 else ()
     set(usearch_nvidia_definitions_ "USEARCH_ARCH_CUDA_=0")
@@ -411,8 +423,9 @@ endif ()
 
 # The AMD classes, each embedding a code object for each of its processors `USEARCH_ROCM_ARCHITECTURES` lists, through
 # ROCm's Clang, never through CMake's HIP language, whose fat binaries would register with `libamdhip64`. A class none
-# of whose processors is listed still exists, over an empty code object, so the dispatch unit lists every class whatever
-# the toolchain compiles for.
+# of whose processors is listed still exists, over an empty code object, so every class builds whatever the toolchain
+# compiles for, while only one with a listed processor joins the dispatch units' ladders through
+# `USEARCH_TARGET_AMD_<CLASS>`.
 if (USEARCH_BUILD_ROCM)
     set(usearch_amd_classes_)
     set(usearch_amd_definitions_ "USEARCH_ARCH_ROCM_=1")
@@ -430,6 +443,12 @@ if (USEARCH_BUILD_ROCM)
             "NUMKONG_TARGET_${target_macro_}=1"
             PARENT_SCOPE
         )
+        if (codes_)
+            set(usearch_gpu_gates_
+                ${usearch_gpu_gates_} "USEARCH_TARGET_AMD_${target_macro_}=1"
+                PARENT_SCOPE
+            )
+        endif ()
         set(usearch_amd_classes_
             ${usearch_amd_classes_} ${class_}
             PARENT_SCOPE
@@ -446,7 +465,7 @@ endif ()
 if (USEARCH_BUILD_METAL)
     set(usearch_apple_classes_)
     set(usearch_apple_definitions_ "USEARCH_ARCH_METAL_=1")
-    function (usearch_apple_class class_)
+    function (usearch_apple_class class_ target_macro_)
         set(usearch_class_${class_}_exists_
             TRUE
             PARENT_SCOPE
@@ -455,10 +474,14 @@ if (USEARCH_BUILD_METAL)
             ${usearch_apple_classes_} ${class_}
             PARENT_SCOPE
         )
+        set(usearch_gpu_gates_
+            ${usearch_gpu_gates_} "USEARCH_TARGET_APPLE_${target_macro_}=1"
+            PARENT_SCOPE
+        )
     endfunction ()
-    usearch_apple_class(apple_metal7)
-    usearch_apple_class(apple_metal9)
-    usearch_apple_class(apple_metal10)
+    usearch_apple_class(apple_metal7 METAL7)
+    usearch_apple_class(apple_metal9 METAL9)
+    usearch_apple_class(apple_metal10 METAL10)
 endif ()
 
 # Declares the object library @p target_ of the units after `SOURCES`, wired as every library here is: the shared setup,
@@ -564,7 +587,8 @@ endfunction ()
 # carry no waiter or atomic reference, so aws_g5 and alibaba_c930, which advance only by those, take none, and a
 # WebAssembly module reads no storage directly. The sequence, shapes and geospatial variants compile for the CPU classes
 # where any of their StringZilla or NumKong kits advance, and a modality whose kits stay put at a class falls back down
-# its kit chain; on NVIDIA they need nothing past the Ampere floor, so they compile for the vendor-wide class.
+# its kit chain; on NVIDIA they need nothing past the Ampere floor, so they compile for the vendor-wide class, and
+# shapes adds datacenter Blackwell for its packed f16 kit.
 set(usearch_dense_nvme_classes_
     serial
     intel_haswell
@@ -646,18 +670,19 @@ usearch_variants(
 usearch_variants(shapes ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
 usearch_variants(shapes nvme cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
 usearch_variants(shapes vram nvidia nvidia KERNELS f16 f32)
+usearch_variants(shapes vram nvidia nvidia_blackwell KERNELS f16)
 usearch_variants(geospatial ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
 usearch_variants(geospatial nvme cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
 usearch_variants(geospatial vram nvidia nvidia)
 usearch_variants(basic vram nvidia nvidia)
 
 # The type-erased implementations behind the C interface: the dispatch units visit the variants through their explicitly
-# instantiated views and compile at the baseline, since they inline no kernel, gated per CPU class and told which GPU
-# vendors joined.
+# instantiated views and compile at the baseline, since they inline no kernel, gated per CPU and GPU class and told
+# which GPU vendors joined.
 usearch_object_library(
     usearch_punned
     SOURCES types.cpp dense_index.cpp sequence_index.cpp shapes_index.cpp geospatial_index.cpp
-    DEFINITIONS ${usearch_cpu_gates_} ${usearch_nvidia_definitions_} ${usearch_amd_definitions_}
+    DEFINITIONS ${usearch_cpu_gates_} ${usearch_gpu_gates_} ${usearch_nvidia_definitions_} ${usearch_amd_definitions_}
                 ${usearch_apple_definitions_}
     LIBRARIES stringzilla::header
 )

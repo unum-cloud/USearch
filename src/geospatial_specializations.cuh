@@ -1030,7 +1030,10 @@ extern template struct us::geospatial::vram_nvidia_index<u32_t, geospatial_nvidi
 struct geospatial_vram_nvidia_variant
     : vram_nvidia_variant<
           us::geospatial::vram_nvidia_index<u32_t, geospatial_nvidia_capabilities_k, geospatial_nvidia_fatbin_t>> {
-    using vram_nvidia_variant::vram_nvidia_variant;
+    static constexpr gpu_class_t gpu_class_k = gpu_class_t::nvidia_ampere_k;
+
+    /** Places the index on CUDA device @p device. */
+    geospatial_vram_nvidia_variant(int device, geospatial_geometry_t const&) noexcept : vram_nvidia_variant(device) {}
     using value_t = us::geospatial::earth_observation_t;
     using node_id_t = index_t::node_id_t;
 

@@ -59,7 +59,7 @@ extern template struct geospatial_nvme_variant<cpu_class_t::serial_k>;
  *  class's kit, a read-only view of a checkpoint on storage scored and judged with the same, or the
  *  basic index on a GPU. */
 using geospatial_variant_t = std::variant< //
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_TARGET_NVIDIA_AMPERE
     geospatial_vram_nvidia_variant, //
 #endif
 #if USEARCH_TARGET_INTEL_SKYLAKE
@@ -214,11 +214,6 @@ struct geospatial_traits_t {
         if (status_t const loaded = variant.load_admit(); failed(loaded))
             return propagate_error(loaded, outcome, "The GPU kernels could not be loaded");
         return true;
-    }
-
-    template <typename make_type_>
-    static void with_vram_variant(geometry_t const&, make_type_&& make) noexcept {
-        make(std::type_identity<geospatial_vram_nvidia_variant> {});
     }
 #endif
 

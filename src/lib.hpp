@@ -795,6 +795,62 @@ constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcep
     return nk_cap_serial_k;
 }
 
+/** The ceiling an NVIDIA device pass instantiates: its class's, read off the one NumKong target the
+ *  class compiles under. */
+inline constexpr nk_capability_t cuda_class_capabilities_k = numkong_capabilities_of(
+    NUMKONG_TARGET_BLACKWELLRTX ? gpu_class_t::nvidia_blackwellrtx_k
+    : NUMKONG_TARGET_BLACKWELL  ? gpu_class_t::nvidia_blackwell_k
+    : NUMKONG_TARGET_HOPPER     ? gpu_class_t::nvidia_hopper_k
+    : NUMKONG_TARGET_ADA        ? gpu_class_t::nvidia_ada_k
+                                : gpu_class_t::nvidia_ampere_k);
+
+/** Whether a device of @p available capabilities runs every kit one GPU class lowers onto. */
+constexpr bool numkong_admits(nk_capability_t available, gpu_class_t gpu_class) noexcept {
+    nk_capability_t const wanted = numkong_capabilities_of(gpu_class);
+    return (available & wanted) == wanted;
+}
+
+/** Whether the build compiled device code for @p gpu_class, as CMake decided and told the dispatch
+ *  units through @c USEARCH_TARGET_<VENDOR>_<CLASS>; a ladder never picks a class without one. */
+constexpr bool gpu_class_compiled(gpu_class_t gpu_class) noexcept {
+    switch (gpu_class) {
+#if USEARCH_TARGET_NVIDIA_AMPERE
+    case gpu_class_t::nvidia_ampere_k: return true;
+#endif
+#if USEARCH_TARGET_NVIDIA_ADA
+    case gpu_class_t::nvidia_ada_k: return true;
+#endif
+#if USEARCH_TARGET_NVIDIA_HOPPER
+    case gpu_class_t::nvidia_hopper_k: return true;
+#endif
+#if USEARCH_TARGET_NVIDIA_BLACKWELL
+    case gpu_class_t::nvidia_blackwell_k: return true;
+#endif
+#if USEARCH_TARGET_NVIDIA_BLACKWELLRTX
+    case gpu_class_t::nvidia_blackwellrtx_k: return true;
+#endif
+#if USEARCH_TARGET_AMD_CDNA3
+    case gpu_class_t::amd_cdna3_k: return true;
+#endif
+#if USEARCH_TARGET_AMD_CDNA4
+    case gpu_class_t::amd_cdna4_k: return true;
+#endif
+#if USEARCH_TARGET_AMD_CDNA5
+    case gpu_class_t::amd_cdna5_k: return true;
+#endif
+#if USEARCH_TARGET_APPLE_METAL7
+    case gpu_class_t::apple_metal7_k: return true;
+#endif
+#if USEARCH_TARGET_APPLE_METAL9
+    case gpu_class_t::apple_metal9_k: return true;
+#endif
+#if USEARCH_TARGET_APPLE_METAL10
+    case gpu_class_t::apple_metal10_k: return true;
+#endif
+    default: return false;
+    }
+}
+
 // The device listing crosses the ABI by casts, so the C vendors and classes mirror the engine's.
 static_assert(static_cast<u32_t>(gpu_vendor_t::apple_k) == usearch_gpu_vendor_apple_k);
 static_assert(static_cast<u32_t>(gpu_class_t::apple_metal10_k) == usearch_gpu_class_apple_metal10_k);

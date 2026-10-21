@@ -62,11 +62,12 @@ extern template struct shapes_nvme_variant<nk::f16_t, cpu_class_t::serial_k>;
  *  one class's kits, a read-only view of a checkpoint on storage scored with the same, or the
  *  basic index on a GPU. */
 using shapes_variant_t = std::variant< //
-#if USEARCH_ARCH_CUDA_
-    shapes_vram_nvidia_variant<nk::f16_t, nk_kernel_chamfers_packed_k>,   //
-    shapes_vram_nvidia_variant<nk::f16_t, nk_kernel_hausdorffs_packed_k>, //
-    shapes_vram_nvidia_variant<nk::f32_t, nk_kernel_chamfers_packed_k>,   //
-    shapes_vram_nvidia_variant<nk::f32_t, nk_kernel_hausdorffs_packed_k>, //
+#if USEARCH_TARGET_NVIDIA_BLACKWELL
+    shapes_vram_nvidia_variant<nk::f16_t, gpu_class_t::nvidia_blackwell_k>, //
+#endif
+#if USEARCH_TARGET_NVIDIA_AMPERE
+    shapes_vram_nvidia_variant<nk::f32_t, gpu_class_t::nvidia_ampere_k>, //
+    shapes_vram_nvidia_variant<nk::f16_t, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_TARGET_INTEL_SKYLAKE
     shapes_ram_variant<nk::f32_t, cpu_class_t::intel_skylake_k>,  //
@@ -190,23 +191,6 @@ struct shapes_traits_t {
         variant.geometry = geometry;
         return true;
     }
-
-#if USEARCH_ARCH_CUDA_
-
-    /** Calls @p make with the GPU variant over the stored scalar under the kind's kernel. */
-    template <typename make_type_>
-    static void with_vram_variant(geometry_t const& geometry, make_type_&& make) noexcept {
-        bool const hausdorff = geometry.metric == usearch_shapes_metric_hausdorff_k;
-        if (geometry.quantization == usearch_scalar_f16_k) {
-            if (hausdorff)
-                make(std::type_identity<shapes_vram_nvidia_variant<nk::f16_t, nk_kernel_hausdorffs_packed_k>> {});
-            else make(std::type_identity<shapes_vram_nvidia_variant<nk::f16_t, nk_kernel_chamfers_packed_k>> {});
-        }
-        else if (hausdorff)
-            make(std::type_identity<shapes_vram_nvidia_variant<nk::f32_t, nk_kernel_hausdorffs_packed_k>> {});
-        else make(std::type_identity<shapes_vram_nvidia_variant<nk::f32_t, nk_kernel_chamfers_packed_k>> {});
-    }
-#endif
 
     static usearch_shapes_metadata_t metadata_of(geometry_t const& geometry) noexcept {
         return {geometry.metric, geometry.quantization, geometry.points, geometry.connectivity};

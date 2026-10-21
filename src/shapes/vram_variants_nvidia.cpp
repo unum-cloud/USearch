@@ -15,22 +15,22 @@
 /** Each dtype's fatbin, linked in as raw bytes beside the variants. */
 extern "C" byte_t const shapes_nvidia_f16_bundle_start[], shapes_nvidia_f16_bundle_end[];
 template <>
-bytes_view_t shapes_nvidia_fatbin<nk_f16_k>::bytes() noexcept {
+bytes_view_t shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f16_k>::bytes() noexcept {
     return {shapes_nvidia_f16_bundle_start,
             static_cast<std::size_t>(shapes_nvidia_f16_bundle_end - shapes_nvidia_f16_bundle_start)};
 }
-template struct us::shapes::vram_nvidia_index<nk::f16_t, u32_t, shapes_nvidia_capabilities_k,
-                                              shapes_nvidia_fatbin<nk_f16_k>>;
-template struct us::shapes::vram_nvidia_kits<nk::f16_t, u32_t, shapes_nvidia_capabilities_k,
-                                             shapes_nvidia_fatbin<nk_f16_k>>;
+template struct us::shapes::vram_nvidia_index<nk::f16_t, u32_t, numkong_capabilities_of(gpu_class_t::nvidia_ampere_k),
+                                              shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f16_k>>;
+template struct us::shapes::vram_nvidia_kits<nk::f16_t, u32_t, numkong_capabilities_of(gpu_class_t::nvidia_ampere_k),
+                                             shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f16_k>>;
 
 extern "C" byte_t const shapes_nvidia_f32_bundle_start[], shapes_nvidia_f32_bundle_end[];
 template <>
-bytes_view_t shapes_nvidia_fatbin<nk_f32_k>::bytes() noexcept {
+bytes_view_t shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f32_k>::bytes() noexcept {
     return {shapes_nvidia_f32_bundle_start,
             static_cast<std::size_t>(shapes_nvidia_f32_bundle_end - shapes_nvidia_f32_bundle_start)};
 }
-template struct us::shapes::vram_nvidia_index<nk::f32_t, u32_t, shapes_nvidia_capabilities_k,
-                                              shapes_nvidia_fatbin<nk_f32_k>>;
-template struct us::shapes::vram_nvidia_kits<nk::f32_t, u32_t, shapes_nvidia_capabilities_k,
-                                             shapes_nvidia_fatbin<nk_f32_k>>;
+template struct us::shapes::vram_nvidia_index<nk::f32_t, u32_t, numkong_capabilities_of(gpu_class_t::nvidia_ampere_k),
+                                              shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f32_k>>;
+template struct us::shapes::vram_nvidia_kits<nk::f32_t, u32_t, numkong_capabilities_of(gpu_class_t::nvidia_ampere_k),
+                                             shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f32_k>>;

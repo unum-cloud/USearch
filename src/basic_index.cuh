@@ -48,10 +48,10 @@ struct basic_handle {
     char capabilities_string[32] {};
 
     /** Builds the variant @p alternative_type_ over @p placement: a CPU variant's allocator, or a
-     *  GPU variant's device. */
-    template <typename alternative_type_, typename placement_type_>
-    basic_handle(std::in_place_type_t<alternative_type_> tag, placement_type_ const& placement) noexcept
-        : variant(tag, placement) {}
+     *  GPU variant's device and the geometry it scores under. */
+    template <typename alternative_type_, typename... placement_types_>
+    basic_handle(std::in_place_type_t<alternative_type_> tag, placement_types_ const&... placement) noexcept
+        : variant(tag, placement...) {}
 };
 
 /** The cursor over a modality's handle: a RAM variant's snapshot, or the next row of an NVMe
@@ -77,13 +77,15 @@ inline void const* address_of(usearch_tape_view_t const& tape) noexcept { return
 /** Where a call's run of queries starts, which the arena it rewinds must not hold. */
 inline void const* address_of(void const* values) noexcept { return values; }
 
-/** Whether @p variant_type_ stores values in the scalar @p geometry names, as a variant storing
- *  them in one scalar must; a variant storing no scalar fits any geometry. */
+/** Whether @p variant_type_ serves @p geometry: it stores values in the scalar the geometry names,
+ *  if it stores one, and scores by the metric the geometry names, if its kernels fix one. */
 template <typename variant_type_, typename geometry_type_>
-bool stores_scalar_of(geometry_type_ const& geometry) noexcept {
+bool serves_geometry(geometry_type_ const& geometry) noexcept {
     if constexpr (requires { variant_type_::dtype_k; })
-        return nk_dtype_of(geometry.quantization) == variant_type_::dtype_k;
-    else return true;
+        if (nk_dtype_of(geometry.quantization) != variant_type_::dtype_k) return false;
+    if constexpr (requires { variant_type_::metric_k; })
+        if (geometry.metric != variant_type_::metric_k) return false;
+    return true;
 }
 
 /**
@@ -116,7 +118,7 @@ handle_type_* make_cpu_handle(typename handle_type_::traits_t::geometry_t& geome
                 !(numkong_admits(available, variant_type_::cpu_class_k) &&
                   forkunion_admits<variant_type_::cpu_class_k>()))
                 return;
-            if (!stores_scalar_of<variant_type_>(geometry)) return;
+            if (!serves_geometry<variant_type_>(geometry)) return;
             picked = true;
             handle = new (std::nothrow)
                 handle_type_(std::in_place_type<variant_type_>, forkunion_allocator_t {no_memory_domain_k});
@@ -170,7 +172,10 @@ bool basic_load_variant(variant_type_& variant, std::string_view path, arguments
 
 /** Places the GPU variant of @p handle_type_ for @p geometry, frozen with @p arguments, on the one
  *  device they name, then hands it to @p fill, as `fill(variant) → bool`; null once @p outcome
- *  records why not, as for a geometry no device kit serves. */
+ *  records why not, as for a geometry no device kit serves.
+ *
+ *  The variant is the first GPU one, its classes listed newest first as the CPU ladder lists its
+ *  own, whose class the device's capabilities admit and which serves the geometry. */
 template <typename handle_type_, typename arguments_type_, typename fill_type_>
 handle_type_* make_vram_handle(typename handle_type_::traits_t::geometry_t& geometry, arguments_type_ const& arguments,
                                usearch_outcome_t* outcome, fill_type_&& fill) noexcept {
@@ -184,18 +189,32 @@ handle_type_* make_vram_handle(typename handle_type_::traits_t::geometry_t& geom
     std::size_t const ordinal = vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[0]) : 0;
     gpu_device_t const* const device = basic_device_at(ordinal, outcome);
     if (!device) return nullptr;
+    nk_capability_t const available = numkong_capabilities_of(device->gpu_class);
     handle_type_* index = nullptr;
-    traits_t::with_vram_variant(geometry, [&]<typename variant_type_>(std::type_identity<variant_type_>) noexcept {
-        index = new (std::nothrow)
-            handle_type_(std::in_place_type<variant_type_>, static_cast<int>(device->vendor_ordinal));
-        if (!index)
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), void();
-        variant_type_& variant = std::get<variant_type_>(index->variant);
-        if (!traits_t::freeze(variant, geometry, arguments, outcome) || !fill(variant))
-            return delete index, index = nullptr, void();
-        std::snprintf(index->capabilities_string, sizeof(index->capabilities_string), "%s",
-                      usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device->gpu_class)));
-    });
+    bool picked = false;
+    auto rung = [&]<typename variant_type_>(std::type_identity<variant_type_>) noexcept {
+        if constexpr (requires { variant_type_::gpu_class_k; }) {
+            if (picked) return;
+            if (!numkong_admits(available, variant_type_::gpu_class_k) || !serves_geometry<variant_type_>(geometry))
+                return;
+            picked = true;
+            index = new (std::nothrow)
+                handle_type_(std::in_place_type<variant_type_>, static_cast<int>(device->vendor_ordinal), geometry);
+            if (!index)
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), void();
+            variant_type_& variant = std::get<variant_type_>(index->variant);
+            if (!traits_t::freeze(variant, geometry, arguments, outcome) || !fill(variant))
+                return delete index, index = nullptr, void();
+            std::snprintf(index->capabilities_string, sizeof(index->capabilities_string), "%s",
+                          usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device->gpu_class)));
+        }
+    };
+    [&]<typename... variant_types_>(std::type_identity<std::variant<variant_types_...>>) noexcept {
+        (rung(std::type_identity<variant_types_> {}), ...);
+    }(std::type_identity<typename handle_type_::variant_t> {});
+    if (!picked)
+        return propagate_error(usearch_status_device_k, outcome, "This build carries no kernels for the device"),
+               nullptr;
     return index;
 }
 

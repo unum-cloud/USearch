@@ -50,7 +50,7 @@ extern template struct sequence_nvme_variant<cpu_class_t::serial_k>;
  *  class's kits, a read-only view of a checkpoint on storage scored with the same, or the basic
  *  index on a GPU. */
 using sequence_variant_t = std::variant< //
-#if USEARCH_ARCH_CUDA_
+#if USEARCH_TARGET_NVIDIA_AMPERE
     sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_bytes_k>, //
     sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k>,  //
     sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k>,           //
@@ -195,22 +195,6 @@ struct sequence_traits_t {
         variant.geometry = std::move(geometry);
         status_t const kept = variant.index.window_widths(to_span(variant.geometry.window_widths));
         return succeeded(kept) || propagate_error(kept, outcome);
-    }
-
-    /** Calls @p make with the GPU variant of the kind: Levenshtein over bytes or runes, or
-     *  overlap. */
-    template <typename make_type_>
-    static void with_vram_variant(geometry_t const& geometry, make_type_&& make) noexcept {
-        switch (geometry.metric) {
-        case usearch_sequence_metric_levenshtein_utf8_k:
-            return make(
-                std::type_identity<sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k>> {});
-        case usearch_sequence_metric_overlap_k:
-            return make(std::type_identity<sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k>> {});
-        default:
-            return make(
-                std::type_identity<sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_bytes_k>> {});
-        }
     }
 #endif
 

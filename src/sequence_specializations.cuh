@@ -308,13 +308,18 @@ inline constexpr usearch_distance_t distance_unit<
     us::sequence::vram_nvidia_index<usearch_sequence_metric_overlap_k, node_id_type_, capability_, kernels_type_>> =
     1.0 / us::sequence::overlap_resolution_k;
 
-/** The sequence alternative on one NVIDIA GPU: the basic VRAM index under the sequence kind
+/** The sequence alternative on any NVIDIA GPU: the basic VRAM index under the sequence kind
  *  @p metric_ - Levenshtein over bytes or UTF-8 runes, or overlap - with 32-bit node IDs. */
 template <usearch_sequence_metric_t metric_>
 struct sequence_vram_nvidia_variant
     : vram_nvidia_variant<us::sequence::vram_nvidia_index<metric_, u32_t, sequence_nvidia_capabilities_k,
                                                           sequence_nvidia_fatbin<metric_>>> {
-    using sequence_vram_nvidia_variant::vram_nvidia_variant::vram_nvidia_variant;
+    static constexpr usearch_sequence_metric_t metric_k = metric_;
+    static constexpr gpu_class_t gpu_class_k = gpu_class_t::nvidia_ampere_k;
+
+    /** Places the index on CUDA device @p device; its kind is the template's. */
+    sequence_vram_nvidia_variant(int device, sequence_geometry_t const&) noexcept
+        : sequence_vram_nvidia_variant::vram_nvidia_variant(device) {}
 
     sequence_geometry_t geometry;
 

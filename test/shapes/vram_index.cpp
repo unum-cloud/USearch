@@ -28,9 +28,9 @@
 
 #if USEARCH_ARCH_CUDA_
 
-/** The library's fatbin of one dtype's shapes kits, defined in
- *  @c src/shapes/vram_variants_nvidia.cpp. */
-template <nk_dtype_t dtype_>
+/** The library's fatbin of one class's shapes kits over one dtype, defined in that class's
+ *  @c src/shapes/vram_variants_nvidia*.cpp unit. */
+template <us::utilities::gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct shapes_nvidia_fatbin {
     static us::utilities::bytes_view_t bytes() noexcept;
 };
@@ -111,16 +111,17 @@ static std::size_t matched_count(std::span<f64_t const> found, std::vector<dista
 
 /**
  *  @brief One collection of @p count clouds of @p kind and @p queries_count held-out queries of
- *      @p scalar_type_, built on the GPU and in RAM under the kits of @p kernel alike.
+ *      @p scalar_type_, built on the GPU under the kits of @p gpu_class_, whose capabilities are
+ *      @p capabilities_, and in RAM under the kits of @p kernel alike.
  *
  *  Every match the GPU reports must carry the pair's serial distance, ascending, and the GPU's
  *  recall at ten must reach the RAM index's at the same breadth, give or take a twentieth.
  */
-template <typename scalar_type_>
+template <typename scalar_type_, gpu_class_t gpu_class_, nk_capability_t capabilities_>
 static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& executor, nk_kernel_kind_t kernel,
                                                 cloud_kind_t kind, std::size_t count, std::size_t queries_count) {
-    using vram_index_t = vram_nvidia_index<scalar_type_, u32_t, nk_cap_cuda_k | nk_cap_ampere_k,
-                                           shapes_nvidia_fatbin<scalar_type_::dtype()>>;
+    using vram_index_t =
+        vram_nvidia_index<scalar_type_, u32_t, capabilities_, shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
     using kit_t = typename shapes_ladder<scalar_type_, nk_cap_any_k>::kit_t;
     using serial_kit_t = typename shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     using ram_index_t = ram_index<kit_t>;
@@ -239,28 +240,49 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     return failures;
 }
 
+/** Every collection under the kits of @p gpu_class_, whose capabilities are @p capabilities_: the
+ *  F16 ones, and the F32 one on the vendor-wide floor, which alone builds F32 packs. */
+template <gpu_class_t gpu_class_, nk_capability_t capabilities_>
+static std::size_t check_shapes_vram_class(settings_t const& settings, cuda_executor_t& executor, char const* tier) {
+    constexpr nk_kernel_kind_t chamfer_k = nk_kernel_chamfers_packed_k, hausdorff_k = nk_kernel_hausdorffs_packed_k;
+    struct cell_t {
+        char const* name;
+        nk_kernel_kind_t kernel;
+        cloud_kind_t kind;
+        std::size_t count, queries_count;
+    };
+    cell_t const cells[] = {{"random", chamfer_k, cloud_kind_t::random_k, 1024, 64},
+                            {"coincident", hausdorff_k, cloud_kind_t::coincident_k, 256, 16},
+                            {"collinear", chamfer_k, cloud_kind_t::collinear_k, 1024, 64},
+                            {"molecular", hausdorff_k, cloud_kind_t::molecular_k, 1024, 64}};
+    std::size_t failures = 0;
+    for (cell_t const& cell : cells)
+        failures += report(fmt::format("shapes_vram {} {}", tier, cell.name).c_str(),
+                           check_shapes_vram_collection<nk::f16_t, gpu_class_, capabilities_>(
+                               stream_key(settings.seed, cell.name), executor, cell.kernel, cell.kind, cell.count,
+                               cell.queries_count));
+    if constexpr (gpu_class_ == gpu_class_t::nvidia_ampere_k)
+        failures += report(
+            fmt::format("shapes_vram {} f32", tier).c_str(),
+            check_shapes_vram_collection<nk::f32_t, gpu_class_, capabilities_>(
+                stream_key(settings.seed, "f32"), executor, chamfer_k, cloud_kind_t::molecular_k, 1024, 64));
+    return failures;
+}
+
+/** Every class the device runs, as the dispatch ladder would admit it: the floor on any NVIDIA
+ *  GPU, and datacenter Blackwell's packed kits on one. */
 std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& device) {
     if (device.vendor != gpu_vendor_t::nvidia_k || !settings.selects("shapes_vram")) return 0;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
     auto [executor, spawn_status] = cuda_executor_t::spawn(std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println(stderr, "- CUDA: device #{} opens no stream", ordinal), 1;
-    constexpr nk_kernel_kind_t chamfer_k = nk_kernel_chamfers_packed_k, hausdorff_k = nk_kernel_hausdorffs_packed_k;
-    std::size_t failures = 0;
-    failures += report("shapes_vram random",
-                       check_shapes_vram_collection<nk::f16_t>(stream_key(settings.seed, "random"), executor, chamfer_k,
-                                                               cloud_kind_t::random_k, 1024, 64));
-    failures += report("shapes_vram coincident",
-                       check_shapes_vram_collection<nk::f16_t>(stream_key(settings.seed, "coincident"), executor,
-                                                               hausdorff_k, cloud_kind_t::coincident_k, 256, 16));
-    failures += report("shapes_vram collinear",
-                       check_shapes_vram_collection<nk::f16_t>(stream_key(settings.seed, "collinear"), executor,
-                                                               chamfer_k, cloud_kind_t::collinear_k, 1024, 64));
-    failures += report("shapes_vram molecular",
-                       check_shapes_vram_collection<nk::f16_t>(stream_key(settings.seed, "molecular"), executor,
-                                                               hausdorff_k, cloud_kind_t::molecular_k, 1024, 64));
-    failures += report("shapes_vram f32",
-                       check_shapes_vram_collection<nk::f32_t>(stream_key(settings.seed, "f32"), executor, chamfer_k,
-                                                               cloud_kind_t::molecular_k, 1024, 64));
+    constexpr nk_capability_t ampere_k = nk_cap_cuda_k | nk_cap_ampere_k;
+    constexpr nk_capability_t blackwell_k = ampere_k | nk_cap_ada_k | nk_cap_blackwell_k;
+    std::size_t failures = check_shapes_vram_class<gpu_class_t::nvidia_ampere_k, ampere_k>(settings, executor,
+                                                                                           "ampere");
+    if (device.gpu_class == gpu_class_t::nvidia_blackwell_k)
+        failures += check_shapes_vram_class<gpu_class_t::nvidia_blackwell_k, blackwell_k>(settings, executor,
+                                                                                          "blackwell");
     return failures;
 }
 

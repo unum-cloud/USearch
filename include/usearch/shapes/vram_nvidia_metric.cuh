@@ -9,15 +9,16 @@
  *  dense kits; the generation slot names the oldest tier whose instructions it needs. Chamfer and
  *  Hausdorff need nothing past the @c ampere floor: NumKong's SIMT bodies score two packs in place,
  *  f16 packs in f32 math and f32 packs in f64 math as the CPU kits do, and stop once a candidate
- *  lies past the walk's radius. One kit covers both, picked at run time by the kernel kind the view
- *  carries, as dense quads kits pick their metric.
+ *  lies past the walk's radius. Datacenter Blackwell scores f16 packs through packed f32x2 and
+ *  mixed-precision math to the same bits. One kit covers both metrics, picked at run time by the
+ *  kernel kind the view carries, as dense quads kits pick their metric.
  *
  *  A stored row is its NumKong pack byte for byte, and a walk prepares one by copying it into its
  *  span, so the bodies read the same pack either way. The whole warp scores one candidate, its
  *  lanes splitting the outer cloud's points: a lane alone wins only on clouds of a few points,
  *  which a pack's bytes cannot tell apart from larger ones. A block walks each query while its four
- *  warps score a candidate each. Only the modality's NVIDIA unit compiles this file, so dispatch
- *  never names a kit.
+ *  warps score a candidate each. Each NVIDIA class unit compiles this file under its own ceiling,
+ *  so dispatch names a class, never a kit.
  */
 #pragma once
 
@@ -28,8 +29,9 @@
 
 #include <numkong/shapes.h>        // `nk_shapes_pack_f16_serial` & kin, which `shapes/serial.h` expects declared ahead
 #include <numkong/shapes/cuda.cuh> // `nk_chamfer_warp_packed_f16_cuda_` & kin
-#include <numkong/types.h>         // `NUMKONG_ARCH_CUDA_AMPERE_` - the kits this unit carries
-#include <numkong/types.hpp>       // `nk::type_for` - a kernel's scalar
+#include <numkong/shapes/blackwell.cuh> // `nk_chamfer_warp_packed_f16_blackwell_` & kin
+#include <numkong/types.h>              // `NUMKONG_ARCH_CUDA_AMPERE_` - the kits this unit carries
+#include <numkong/types.hpp>            // `nk::type_for` - a kernel's scalar
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_device.hpp"        // `vram_kernel_symbol` - a kernel's symbol
@@ -98,6 +100,49 @@ struct f16_ampere_shapes_kit_t {
     }
 };
 
+#if NUMKONG_TARGET_BLACKWELL
+
+/** Chamfer and Hausdorff between f16 packs in f32 math, a warp to a row, each lane scanning two
+ *  inner points per step through packed f32x2 and the f16 widening folded into every difference;
+ *  the Ampere kit's distances bit for bit. */
+struct f16_blackwell_shapes_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
+    inline static constexpr bool compiled_k = true;
+    inline static constexpr u32_t lanes_per_row_k = 32;
+
+    using warp_t = cuda_warp_t;
+    using query_t = vram_pack_query_t;
+    using selector_t = basic::vram_keep_diverse_t;
+
+    static constexpr bool serves(std::size_t) noexcept { return true; }
+    static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
+        return round_up_to_multiple<std::size_t>(bytes, 16);
+    }
+
+    static __device__ __forceinline__ query_t prepare(basic::vram_row_t row, byte_t* span, u32_t lane) noexcept {
+        return vram_prepare_pack(row, span, lane);
+    }
+    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t kernel, query_t const& query,
+                                                             basic::vram_row_t row) noexcept {
+        return kernel == nk_kernel_hausdorffs_packed_k ? nk_hausdorff_bound_packed_f16_simt_(query.pack, row.data) : 0;
+    }
+    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t kernel, query_t const& query,
+                                                       basic::vram_row_t row, distance_t radius, u32_t lane) noexcept {
+        return kernel == nk_kernel_hausdorffs_packed_k
+                   ? nk_hausdorff_warp_packed_f16_blackwell_(query.pack, row.data, radius, lane)
+                   : nk_chamfer_warp_packed_f16_blackwell_(query.pack, row.data, radius, lane);
+    }
+};
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_blackwell_shapes_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
+    inline static constexpr bool compiled_k = false;
+};
+#endif // NUMKONG_TARGET_BLACKWELL
+
 /** Chamfer and Hausdorff between f32 packs in f64 math, a warp to a row. */
 struct f32_ampere_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
@@ -133,7 +178,7 @@ struct f32_ampere_shapes_kit_t {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct shapes_ladder<nk::f16_t, caps_> {
-    using kit_t = typename highest_kit<caps_, f16_ampere_shapes_kit_t>::type;
+    using kit_t = typename highest_kit<caps_, f16_ampere_shapes_kit_t, f16_blackwell_shapes_kit_t>::type;
     static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
