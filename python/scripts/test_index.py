@@ -30,6 +30,7 @@ from usearch.index import (
     BatchMatches,
     Clustering,
     Index,
+    Indexes,
     Match,
     Matches,
     MetricKind,
@@ -197,6 +198,30 @@ def test_index_search(ndim, metric, quantization, dtype, batch_size):
         assert matches.keys.shape[0] == matches.distances.shape[0]
         assert len(matches) == batch_size
         assert np.all(np.sort(index.keys) == np.sort(keys))
+
+
+@pytest.mark.parametrize("count", [0, -1])
+@pytest.mark.parametrize("batch_size", [0, 1, 7])
+@pytest.mark.parametrize("single_query", [False, True])
+def test_index_search_rejects_non_positive_count(count, batch_size, single_query):
+    # Searching for zero matches used to crash the interpreter with a segmentation fault.
+    ndim = 3
+    index = Index(ndim=ndim)
+    if batch_size:
+        index.add(np.arange(batch_size), random_vectors(count=batch_size, ndim=ndim))
+    queries = random_vectors(count=1 if single_query else 4, ndim=ndim)
+    queries = queries[0] if single_query else queries
+
+    with pytest.raises(ValueError, match="count"):
+        index.search(queries, count)
+    with pytest.raises(ValueError, match="count"):
+        Indexes([index]).search(queries, count)
+    with pytest.raises(ValueError, match="count"):
+        search(random_vectors(count=5, ndim=ndim), queries.reshape(-1, ndim), count, exact=True)
+
+    # The smallest valid `count` keeps working.
+    if batch_size:
+        assert len(index.search(queries, 1)) == (1 if single_query else 4)
 
 
 @pytest.mark.parametrize("ndim", [8, 32, 128])
