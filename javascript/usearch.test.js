@@ -293,6 +293,59 @@ test("Expected count()", async (t) => {
   });
 });
 
+test("Keys outside of the unsigned 64-bit range", async (t) => {
+  const MAX_KEY = 2n ** 64n - 1n;
+  const vector = new Float32Array([0.2, 0.6, 0.4]);
+  const newIndex = () =>
+    new usearch.Index({ metric: "l2sq", connectivity: 16, dimensions: 3 });
+
+  // These used to be silently wrapped around by `BigUint64Array`,
+  // so `-1` was stored as `2^64 - 1` and `2^64` as `0`.
+  const badKeys = [-1, -1n, -(2n ** 63n), 2n ** 64n, 2n ** 64n + 1n, 1e20];
+  const label = (key) => (typeof key === "bigint" ? `${key}n` : String(key));
+
+  for (const key of badKeys) {
+    await t.test(`add rejects a single key ${label(key)}`, () => {
+      const index = newIndex();
+      assert.throws(() => index.add(key, vector), /All keys must be/);
+      assert.equal(index.size(), 0, "nothing must be inserted");
+      assert.equal(index.contains(0n), false);
+      assert.equal(index.contains(MAX_KEY), false);
+    });
+
+    await t.test(`add rejects ${label(key)} inside an array`, () => {
+      const index = newIndex();
+      assert.throws(() => index.add([key], vector), /All keys must be/);
+      assert.equal(index.size(), 0, "nothing must be inserted");
+    });
+
+    await t.test(`contains, count and remove reject ${label(key)}`, () => {
+      const index = newIndex();
+      index.add(0n, vector);
+      index.add(MAX_KEY, vector);
+      assert.throws(() => index.contains(key), /All keys must be/);
+      assert.throws(() => index.contains([key]), /All keys must be/);
+      assert.throws(() => index.count(key), /All keys must be/);
+      assert.throws(() => index.remove(key), /All keys must be/);
+      assert.equal(index.size(), 2, "existing keys must not be removed");
+    });
+  }
+
+  await t.test("the smallest and the largest keys are still accepted", () => {
+    const index = newIndex();
+    index.add(0n, vector);
+    index.add(MAX_KEY, new Float32Array([0.1, 0.2, 0.3]));
+    index.add(Number.MAX_SAFE_INTEGER, new Float32Array([0.3, 0.2, 0.1]));
+    assert.equal(index.size(), 3);
+    assert.equal(index.contains(0n), true);
+    assert.equal(index.contains(0), true);
+    assert.equal(index.contains(MAX_KEY), true);
+    assert.equal(index.contains(BigInt(Number.MAX_SAFE_INTEGER)), true);
+    assert.deepEqual(index.contains([0n, MAX_KEY, 1n]), [true, true, false]);
+    assert.equal(index.search(vector, 1).keys[0], 0n);
+  });
+});
+
 test("Operations with invalid values", () => {
   const indexBatch = new usearch.Index(2, "l2sq");
 
