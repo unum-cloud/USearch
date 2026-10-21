@@ -135,6 +135,25 @@ function isOneKey(keys: number | bigint | BigUint64Array | bigint[]): boolean {
   );
 }
 
+/**
+ * Converts a single key to a `bigint`, making sure it fits into the unsigned
+ * 64-bit range of `BigUint64Array`, which would otherwise silently wrap it around.
+ */
+function normalizeKey(key: unknown): bigint {
+  let normalizedKey: bigint;
+  if (typeof key === "bigint") {
+    normalizedKey = key;
+  } else if (typeof key === "number" && Number.isInteger(key)) {
+    normalizedKey = BigInt(key);
+  } else {
+    throw new Error("All keys must be positive integers or bigints.");
+  }
+  if (BigInt.asUintN(64, normalizedKey) !== normalizedKey) {
+    throw new Error("All keys must be in the range [0, 2^64).");
+  }
+  return normalizedKey;
+}
+
 function normalizeKeys(keys: unknown): BigUint64Array {
   if (keys instanceof BigUint64Array) {
     return keys;
@@ -144,22 +163,9 @@ function normalizeKeys(keys: unknown): BigUint64Array {
     (typeof keys === "number" && !Number.isNaN(keys)) ||
     typeof keys === "bigint"
   ) {
-    normalizedKeys = BigUint64Array.of(BigInt(keys));
+    normalizedKeys = BigUint64Array.of(normalizeKey(keys));
   } else if (Array.isArray(keys)) {
-    const bigintkeys = keys.map((key) => {
-      if (typeof key === "bigint") {
-        return key;
-      } else if (
-        typeof key === "number" &&
-        !Number.isNaN(key) &&
-        Number.isInteger(key) &&
-        key >= 0
-      ) {
-        return BigInt(key);
-      }
-      throw new Error("All keys must be positive integers or bigints.");
-    });
-    normalizedKeys = BigUint64Array.from(bigintkeys);
+    normalizedKeys = BigUint64Array.from(keys.map(normalizeKey));
   } else {
     throw new Error(
       "Keys must be a number, bigint, an array of numbers or bigints, or a BigUint64Array."
