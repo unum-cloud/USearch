@@ -479,7 +479,7 @@ static py::tuple search_many_in_index( //
     progress_func_t const& progress, scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     if (wanted == 0)
-        return py::tuple(5);
+        throw std::invalid_argument("`count` must be a positive integer");
 
     // Clamp threads to hardware limit instead of throwing
     threads = std::min<std::size_t>(threads, std::thread::hardware_concurrency());
@@ -544,7 +544,7 @@ static py::tuple search_many_brute_force(       //
     scalar_kind_t scalar_kind = scalar_kind_t::unknown_k) {
 
     if (wanted == 0)
-        return py::tuple(5);
+        throw std::invalid_argument("`count` must be a positive integer");
 
     py::buffer_info dataset_info = dataset.request();
     py::buffer_info queries_info = queries.request();
