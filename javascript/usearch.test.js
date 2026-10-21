@@ -302,6 +302,14 @@ test("Operations with invalid values", () => {
   // All keys must be positive integers or bigints
   assert.throws(() => indexBatch.add(keys, vectors));
 
+  // Keys outside of [0, 2^64) must not wrap around onto other keys
+  for (const key of [-1, -1n, 2n ** 64n, 1.5])
+    assert.throws(() => indexBatch.add(key, vectors[0]));
+  assert.equal(indexBatch.size(), 0);
+  indexBatch.add(2n ** 64n - 1n, vectors[1]);
+  assert.throws(() => indexBatch.remove(-1));
+  assert.equal(indexBatch.size(), 1);
+
   // Vectors must be a TypedArray or an array of arrays
   assert.throws(() => indexBatch.search(NaN, 2));
 });
