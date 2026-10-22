@@ -132,6 +132,8 @@ bool vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vector
     // Every resident block of a builder takes its own scratch, so the most any builder keeps
     // resident must fit on one multiprocessor, or the launch keeps fewer blocks resident than its
     // grid and arena were sized for.
+    static_assert(resident_blocks_(vram_kernel_t::percolate_k, 0) == resident_blocks_(vram_kernel_t::refine_k, 0),
+                  "A percolation carves its slices from the arena its plan sized for the refine's grid");
     std::size_t const resident_blocks = max_of(resident_blocks_(vram_kernel_t::insert_k, 0),
                                                resident_blocks_(vram_kernel_t::refine_k, 0));
     return block_bytes <= core.device_.shared_memory_per_block_bytes &&
@@ -525,6 +527,8 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
         vram_back_link<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.build));
     else if constexpr (kernel_ == vram_kernel_t::refine_k)
         vram_refine<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.refine));
+    else if constexpr (kernel_ == vram_kernel_t::percolate_k)
+        vram_percolate<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.refine));
     else if constexpr (kernel_ == vram_kernel_t::search_k)
         vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
             vram_view<kit_t>(arguments.search), vram_view<kit_t>(arguments.search_sink), vram_no_rescoring {});

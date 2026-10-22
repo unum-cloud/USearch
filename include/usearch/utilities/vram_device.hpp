@@ -224,6 +224,9 @@ enum class vram_kernel_t : u32_t {
     /** Folds each walked node's forward picks and the walkers chained onto it into its row. */
     merge_back_links_k,
 
+    /** Re-selects each row with a fresh slot within two hops from those two hops of the graph. */
+    percolate_k,
+
     /** Rebuilds the norms column from the stored vectors. */
     derive_norms_k,
 

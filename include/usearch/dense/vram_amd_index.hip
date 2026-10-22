@@ -86,6 +86,8 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
         vram_back_link<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.build));
     else if constexpr (kernel_ == vram_kernel_t::refine_k)
         vram_refine<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.refine));
+    else if constexpr (kernel_ == vram_kernel_t::percolate_k)
+        vram_percolate<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.refine));
     else if constexpr (kernel_ == vram_kernel_t::search_k)
         vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
             vram_view<kit_t>(arguments.search), vram_view<kit_t>(arguments.search_sink), vram_no_rescoring {});

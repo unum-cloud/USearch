@@ -122,6 +122,9 @@ struct vram_refine_t {
     u32_t* link_heads = nullptr;
     u32_t* link_next = nullptr;
     vram_bitset_t walked;
+    u32_t* fresh_slots = nullptr;
+    u32_t* percolated = nullptr;
+    u32_t* gained = nullptr;
 };
 
 /** A search's landing, mirroring the shared search sink. */
@@ -307,15 +310,18 @@ struct vram_attend_heads_t {
     std::size_t head_count;
 };
 
-/** The counters an audit lands in page-locked memory, in the order of the device's: the levels
- *  that expanded, the last sweep's count, which only a sweep short of convergence leaves nonzero,
- *  then the unreached, reconnected and claim counters. */
+/** The counters an audit lands in page-locked memory, in the order of the device's: the levels that
+ *  expanded, the last sweep's count, which only a sweep short of convergence leaves nonzero, then
+ *  the unreached, reconnected and claim counters, and a percolation round's percolated and changed
+ *  rows. */
 struct vram_audit_landing_t {
     u32_t levels;
     u32_t last_expanded;
     u32_t unreached;
     u32_t reconnected;
     u32_t claims[2];
+    u32_t percolated;
+    u32_t gained;
 };
 
 /** Device scratch one refine plan carves once from a @p traversal_context_type_ and its phases
@@ -340,6 +346,10 @@ struct vram_refine_scratch {
     /** The walk's and the merge's claim counters, the last pass's completion oracle. */
     u32_t* claims = nullptr;
 
+    /** The rows the last percolation round re-selected, and the rows its merge changed. */
+    u32_t* percolated = nullptr;
+    u32_t* gained = nullptr;
+
     /** The rows the last audit left unreached, which the heal walks. */
     u32_t* island_ids = nullptr;
 
@@ -350,13 +360,15 @@ struct vram_refine_scratch {
 
 /** The buffers one refinement pass uses up, carved from its context's staging when it queues: the
  *  heads of the walkers' chains, then the bitset of rows the pass walked, the shadow neighbors the
- *  walks land and the chains' links beside them, @b [rows,connectivity] each. A reconnection counts
- *  its in-links over the chain heads, since it queues after its pass. */
+ *  walks land and the chains' links beside them, @b [rows,connectivity] each, then one bit per
+ *  neighbor slot, the slots a percolation round's merge filled, which the plan's next round reads.
+ *  A reconnection counts its in-links over the chain heads, since it queues after its pass. */
 struct vram_refine_passes_t {
     u32_t* link_heads = nullptr;
     vram_bitset_t walked;
     u32_t* shadow_neighbors = nullptr;
     u32_t* link_next = nullptr;
+    u32_t* fresh_slots = nullptr;
 };
 
 #pragma endregion Shard Types
@@ -1017,12 +1029,15 @@ struct vram_shard_core {
      *      shape one host thread drives over many devices at once: @ref queue a phase, @ref wait
      *      for it, @ref advance past it, and @ref finish once no phase follows.
      *
-     *  The phases re-select every node of the planned range, once per round of walks across while
-     *  the shard holds several parts, then audit reachability, then heal round by round while the
-     *  islands shrink: re-select them, and reconnect whatever stays unreached into a reached pick
-     *  or the landmark covering it. A re-selection's walk lands shadow neighbors and chains itself
-     *  onto every pick, as an insertion does, and the merge folds each walked row's forward picks,
-     *  then every walker chained onto it, into its live row, re-judging whatever overflows it.
+     *  The phases re-select every node of the planned range by a walk, once per round of walks
+     *  across while the shard holds several parts, then audit reachability, then heal round by
+     *  round while the islands shrink: re-select them, and reconnect whatever stays unreached into
+     *  a reached pick or the landmark covering it. A re-selection lands shadow neighbors and chains
+     *  itself onto every pick, as an insertion does, and the merge folds each re-selected row's
+     *  forward picks, then every row chained onto it, into its live row, re-judging whatever
+     *  overflows it. The walk runs once, as the CPU's refine does per call; each round @ref
+     *  percolate asks for after it percolates every row with a slot within two hops the last merge
+     *  filled.
      *
      *  A phase queues its launches and the landing of its counters behind the context's event and
      *  never waits; @ref plan_refine made every allocation, so no phase allocates, and only a
@@ -1049,19 +1064,26 @@ struct vram_shard_core {
             case phase_t::reselect_k: {
                 iota_view<node_id_t> const range = round_nodes_();
                 if (!range.empty())
-                    status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config, range, {}, parts_,
-                                                            round_);
+                    status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config, vram_kernel_t::refine_k,
+                                                            range, {}, parts_, round_);
                 if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), 0, stream);
                 break;
             }
+            case phase_t::percolate_k:
+                // Every row is claimed, and only those with a slot within two hops the last merge
+                // filled percolate.
+                status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config, vram_kernel_t::percolate_k,
+                                                        {0, static_cast<node_id_t>(index_->size())}, {});
+                if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), 0, stream);
+                break;
             case phase_t::audit_k: status_ = queue_sweeps_(context); break;
             case phase_t::heal_k:
                 // The island IDs replace the range: offsets below their count index them. Only
                 // island rows change, and no reached row points at one, so the audit before stands.
                 // A continued audit sweeps on alone.
                 if (!next_sweep_ && islands_)
-                    status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config, {0, islands_},
-                                                            {scratch_.island_ids, islands_});
+                    status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config, vram_kernel_t::refine_k,
+                                                            {0, islands_}, {scratch_.island_ids, islands_});
                 if (succeeded(status_) && !next_sweep_)
                     status_ = index_->kernels_.queue_reconnect_(*index_, context, scratch_, islands_);
                 if (succeeded(status_)) status_ = queue_sweeps_(context);
@@ -1091,9 +1113,11 @@ struct vram_shard_core {
                 status_ = status_t::device_error_k;
                 return false;
             }
-            tally_.visited_nodes += walked;
-            if (phase_ == phase_t::reselect_k) {
-                if (++round_ < rounds_) return true;
+            // A percolation round claims every row of its range but re-selects only the fresh ones.
+            tally_.visited_nodes += phase_ == phase_t::percolate_k ? landed.percolated : walked;
+            if (phase_ == phase_t::reselect_k && ++round_ < rounds_) return true;
+            if (phase_ == phase_t::reselect_k || phase_ == phase_t::percolate_k) {
+                gained_before_ = std::exchange(gained_, landed.gained);
                 phase_ = phase_t::audit_k;
                 return true;
             }
@@ -1115,12 +1139,22 @@ struct vram_shard_core {
         /** Stops the re-selection after the round that landed last, so the next phase audits and
          *  heals; a no-op in any other phase. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k) rounds_ = 0, phase_ = phase_t::audit_k;
+            if (phase_ == phase_t::reselect_k || phase_ == phase_t::percolate_k) rounds_ = 0, phase_ = phase_t::audit_k;
         }
 
-        /** Whether the current phase re-selects the planned range - the phase a caller's
-         *  progress counts. */
-        bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
+        /** Follows the round that landed last, the walk or a percolation, with a percolation round
+         *  before its audit queues: answers whether one follows, which needs that round to have
+         *  changed fewer rows than the one before it. The percolation re-selects only the rows with
+         *  a slot within two hops that the last round's merge filled. */
+        bool percolate() noexcept {
+            bool const shrank = gained_ && (!gained_before_ || gained_ < gained_before_);
+            if (!index_ || failed(status_) || phase_ != phase_t::audit_k || next_sweep_ || !shrank) return false;
+            phase_ = phase_t::percolate_k;
+            return true;
+        }
+
+        /** Whether the current phase re-selects - the phase a caller's progress counts. */
+        bool reselecting() const noexcept { return phase_ == phase_t::reselect_k || phase_ == phase_t::percolate_k; }
 
         /** Nodes re-selected so far. */
         std::size_t visited() const noexcept { return tally_.visited_nodes; }
@@ -1141,7 +1175,7 @@ struct vram_shard_core {
 
       private:
         friend struct vram_shard_core;
-        enum class phase_t : u8_t { reselect_k, audit_k, heal_k, done_k };
+        enum class phase_t : u8_t { reselect_k, percolate_k, audit_k, heal_k, done_k };
 
         /** Queues the audit's next batch of sweeps on @p context, its seeds first when it
          *  starts. */
@@ -1160,10 +1194,11 @@ struct vram_shard_core {
             return round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
         }
 
-        /** Rows the queued phase walked: the round's nodes while re-selecting, and the islands when
-         *  a heal round's queue began a fresh audit, which leaves the next sweep at two. */
+        /** Rows the queued phase claimed: the round's nodes while re-selecting, and the islands
+         *  when a heal round's queue began a fresh audit, which leaves the next sweep at two. */
         std::size_t walked_() const noexcept {
             if (phase_ == phase_t::reselect_k) return round_nodes_().size();
+            if (phase_ == phase_t::percolate_k) return index_->size();
             return phase_ == phase_t::heal_k && next_sweep_ == 2 ? islands_ : 0;
         }
 
@@ -1182,6 +1217,11 @@ struct vram_shard_core {
 
         /** The islands the last audit left. */
         u32_t islands_ = 0;
+
+        /** The rows the last percolation round's merge changed and the round before's, zero before
+         *  them. */
+        u32_t gained_ = 0;
+        u32_t gained_before_ = 0;
 
         /** The audit sweep the next batch queues from, zero before an audit starts. */
         u32_t next_sweep_ = 0;
@@ -2249,14 +2289,17 @@ struct vram_shard_core {
     std::size_t scratch_bytes_(scratch_use_t use, std::size_t parts = 0) const noexcept {
         std::size_t const rows = size(), words = divide_round_up<std::size_t>(rows, 32);
         std::size_t const refine_words = use == scratch_use_t::refine_k ? rows + parts : 0;
-        return (words * 3 + 7 + refine_words) * sizeof(u32_t);
+        return (words * 3 + 9 + refine_words) * sizeof(u32_t);
     }
 
     /** Bytes of the staging one refinement pass carves over the rows published now. */
     std::size_t refine_staging_bytes_() const noexcept {
         std::size_t const rows = size(), words = divide_round_up<std::size_t>(rows, 32);
-        return (rows + words + 2 * rows * connectivity()) * sizeof(u32_t);
+        return (rows + words + 2 * rows * connectivity() + rows * fresh_words_()) * sizeof(u32_t);
     }
+
+    /** Words of one row's fresh slots, a bit per neighbor slot. */
+    std::size_t fresh_words_() const noexcept { return divide_round_up<std::size_t>(connectivity(), 32); }
 
     /** The buffers one refinement pass uses up, from @p context 's staging, which @ref plan_refine
      *  grew for them; all null when it could not. */
@@ -2269,6 +2312,7 @@ struct vram_shard_core {
         passes.walked.words = passes.link_heads + rows;
         passes.shadow_neighbors = passes.walked.words + words;
         passes.link_next = passes.shadow_neighbors + rows * connectivity();
+        passes.fresh_slots = passes.link_next + rows * connectivity();
         return passes;
     }
 
@@ -2294,8 +2338,10 @@ struct vram_shard_core {
         scratch.unreached = scratch.expanded + 2;
         scratch.reconnected = scratch.unreached + 1;
         scratch.claims = scratch.reconnected + 1;
+        scratch.percolated = scratch.claims + 2;
+        scratch.gained = scratch.percolated + 1;
         if (use == scratch_use_t::refine_k) {
-            scratch.island_ids = scratch.claims + 2;
+            scratch.island_ids = scratch.gained + 1;
             scratch.part_bases = scratch.island_ids + rows;
         }
         if (failed(vendor_t::fill(scratch.reconnected, 0, sizeof(u32_t), context.stream())))
@@ -2456,8 +2502,9 @@ struct vram_shard_core {
      *  cannot fit it. */
     gpu_arena_shape_t build_arena_shape_(u32_t expansion, u32_t candidate_slots, u32_t walks) const noexcept {
         u32_t const scratch_bytes = builder_scratch_bytes_per_warp_(expansion, candidate_slots);
+        // A percolation claims two hops, a row of rows, however few ranks it keeps.
         gpu_arena_shape_t shape = arena_shape_for(
-            walk_selection_rows_(expansion, candidate_slots),
+            max_of(walk_selection_rows_(expansion, candidate_slots), static_cast<u32_t>(connectivity())),
             candidate_slots ? frontier_kind_t::register_ladder_k : frontier_kind_t::wide_arena_k, walks);
         if (!kernels_.build_scratch_fits(*this, scratch_bytes)) shape.scratch_bytes = scratch_bytes;
         return shape;

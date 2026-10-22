@@ -1617,6 +1617,17 @@ struct rocm_registers_schedule_t {
             storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
     }
 
+    /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
+    template <vram_quads_kit kit_>
+    __device__ __forceinline__ u32_t keep_diverse( //
+        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
+        vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
+        vram_telemetry_t& telemetry, u32_t lane) noexcept {
+        return vram_keep_diverse<kit_>(storage, cache, *this, sorted, position_mask, candidates_count, selection,
+                                       candidate_norms, kept_zero, telemetry, lane);
+    }
+
     template <typename storage_, typename cache_>
     static __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids,
                                                       u32_t rows, u32_t lane) noexcept {
@@ -1649,6 +1660,17 @@ struct cdna5_registers_schedule_t {
         u32_t lane) noexcept {
         return vram_score_batch<kit_, warp_t, resident_blocks_>( //
             storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
+    }
+
+    /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
+    template <vram_quads_kit kit_>
+    __device__ __forceinline__ u32_t keep_diverse( //
+        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
+        vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
+        vram_telemetry_t& telemetry, u32_t lane) noexcept {
+        return vram_keep_diverse<kit_>(storage, cache, *this, sorted, position_mask, candidates_count, selection,
+                                       candidate_norms, kept_zero, telemetry, lane);
     }
 
     template <typename storage_, typename cache_>
@@ -1701,6 +1723,17 @@ struct cdna3_lds_schedule_t {
             storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
     }
 
+    /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
+    template <vram_quads_kit kit_>
+    __device__ __forceinline__ u32_t keep_diverse( //
+        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
+        vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
+        vram_telemetry_t& telemetry, u32_t lane) noexcept {
+        return vram_keep_diverse<kit_>(storage, cache, *this, sorted, position_mask, candidates_count, selection,
+                                       candidate_norms, kept_zero, telemetry, lane);
+    }
+
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
@@ -1744,6 +1777,17 @@ struct cdna4_lds_schedule_t {
         u32_t lane) noexcept {
         return vram_score_batch<kit_, warp_t, resident_blocks_>( //
             storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
+    }
+
+    /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
+    template <vram_quads_kit kit_>
+    __device__ __forceinline__ u32_t keep_diverse( //
+        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
+        vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
+        vram_telemetry_t& telemetry, u32_t lane) noexcept {
+        return vram_keep_diverse<kit_>(storage, cache, *this, sorted, position_mask, candidates_count, selection,
+                                       candidate_norms, kept_zero, telemetry, lane);
     }
 
     template <typename storage_, typename cache_>

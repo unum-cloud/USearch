@@ -269,8 +269,9 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** Re-selects every node's neighbors, pass after pass, then re-links whatever no search can
- *  reach; a pass that re-wires nothing ends the phase. */
+/** Re-selects every node's neighbors through one plan, a walk and then percolation rounds, each
+ *  percolating only the rows with a fresh slot within two hops, then re-links whatever no search
+ *  can reach; a round changing no fewer rows than the one before ends the rounds. */
 template <typename streamed_dataset_type_>
 bool run_refinement(streamed_dataset_type_& streamed) {
     using bench_t = typename streamed_dataset_type_::bench_t;
@@ -293,25 +294,35 @@ bool run_refinement(streamed_dataset_type_& streamed) {
     changed_per_pass.reserve(max_refines);
     progress_bar_t progress {"refining", max_refines, bench.settings.terminal};
     auto started = steady_clock_t::now();
-    for (std::size_t pass = 0; pass != max_refines; ++pass) {
-        auto const [refinement, refine_status] = bench.index->refine({0, static_cast<node_id_t>(nodes)},
-                                                                     *bench.traversal, config);
-        if (failed(refine_status)) {
-            fmt::println("Refinement failed on pass {}: status {}", pass, int(refine_status));
-            return false;
-        }
-        changed_per_pass.push_back(refinement.changed_nodes);
-        report.sums.visited_members += refinement.visited_members;
-        report.sums.computed_distances += refinement.computed_distances;
-        report.sums.restarts += refinement.restarts;
-        report.islands_found += refinement.islands_found;
-        report.islands_reconnected += refinement.islands_reconnected;
-        report.reachable_nodes = refinement.health.reachable_nodes;
-        report.sweeps = refinement.health.sweeps;
-        progress.tick(pass + 1);
-        if (!refinement.changed_nodes) break;
+    auto [plan, plan_status] = bench.index->plan_refine({0, static_cast<node_id_t>(nodes)}, *bench.traversal, config);
+    if (failed(plan_status)) {
+        fmt::println("Refinement failed to plan: status {}", int(plan_status));
+        return false;
+    }
+    std::size_t rounds = 0, changed_before = 0;
+    for (bool more = true; more;) {
+        if (failed(plan.queue(*bench.traversal, config)) || failed(plan.wait(*bench.traversal))) break;
+        bool const reselected = plan.reselecting();
+        more = plan.advance();
+        if (!reselected) continue;
+        std::size_t const changed = plan.finish(*bench.traversal).value.changed_nodes;
+        changed_per_pass.push_back(changed - changed_before), changed_before = changed;
+        progress.tick(++rounds);
+        if (rounds < max_refines && plan.percolate()) more = true;
     }
     progress.finish();
+    auto const [refinement, refine_status] = plan.finish(*bench.traversal);
+    if (failed(refine_status)) {
+        fmt::println("Refinement failed after {} rounds: status {}", rounds, int(refine_status));
+        return false;
+    }
+    report.sums.visited_members = refinement.visited_members;
+    report.sums.computed_distances = refinement.computed_distances;
+    report.sums.restarts = refinement.restarts;
+    report.islands_found = refinement.islands_found;
+    report.islands_reconnected = refinement.islands_reconnected;
+    report.reachable_nodes = refinement.health.reachable_nodes;
+    report.sweeps = refinement.health.sweeps;
     // Every pass heals what it strands, so the passes' wall time holds the healing too.
     report.refining_seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     report.changed_per_pass = changed_per_pass;

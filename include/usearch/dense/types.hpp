@@ -106,7 +106,8 @@ struct further_scored_node_t {
 /** Outcome of one refinement or heal pass: every count means the same on every dense layer and residency. */
 struct [[nodiscard]] refine_result_t {
 
-    /** Nodes re-selected: the planned range, then the islands of every round. */
+    /** Nodes re-selected: the planned range, then the rows each further round a caller asked for
+     *  found fresh, then the islands of every heal round. */
     std::size_t visited_nodes = 0;
 
     /** Of those, the nodes whose neighbors gained a member they lacked - never more than

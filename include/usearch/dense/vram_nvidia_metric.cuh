@@ -1812,6 +1812,175 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_batch( //
         storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
 }
 
+/** Rows one @c mma.sync tile spans: the block the tile greedy walks the sorted candidates in. */
+inline constexpr u32_t cuda_tile_rows_k = 16;
+
+/**
+ *  @brief Two m16n8 tiles of dots between the cache rows at @p top and @p bottom, a lane's rows
+ *      @b g and @b g+8, and the cache rows at @p columns, the lane's column @b g of each tile.
+ *
+ *  The scan's operand permutation: lane (g, q) loads fragment 4·span + q of every row it holds,
+ *  words x and y feed one step and z and w the next, so both sides take one permutation of the
+ *  dimensions, and a fragment past the row reads as zeros. Every tile-capable kit's step spans 32
+ *  bytes of depth, so one permutation serves them all.
+ */
+template <vram_quads_kit kit_>
+__device__ __forceinline__ std::array<std::array<typename kit_::dot_t, 4>, 2> cuda_block_tiles( //
+    vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache, u32_t top, u32_t bottom,
+    u32_t const (&columns)[2], u32_t lane) noexcept {
+
+    using fragment_t = typename kit_::fragment_t;
+    using tile_t = std::array<typename kit_::dot_t, 4>;
+    u32_t const quarter = lane % 4, spans = divide_round_up(storage.row_fragments, 4u);
+    fragment_t const* const top_row = cache.staged_row(storage, top);
+    fragment_t const* const bottom_row = cache.staged_row(storage, bottom);
+    fragment_t const* const column_rows[2] = {cache.staged_row(storage, columns[0]),
+                                              cache.staged_row(storage, columns[1])};
+    std::array<tile_t, 2> tiles = {};
+#pragma unroll 1
+    for (u32_t span = 0; span != spans; ++span) {
+        u32_t const fragment = span * 4 + quarter;
+        bool const in_row = fragment < storage.row_fragments;
+        fragment_t const upper = in_row ? top_row[fragment] : fragment_t {};
+        fragment_t const lower = in_row ? bottom_row[fragment] : fragment_t {};
+        fragment_t const first {upper.x, lower.x, upper.y, lower.y}, second {upper.z, lower.z, upper.w, lower.w};
+#pragma unroll
+        for (u32_t tile = 0; tile != 2; ++tile) {
+            fragment_t const piece = in_row ? column_rows[tile][fragment] : fragment_t {};
+            tiles[tile] = kit_::accumulate_tile(first, uint2 {piece.x, piece.y}, tiles[tile]);
+            tiles[tile] = kit_::accumulate_tile(second, uint2 {piece.z, piece.w}, tiles[tile]);
+        }
+    }
+    return tiles;
+}
+
+/**
+ *  @brief The greedy diversity prefix of @ref vram_keep_diverse on the kit's tensor-core tiles.
+ *
+ *  The sorted candidates run in blocks of @ref cuda_tile_rows_k. Each block first scores against
+ *  the kept ones, sixteen columns a pass, each row falling once any of its lanes sees a nearer kept
+ *  one, then against itself, and keeps its rows in order by one vote a row. Every pair is scored
+ *  once and stays in registers, a row's kept set is the one the serial greedy would test, and the
+ *  zero rule and the stop at a full row cut where it would: the verdicts are the serial greedy's
+ *  for the distances the tiles give.
+ */
+template <vram_quads_kit kit_, typename schedule_>
+    requires requires(typename kit_::fragment_t a, uint2 b, std::array<typename kit_::dot_t, 4> tile) {
+        kit_::accumulate_tile(a, b, tile);
+    }
+__device__ __forceinline__ u32_t cuda_keep_diverse( //
+    vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
+    vram_sorted_buffer<cuda_warp_t, node_id_t> const& sorted_candidates, u32_t position_mask, u32_t candidates_count,
+    vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
+    vram_telemetry_t& telemetry, u32_t lane) noexcept {
+
+    using norms_t = typename kit_::norms_t;
+    using tiles_t = std::array<std::array<typename kit_::dot_t, 4>, 2>;
+    constexpr u32_t half_k = cuda_tile_rows_k / 2;
+    u32_t const group = lane / 4, quarter = lane % 4;
+    u32_t* const selected_ids = selection.selected_ids;
+    f32_t const* const to_query = selection.candidate_distances;
+    u32_t selected_count = 0, staged_through = 0;
+#pragma unroll 1
+    for (u32_t block_first = 0; block_first < candidates_count && selected_count < storage.connectivity;
+         block_first += cuda_tile_rows_k) {
+        u32_t const block_count = min_of(cuda_tile_rows_k, candidates_count - block_first);
+        // Lane r keeps block row r's cache row, modulo the block; rows past a short block re-read
+        // its first.
+        u32_t const block_row = lane % cuda_tile_rows_k < block_count ? lane % cuda_tile_rows_k : 0;
+        u32_t const position = sorted_candidates.at(block_first + block_row).id() & position_mask;
+        // Ties visit rows out of staging order, so the wait covers every row the block names.
+        u32_t landed = position + 1;
+        for (u32_t offset = half_k; offset; offset >>= 1)
+            landed = max_of(landed, cuda_warp_t::shuffle_xor(landed, offset));
+        staged_through = max_of(staged_through, landed);
+        schedule.await_rows(staged_through);
+        u32_t const top = cuda_warp_t::shuffle(position, group);
+        u32_t const bottom = cuda_warp_t::shuffle(position, group + half_k);
+        norms_t const top_norms = candidate_norms[top], bottom_norms = candidate_norms[bottom];
+        u32_t const kept_before = selected_count;
+
+        // Against the kept ones: a row falls once a lane of it sees a kept one nearer than the row.
+        bool top_rejected = false, bottom_rejected = false;
+#pragma unroll 1
+        for (u32_t first_column = 0; first_column < kept_before; first_column += cuda_tile_rows_k) {
+            u32_t const columns[2] = {selected_ids[min_of(first_column + group, kept_before - 1)],
+                                      selected_ids[min_of(first_column + half_k + group, kept_before - 1)]};
+            tiles_t const tiles = cuda_block_tiles<kit_>(storage, cache, top, bottom, columns, lane);
+#pragma unroll
+            for (u32_t tile = 0; tile != 2; ++tile)
+#pragma unroll
+                for (u32_t column = 0; column != 2; ++column) {
+                    u32_t const kept = first_column + tile * half_k + quarter * 2 + column;
+                    if (kept >= kept_before) continue;
+                    norms_t const kept_norms = candidate_norms[selected_ids[kept]];
+                    f32_t const from_top = kit_::distance(storage.kernel, tiles[tile][column], top_norms, kept_norms);
+                    f32_t const from_bottom = kit_::distance(storage.kernel, tiles[tile][2 + column], bottom_norms,
+                                                             kept_norms);
+                    top_rejected |= !(from_top >= to_query[top]);
+                    bottom_rejected |= !(from_bottom >= to_query[bottom]);
+                }
+        }
+        // Lanes 4g to 4g + 3 hold rows g and g + 8.
+        typename cuda_warp_t::mask_t const top_lanes = cuda_warp_t::ballot(top_rejected);
+        typename cuda_warp_t::mask_t const bottom_lanes = cuda_warp_t::ballot(bottom_rejected);
+        u32_t rejected = 0;
+        for (u32_t row = 0; row != half_k; ++row)
+            rejected |= ((top_lanes >> (4 * row)) & 0xFu ? 1u : 0u) << row |
+                        ((bottom_lanes >> (4 * row)) & 0xFu ? 1u : 0u) << (row + half_k);
+
+        // Against itself: tile t's column g is block row 8t + g, the lane's own rows.
+        u32_t const own_columns[2] = {top, bottom};
+        tiles_t const own = cuda_block_tiles<kit_>(storage, cache, top, bottom, own_columns, lane);
+        // Entry e is block column 8 (e / 2) + 2q + e % 2, from the lane's rows g and g + 8.
+        f32_t between[2][4];
+#pragma unroll
+        for (u32_t entry = 0; entry != 4; ++entry) {
+            u32_t const column = (entry >> 1) * half_k + quarter * 2 + (entry & 1u);
+            norms_t const column_norms = candidate_norms[cuda_warp_t::shuffle(position, column)];
+            between[0][entry] = kit_::distance(storage.kernel, own[entry >> 1][entry & 1u], top_norms, column_norms);
+            between[1][entry] = kit_::distance(storage.kernel, own[entry >> 1][2 + (entry & 1u)], bottom_norms,
+                                               column_norms);
+        }
+        u32_t kept_rows = 0;
+#pragma unroll 1
+        for (u32_t row = 0; row != block_count && selected_count < storage.connectivity; ++row) {
+            u32_t const candidate = cuda_warp_t::shuffle(position, row);
+            f32_t const distance = to_query[candidate];
+            bool clash = false;
+            if (group == row % half_k)
+#pragma unroll
+                for (u32_t entry = 0; entry != 4; ++entry) {
+                    u32_t const column = (entry >> 1) * half_k + quarter * 2 + (entry & 1u);
+                    f32_t const to_kept = row < half_k ? between[0][entry] : between[1][entry];
+                    clash |= column < row && ((kept_rows >> column) & 1u) && !(to_kept >= distance);
+                }
+            // A second duplicate of the row would only repeat the first one's links.
+            bool const diverse = !((rejected >> row) & 1u) && !(distance == 0 && kept_zero) && !cuda_warp_t::any(clash);
+            if (diverse) {
+                kept_zero |= distance == 0;
+                kept_rows |= 1u << row;
+                if (lane == 0) selected_ids[selected_count] = candidate;
+                ++selected_count;
+                cuda_warp_t::sync();
+            }
+        }
+        telemetry.scored += block_count * kept_before + block_count * (block_count - 1) / 2;
+    }
+    return selected_count;
+}
+
+/** The greedy diversity prefix under a kit without a tensor-core step: the serial greedy. */
+template <vram_quads_kit kit_, typename schedule_>
+__device__ __forceinline__ u32_t cuda_keep_diverse( //
+    vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
+    vram_sorted_buffer<cuda_warp_t, node_id_t> const& sorted_candidates, u32_t position_mask, u32_t candidates_count,
+    vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
+    vram_telemetry_t& telemetry, u32_t lane) noexcept {
+    return vram_keep_diverse<kit_>(storage, cache, schedule, sorted_candidates, position_mask, candidates_count,
+                                   selection, candidate_norms, kept_zero, telemetry, lane);
+}
+
 /**
  *  @brief The Ampere and Ada staging: every lane queues register-free @c cp.async copies of the
  *      fragments it strides over, one commit group per stage, so a consumer walking the rows in
@@ -1842,6 +2011,17 @@ struct ampere_cp_async_schedule_t {
         u32_t lane) noexcept {
         return cuda_score_batch<kit_, resident_blocks_, fragments_per_load_k>( //
             storage, query_span, query_state, gathered, gathered_count, lane);
+    }
+
+    /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
+    template <vram_quads_kit kit_>
+    __device__ __forceinline__ u32_t keep_diverse( //
+        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
+        vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
+        vram_telemetry_t& telemetry, u32_t lane) noexcept {
+        return cuda_keep_diverse<kit_>(storage, cache, *this, sorted, position_mask, candidates_count, selection,
+                                       candidate_norms, kept_zero, telemetry, lane);
     }
 
     template <typename storage_, typename cache_>
@@ -2120,6 +2300,17 @@ struct hopper_tma_schedule_t {
             storage, query_span, query_state, gathered, gathered_count, lane);
     }
 
+    /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
+    template <vram_quads_kit kit_>
+    __device__ __forceinline__ u32_t keep_diverse( //
+        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
+        vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
+        vram_telemetry_t& telemetry, u32_t lane) noexcept {
+        return cuda_keep_diverse<kit_>(storage, cache, *this, sorted, position_mask, candidates_count, selection,
+                                       candidate_norms, kept_zero, telemetry, lane);
+    }
+
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
@@ -2230,6 +2421,17 @@ struct blackwell_tma_schedule_t {
         return cuda_tma_gather_quads<kit_>(gather, storage, query_span, query_state, gathered, gathered_count, lane);
     }
 
+    /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
+    template <vram_quads_kit kit_>
+    __device__ __forceinline__ u32_t keep_diverse( //
+        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
+        vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
+        vram_telemetry_t& telemetry, u32_t lane) noexcept {
+        return cuda_keep_diverse<kit_>(storage, cache, *this, sorted, position_mask, candidates_count, selection,
+                                       candidate_norms, kept_zero, telemetry, lane);
+    }
+
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
@@ -2295,6 +2497,17 @@ struct blackwellrtx_tma_schedule_t {
         u32_t lane) noexcept {
         return cuda_score_batch<kit_, resident_blocks_, fragments_per_load_k>( //
             storage, query_span, query_state, gathered, gathered_count, lane);
+    }
+
+    /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
+    template <vram_quads_kit kit_>
+    __device__ __forceinline__ u32_t keep_diverse( //
+        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
+        vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
+        vram_telemetry_t& telemetry, u32_t lane) noexcept {
+        return cuda_keep_diverse<kit_>(storage, cache, *this, sorted, position_mask, candidates_count, selection,
+                                       candidate_norms, kept_zero, telemetry, lane);
     }
 
     template <typename storage_, typename cache_>

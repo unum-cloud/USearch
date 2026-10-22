@@ -48,6 +48,7 @@ constexpr u32_t hip_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept 
     case vram_kernel_t::insert_k:
     case vram_kernel_t::back_link_k:
     case vram_kernel_t::refine_k:
+    case vram_kernel_t::percolate_k:
     case vram_kernel_t::merge_back_links_k: return 3;
     case vram_kernel_t::search_k:
     case vram_kernel_t::search_indexer_k:
@@ -92,6 +93,11 @@ inline constexpr amd_rung_t amd_rungs[] = {
     {vram_kernel_t::refine_k, 4},
     {vram_kernel_t::refine_k, 8},
     {vram_kernel_t::refine_k, 16},
+    {vram_kernel_t::percolate_k, 0},
+    {vram_kernel_t::percolate_k, 2},
+    {vram_kernel_t::percolate_k, 4},
+    {vram_kernel_t::percolate_k, 8},
+    {vram_kernel_t::percolate_k, 16},
     {vram_kernel_t::search_k, 0},
     {vram_kernel_t::search_k, 2},
     {vram_kernel_t::search_k, 4},
@@ -470,22 +476,23 @@ struct vram_amd_kernels {
 #pragma region Refinement
 
     /** Queues one pass of the three-pass refinement engine behind @c refine_plan_t into its carved
-     *  @p scratch: the walk covers @p nodes, or under a device-resident @p node_ids the listed IDs
-     *  with @p nodes spanning the array's offsets, each node first walking across the neighboring
-     *  group in round @p round when @p parts parts are given; the merge folds the walked rows'
-     *  forward picks and the walkers chained onto every picked row into the live rows, and leaves
-     *  every other row as it was. Nothing waits: the landing queued after it checks its claims. */
+     *  @p scratch through @p kernel, a walk or a percolation: the pass covers @p nodes, or under a
+     *  device-resident @p node_ids the listed IDs with @p nodes spanning the array's offsets, each
+     *  node first walking across the neighboring group in round @p round when @p parts parts are
+     *  given; the merge folds the re-selected rows' forward picks and the rows chained onto every
+     *  picked row into the live rows, and leaves every other row as it was. Nothing waits: the
+     *  landing queued after it checks its claims. */
     status_t refine_pass_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
-                          refine_config_t config, iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
-                          u32_t parts = 0, u32_t round = 0) noexcept {
+                          refine_config_t config, vram_kernel_t kernel, iota_view<node_id_t> nodes,
+                          std::span<u32_t const> node_ids, u32_t parts = 0, u32_t round = 0) noexcept {
         if (status_t const kept = core.status(); failed(kept)) return kept;
         std::size_t const nodes_count = core.size();
         std::size_t const walk_count = nodes.size();
         hip_stream_handle_t const stream = context.stream();
         vram_refine_passes_t const passes = core.refine_passes_(context);
         if (!passes.link_heads) return status_t::bad_alloc_k;
-        // Every chain starts empty and no row walked yet.
-        if (hip_api().fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != hip_success_k ||
+        // Chains start empty and no row walked yet; a percolation's counters follow the claims.
+        if (hip_api().fill_async(scratch.claims, 0, 4 * sizeof(u32_t), stream) != hip_success_k ||
             hip_api().fill_async(passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) != hip_success_k ||
             hip_api().fill_async(passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) != hip_success_k)
             return status_t::device_error_k;
@@ -526,8 +533,11 @@ struct vram_amd_kernels {
                             round,
                             passes.link_heads,
                             passes.link_next,
-                            passes.walked};
-        if (status_t const launched = launch_refine_(core, view, candidate_slots, stream); failed(launched))
+                            passes.walked,
+                            node_ids.empty() ? passes.fresh_slots : nullptr,
+                            scratch.percolated,
+                            scratch.gained};
+        if (status_t const launched = launch_refine_(core, kernel, view, candidate_slots, stream); failed(launched))
             return launched;
 
         // Fold every walked row's forward picks and every chain of walkers into the live rows; a
@@ -720,12 +730,12 @@ struct vram_amd_kernels {
         }
         return status_t::success_k;
     }
-    status_t launch_refine_(core_t& core, vram_refine_t const& view, u32_t candidate_slots,
+    status_t launch_refine_(core_t& core, vram_kernel_t kernel, vram_refine_t const& view, u32_t candidate_slots,
                             hip_stream_handle_t stream) noexcept {
         vram_arguments_t arguments {};
         arguments.refine = view;
-        return launch_(vram_kernel_t::refine_k, candidate_slots,
-                       core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, candidate_slots),
+        return launch_(kernel, candidate_slots,
+                       core.device_.multiprocessor_count * resident_blocks_(kernel, candidate_slots),
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
 
@@ -1053,7 +1063,7 @@ struct vram_amd_index {
      *  attends on its first device, and publishes or fails their batches together. */
     template <typename, nk_dtype_t, typename, typename, typename, typename>
     friend struct vram_amd_indexes;
-    template <typename, typename, typename, template <typename> class, typename>
+    template <typename, typename, typename, typename, template <typename> class, typename>
     friend struct shard_set;
     template <typename, typename>
     friend struct vram_shard_fanout;

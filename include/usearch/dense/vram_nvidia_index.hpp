@@ -73,6 +73,7 @@ constexpr u32_t cuda_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept
     case vram_kernel_t::insert_k:
     case vram_kernel_t::back_link_k:
     case vram_kernel_t::refine_k:
+    case vram_kernel_t::percolate_k:
     case vram_kernel_t::merge_back_links_k: return slots <= 8 ? 3 : 2;
     case vram_kernel_t::search_k:
     case vram_kernel_t::search_indexer_k:
@@ -111,6 +112,11 @@ inline constexpr cuda_rung_t cuda_rungs[] = {
     {vram_kernel_t::refine_k, 4},
     {vram_kernel_t::refine_k, 8},
     {vram_kernel_t::refine_k, 16},
+    {vram_kernel_t::percolate_k, 0},
+    {vram_kernel_t::percolate_k, 2},
+    {vram_kernel_t::percolate_k, 4},
+    {vram_kernel_t::percolate_k, 8},
+    {vram_kernel_t::percolate_k, 16},
     {vram_kernel_t::search_k, 0},
     {vram_kernel_t::search_k, 2},
     {vram_kernel_t::search_k, 4},
@@ -157,6 +163,7 @@ constexpr bool cuda_gathers_rows(vram_kernel_t kernel) noexcept {
     switch (kernel) {
     case vram_kernel_t::insert_k:
     case vram_kernel_t::refine_k:
+    case vram_kernel_t::percolate_k:
     case vram_kernel_t::search_k:
     case vram_kernel_t::search_indexer_k:
     case vram_kernel_t::multiply_k:
@@ -610,25 +617,33 @@ struct vram_nvidia_kernels {
         u32_t const* part_bases = nullptr;
         u32_t parts = 0;
         u32_t round = 0;
+
+        /** The kernel the rows run through: a walk, or a percolation with its fresh slots and its
+         *  two counters. */
+        vram_kernel_t kernel = vram_kernel_t::refine_k;
+        u32_t* fresh_slots = nullptr;
+        u32_t* percolated = nullptr;
+        u32_t* gained = nullptr;
     };
 
     /** Queues one pass of the three-pass refinement engine behind @c refine_plan_t into its carved
-     *  @p scratch: the walk covers @p nodes, or under a device-resident @p node_ids the listed IDs
-     *  with @p nodes spanning the array's offsets, each node first walking across the neighboring
-     *  group in round @p round when @p parts parts are given; the merge folds the walked rows'
-     *  forward picks and the walkers chained onto every picked row into the live rows, and leaves
-     *  every other row as it was. Nothing waits: the landing queued after it checks its claims. */
+     *  @p scratch through @p kernel, a walk or a percolation: the pass covers @p nodes, or under a
+     *  device-resident @p node_ids the listed IDs with @p nodes spanning the array's offsets, each
+     *  node first walking across the neighboring group in round @p round when @p parts parts are
+     *  given; the merge folds the re-selected rows' forward picks and the rows chained onto every
+     *  picked row into the live rows, and leaves every other row as it was. Nothing waits: the
+     *  landing queued after it checks its claims. */
     status_t refine_pass_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
-                          refine_config_t config, iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
-                          u32_t parts = 0, u32_t round = 0) noexcept {
+                          refine_config_t config, vram_kernel_t kernel, iota_view<node_id_t> nodes,
+                          std::span<u32_t const> node_ids, u32_t parts = 0, u32_t round = 0) noexcept {
         if (status_t const kept = core.status(); failed(kept)) return kept;
         std::size_t const nodes_count = core.size();
         std::size_t const walk_count = nodes.size();
         cuda_stream_handle_t const stream = context.stream();
         vram_refine_passes_t const passes = core.refine_passes_(context);
         if (!passes.link_heads) return status_t::bad_alloc_k;
-        // Every chain starts empty and no row walked yet.
-        if (cuda_fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != cuda_success_k ||
+        // Chains start empty and no row walked yet; a percolation's counters follow the claims.
+        if (cuda_fill_async(scratch.claims, 0, 4 * sizeof(u32_t), stream) != cuda_success_k ||
             cuda_fill_async(passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) != cuda_success_k ||
             cuda_fill_async(passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
@@ -666,6 +681,11 @@ struct vram_nvidia_kernels {
         launch.part_bases = parts > 1 ? scratch.part_bases : nullptr;
         launch.parts = parts > 1 ? parts : 0;
         launch.round = round;
+        launch.kernel = kernel;
+        // A range pass marks the slots its merge fills for the next round; a heal marks none.
+        if (node_ids.empty())
+            launch.fresh_slots = passes.fresh_slots, launch.percolated = scratch.percolated,
+            launch.gained = scratch.gained;
         if (status_t const launched = launch_refine_(core, launch, context); failed(launched)) return launched;
 
         // Fold every walked row's forward picks and every chain of walkers into the live rows; a
@@ -893,7 +913,8 @@ struct vram_nvidia_kernels {
         return status_t::success_k;
     }
 
-    /** Walks the rows of @p launch, landing their re-selected neighbors in its shadow matrix. */
+    /** Walks or percolates the rows of @p launch, landing their re-selected neighbors in its shadow
+     *  matrix. */
     status_t launch_refine_(core_t& core, refine_launch_t const& launch, traversal_context_t& context) noexcept {
         vram_arguments_t arguments {};
         u32_t const selection_rows = core.walk_selection_rows_(launch.expansion, launch.candidate_slots);
@@ -916,12 +937,14 @@ struct vram_nvidia_kernels {
                             launch.round,
                             launch.link_heads,
                             launch.link_next,
-                            launch.walked};
-        return launch_(
-            kernel_function_(vram_kernel_t::refine_k, launch.candidate_slots),
-            core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.candidate_slots),
-            vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments,
-            rows_map_(core));
+                            launch.walked,
+                            launch.fresh_slots,
+                            launch.percolated,
+                            nullptr};
+        return launch_(kernel_function_(launch.kernel, launch.candidate_slots),
+                       core.device_.multiprocessor_count * resident_blocks_(launch.kernel, launch.candidate_slots),
+                       vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments,
+                       rows_map_(core));
     }
 
     /** Merges every walked row's forward picks and every chain of walkers the walks of @p launch
@@ -954,7 +977,10 @@ struct vram_nvidia_kernels {
             0,
             launch.link_heads,
             launch.link_next,
-            launch.walked};
+            launch.walked,
+            launch.fresh_slots,
+            nullptr,
+            launch.gained};
         return launch_(
             kernel_function_(vram_kernel_t::merge_back_links_k, 0),
             core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.candidate_slots),
@@ -1371,7 +1397,7 @@ struct vram_nvidia_index {
      *  attends on its first device, and publishes or fails their batches together. */
     template <typename, nk_dtype_t, typename, typename, typename, typename>
     friend struct vram_nvidia_indexes;
-    template <typename, typename, typename, template <typename> class, typename>
+    template <typename, typename, typename, typename, template <typename> class, typename>
     friend struct shard_set;
     template <typename, typename>
     friend struct vram_shard_fanout;

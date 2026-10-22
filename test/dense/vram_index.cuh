@@ -327,7 +327,9 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
 
 /** Builds and refines rows repeating four vectors, so every walk meets plateaus of equal distances
  *  far wider than its ranks: a tie at the radius must displace no rank, as on the CPU, so each walk
- *  ends near its ranks instead of expanding its whole plateau, and the ledger must balance. */
+ *  ends near its ranks instead of expanding its whole plateau. The first round walks every row, the
+ *  percolation rounds a caller asks for end on their own once the changed rows stop shrinking,
+ *  though two hops of a plateau percolate almost every row, and the ledger must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t test_dense_vram_tied_build(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -354,6 +356,24 @@ std::size_t test_dense_vram_tied_build(make_index_type_ const& make_index, u64_t
         failures += expect(refined_status == status_t::success_k && refined.changed_nodes <= refined.visited_nodes);
         // A walk flooding its plateau expands every one of its rows.
         failures += expect(2 * refined.visited_members < refined.visited_nodes * plateau_rows_k);
+        if constexpr (requires(typename index_type_::refine_plan_t& plan) { plan.percolate(); }) {
+            auto [plan, plan_status] = index.plan_refine({0, static_cast<node_id_t>(index.size())}, context);
+            failures += expect(plan_status == status_t::success_k);
+            // The changed rows shrink every round, from at most every row, which bounds the rounds.
+            std::size_t rounds = 0, first_round = 0;
+            bool more = succeeded(plan_status);
+            while (more && rounds <= dense_growth_nodes_k) {
+                if (failed(plan.queue(context, {})) || failed(plan.wait(context))) break;
+                bool const percolating = plan.reselecting();
+                std::size_t const visited_before = plan.visited();
+                more = plan.advance();
+                if (!percolating) continue;
+                if (!rounds++) first_round = plan.visited() - visited_before;
+                if (plan.percolate()) more = true;
+            }
+            failures += expect(!more && plan.finish(context).status == status_t::success_k);
+            failures += expect_eq(first_round, dense_growth_nodes_k);
+        }
     }
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
@@ -385,6 +405,9 @@ std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_
         broad_refine.expansion_factor = 1024;
         failures += expect(index.refine({0, static_cast<node_id_t>(index.size())}, context, broad_refine).status ==
                            status_t::success_k);
+        // The greedy over many tile blocks of a wide pool keeps every row findable.
+        if constexpr (kernel_ != nk_kernel_dot_k)
+            failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
     }
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
