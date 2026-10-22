@@ -1284,6 +1284,115 @@ void test_filtered_search() {
     }
 }
 
+/**
+ * Counts live keys that an exhaustive search for their own vector does not return.
+ */
+template <typename index_at, typename key_at>
+std::size_t count_unreachable(index_at& index, std::vector<std::vector<float>> const& vectors,
+                              std::vector<key_at> const& live_keys) {
+    std::size_t const wanted = index.size();
+    std::vector<key_at> keys(wanted);
+    std::vector<distance_punned_t> distances(wanted);
+    std::size_t unreachable = 0;
+    for (key_at key : live_keys) {
+        typename index_at::search_result_t search_result =
+            index.search(vectors[static_cast<std::size_t>(key)].data(), wanted);
+        expect(search_result);
+        std::size_t found = search_result.dump_to(keys.data(), distances.data());
+        bool found_self = false;
+        for (std::size_t r = 0; r != found && !found_self; ++r)
+            found_self = keys[r] == key;
+        unreachable += !found_self;
+    }
+    return unreachable;
+}
+
+/**
+ * `remove()` followed by `add()` reuses the removed node's slot and rewrites it in place.
+ * The removed node's old neighbors must be relinked to each other, otherwise the part of
+ * the graph that was reachable only through the removed node becomes unreachable.
+ *
+ * Points on a line make every node link only to its two neighbors on the line, so a
+ * single remove + far add cuts the graph in two.
+ */
+template <typename key_at, typename slot_at> void test_remove_add_line_reachability() {
+    using index_t = index_dense_gt<key_at, slot_at>;
+    std::size_t const total = 1000;
+    std::size_t const far = total + 1;
+    std::vector<std::vector<float>> vectors(far + 1);
+    for (std::size_t i = 0; i != vectors.size(); ++i)
+        vectors[i] = {static_cast<float>(i), 1.0f, 2.0f};
+    vectors[far] = {777.2f, 1.0f, 2.0f};
+
+    for (std::size_t removed : {std::size_t(100), std::size_t(500)}) {
+        metric_punned_t metric(3, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+        typename index_t::state_result_t make_result = index_t::make(metric, index_dense_config_t{});
+        expect(make_result);
+        index_t& index = make_result.index;
+        expect(index.try_reserve(far + 1));
+        for (std::size_t i = 1; i <= total; ++i)
+            expect(index.add(static_cast<key_at>(i), vectors[i].data()));
+
+        expect(index.remove(static_cast<key_at>(removed)));
+        expect(index.add(static_cast<key_at>(far), vectors[far].data()));
+        expect_eq(index.size(), total);
+
+        std::vector<key_at> live;
+        for (std::size_t i = 1; i <= far; ++i)
+            if (i != removed)
+                live.push_back(static_cast<key_at>(i));
+        expect_eq(count_unreachable(index, vectors, live), static_cast<std::size_t>(0));
+    }
+}
+
+/**
+ * Repeated rounds of removing a fraction of the keys and adding new ones, which reuse the
+ * removed slots, optionally from several threads. Every live key must stay reachable.
+ */
+template <typename key_at, typename slot_at>
+void test_remove_add_churn_reachability(std::size_t dimensions, std::size_t initial, std::size_t rounds,
+                                        std::size_t per_round, std::size_t threads_count) {
+    using index_t = index_dense_gt<key_at, slot_at>;
+    std::size_t const total = initial + rounds * per_round;
+    std::vector<std::vector<float>> vectors(total);
+    std::default_random_engine generator(7);
+    std::uniform_real_distribution<float> distribution(-1.0f, 1.0f);
+    for (auto& vector : vectors) {
+        vector.resize(dimensions);
+        for (auto& component : vector)
+            component = distribution(generator);
+    }
+
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+    typename index_t::state_result_t make_result = index_t::make(metric, index_dense_config_t(16));
+    expect(make_result);
+    index_t& index = make_result.index;
+    executor_default_t executor(threads_count);
+    expect(index.try_reserve({initial, executor.size()}));
+    for (std::size_t i = 0; i != initial; ++i)
+        expect(index.add(static_cast<key_at>(i), vectors[i].data()));
+
+    std::vector<key_at> live(initial);
+    for (std::size_t i = 0; i != initial; ++i)
+        live[i] = static_cast<key_at>(i);
+    std::size_t next_key = initial;
+    for (std::size_t round = 0; round != rounds; ++round) {
+        std::shuffle(live.begin(), live.end(), generator);
+        for (std::size_t i = 0; i != per_round; ++i)
+            expect(index.remove(live[live.size() - 1 - i]));
+        live.resize(live.size() - per_round);
+        std::size_t const first_new = next_key;
+        executor.fixed(per_round, [&](std::size_t thread, std::size_t task) {
+            std::size_t const key = first_new + task;
+            expect(index.add(static_cast<key_at>(key), vectors[key].data(), thread));
+        });
+        for (std::size_t i = 0; i != per_round; ++i)
+            live.push_back(static_cast<key_at>(next_key++));
+        expect_eq(index.size(), initial);
+        expect_eq(count_unreachable(index, vectors, live), static_cast<std::size_t>(0));
+    }
+}
+
 void test_isolate() {
     constexpr std::size_t dataset_count = 16;
     constexpr std::size_t dimensions = 32;
@@ -1658,6 +1767,16 @@ int main(int, char**) {
     test_slot_lookup_churn<std::int64_t, uint40_t>();
 
     test_filtered_search();
+
+    // `remove()` + `add()` reuses the removed slot; its old neighbors must stay connected.
+    std::printf("Testing remove + add reachability\n");
+    test_remove_add_line_reachability<std::int64_t, slot32_t>();
+    test_remove_add_line_reachability<std::int64_t, uint40_t>();
+    test_remove_add_churn_reachability<std::int64_t, slot32_t>(16, 2000, 10, 200, 1);
+    if (std::thread::hardware_concurrency() > 1)
+        test_remove_add_churn_reachability<std::int64_t, slot32_t>(
+            16, 2000, 10, 200, static_cast<std::size_t>(std::thread::hardware_concurrency()));
+
     test_isolate();
     test_compact();
     test_load_after_metric_make();

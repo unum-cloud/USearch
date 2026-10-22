@@ -2514,6 +2514,8 @@ class index_gt {
         std::size_t computed_distances{};
         std::size_t computed_distances_in_refines{};
         std::size_t computed_distances_in_reverse_refines{};
+        /// @brief Reused snapshot of a reused node's old neighbors, relinked in `update`.
+        buffer_gt<candidate_t, candidates_allocator_t> removed_neighbors{};
 
         /// @brief Heterogeneous distance calculation.
         template <typename value_at, typename metric_at, typename entry_at> //
@@ -3394,6 +3396,10 @@ class index_gt {
 
         node_t updated_node = node_at_(updated_slot);
         level_t updated_node_level = updated_node.level();
+
+        // The node is about to move, so its old neighbors must stop depending on it.
+        if (!relink_neighbors_of_(metric, updated_slot, updated_node_level, context))
+            return result.failed("Out of memory!");
 
         // Copy entry coordinates under locks
         level_t max_level_copy;
@@ -4352,6 +4358,72 @@ class index_gt {
         }
 
         return top_view;
+    }
+
+    /**
+     *  @brief Relinks the neighbors of `removed_slot` to each other on every level up to
+     *  `max_level`, dropping their links to `removed_slot`. Called before the slot is
+     *  rewritten in place, so the part of the graph reachable only through it stays reachable.
+     *  @return `false` on allocation failure.
+     */
+    template <typename metric_at>
+    bool relink_neighbors_of_( //
+        metric_at&& metric, compressed_slot_t removed_slot, level_t max_level, context_t& context) usearch_noexcept_m {
+
+        std::size_t const max_neighbors = (std::max)(config_.connectivity, config_.connectivity_base);
+        if (context.removed_neighbors.size() < max_neighbors) {
+            buffer_gt<candidate_t, candidates_allocator_t> grown(max_neighbors);
+            if (!grown)
+                return false;
+            context.removed_neighbors = std::move(grown);
+        }
+        top_candidates_t& top = context.top_for_refine;
+        if (!top.reserve(max_neighbors * 2))
+            return false;
+
+        node_t removed_node = node_at_(removed_slot);
+        for (level_t level = max_level; level >= 0; --level) {
+            std::size_t removed_count = 0;
+            {
+                node_lock_t removed_lock = node_lock_(removed_slot);
+                neighbors_ref_t removed_neighbors = neighbors_(removed_node, level);
+                removed_count = removed_neighbors.size();
+                for (std::size_t i = 0; i != removed_count; ++i)
+                    context.removed_neighbors[i] = candidate_t{distance_t{}, removed_neighbors[i]};
+            }
+
+            std::size_t const connectivity_max = level ? config_.connectivity : config_.connectivity_base;
+            for (std::size_t i = 0; i != removed_count; ++i) {
+                compressed_slot_t neighbor_slot = context.removed_neighbors[i].slot;
+                if (neighbor_slot == removed_slot)
+                    continue;
+                node_lock_t neighbor_lock = node_lock_(neighbor_slot);
+                neighbors_ref_t neighbor_neighbors = neighbors_(node_at_(neighbor_slot), level);
+
+                top.clear();
+                for (compressed_slot_t slot : neighbor_neighbors)
+                    if (slot != removed_slot && slot != neighbor_slot)
+                        top.insert_reserved(
+                            {context.measure(citerator_at(neighbor_slot), citerator_at(slot), metric), slot});
+                for (std::size_t j = 0; j != removed_count; ++j) {
+                    compressed_slot_t slot = context.removed_neighbors[j].slot;
+                    if (slot == removed_slot || slot == neighbor_slot ||
+                        std::find_if(neighbor_neighbors.begin(), neighbor_neighbors.end(),
+                                     [slot](compressed_slot_t other) { return other == slot; }) !=
+                            neighbor_neighbors.end())
+                        continue;
+                    top.insert_reserved(
+                        {context.measure(citerator_at(neighbor_slot), citerator_at(slot), metric), slot});
+                }
+
+                candidates_view_t top_view =
+                    refine_(metric, connectivity_max, top, context, context.computed_distances_in_reverse_refines);
+                neighbor_neighbors.clear();
+                for (std::size_t idx = 0; idx != top_view.size(); idx++)
+                    neighbor_neighbors.push_back(top_view[idx].slot);
+            }
+        }
+        return true;
     }
 
     template <typename value_at, typename metric_at>
