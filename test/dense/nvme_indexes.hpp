@@ -10,18 +10,18 @@
  *  checks every covering read against it. A walk as wide as the index scores every row, so the
  *  RAM group the parts came from judges every verb, as do the @c f64 oracles of @c dense.cuh.
  *
- *  Merge, split, refine and build view each target back and judge it against a fresh RAM build of
- *  the same rows. Recall is the share of every query's results whose exact distance is within its
- *  exact k-th nearest, so ties never count against a ranking. A rewrite passes when its target,
- *  searched with the default walk, recalls within @ref rewrite_recall_margin_k of a fresh RAM build
- *  of the same rows searched alike.
+ *  Compaction, refine and build view each target back and judge it against a fresh RAM build of the
+ *  same rows. Recall is the share of every query's results whose exact distance is within its exact
+ *  k-th nearest, so ties never count against a ranking. A rewrite passes when its target, searched
+ *  with the default walk, recalls within @ref rewrite_recall_margin_k of a fresh RAM build of the
+ *  same rows searched alike.
  */
 #pragma once
 
 #include <cstdint> // `std::uintptr_t`, for the checkpoint paths' per-run salt
 #include <cstdio>  // `std::remove`, `std::rename`, `std::snprintf`, for the checkpoint's files
 
-#include <algorithm>    // `std::is_sorted`, `std::nth_element`, `std::upper_bound`
+#include <algorithm>    // `std::is_sorted`, `std::nth_element`
 #include <array>        // `std::array`
 #include <atomic>       // `std::atomic`, for the failing engines' countdown
 #include <bit>          // `std::bit_cast`, for `uuid_t` keys from numbers
@@ -34,7 +34,7 @@
 
 #include <fmt/format.h>
 
-#include "usearch/dense/nvme_indexes.hpp"
+#include "usearch/dense/nvme_compaction.hpp"
 #include "usearch/dense/ram_indexes.hpp"
 
 #include "dense.cuh"
@@ -1170,7 +1170,7 @@ constexpr f64_t rewrite_recall_margin_k = 0.05;
 /** Queries every recall is measured over, and results each one keeps. */
 constexpr std::size_t rewrite_queries_k = 64, rewrite_wanted_k = 10;
 
-/** Rows the merge, split and refine scenarios rewrite. */
+/** Rows the compaction and refine scenarios rewrite. */
 constexpr std::size_t rewrite_rows_k = 4 * dense_thread_nodes_k;
 
 /** The rows one rewrite scenario draws from, the RAM groups it saves them through, the checkpoints
@@ -1348,27 +1348,28 @@ struct rewrite_fixture {
 /** A lent workspace of @p bytes. */
 inline std::vector<byte_t> rewrite_workspace(std::size_t bytes) { return std::vector<byte_t>(bytes); }
 
-/** Merging the two parts one RAM group saved yields one part over every row, every key once, that a
- *  RAM group loads back whole, and that recalls within the margin of a fresh RAM build. */
+/** Compacting the two parts one RAM group saved yields one part over every row, every key once,
+ *  that a RAM group loads back whole, and that recalls within the margin of a fresh RAM build. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
-std::size_t test_nvme_rewrites_merge(u64_t seed) {
+std::size_t test_nvme_rewrites_compact(u64_t seed) {
     using ram_t = typename rewrite_fixture<nvme_type_>::ram_t;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
-    rewrite_fixture<nvme_type_> fixture {"rewrite_merge", kernel_, rewrite_rows_k, dimensions, seed};
+    rewrite_fixture<nvme_type_> fixture {"rewrite_compact", kernel_, rewrite_rows_k, dimensions, seed};
     nvme_type_ source = fixture.view(fixture.save(0, rewrite_rows_k, checkpoint_layout_t::distributed_k));
     if (fixture.failures) return fixture.failures;
     std::vector<byte_t> workspace = rewrite_workspace(4u << 20);
     nvme_checkpoint_t& target = fixture.checkpoint();
     std::array<nvme_type_ const*, 1> const sources {&source};
-    auto const [merged, status] = merge(std::span<nvme_type_ const* const>(sources), target.manifest.data(),
-                                        fixture.driver.executor, std::span {workspace});
+    auto const [compacted, status] = compact(std::span<nvme_type_ const* const>(sources), target.manifest.data(),
+                                             fixture.driver.executor, std::span {workspace});
     fixture.failures += expect_eq(status, status_t::success_k);
-    target.parts = merged.parts;
-    fixture.failures += expect_eq(merged.rows, rewrite_rows_k);
-    fixture.failures += expect_eq(merged.parts, 1u);
-    fixture.failures += expect_eq(merged.cut_edges, 0u);
-    fixture.failures += expect(merged.graph.visited_nodes > 0);
-    fixture.failures += expect(merged.value_reads.count > 0 && merged.written_bytes > 0);
+    target.parts = compacted.compaction.target_shards;
+    fixture.failures += expect_eq(compacted.compaction.source_shards, 2u);
+    fixture.failures += expect_eq(compacted.compaction.target_shards, 1u);
+    fixture.failures += expect_eq(compacted.compaction.moved_rows, rewrite_rows_k / 2);
+    fixture.failures += expect_eq(compacted.compaction.cut_edges, 0u);
+    fixture.failures += expect(compacted.compaction.graph.visited_nodes > 0);
+    fixture.failures += expect(compacted.value_reads.count > 0 && compacted.written_bytes > 0);
     if (failed(status)) return fixture.failures;
 
     nvme_type_ viewed = fixture.view(target.manifest.data());
@@ -1385,14 +1386,14 @@ std::size_t test_nvme_rewrites_merge(u64_t seed) {
     return fixture.failures;
 }
 
-/** Three parts from two sources, a manifest of two and a monolith, merge step by step, a search of
- *  a source running between every two steps on the same executor, and the merge recalls within the
- *  margin. */
+/** Three parts from two sources, a manifest of two and a monolith, compact step by step, a search
+ *  of a source running between every two steps on the same executor, and the target recalls within
+ *  the margin. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
-std::size_t test_nvme_rewrites_merge_steps(u64_t seed) {
+std::size_t test_nvme_rewrites_compact_steps(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
     std::size_t const first_rows = rewrite_rows_k * 2 / 3;
-    rewrite_fixture<nvme_type_> fixture {"rewrite_merge_steps", kernel_, rewrite_rows_k, dimensions, seed};
+    rewrite_fixture<nvme_type_> fixture {"rewrite_compact_steps", kernel_, rewrite_rows_k, dimensions, seed};
     nvme_type_ first = fixture.view(fixture.save(0, first_rows, checkpoint_layout_t::distributed_k));
     nvme_type_ second = fixture.view(
         fixture.save(first_rows, rewrite_rows_k - first_rows, checkpoint_layout_t::monolith_k));
@@ -1401,8 +1402,8 @@ std::size_t test_nvme_rewrites_merge_steps(u64_t seed) {
     std::vector<byte_t> workspace = rewrite_workspace(4u << 20);
     nvme_checkpoint_t& target = fixture.checkpoint();
     std::array<nvme_type_ const*, 2> const sources {&first, &second};
-    auto [plan, status] = plan_merge(std::span<nvme_type_ const* const>(sources), target.manifest.data(),
-                                     std::span {workspace});
+    auto [plan, status] = plan_compact(std::span<nvme_type_ const* const>(sources), target.manifest.data(),
+                                       std::span {workspace});
     fixture.failures += expect_eq(status, status_t::success_k);
     if (failed(status)) return fixture.failures;
 
@@ -1418,12 +1419,13 @@ std::size_t test_nvme_rewrites_merge_steps(u64_t seed) {
             ++steps;
         }
     } while (plan.advance());
-    fixture.failures += expect(plan.phase() == nvme_rewrite_phase_t::finish_k);
+    fixture.failures += expect(plan.phase() == nvme_compact_phase_t::finish_k);
     fixture.failures += expect(phases >= 4 && steps >= phases);
-    auto const [merged, finish_status] = plan.finish();
+    auto const [compacted, finish_status] = plan.finish();
     fixture.failures += expect_eq(finish_status, status_t::success_k);
-    target.parts = merged.parts;
-    fixture.failures += expect_eq(merged.rows, rewrite_rows_k);
+    target.parts = compacted.compaction.target_shards;
+    fixture.failures += expect_eq(compacted.compaction.source_shards, 3u);
+    fixture.failures += expect_eq(compacted.compaction.target_shards, 1u);
     if (failed(finish_status)) return fixture.failures;
 
     nvme_type_ viewed = fixture.view(target.manifest.data());
@@ -1436,74 +1438,57 @@ std::size_t test_nvme_rewrites_merge_steps(u64_t seed) {
     return fixture.failures;
 }
 
-/** A split by rows of one part into thirds: the parts and rows add up, the cut edges are counted,
- *  and each third, repaired by the RAM refine the workspace holds, recalls within the margin. */
+/** Four parts compact into two under a capacity of two parts' rows, each appended part linking in,
+ *  then back into four under a capacity of one part's rows: every part is cut in half, the cut
+ *  edges are counted, and each half, repaired by the RAM refine the workspace holds, recalls within
+ *  the margin. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
-std::size_t test_nvme_rewrites_split_rows(u64_t seed) {
+std::size_t test_nvme_rewrites_compact_capacity(u64_t seed) {
+    using ram_t = typename rewrite_fixture<nvme_type_>::ram_t;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
-    rewrite_fixture<nvme_type_> fixture {"rewrite_split_rows", kernel_, rewrite_rows_k, dimensions, seed};
-    nvme_type_ source = fixture.view(fixture.save(0, rewrite_rows_k, checkpoint_layout_t::monolith_k));
+    std::size_t const part_rows = rewrite_rows_k / 4;
+    rewrite_fixture<nvme_type_> fixture {"rewrite_compact_capacity", kernel_, rewrite_rows_k, dimensions, seed};
+    ram_t group {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    nvme_type_ source = fixture.view(fixture.save(group, 0, rewrite_rows_k, checkpoint_layout_t::distributed_k, 4));
     if (fixture.failures) return fixture.failures;
+    fixture.failures += expect_eq(source.shards_count(), 4u);
     std::vector<byte_t> workspace = rewrite_workspace(8u << 20);
-    nvme_checkpoint_t& target = fixture.checkpoint();
-    // The monolith of two RAM shards has no edge across its halves, so thirds cut inside them.
-    auto const [cut, status] = split(source, split_by_rows_t {divide_round_up<std::size_t>(rewrite_rows_k, 3)},
-                                     target.manifest.data(), fixture.driver.executor, std::span {workspace});
-    fixture.failures += expect_eq(status, status_t::success_k);
-    target.parts = cut.parts;
-    fixture.failures += expect_eq(cut.parts, 3u);
-    fixture.failures += expect_eq(cut.rows, rewrite_rows_k);
-    fixture.failures += expect(cut.cut_edges > 0);
-    fixture.failures += expect(cut.graph.visited_nodes >= rewrite_rows_k);
-    if (failed(status)) return fixture.failures;
 
-    nvme_type_ viewed = fixture.view(target.manifest.data());
-    fixture.failures += expect_eq(viewed.shards_count(), 3u);
+    nvme_checkpoint_t& halves = fixture.checkpoint();
+    std::array<nvme_type_ const*, 1> const quartered {&source};
+    auto const [packed, pack_status] = compact(std::span<nvme_type_ const* const>(quartered), halves.manifest.data(),
+                                               fixture.driver.executor, std::span {workspace},
+                                               compact_config_t {2 * part_rows});
+    fixture.failures += expect_eq(pack_status, status_t::success_k);
+    halves.parts = packed.compaction.target_shards;
+    fixture.failures += expect_eq(packed.compaction.source_shards, 4u);
+    fixture.failures += expect_eq(packed.compaction.target_shards, 2u);
+    fixture.failures += expect_eq(packed.compaction.moved_rows, 2 * part_rows);
+    fixture.failures += expect_eq(packed.compaction.cut_edges, 0u);
+    if (failed(pack_status)) return fixture.failures;
+    nvme_type_ halved = fixture.view(halves.manifest.data());
+    fixture.failures += expect_eq(halved.shards_count(), 2u);
+    fixture.failures += expect_eq(halved.size(), rewrite_rows_k);
+    fixture.expect_keys(halved);
+    fixture.expect_recall(halved, "of four parts into two");
+
+    nvme_checkpoint_t& quarters = fixture.checkpoint();
+    std::array<nvme_type_ const*, 1> const halved_sources {&halved};
+    auto const [cut, cut_status] = compact(std::span<nvme_type_ const* const>(halved_sources), quarters.manifest.data(),
+                                           fixture.driver.executor, std::span {workspace},
+                                           compact_config_t {part_rows});
+    fixture.failures += expect_eq(cut_status, status_t::success_k);
+    quarters.parts = cut.compaction.target_shards;
+    fixture.failures += expect_eq(cut.compaction.target_shards, 4u);
+    fixture.failures += expect_eq(cut.compaction.moved_rows, 2 * part_rows);
+    fixture.failures += expect(cut.compaction.cut_edges > 0);
+    fixture.failures += expect(cut.compaction.graph.visited_nodes >= rewrite_rows_k);
+    if (failed(cut_status)) return fixture.failures;
+    nvme_type_ viewed = fixture.view(quarters.manifest.data());
+    fixture.failures += expect_eq(viewed.shards_count(), 4u);
     fixture.failures += expect_eq(viewed.size(), rewrite_rows_k);
     fixture.expect_keys(viewed);
-    fixture.expect_recall(viewed, "by rows, repaired in RAM");
-    return fixture.failures;
-}
-
-/** A split by keys of two parts into three key ranges, in a workspace too small for any RAM index,
- *  so every part is repaired by walks: the parts and rows add up, each part holds only its range,
- *  the cut edges are counted, and the parts recall within the margin. */
-template <typename nvme_type_, nk_kernel_kind_t kernel_>
-std::size_t test_nvme_rewrites_split_keys(u64_t seed) {
-    using key_t = typename nvme_type_::key_t;
-    std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
-    rewrite_fixture<nvme_type_> fixture {"rewrite_split_keys", kernel_, rewrite_rows_k, dimensions, seed};
-    nvme_type_ source = fixture.view(fixture.save(0, rewrite_rows_k, checkpoint_layout_t::distributed_k));
-    if (fixture.failures) return fixture.failures;
-    std::vector<byte_t> workspace = rewrite_workspace(512u << 10);
-    nvme_checkpoint_t& target = fixture.checkpoint();
-    std::array<key_t, 2> const fences {static_cast<key_t>(1 + rewrite_rows_k / 3),
-                                       static_cast<key_t>(1 + rewrite_rows_k * 2 / 3)};
-    auto const [cut, status] = split(source, split_by_keys<key_t> {std::span<key_t const>(fences)},
-                                     target.manifest.data(), fixture.driver.executor, std::span {workspace});
-    fixture.failures += expect_eq(status, status_t::success_k);
-    target.parts = cut.parts;
-    fixture.failures += expect_eq(cut.parts, 3u);
-    fixture.failures += expect_eq(cut.rows, rewrite_rows_k);
-    fixture.failures += expect(cut.cut_edges > 0);
-    if (failed(status)) return fixture.failures;
-
-    nvme_type_ viewed = fixture.view(target.manifest.data());
-    fixture.failures += expect_eq(viewed.shards_count(), 3u);
-    fixture.expect_keys(viewed);
-    // In placement order the parts follow the fences, so the ranges of the keys never fall back.
-    typename nvme_type_::cursor_t cursor {viewed};
-    std::vector<key_t> read(rewrite_rows_k);
-    auto const [exported, read_status] = cursor.read(viewed, std::span {read}, {}, fixture.driver.executor);
-    fixture.failures += expect_eq(read_status, status_t::success_k);
-    fixture.failures += expect_eq(exported.count, rewrite_rows_k);
-    auto range_of = [&](key_t key) noexcept {
-        return std::upper_bound(fences.begin(), fences.end(), key) - fences.begin();
-    };
-    std::size_t fallbacks = 0;
-    for (std::size_t row = 1; row < exported.count; ++row) fallbacks += range_of(read[row]) < range_of(read[row - 1]);
-    fixture.failures += expect_eq(fallbacks, 0u);
-    fixture.expect_recall(viewed, "by keys, repaired by walks");
+    fixture.expect_recall(viewed, "of two parts into four, repaired in RAM");
     return fixture.failures;
 }
 
@@ -1546,11 +1531,11 @@ std::size_t test_nvme_rewrites_refine(u64_t seed) {
     auto const [refined, status] = refine(source, iota_view<std::size_t> {0, rewrite_rows_k}, target.manifest.data(),
                                           fixture.driver.executor, std::span {workspace});
     fixture.failures += expect_eq(status, status_t::success_k);
-    target.parts = refined.parts;
-    fixture.failures += expect_eq(refined.rows, rewrite_rows_k);
-    fixture.failures += expect_eq(refined.graph.visited_nodes, rewrite_rows_k);
-    fixture.failures += expect(refined.graph.changed_nodes > 0);
-    fixture.failures += expect_eq(refined.graph.islands_reconnected, refined.graph.islands_found);
+    target.parts = refined.compaction.target_shards;
+    fixture.failures += expect_eq(refined.compaction.moved_rows, 0u);
+    fixture.failures += expect_eq(refined.compaction.graph.visited_nodes, rewrite_rows_k);
+    fixture.failures += expect(refined.compaction.graph.changed_nodes > 0);
+    fixture.failures += expect_eq(refined.compaction.graph.islands_reconnected, refined.compaction.graph.islands_found);
     if (failed(status)) return fixture.failures;
 
     nvme_type_ viewed = fixture.view(target.manifest.data());
@@ -1574,11 +1559,12 @@ template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_build(u64_t seed) {
     using scalar_t = typename nvme_type_::scalar_t;
     using ram_t = typename rewrite_fixture<nvme_type_>::ram_t;
-    using block_index_t = ram_index<typename nvme_type_::quads_kit_t, typename nvme_type_::tiles_kit_t,
-                                    typename nvme_type_::elementwise_kit_t, typename nvme_type_::rmscast_kit_t,
-                                    typename nvme_type_::visits_kit_t, fu::standard_yield_t, fu::standard_atomic_ref,
-                                    dummy_cache_hints_t, nvme_workspace_allocator<byte_t>,
-                                    nvme_workspace_allocator<byte_t>, arena_allocator<byte_t, forkunion_allocator_t>>;
+    using workspace_allocator_t = arena_allocator<byte_t, lent_allocator<byte_t>>;
+    using block_index_t =
+        ram_index<typename nvme_type_::quads_kit_t, typename nvme_type_::tiles_kit_t,
+                  typename nvme_type_::elementwise_kit_t, typename nvme_type_::rmscast_kit_t,
+                  typename nvme_type_::visits_kit_t, fu::standard_yield_t, fu::standard_atomic_ref, dummy_cache_hints_t,
+                  workspace_allocator_t, workspace_allocator_t, arena_allocator<byte_t, forkunion_allocator_t>>;
     constexpr std::size_t rows_count = 4 * rewrite_rows_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     rewrite_fixture<nvme_type_> fixture {"rewrite_build", kernel_, rows_count, dimensions, seed};
@@ -1589,13 +1575,14 @@ std::size_t test_nvme_rewrites_build(u64_t seed) {
     if (fixture.failures) return fixture.failures;
 
     std::vector<byte_t> probed(16u << 20);
-    bytes_span_t left {probed};
+    typename workspace_allocator_t::arena_t probe_arena {lent_allocator<byte_t> {probed}};
+    fixture.failures += expect_eq(probe_arena.reserve_exactly(probed.size()), status_t::success_k);
     {
-        std::unique_ptr<block_index_t> const probe {new (std::nothrow) block_index_t(
-            kernel_, nvme_workspace_allocator<byte_t>(left), nvme_workspace_allocator<byte_t>(left))};
+        workspace_allocator_t const allocator {probe_arena};
+        std::unique_ptr<block_index_t> const probe {new (std::nothrow) block_index_t(kernel_, allocator, allocator)};
         fixture.failures += expect(probe && succeeded(probe->reserve({1, connectivity_16_k, dimensions}).status));
     }
-    std::size_t const fixed = probed.size() - left.size();
+    std::size_t const fixed = probe_arena.size();
     std::size_t const value_bytes = dense_rows_bytes(fixture.vectors.view(), 1), neighbors_bytes = 16 * sizeof(u32_t);
     std::size_t const row_bytes = 2 * value_bytes + 2 * neighbors_bytes + 2 * sizeof(u32_t) + 16;
     std::vector<byte_t> workspace = rewrite_workspace(fixed + rows_count / 4 * row_bytes);
@@ -1607,19 +1594,18 @@ std::size_t test_nvme_rewrites_build(u64_t seed) {
     if (failed(status)) return fixture.failures;
     std::size_t blocks = 0;
     do {
-        if (plan.phase() == nvme_rewrite_phase_t::build_k) blocks += plan.steps().size();
+        if (plan.phase() == nvme_compact_phase_t::build_k) blocks += plan.steps().size();
         for (auto const step : plan.steps())
             fixture.failures += expect_eq(plan.run(step, fixture.driver.executor), status_t::success_k);
     } while (plan.advance());
     auto const [built, finish_status] = plan.finish();
     fixture.failures += expect_eq(finish_status, status_t::success_k);
-    target.parts = built.parts;
+    target.parts = built.compaction.target_shards;
     fixture.failures += expect(blocks >= 4);
-    fixture.failures += expect_eq(built.rows, rows_count);
-    fixture.failures += expect_eq(built.parts, 1u);
+    fixture.failures += expect_eq(built.compaction.target_shards, 1u);
     if (failed(finish_status)) return fixture.failures;
 
-    fixture.failures += expect(built.graph.visited_nodes >= rows_count);
+    fixture.failures += expect(built.compaction.graph.visited_nodes >= rows_count);
     nvme_type_ viewed = fixture.view(target.manifest.data());
     fixture.expect_keys(viewed);
     fixture.expect_recall(
@@ -1630,8 +1616,8 @@ std::size_t test_nvme_rewrites_build(u64_t seed) {
     return fixture.failures;
 }
 
-/** A merge dropped after its first re-select step leaves no manifest, no part and no spill behind,
- *  so nothing views. */
+/** A compaction dropped after its first re-select step leaves no manifest, no part and no spill
+ *  behind, so nothing views. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_dropped(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
@@ -1643,15 +1629,15 @@ std::size_t test_nvme_rewrites_dropped(u64_t seed) {
     target.parts = 1;
     {
         std::array<nvme_type_ const*, 1> const sources {&source};
-        auto [plan, status] = plan_merge(std::span<nvme_type_ const* const>(sources), target.manifest.data(),
-                                         std::span {workspace});
+        auto [plan, status] = plan_compact(std::span<nvme_type_ const* const>(sources), target.manifest.data(),
+                                           std::span {workspace});
         fixture.failures += expect_eq(status, status_t::success_k);
-        while (succeeded(status) && plan.phase() != nvme_rewrite_phase_t::reselect_k) {
+        while (succeeded(status) && plan.phase() != nvme_compact_phase_t::reselect_k) {
             for (auto const step : plan.steps())
                 fixture.failures += expect_eq(plan.run(step, fixture.driver.executor), status_t::success_k);
             if (!plan.advance()) break;
         }
-        fixture.failures += expect(plan.phase() == nvme_rewrite_phase_t::reselect_k);
+        fixture.failures += expect(plan.phase() == nvme_compact_phase_t::reselect_k);
         auto const steps = plan.steps();
         fixture.failures += expect_eq(plan.run(steps[0], fixture.driver.executor), status_t::success_k);
         fixture.failures += expect_eq(plan.finish().status, status_t::cancelled_k);
@@ -1941,10 +1927,9 @@ std::size_t test_nvme_rewrites_configuration(char const* name, u64_t seed) {
         if (failed(probe.status)) return report(name, "engine refused by this host");
     }
     std::size_t failures_count = 0;
-    failures_count += test_nvme_rewrites_merge<indexes_t, kernel_>(seed);
-    failures_count += test_nvme_rewrites_merge_steps<indexes_t, kernel_>(seed);
-    failures_count += test_nvme_rewrites_split_rows<indexes_t, kernel_>(seed);
-    failures_count += test_nvme_rewrites_split_keys<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_rewrites_compact<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_rewrites_compact_steps<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_rewrites_compact_capacity<indexes_t, kernel_>(seed);
     failures_count += test_nvme_rewrites_refine<indexes_t, kernel_>(seed);
     failures_count += test_nvme_rewrites_build<indexes_t, kernel_>(seed);
     failures_count += test_nvme_rewrites_dropped<indexes_t, kernel_>(seed);

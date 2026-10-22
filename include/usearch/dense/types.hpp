@@ -159,6 +159,31 @@ inline refine_result_t& operator+=(refine_result_t& into, refine_result_t const&
     return into;
 }
 
+/** What a compaction targets: the most rows any target shard may hold, and the breadth of every
+ *  re-selection walk. */
+struct compact_config_t {
+
+    /** Rows one target shard may hold; zero, or anything past the 32-bit ID space, means 2^32 - 2.
+     *  A source shard larger than this is cut, so a smaller capacity redistributes. */
+    std::size_t shard_capacity = 0;
+
+    /** Breadth of every re-selection walk and block build; zero means twice the connectivity. */
+    u32_t expansion_factor = 0;
+};
+
+/** Outcome of a compaction, whatever its residencies. */
+struct [[nodiscard]] compact_result_t {
+
+    /** Shards the sources held, and shards the target holds after. */
+    std::size_t source_shards = 0, target_shards = 0;
+
+    /** Rows that changed shard, and edges dropped because a cut separated their ends. */
+    std::size_t moved_rows = 0, cut_edges = 0;
+
+    /** The re-selections and the heal, counted as every refine counts them. */
+    refine_result_t graph;
+};
+
 /** The online-softmax carry of one attended row, in natural-log units - the C++ face of
  *  @c usearch_dense_softmax_state_t. */
 struct softmax_state_t {

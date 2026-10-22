@@ -1323,6 +1323,13 @@ class growing_arena {
         return bytes;
     }
 
+    /** Bytes handed out across chunks, the padding before every slice included. */
+    std::size_t size() const noexcept {
+        std::size_t bytes = 0;
+        for (std::size_t chunk = 0; chunk != chunks_; ++chunk) bytes += runs_[chunk].size();
+        return bytes;
+    }
+
     /** Opens the seed chunk at @p bytes, the width every later chunk doubles from; a
      *  seeded arena answers in one compare. */
     status_t reserve_exactly(std::size_t bytes) noexcept {
@@ -1394,6 +1401,23 @@ class growing_arena {
         return run.data() + run.size() - bytes;
     }
 };
+
+/** Hands out the one span its caller lends, to a request of exactly its extent, and refuses every
+ *  other; releasing does nothing. The upstream of a @ref growing_arena whose only chunk is borrowed
+ *  memory: seeded by @ref growing_arena::reserve_exactly over the whole span, any later chunk would
+ *  at least double it, so the span is never handed out twice. */
+template <typename value_type_ = std::byte>
+struct lent_allocator {
+    using value_type = value_type_;
+
+    /** The lent memory; empty refuses every request. */
+    std::span<value_type_> lent;
+
+    value_type_* allocate(std::size_t count) noexcept { return count == lent.size() ? lent.data() : nullptr; }
+    void deallocate(value_type_*, std::size_t) noexcept {}
+};
+
+static_assert(buffer_allocator<lent_allocator<std::byte>>);
 
 /** Hands out slices of one @ref growing_arena it points at but does not own. Copies share
  *  the arena by pointer, so containers built from one reserve disjoint slices; releasing a
