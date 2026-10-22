@@ -3,10 +3,11 @@
 #include <float.h>  // `_Float16`
 #include <stdlib.h> // `aligned_alloc`
 
-#include <atomic>  // `std::atomic`
-#include <chrono>  // `std::chrono`
-#include <cstring> // `std::strncmp`
-#include <thread>  // `std::thread`
+#include <atomic>      // `std::atomic`
+#include <chrono>      // `std::chrono`
+#include <cstring>     // `std::strncmp`
+#include <thread>      // `std::thread`
+#include <type_traits> // `std::is_floating_point`
 
 #include <usearch/index.hpp> // `expected_gt` and macros
 
@@ -374,10 +375,10 @@ inline expected_gt<scalar_kind_t> scalar_kind_from_name(char const* name, std::s
         parsed.result = scalar_kind_t::i8_k;
     else if (str_equals(name, len, "u8"))
         parsed.result = scalar_kind_t::u8_k;
-    else if (str_equals(name, len, "b1"))
+    else if (str_equals(name, len, "b1") || str_equals(name, len, "b1x8"))
         parsed.result = scalar_kind_t::b1x8_k;
     else
-        parsed.failed("Unknown type, choose: f64, f32, bf16, f16, e5m2, e4m3, e3m2, e2m3, i8, u8, b1");
+        parsed.failed("Unknown type, choose: f64, f32, bf16, f16, e5m2, e4m3, e3m2, e2m3, i8, u8, b1, b1x8");
     return parsed;
 }
 
@@ -525,8 +526,10 @@ inline std::uint16_t f32_to_f16(float f32) noexcept {
  */
 inline float bf16_to_f32(std::uint16_t u16) noexcept {
 #if USEARCH_USE_NUMKONG
+    nk_bf16_t bits;
+    std::memcpy(&bits, &u16, sizeof(bits));
     nk_f32_t result;
-    nk_bf16_to_f32_serial((nk_bf16_t const*)&u16, &result);
+    nk_bf16_to_f32_serial(&bits, &result);
     return result;
 #else
     union float_or_unsigned_int_t {
@@ -2280,8 +2283,23 @@ template <typename scalar_at = float, typename result_at = scalar_at> struct met
 
     inline result_t operator()(scalar_t const* a, scalar_t const* b, std::size_t dim) const noexcept {
         result_t ab{}, a2{}, b2{};
+        // OpenMP only accepts `x += expr` as a reduction update, not a comma-expression.
+        // With a function-call cast, GCC leaves `a2` and `b2` at zero and every distance becomes 0.
+        add_products_(a, b, dim, ab, a2, b2, std::is_floating_point<scalar_t>());
+
+        result_t result_if_zero[2][2];
+        result_if_zero[0][0] = 1 - ab / (std::sqrt(a2) * std::sqrt(b2));
+        result_if_zero[0][1] = result_if_zero[1][0] = 1;
+        result_if_zero[1][1] = 0;
+        return result_if_zero[a2 == 0][b2 == 0];
+    }
+
+  private:
+    inline void add_products_(scalar_t const* a, scalar_t const* b, std::size_t dim, result_t& ab, result_t& a2,
+                              result_t& b2, std::true_type) const noexcept {
+        result_t product{}, first_squared{}, second_squared{};
 #if USEARCH_USE_OPENMP
-#pragma omp simd reduction(+ : ab, a2, b2)
+#pragma omp simd reduction(+ : product, first_squared, second_squared)
 #elif defined(USEARCH_DEFINED_CLANG)
 #pragma clang loop vectorize(enable)
 #elif defined(USEARCH_DEFINED_GCC)
@@ -2290,14 +2308,24 @@ template <typename scalar_at = float, typename result_at = scalar_at> struct met
         for (std::size_t i = 0; i != dim; ++i) {
             result_t ai = static_cast<result_t>(a[i]);
             result_t bi = static_cast<result_t>(b[i]);
-            ab += ai * bi, a2 += square(ai), b2 += square(bi);
+            product += ai * bi;
+            first_squared += square(ai);
+            second_squared += square(bi);
         }
+        ab = product;
+        a2 = first_squared;
+        b2 = second_squared;
+    }
 
-        result_t result_if_zero[2][2];
-        result_if_zero[0][0] = 1 - ab / (std::sqrt(a2) * std::sqrt(b2));
-        result_if_zero[0][1] = result_if_zero[1][0] = 1;
-        result_if_zero[1][1] = 0;
-        return result_if_zero[a2 == 0][b2 == 0];
+    inline void add_products_(scalar_t const* a, scalar_t const* b, std::size_t dim, result_t& ab, result_t& a2,
+                              result_t& b2, std::false_type) const noexcept {
+        for (std::size_t i = 0; i != dim; ++i) {
+            result_t ai = static_cast<result_t>(a[i]);
+            result_t bi = static_cast<result_t>(b[i]);
+            ab += ai * bi;
+            a2 += square(ai);
+            b2 += square(bi);
+        }
     }
 };
 
@@ -2544,9 +2572,14 @@ struct metric_cos_i8_t {
             a2 += square(ai);
             b2 += square(bi);
         }
-        result_t a2f = std::sqrt(static_cast<result_t>(a2));
-        result_t b2f = std::sqrt(static_cast<result_t>(b2));
-        return (ab != 0) ? (1.f - ab / (a2f * b2f)) : 0;
+        // Same tail as `nk_angular_i8_serial`: a zero dot product is orthogonal, not identical.
+        if (a2 == 0 && b2 == 0)
+            return 0;
+        if (ab == 0)
+            return 1;
+        result_t norms = std::sqrt(static_cast<result_t>(a2)) * std::sqrt(static_cast<result_t>(b2));
+        result_t unclipped = 1 - static_cast<result_t>(ab) / norms;
+        return unclipped < 0 ? 0 : unclipped;
     }
 };
 
@@ -2596,9 +2629,14 @@ struct metric_cos_u8_t {
             a2 += square(ai);
             b2 += square(bi);
         }
-        result_t a2f = std::sqrt(static_cast<result_t>(a2));
-        result_t b2f = std::sqrt(static_cast<result_t>(b2));
-        return (ab != 0) ? (1.f - ab / (a2f * b2f)) : 0;
+        // Same tail as `nk_angular_u8_serial`: a zero dot product is orthogonal, not identical.
+        if (a2 == 0 && b2 == 0)
+            return 0;
+        if (ab == 0)
+            return 1;
+        result_t norms = std::sqrt(static_cast<result_t>(a2)) * std::sqrt(static_cast<result_t>(b2));
+        result_t unclipped = 1 - static_cast<result_t>(ab) / norms;
+        return unclipped < 0 ? 0 : unclipped;
     }
 };
 
@@ -3746,6 +3784,8 @@ class flat_hash_multi_set_gt {
     char* data_ = nullptr;
     std::size_t buckets_ = 0;
     std::size_t populated_slots_ = 0;
+    /// @brief  Number of tombstones (slots marked deleted but not yet reclaimed)
+    std::size_t deleted_slots_ = 0;
     /// @brief  Number of slots
     std::size_t capacity_slots_ = 0;
 
@@ -3781,6 +3821,34 @@ class flat_hash_multi_set_gt {
         }
     }
 
+    /**
+     *  @brief  Copies every live entry of @p source into the freshly zeroed @p target.
+     *
+     *  Tombstones are never carried over, so probe chains must be rebuilt from the hash
+     *  rather than reproduced slot-for-slot: a live entry displaced past a tombstone by
+     *  linear probing would otherwise become unreachable once that tombstone reads empty.
+     *  The target holds no tombstones, so an unpopulated slot is always a free slot.
+     */
+    void rehash_into(char* source, std::size_t source_slots, char* target, std::size_t target_slots) const noexcept {
+        hash_t hasher;
+        for (std::size_t i = 0; i != source_slots; ++i) {
+            slot_ref_t source_slot = slot_ref(source, i);
+            if (!(source_slot.header.populated & source_slot.mask) || (source_slot.header.deleted & source_slot.mask))
+                continue;
+
+            std::size_t target_index = hasher(source_slot.element) & (target_slots - 1);
+            while (true) {
+                slot_ref_t target_slot = slot_ref(target, target_index);
+                if (!(target_slot.header.populated & target_slot.mask)) {
+                    new (&target_slot.element) element_t(source_slot.element);
+                    target_slot.header.populated |= target_slot.mask;
+                    break;
+                }
+                target_index = (target_index + 1) & (target_slots - 1);
+            }
+        }
+    }
+
   public:
     std::size_t size() const noexcept { return populated_slots_; }
     std::size_t capacity() const noexcept { return capacity_slots_ * 2u / 3u; }
@@ -3805,22 +3873,15 @@ class flat_hash_multi_set_gt {
         if (!data_)
             usearch_raise_runtime_error("failed memory allocation");
 
-        // Copy metadata
+        // Copy metadata. Only live entries are rehashed below, so the copy has no tombstones.
         buckets_ = other.buckets_;
         populated_slots_ = other.populated_slots_;
+        deleted_slots_ = 0;
         capacity_slots_ = other.capacity_slots_;
 
         // Initialize new buckets to empty
         std::memset(data_, 0, buckets_ * bytes_per_bucket());
-
-        // Copy elements and bucket headers
-        for (std::size_t i = 0; i < capacity_slots_; ++i) {
-            slot_ref_t old_slot = other.slot_ref(i);
-            if ((old_slot.header.populated & old_slot.mask) && !(old_slot.header.deleted & old_slot.mask)) {
-                slot_ref_t new_slot = slot_ref(i);
-                populate_slot(new_slot, old_slot.element);
-            }
-        }
+        rehash_into(other.data_, other.capacity_slots_, data_, capacity_slots_);
     }
 
     flat_hash_multi_set_gt& operator=(flat_hash_multi_set_gt const& other) {
@@ -3848,22 +3909,15 @@ class flat_hash_multi_set_gt {
         if (!data_)
             usearch_raise_runtime_error("failed memory allocation");
 
-        // Copy metadata
+        // Copy metadata. Only live entries are rehashed below, so the copy has no tombstones.
         buckets_ = other.buckets_;
         populated_slots_ = other.populated_slots_;
+        deleted_slots_ = 0;
         capacity_slots_ = other.capacity_slots_;
 
         // Initialize new buckets to empty
         std::memset(data_, 0, buckets_ * bytes_per_bucket());
-
-        // Copy elements and bucket headers
-        for (std::size_t i = 0; i < capacity_slots_; ++i) {
-            slot_ref_t old_slot = other.slot_ref(i);
-            if ((old_slot.header.populated & old_slot.mask) && !(old_slot.header.deleted & old_slot.mask)) {
-                slot_ref_t new_slot = slot_ref(i);
-                populate_slot(new_slot, old_slot.element);
-            }
-        }
+        rehash_into(other.data_, other.capacity_slots_, data_, capacity_slots_);
 
         return *this;
     }
@@ -3880,6 +3934,7 @@ class flat_hash_multi_set_gt {
         if (data_)
             std::memset(data_, 0, buckets_ * bytes_per_bucket());
         populated_slots_ = 0;
+        deleted_slots_ = 0;
     }
 
     void reset() noexcept {
@@ -3889,11 +3944,19 @@ class flat_hash_multi_set_gt {
         data_ = nullptr;
         buckets_ = 0;
         populated_slots_ = 0;
+        deleted_slots_ = 0;
         capacity_slots_ = 0;
     }
 
+    /**
+     *  @brief  Grows the table to fit @p capacity live entries, reclaiming tombstones.
+     *
+     *  Tombstones are reclaimed even when no growth is requested. They only ever stop
+     *  being created once reclaimed, and a table with no empty slot left cannot
+     *  terminate a probe, silently stranding live entries.
+     */
     bool try_reserve(std::size_t capacity) noexcept {
-        if (capacity <= this->capacity())
+        if (capacity <= this->capacity() && deleted_slots_ == 0)
             return true;
 
         // Calculate new sizes
@@ -3913,7 +3976,15 @@ class flat_hash_multi_set_gt {
         checked_size_result_t new_slots = checked_mul(new_buckets_checked.value, slots_per_bucket());
         if (!new_slots)
             return false;
-        checked_size_result_t new_bytes = checked_mul(new_buckets_checked.value, bytes_per_bucket());
+
+        // Never shrink: reclaiming tombstones alone needs no more than the current capacity
+        std::size_t target_buckets = new_buckets_checked.value;
+        std::size_t target_slots = new_slots.value;
+        if (target_slots < capacity_slots_) {
+            target_buckets = buckets_;
+            target_slots = capacity_slots_;
+        }
+        checked_size_result_t new_bytes = checked_mul(target_buckets, bytes_per_bucket());
         if (!new_bytes)
             return false;
 
@@ -3924,36 +3995,15 @@ class flat_hash_multi_set_gt {
 
         // Initialize new buckets to empty
         std::memset(new_data, 0, new_bytes.value);
-
-        // Rehash and copy existing elements to new_data
-        hash_t hasher;
-        for (std::size_t i = 0; i < capacity_slots_; ++i) {
-            slot_ref_t old_slot = slot_ref(i);
-            if ((~old_slot.header.populated & old_slot.mask) | (old_slot.header.deleted & old_slot.mask))
-                continue;
-
-            // Rehash
-            std::size_t hash_value = hasher(old_slot.element);
-            std::size_t new_slot_index = hash_value & (new_slots.value - 1);
-
-            // Linear probing to find an empty slot in new_data
-            while (true) {
-                slot_ref_t new_slot = slot_ref(new_data, new_slot_index);
-                if (!(new_slot.header.populated & new_slot.mask) || (new_slot.header.deleted & new_slot.mask)) {
-                    populate_slot(new_slot, std::move(old_slot.element));
-                    new_slot.header.populated |= new_slot.mask;
-                    break;
-                }
-                new_slot_index = (new_slot_index + 1) & (new_slots.value - 1);
-            }
-        }
+        rehash_into(data_, capacity_slots_, new_data, target_slots);
 
         // Deallocate old data and update pointers and sizes
         if (data_)
             allocator_t{}.deallocate(data_, buckets_ * bytes_per_bucket());
         data_ = new_data;
-        buckets_ = new_buckets_checked.value;
-        capacity_slots_ = new_slots.value;
+        buckets_ = target_buckets;
+        capacity_slots_ = target_slots;
+        deleted_slots_ = 0;
 
         return true;
     }
@@ -4082,6 +4132,7 @@ class flat_hash_multi_set_gt {
                     // Found a match, mark as deleted
                     slot.header.deleted |= slot.mask;
                     --populated_slots_;
+                    ++deleted_slots_;
                     popped_value = slot.element;
                     return true; // Successfully removed
                 }
@@ -4117,6 +4168,7 @@ class flat_hash_multi_set_gt {
                     // Found a match, mark as deleted
                     slot.header.deleted |= slot.mask;
                     --populated_slots_;
+                    ++deleted_slots_;
                     ++count; // Increment count of elements removed
                 }
             } else {
@@ -4247,8 +4299,10 @@ class flat_hash_multi_set_gt {
     }
 
     bool try_emplace(element_t const& element) noexcept {
-        // Check if we need to resize
-        if (populated_slots_ * 3u >= capacity_slots_ * 2u)
+        // Both live entries and tombstones consume slots a probe must walk past, so the
+        // load factor counts them together. Under churn the live count alone stays flat
+        // and would never trigger the rehash that reclaims the tombstones.
+        if ((populated_slots_ + deleted_slots_) * 3u >= capacity_slots_ * 2u)
             if (!try_reserve(populated_slots_ + 1))
                 return false;
 
@@ -4260,7 +4314,9 @@ class flat_hash_multi_set_gt {
         while (true) {
             slot_ref_t slot = slot_ref(slot_index);
             if ((~slot.header.populated & slot.mask) | (slot.header.deleted & slot.mask)) {
-                // Found an empty or deleted slot
+                // Found an empty or deleted slot; reusing a tombstone reclaims it.
+                // Read the tombstone bit before `populate_slot` clears it.
+                deleted_slots_ -= (slot.header.deleted & slot.mask) != 0;
                 populate_slot(slot, element);
                 ++populated_slots_;
                 return true;

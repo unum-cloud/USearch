@@ -1,1 +1,16 @@
+include VERSION
+
+# Headers compiled into `usearch.compiled`. `python/lib.cpp` includes
+# `<usearch/index_dense.hpp>`, which reaches `<numkong/numkong.h>` and, through it,
+# every architecture-specific kernel header — so the whole `numkong/include` tree
+# ships, not just the subset one platform happens to pull in.
+recursive-include include/usearch *.hpp
+recursive-include numkong/include *.h
+include numkong/LICENSE
+
+include python/usearch/compiled.pyi
 include python/usearch/py.typed
+
+# NumKong's own sources are never compiled here: `NK_DYNAMIC_DISPATCH=1` resolves
+# its symbols from the installed `numkong` package at import time.
+prune numkong/c

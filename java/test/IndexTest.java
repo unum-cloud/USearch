@@ -1,9 +1,9 @@
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import cloud.unum.usearch.Index;
 import java.io.File;
@@ -13,8 +13,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import org.junit.AfterClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
 
 public class IndexTest {
 
@@ -42,7 +42,7 @@ public class IndexTest {
         }
     }
 
-    @AfterClass
+    @AfterAll
     public static void tearDown() {
         System.out.println("Java Tests Passed!");
     }
@@ -151,12 +151,12 @@ public class IndexTest {
         try (Index index = new Index.Config().metric("cos").dimensions(256).build()) {
             // Test empty index
             long initialMemory = index.memoryUsage();
-            assertTrue("Initial memory usage should be positive", initialMemory > 0);
+            assertTrue(initialMemory > 0, "Initial memory usage should be positive");
 
             // Add some vectors
             index.reserve(1000);
             long afterReserve = index.memoryUsage();
-            assertTrue("Memory should increase after reserve", afterReserve >= initialMemory);
+            assertTrue(afterReserve >= initialMemory, "Memory should increase after reserve");
 
             // Add vectors
             float[] vector = new float[256];
@@ -168,12 +168,12 @@ public class IndexTest {
             }
 
             long afterAdding = index.memoryUsage();
-            assertTrue("Memory should increase after adding vectors", afterAdding > afterReserve);
+            assertTrue(afterAdding > afterReserve, "Memory should increase after adding vectors");
 
             // Memory should be reasonable (not too small, not too large)
             assertTrue(
-                    "Memory usage should be reasonable",
-                    afterAdding > 1000 && afterAdding < 1_000_000_000L);
+                    afterAdding > 1000 && afterAdding < 1_000_000_000L,
+                    "Memory usage should be reasonable");
         }
     }
 
@@ -183,17 +183,17 @@ public class IndexTest {
                 = new Index.Config().metric("cos").quantization("f32").dimensions(10).build()) {
             // Test hardware acceleration API
             String hardwareAcceleration = index.hardwareAcceleration();
-            assertNotEquals("Hardware acceleration should not be null", null, hardwareAcceleration);
+            assertNotEquals(null, hardwareAcceleration, "Hardware acceleration should not be null");
             assertTrue(
-                    "Hardware acceleration should be non-empty", !hardwareAcceleration.isEmpty());
+                    !hardwareAcceleration.isEmpty(), "Hardware acceleration should be non-empty");
 
             // Test metric kind API
             String metricKind = index.getMetricKind();
-            assertEquals("Metric kind should be cos", "cos", metricKind);
+            assertEquals("cos", metricKind, "Metric kind should be cos");
 
             // Test scalar kind API
             String scalarKind = index.getScalarKind();
-            assertEquals("Scalar kind should be f32", "f32", scalarKind);
+            assertEquals("f32", scalarKind, "Scalar kind should be f32");
 
             System.out.println("Hardware acceleration: " + hardwareAcceleration);
             System.out.println("Metric kind: " + metricKind);
@@ -240,7 +240,7 @@ public class IndexTest {
                 index.add(42, vec);
 
                 long[] keys = index.search(vec, 1);
-                assertEquals("Self-match failed for " + quantization, 42L, keys[0]);
+                assertEquals(42L, keys[0], "Self-match failed for " + quantization);
             }
         }
     }
@@ -583,9 +583,9 @@ public class IndexTest {
                 long[] arrayResults = index.search(queryVector, 10);
                 long[] bufferResults = bufferIndex.search(queryBuffer.asFloatBuffer(), 10);
                 assertEquals(
-                        "Search results should be equivalent",
                         arrayResults.length,
-                        bufferResults.length);
+                        bufferResults.length,
+                        "Search results should be equivalent");
             }
         }
     }
@@ -628,16 +628,16 @@ public class IndexTest {
 
             // Test searchInto - should find vector 3 first
             int found = index.searchInto(queryFloat, resultsLong, 5);
-            assertTrue("Should find at least 1 result", found >= 1);
-            assertTrue("Should find at most 5 results", found <= 5);
+            assertTrue(found >= 1, "Should find at least 1 result");
+            assertTrue(found <= 5, "Should find at most 5 results");
 
             // Verify buffer position was advanced
             assertEquals(
-                    "Results buffer position should be advanced", found, resultsLong.position());
+                    found, resultsLong.position(), "Results buffer position should be advanced");
 
             // First result should be key 3 (exact match)
             resultsLong.rewind();
-            assertEquals("First result should be exact match", 3L, resultsLong.get(0));
+            assertEquals(3L, resultsLong.get(0), "First result should be exact match");
         }
     }
 
@@ -673,8 +673,8 @@ public class IndexTest {
             java.nio.LongBuffer resultsLong = resultsBuffer.asLongBuffer();
 
             int found = index.searchInto(doubleBuffer, resultsLong, 3);
-            assertTrue("Should find results", found > 0);
-            assertEquals("First result should be key 102", 102L, resultsLong.get(0));
+            assertTrue(found > 0, "Should find results");
+            assertEquals(102L, resultsLong.get(0), "First result should be key 102");
         }
     }
 
@@ -708,8 +708,8 @@ public class IndexTest {
             java.nio.LongBuffer resultsLong = resultsBuffer.asLongBuffer();
 
             int found = index.searchInto(vectorBuffer, resultsLong, 2);
-            assertTrue("Should find results", found > 0);
-            assertEquals("First result should be key 201", 201L, resultsLong.get(0));
+            assertTrue(found > 0, "Should find results");
+            assertEquals(201L, resultsLong.get(0), "First result should be key 201");
         }
     }
 
@@ -717,13 +717,13 @@ public class IndexTest {
     public void testPlatformCapabilities() {
         // Test runtime hardware capabilities
         String[] available = Index.hardwareAccelerationAvailable();
-        assertNotEquals("Available capabilities should not be null", null, available);
-        assertTrue("Platform should have at least serial capability", available.length > 0);
+        assertNotEquals(null, available, "Available capabilities should not be null");
+        assertTrue(available.length > 0, "Platform should have at least serial capability");
 
         // Test compile-time capabilities
         String[] compiled = Index.hardwareAccelerationCompiled();
-        assertNotEquals("Compiled capabilities should not be null", null, compiled);
-        assertTrue("Should have at least serial compiled", compiled.length > 0);
+        assertNotEquals(null, compiled, "Compiled capabilities should not be null");
+        assertTrue(compiled.length > 0, "Should have at least serial compiled");
 
         // Should always include serial as baseline in both
         boolean hasAvailableSerial = false;
@@ -743,13 +743,13 @@ public class IndexTest {
             }
         }
 
-        assertTrue("Platform should always support serial capability", hasAvailableSerial);
-        assertTrue("Serial should always be compiled", hasCompiledSerial);
+        assertTrue(hasAvailableSerial, "Platform should always support serial capability");
+        assertTrue(hasCompiledSerial, "Serial should always be compiled");
 
         // Test library version
         String version = Index.version();
-        assertNotEquals("Library version should not be null", null, version);
-        assertTrue("Library version should be non-empty", !version.isEmpty());
+        assertNotEquals(null, version, "Library version should not be null");
+        assertTrue(!version.isEmpty(), "Library version should be non-empty");
 
         // Test dynamic dispatch detection
         boolean usesDynamicDispatch = Index.usesDynamicDispatch();

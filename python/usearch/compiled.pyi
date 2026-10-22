@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 from collections.abc import Buffer, Callable
 from typing import Any, Literal
 
@@ -33,7 +34,7 @@ VERSION_MAJOR: int
 VERSION_MINOR: int
 VERSION_PATCH: int
 
-class MetricKind(int):
+class MetricKind(enum.Enum):
     Unknown: MetricKind
     IP: MetricKind
     Cos: MetricKind
@@ -48,7 +49,7 @@ class MetricKind(int):
     Cosine: MetricKind  # alias for Cos
     InnerProduct: MetricKind  # alias for IP
 
-class ScalarKind(int):
+class ScalarKind(enum.Enum):
     Unknown: ScalarKind
     F64: ScalarKind
     F32: ScalarKind
@@ -70,7 +71,7 @@ class ScalarKind(int):
     I32: ScalarKind
     I16: ScalarKind
 
-class MetricSignature(int):
+class MetricSignature(enum.Enum):
     ArrayArray: MetricSignature
     ArrayArraySize: MetricSignature
 

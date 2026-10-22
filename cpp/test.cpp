@@ -1181,7 +1181,74 @@ template <typename key_at, typename slot_at> void test_strings() {
 }
 
 /**
- * @brief Tests replacing and updating entries in index_dense_gt to ensure consistency after modifications.
+ *  @brief  Churns a tightly-reserved index, so `slot_lookup_` accumulates tombstones.
+ *
+ *  Removals leave tombstones that probes must walk past. If they are never reclaimed the
+ *  table runs out of empty slots, probes can no longer terminate, and live keys go missing:
+ *  `remove` reports nothing removed while `contains` still finds the key. Copying such a
+ *  table must rebuild the probe chains, not reproduce the slot layout.
+ */
+template <typename key_at, typename slot_at> void test_slot_lookup_churn() {
+    constexpr std::size_t live_count = 128;
+    constexpr std::size_t churn_count = live_count * 8;
+    constexpr std::size_t dimensions = 4;
+
+    using index_punned_t = index_dense_gt<key_at, slot_at>;
+    metric_punned_t metric(dimensions, metric_kind_t::cos_k);
+
+    std::random_device seed_source;
+    std::mt19937 generator(seed_source());
+    std::uniform_real_distribution<float> distribution(0.0, 1.0);
+    using vector_of_vectors_t = std::vector<std::vector<float>>;
+
+    vector_of_vectors_t vector_of_vectors(live_count + churn_count);
+    for (auto& vector : vector_of_vectors) {
+        vector.resize(dimensions);
+        std::generate(vector.begin(), vector.end(), [&] { return distribution(generator); });
+    }
+
+    index_punned_t index = index_punned_t::make(metric);
+
+    // Reserve tightly, so the churn below exhausts the empty slots
+    index.reserve(live_count * 3);
+
+    std::vector<key_at> live_keys;
+    std::size_t added = 0;
+    for (; added < live_count; ++added) {
+        index.add(static_cast<key_at>(added), vector_of_vectors[added].data());
+        live_keys.push_back(static_cast<key_at>(added));
+    }
+
+    // Every iteration frees one slot and immediately reuses it
+    for (std::size_t idx = 0; idx < churn_count; ++idx, ++added) {
+        key_at victim = live_keys[idx % live_count];
+        expect(index.contains(victim));
+        expect_eq(index.remove(victim).completed, 1);
+        expect(!index.contains(victim));
+        index.add(static_cast<key_at>(added), vector_of_vectors[added].data());
+        live_keys[idx % live_count] = static_cast<key_at>(added);
+    }
+
+    // Every live key stays reachable and the size never drifts
+    expect_eq(index.size(), live_count);
+    for (key_at key : live_keys)
+        expect(index.contains(key));
+
+    // Copying a table that still holds tombstones must not strand live keys
+    expect_eq(index.remove(live_keys.back()).completed, 1);
+    live_keys.pop_back();
+
+    auto copy_result = index.copy();
+    expect(copy_result);
+    index_punned_t& copy = copy_result.index;
+    expect_eq(copy.size(), live_keys.size());
+    for (key_at key : live_keys)
+        expect(copy.contains(key));
+}
+
+/**
+ *  @brief  Tests replacing and updating entries in `index_dense_gt`, to ensure consistency
+ *          after modifications.
  */
 template <typename key_at, typename slot_at> void test_replacing_update() {
 
@@ -1320,6 +1387,51 @@ void test_isolate() {
     }
 }
 
+/**
+ *  @brief  Regression test: `compact()` permutes the slots of all members, so the
+ *          key-to-slot lookup and the free-slot list must follow the permutation.
+ *          Otherwise `get` returns other members' vectors and later `add` calls
+ *          overwrite live members.
+ */
+void test_compact() {
+    constexpr std::size_t dataset_count = 256;
+    constexpr std::size_t added_count = 64;
+    constexpr std::size_t dimensions = 16;
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+
+    std::mt19937 generator(42);
+    std::uniform_real_distribution<float> distribution(0.0, 1.0);
+    std::vector<std::vector<float>> vectors(dataset_count + added_count, std::vector<float>(dimensions));
+    for (auto& vector : vectors)
+        std::generate(vector.begin(), vector.end(), [&] { return distribution(generator); });
+
+    index_dense_t index = index_dense_t::make(metric);
+    index.reserve(dataset_count + added_count);
+    for (std::size_t idx = 0; idx < dataset_count; ++idx)
+        expect(index.add(idx, vectors[idx].data()));
+    for (std::size_t idx = 0; idx < dataset_count; idx += 3)
+        expect(index.remove(idx));
+    std::size_t const removed_count = (dataset_count + 2) / 3;
+
+    expect(index.compact());
+    expect_eq(index.size(), dataset_count - removed_count);
+
+    // Freed slots must be reused without clobbering live members
+    for (std::size_t idx = dataset_count; idx < dataset_count + added_count; ++idx)
+        expect(index.add(idx, vectors[idx].data()));
+    expect_eq(index.size(), dataset_count - removed_count + added_count);
+
+    std::vector<float> reconstructed(dimensions);
+    for (std::size_t idx = 0; idx < dataset_count + added_count; ++idx) {
+        bool const removed = idx < dataset_count && idx % 3 == 0;
+        expect_eq(index.contains(idx), !removed);
+        if (removed)
+            continue;
+        expect_eq(index.get(idx, reconstructed.data()), std::size_t(1));
+        expect(std::equal(reconstructed.begin(), reconstructed.end(), vectors[idx].begin()));
+    }
+}
+
 static void usearch_write_backtrace(int signal_number) {
     std::fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);
 #if USEARCH_HAS_STD_STACKTRACE
@@ -1429,6 +1541,97 @@ void test_load_after_metric_make() {
     std::remove(path);
 }
 
+/**
+ *  @brief  Feeds `view` a truncated index file.
+ *
+ *  The matrix dimensions and the node count come from the file itself, so a short file
+ *  describes a matrix and a level array that reach past the mapping. Both must be rejected
+ *  rather than walked, and a caller-supplied offset past the end must fail the same way.
+ */
+void test_view_of_truncated_file() {
+    std::printf("Testing view of a truncated index file\n");
+
+    using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
+    std::size_t const dimensions = 64;
+    std::size_t const collection = 2048;
+    char const* path = "tmp_truncated.usearch";
+
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind<f32_t>());
+    index_t::state_result_t built = index_t::make(metric);
+    expect(built);
+    expect(built.index.try_reserve(collection));
+    std::vector<float> vector(dimensions);
+    for (std::size_t i = 0; i != collection; ++i) {
+        for (std::size_t d = 0; d != dimensions; ++d)
+            vector[d] = static_cast<float>((i * 31 + d) % 997) / 997.f;
+        expect(built.index.add(static_cast<std::int64_t>(i), vector.data()));
+    }
+    expect(built.index.save(path));
+
+    std::vector<char> prefix;
+    {
+        std::FILE* file = std::fopen(path, "rb");
+        expect(file != nullptr);
+        std::fseek(file, 0, SEEK_END);
+        long const bytes = std::ftell(file);
+        std::fseek(file, 0, SEEK_SET);
+        prefix.resize(static_cast<std::size_t>(bytes) / 8);
+        expect(std::fread(prefix.data(), 1, prefix.size(), file) == prefix.size());
+        std::fclose(file);
+    }
+    {
+        std::FILE* file = std::fopen(path, "wb");
+        expect(file != nullptr);
+        std::fwrite(prefix.data(), 1, prefix.size(), file);
+        std::fclose(file);
+    }
+
+    index_t::state_result_t viewed = index_t::make(metric);
+    expect(viewed);
+    serialization_result_t truncated = viewed.index.view(path);
+    expect(!truncated);
+    truncated.error.release();
+
+    // A caller-supplied offset past the end must fail the same way.
+    index_t::state_result_t offset_viewed = index_t::make(metric);
+    expect(offset_viewed);
+    serialization_result_t beyond = offset_viewed.index.view(memory_mapped_file_t(path), prefix.size() * 4);
+    expect(!beyond);
+    beyond.error.release();
+
+    std::remove(path);
+}
+
+/**
+ *  @brief  Regression test: every thread context must draw node levels of its own. Default-seeded, all
+ *          contexts drew the same levels and started over after every `reserve`, so every per-level node
+ *          count was a multiple of `contexts * steps`, the upper levels too full and the top ones missing.
+ */
+void test_level_generators() {
+    constexpr std::size_t contexts = 16, steps = 16, per_context_step = 64, dimensions = 2;
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+    index_dense_t index = index_dense_t::make(metric);
+
+    std::mt19937 generator(42);
+    std::uniform_real_distribution<float> distribution(0.0, 1.0);
+
+    std::size_t key = 0;
+    for (std::size_t step = 0; step != steps; ++step) {
+        expect(index.try_reserve(index_limits_t((step + 1) * contexts * per_context_step, contexts)));
+        for (std::size_t idx = 0; idx != contexts * per_context_step; ++idx, ++key) {
+            float vector[dimensions] = {distribution(generator), distribution(generator)};
+            expect(index.add(key, vector, idx % contexts));
+        }
+    }
+    expect_eq(index.size(), contexts * steps * per_context_step);
+
+    // Independent draws put about 1024 nodes on level 1 and 64 on level 2: almost never multiples of 256.
+    bool all_multiples = true;
+    for (std::size_t level = 1; level <= index.max_level(); ++level)
+        all_multiples = all_multiples && index.stats(level).nodes % (contexts * steps) == 0;
+    expect(!all_multiples);
+}
+
 int main(int, char**) {
     install_crash_handlers();
 
@@ -1518,9 +1721,16 @@ int main(int, char**) {
         test_sets<std::int64_t, slot32_t>(set_size, 20, 30);
     test_strings<std::int64_t, slot32_t>();
 
+    std::printf("Testing key lookups under churn\n");
+    test_slot_lookup_churn<std::int64_t, std::uint32_t>();
+    test_slot_lookup_churn<std::int64_t, uint40_t>();
+
     test_filtered_search();
     test_isolate();
+    test_compact();
     test_load_after_metric_make();
+    test_view_of_truncated_file();
+    test_level_generators();
 
     // Regression for USearch #735: concurrent builds must not strand nodes as
     // contained-but-unreachable. Only meaningful with more than one thread, and at

@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.11 FATAL_ERROR)
 project(
     usearch
-    VERSION 2.25.3
+    VERSION 2.26.5
     LANGUAGES C CXX
     DESCRIPTION "Smaller & Faster Single-File Vector Search Engine from Unum"
     HOMEPAGE_URL "https://github.com/unum-cloud/USearch"
@@ -146,16 +146,16 @@ target_compile_definitions(
 
 target_include_directories(
     ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIR}>
-                                                               $<INSTALL_INTERFACE:include>
+                                                               $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 if (USEARCH_USE_NUMKONG)
     target_include_directories(
         ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE}
-        INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/numkong/include> $<INSTALL_INTERFACE:numkong/include>
+        INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/numkong/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/numkong>
     )
 endif ()
 # Install a pkg-config file, so other tools can find this
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc" @ONLY)
 
 # Install a custom package version config file instead of write_basic_package_version_file to ensure that it's
 # architecture-independent https://github.com/nlohmann/json/issues/1697
@@ -214,6 +214,17 @@ endif ()
 # Include directories
 set(USEARCH_HEADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/numkong/include")
 
+# Host tuning for the tests & benchmarks only, never the distributable libraries, and only where the host is the target.
+if (MSVC OR CMAKE_CROSSCOMPILING OR NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|IntelLLVM")
+    set(USEARCH_HOST_TUNING "")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    set(USEARCH_HOST_TUNING -mcpu=native)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(USEARCH_HOST_TUNING -march=native)
+else ()
+    set(USEARCH_HOST_TUNING "")
+endif ()
+
 # Function to setup target
 function (setup_target TARGET_NAME)
     # Compiler-specific options List of all possible compiler IDs:
@@ -237,7 +248,6 @@ function (setup_target TARGET_NAME)
                     -Wextra
                     -Wno-conversion
                     -Wno-unknown-pragmas
-                    -march=native
                     -fmax-errors=1
                     -pedantic
                     -fdiagnostics-color=always
@@ -367,6 +377,9 @@ function (setup_target TARGET_NAME)
     if (TARGET_TYPE STREQUAL "SHARED_LIBRARY" OR TARGET_TYPE STREQUAL "STATIC_LIBRARY")
         set_target_properties(${TARGET_NAME} PROPERTIES PREFIX "lib")
     endif ()
+    if (TARGET_TYPE STREQUAL "EXECUTABLE")
+        target_compile_options(${TARGET_NAME} PRIVATE ${USEARCH_HOST_TUNING})
+    endif ()
 
     # Core compilation settings affecting "index.hpp"
     target_compile_definitions(${TARGET_NAME} PRIVATE "USEARCH_USE_OPENMP=$<BOOL:${USEARCH_USE_OPENMP}>")
@@ -379,6 +392,21 @@ function (setup_target TARGET_NAME)
     if (USEARCH_USE_NUMKONG AND TARGET nk_shared)
         target_compile_definitions(${TARGET_NAME} PRIVATE "NK_DYNAMIC_DISPATCH=1")
         target_link_libraries(${TARGET_NAME} PRIVATE nk_shared)
+
+        # Keep NumKong discoverable both in the build tree (`build/numkong`) and
+        # after packaging it next to `libusearch_c` in language bindings.
+        if (APPLE)
+            set(_USEARCH_NUMKONG_RPATH "@loader_path;@loader_path/numkong")
+        elseif (UNIX AND NOT CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+            set(_USEARCH_NUMKONG_RPATH "$ORIGIN;$ORIGIN/numkong")
+        endif ()
+
+        if (DEFINED _USEARCH_NUMKONG_RPATH)
+            set_target_properties(
+                ${TARGET_NAME} PROPERTIES BUILD_RPATH "${_USEARCH_NUMKONG_RPATH}"
+                                          INSTALL_RPATH "${_USEARCH_NUMKONG_RPATH}"
+            )
+        endif ()
     endif ()
 
 endfunction ()
@@ -394,6 +422,19 @@ if (USEARCH_USE_NUMKONG)
 
     if (TARGET nk_shared)
         set_target_properties(nk_shared PROPERTIES ENABLE_EXPORTS ON)
+
+        # Windows has no RPATH equivalent, so the dynamic loader only finds
+        # NumKong reliably when it sits next to the binaries that link it.
+        if (WIN32)
+            set_target_properties(
+                nk_shared
+                PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+                           RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}"
+                           RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}"
+                           RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}"
+                           RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}"
+            )
+        endif ()
     endif ()
 endif ()
 

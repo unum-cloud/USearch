@@ -43,7 +43,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, new_index};
 let options = IndexOptions {
     dimensions: 3, // necessary for most metric kinds
     metric: MetricKind::IP, // or ::L2sq, ::Cos ...
-    quantization: ScalarKind::BF16, // or ::F32, ::F16, ::E5M2, ::E4M3, ::E3M2, ::E2M3, ::U8, ::I8, ::B1x8 ...
+    quantization: ScalarKind::BF16, // or ::F32, ::F16, ::E5M2, ::E4M3, ::E3M2, ::E2M3, ::U8, ::I8, ::B1 ...
     connectivity: 0, // zero for auto
     expansion_add: 0, // zero for auto
     expansion_search: 0, // zero for auto
@@ -86,7 +86,7 @@ So you can memory-map the index file manually, and later call `view_from_buffer`
 ```rust
 assert!(index.save_to_buffer(&mut serialization_buffer).is_ok());
 assert!(index.load_from_buffer(&serialization_buffer).is_ok());
-assert!(index.view_from_buffer(&serialization_buffer).is_ok());
+assert!(unsafe { index.view_from_buffer(&serialization_buffer) }.is_ok());
 ```
 
 To reopen an index without already knowing how it was built, read its header with `Index::metadata` or use the one-shot `Index::restore`:
@@ -109,7 +109,7 @@ That includes:
 
 - `MetricKind::IP` - Inner Product metric, defined as `IP = 1 - sum(a[i] * b[i])`.
 - `MetricKind::L2sq` - Squared Euclidean Distance metric, defined as `L2 = sum((a[i] - b[i])^2)`.
-- `MetricKind::Cos` - Cosine Similarity metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2) * sqrt(sum(b[i]^2)))`.
+- `MetricKind::Cos` - Cosine Distance metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2)) * sqrt(sum(b[i]^2)))`.
 - `MetricKind::Pearson` - Pearson Correlation metric.
 - `MetricKind::Haversine` - Haversine (Great Circle) Distance metric.
 - `MetricKind::Divergence` - Jensen Shannon Divergence metric.
@@ -194,14 +194,14 @@ index.add(43, buffer_b);
 ### Binary Vectors
 
 USearch also implements binary distance functions and natively supports bit-vectors.
-If you initialize the index with `quantization: ScalarKind::B1x8`, you can add floating-point vectors and they will be quantized mapping positive values to `1` and negative and zero values to `0`.
+If you initialize the index with `quantization: ScalarKind::B1`, you can add floating-point vectors and they will be quantized mapping positive values to `1` and negative and zero values to `0`.
 Alternatively, you can use the `b1x8` type to represent packed binary vectors directly.
 
 ```rs
 let index = Index::new(&IndexOptions {
     dimensions: 8,
     metric: MetricKind::Hamming,
-    quantization: ScalarKind::B1x8,
+    quantization: ScalarKind::B1,
     ..Default::default()
 })
 .unwrap();

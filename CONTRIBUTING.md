@@ -484,6 +484,7 @@ Then, on Windows, copy the library to the CSharp project and run the tests:
 ```sh
 mkdir -p ".\csharp\lib\runtimes\win-x64\native"
 cp ".\build_artifacts\libusearch_c.dll" ".\csharp\lib\runtimes\win-x64\native"
+cp ".\build_artifacts\numkong.dll" ".\csharp\lib\runtimes\win-x64\native"
 cd csharp
 dotnet test -c Debug --logger "console;verbosity=detailed"
 dotnet test -c Release
@@ -494,8 +495,10 @@ On Linux, the process is similar:
 ```sh
 mkdir -p "csharp/lib/runtimes/linux-x64/native" # for x86
 cp "build_artifacts/libusearch_c.so" "csharp/lib/runtimes/linux-x64/native" # for x86
+cp "build_artifacts/numkong/libnumkong.so" "csharp/lib/runtimes/linux-x64/native" # for x86
 mkdir -p "csharp/lib/runtimes/linux-arm64/native" # for ARM
 cp "build_artifacts/libusearch_c.so" "csharp/lib/runtimes/linux-arm64/native" # for ARM
+cp "build_artifacts/numkong/libnumkong.so" "csharp/lib/runtimes/linux-arm64/native" # for ARM
 cd csharp
 dotnet test -c Debug --logger "console;verbosity=detailed"
 dotnet test -c Release

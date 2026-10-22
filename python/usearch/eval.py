@@ -283,7 +283,8 @@ class Dataset:
     neighbors: np.ndarray
 
     def crop_neighbors(self, k: int):
-        self.neighbors = self.neighbors[:, k]
+        """Retains the first k ground-truth neighbors for each query."""
+        self.neighbors = self.neighbors[:, :k]
 
     @property
     def ndim(self):

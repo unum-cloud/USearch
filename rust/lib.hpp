@@ -6,6 +6,7 @@ struct Matches;
 struct IndexOptions;
 struct IndexMetadata;
 struct MemoryStats;
+struct IndexStats;
 enum class MetricKind;
 enum class ScalarKind;
 
@@ -118,9 +119,13 @@ class NativeIndex {
     void save(rust::Str path) const;
     void load(rust::Str path) const;
     void view(rust::Str path) const;
+    void compact() const;
     void reset() const;
     size_t memory_usage() const;
     MemoryStats memory_stats() const;
+    IndexStats stats() const;
+    IndexStats stats_for_level(size_t level) const;
+    IndexStats stats_per_level(rust::Slice<IndexStats> stats_per_level, size_t max_level) const;
     char const* hardware_acceleration() const;
 
     void save_to_buffer(rust::Slice<uint8_t> buffer) const;

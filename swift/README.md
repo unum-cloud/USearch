@@ -16,15 +16,15 @@ dependencies: [
 Here’s a basic example:
 
 ```swift
-let index = USearchIndex.make(metric: .Cos, dimensions: 3, connectivity: 8)
+let index = try USearchIndex.make(metric: .cos, dimensions: 3, connectivity: 8)
 let vectorA: [Float32] = [0.3, 0.5, 1.2] // `Float32` and `Float64` are always supported
 let vectorB: [Float32] = [0.4, 0.2, 1.2] // `Float16` support depends on the OS and hardware
-index.add(key: 42, vector: vectorA) // Pass full arrays or slices
-index.add(key: 43, vector: vectorB)
+try index.add(key: 42, vector: vectorA) // Pass full arrays or slices
+try index.add(key: 43, vector: vectorB)
 
-let results = index.search(vector: vectorA, count: 10)
+let results = try index.search(vector: vectorA, count: 10)
 assert(results.0[0] == 42)
-let retrieved: [[Float32]]? = index.get(key: 42)
+let retrieved: [[Float]]? = try index.get(key: 42)
 assert(retrieved![0] == vectorA)
 ```
 
@@ -38,10 +38,10 @@ import USearch
 struct USearchMobileApp: App {
     var body: some Scene {
         WindowGroup {
-            let index = USearchIndex.make(metric: .IP, dimensions: 2, connectivity: 16, quantization: .F32) // or .bf16, .f16, .e5m2, .e4m3, .e3m2, .e2m3, .u8, .i8
-            let _ = index.reserve(10)
+            let index = try! USearchIndex.make(metric: .ip, dimensions: 2, connectivity: 16, quantization: .f32) // or .bf16, .f16, .e5m2, .e4m3, .e3m2, .e2m3, .u8, .i8
+            let _ = try? index.reserve(10)
             let coordinates: Array<Float32> = [40.177200, 44.503490]
-            let _ = index.add(key: 10, vector: coordinates)            
+            let _ = try? index.add(key: 10, vector: coordinates)            
             VStack {
                 Text("USearch index contains \(index.count) vectors")
                 Spacer()

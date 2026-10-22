@@ -14,7 +14,7 @@ using Cloud.Unum.USearch;
 
 using var index = new USearchIndex(
     metricKind: MetricKind.Cos, // Choose cosine metric
-    quantization: ScalarKind.Float32, // or Float64, BFloat16, Float16, E5M2, E4M3, E3M2, E2M3, Int8, UInt8
+    quantization: ScalarKind.Float32, // or Float64, BFloat16, Float16, E5M2, E4M3, E3M2, E2M3, Int8, U8, Bits1
     dimensions: 3,  // Define the number of dimensions in input vectors
     connectivity: 16, // How frequent should the connections in the graph be, optional
     expansionAdd: 128, // Control the recall of indexing, optional
@@ -34,7 +34,7 @@ Trace.Assert(distances[0] <= 0.001f);
 ## Serialization
 
 ```csharp
-index.Save("index.usearch")
+index.Save("index.usearch");
 
 // Copy the whole index into memory
 using var indexLoaded = new USearchIndex("index.usearch");
