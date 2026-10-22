@@ -12,7 +12,7 @@ env:
   PYTHONFAULTHANDLER: 1
   PYTHON_VERSION: 3.11
   DOTNET_VERSION: 10.0.x
-  NODE_VERSION: 24
+  NODE_VERSION: "24.22.1"
   JAVA_VERSION: 21
   GO_VERSION: "^1.25.0"
   ANDROID_NDK_VERSION: 27.2.12479018
@@ -86,7 +86,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2.2"
           pip install pytest pytest-repeat numpy numba cppyy
 
           python -m pip install .
@@ -191,7 +191,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2.2"
           pip install pytest pytest-repeat numpy numba cppyy
 
           python -m pip install .
@@ -259,7 +259,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2.2"
           pip install pytest pytest-repeat numpy
           python -m pip install .
         env:
@@ -321,7 +321,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2.2"
           pip install pytest pytest-repeat numpy
           python -m pip install .
       - name: Test Python
@@ -422,7 +422,7 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 10
           timeout_minutes: 180
-          command: python -m pip install "cibuildwheel~=4.3.1"
+          command: python -m pip install --upgrade "pip>=26.2.2" "cibuildwheel~=4.3.1"
       - name: Build wheels
         uses: nick-fields/retry@v4
         with:
@@ -454,7 +454,7 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 10
           timeout_minutes: 180
-          command: python -m pip install "cibuildwheel~=4.3.1"
+          command: python -m pip install --upgrade "pip>=26.2.2" "cibuildwheel~=4.3.1"
       - name: Build wheels
         uses: nick-fields/retry@v4
         with:
@@ -486,7 +486,7 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 10
           timeout_minutes: 180
-          command: python -m pip install "cibuildwheel~=4.3.1"
+          command: python -m pip install --upgrade "pip>=26.2.2" "cibuildwheel~=4.3.1"
       - name: Build wheels
         uses: nick-fields/retry@v4
         with:
