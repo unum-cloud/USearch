@@ -6,25 +6,31 @@
  *      one RAM or VRAM index through the C interface and judged against an exact scan.
  *
  *  Points are stored in the scalar the file holds, so the oracle packs exactly what the index
- *  stores. A VRAM index lands its matches in a host arena, as a C caller reading them would. An
- *  NVMe run builds in RAM, saves a checkpoint to the temporary directory and searches a view of
- *  it.
+ *  stores. A VRAM index places one shard on every device @c USEARCH_DEVICES names, device zero
+ *  when unset, and lands its matches in a host arena, as a C caller reading them would. An NVMe
+ *  run builds in RAM, saves a checkpoint to the checkpoints directory and searches a view of it.
+ *  A named checkpoint is stamped with the stored scalar, the metric and the connectivity, and
+ *  several shards save a `.safegraphs.json` manifest beside a monolith apiece.
  *
  *  @verbatim
- *  --base-points  required  Every shape's points end to end, `.fbin` or `.f16bin` with 3 columns
- *  --base-counts  required  Points per shape, `.ibin` with 1 column
- *  --residency    ram       Where the index lives: ram, vram on GPU zero, or nvme
- *  --metric       chamfer, hausdorff, gromov_wasserstein or wasserstein_procrustes; chamfer by default
+ *  --base-points      required                 Every shape's points end to end, `.fbin` or `.f16bin` with 3 columns
+ *  --base-counts      required                 Points per shape, `.ibin` with 1 column
+ *  --residency        ram                      Where the index lives: ram, vram or nvme
+ *  --metric           chamfer                  chamfer, hausdorff, gromov_wasserstein or wasserstein_procrustes
+ *  --save             none                     Checkpoint name to serialize the index into after ingestion
+ *  --load             none                     Checkpoint name to restore, then insert the entries past it
+ *  --checkpoints-dir  the temporary directory  Directory for checkpoint blobs
  *  @endverbatim
  */
-#include <cstdint> // `std::uint8_t` - the checkpoint path's bytes
+#include <cstdint> // `std::uint8_t` - the checkpoint path's bytes, `std::int32_t` - the device ordinals
 #include <cstdio>  // `std::remove` - the checkpoint an NVMe run saved
 
 #include <array>       // `std::array` - the kinds, and one round of the exact scan
-#include <filesystem>  // `std::filesystem::temp_directory_path` - where an NVMe run saves
+#include <filesystem>  // `std::filesystem::temp_directory_path` - the default checkpoints directory
 #include <limits>      // `std::numeric_limits` - the exact scan's open radius
 #include <string>      // `std::string` - the checkpoint path
 #include <string_view> // `std::string_view`
+#include <vector>      // `std::vector` - the devices a VRAM index spans
 
 #include "usearch/shapes_index.h"
 #include "usearch/shapes/ram_metric.hpp"
@@ -53,6 +59,24 @@ inline constexpr std::array<shapes_kind_t, 4> shapes_kinds_k {{
      nk_kernel_wassersteinprocrustes_packed_k},
 }};
 
+/** The checkpoint flags: the names a run saves into and restores from, and where both resolve. */
+struct shapes_checkpoints_t {
+
+    /** Checkpoint name to serialize the index into after ingestion. */
+    std::string_view save_name;
+
+    /** Checkpoint name to restore in place of an empty index, then insert the entries past it. */
+    std::string_view load_name;
+
+    /** Directory the checkpoint blobs land in; empty takes the temporary directory. */
+    std::string_view checkpoints_dir;
+};
+
+/** The C interface's view of a checkpoint @p path. */
+inline usearch_bytes_view_t path_view_of(std::string const& path) noexcept {
+    return {reinterpret_cast<std::uint8_t const*>(path.data()), path.size()};
+}
+
 /** Packs the shape at @p row of @p coordinates, bounded by @p offsets, into @p packed. */
 template <typename scalar_type_>
 status_t pack_shape(std::span<scalar_type_ const> coordinates, std::span<std::size_t const> offsets, std::size_t row,
@@ -65,10 +89,12 @@ status_t pack_shape(std::span<scalar_type_ const> coordinates, std::span<std::si
 }
 
 /** Builds, searches and judges an index over the shapes in @p points_file, which hold
- *  @p scalar_type_ points, cut by the counts in @p counts_file. */
+ *  @p scalar_type_ points, cut by the counts in @p counts_file; a VRAM one spans the devices of
+ *  @p vram. */
 template <typename scalar_type_>
 int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, std::string_view residency,
-               bytes_view_t points_file, bytes_view_t counts_file) {
+               usearch_vram_options_t const& vram, shapes_checkpoints_t const& checkpoints, bytes_view_t points_file,
+               bytes_view_t counts_file) {
     auto const [points, points_parse_status] = utilities::parse_matrix_header<scalar_type_, u32_t>(points_file);
     if (failed(points_parse_status) || points.columns != 3)
         return fmt::println(stderr, "--base-points must hold 3 columns per point"), 1;
@@ -91,10 +117,48 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, std:
                             points.rows),
                1;
 
+    // A named checkpoint carries what its payload depends on, and several shards save a manifest.
+    std::error_code folder_error;
+    std::filesystem::path const folder = checkpoints.checkpoints_dir.empty()
+                                             ? std::filesystem::temp_directory_path(folder_error)
+                                             : std::filesystem::path(checkpoints.checkpoints_dir);
+    bool const sharded = residency == "vram" && vram.devices_count > 1;
+    auto const checkpoint_of = [&](std::string_view name) {
+        return (folder / fmt::format("{}-{}-{}-c{}.safegraphs{}", name, half_k ? "f16" : "f32", kind.token,
+                                     settings.connectivity.value, sharded ? ".json" : ""))
+            .string();
+    };
+
     usearch_outcome_t outcome {};
     usearch_shapes_index_t index = nullptr;
-    usearch_vram_options_t const vram {};
-    if (residency == "vram") {
+    std::string const loaded_path = checkpoints.load_name.empty() ? std::string {}
+                                                                  : checkpoint_of(checkpoints.load_name);
+    if (!loaded_path.empty()) {
+        usearch_executor_t loading = nullptr;
+        if (residency == "vram") {
+            usearch_executor_for_vram_t loading_arguments {.executor = &loading, .outcome = &outcome, .vram = vram};
+            usearch_executor_for_vram(&loading_arguments);
+            usearch_shapes_load_vram_t load {.index = &index,
+                                             .executor = loading,
+                                             .outcome = &outcome,
+                                             .path = path_view_of(loaded_path),
+                                             .vram = vram};
+            if (!outcome.message) usearch_shapes_load_vram(&load);
+        }
+        else {
+            usearch_executor_for_ram_t loading_arguments {.executor = &loading,
+                                                          .outcome = &outcome,
+                                                          .threads = settings.threads.value};
+            usearch_executor_for_ram(&loading_arguments);
+            usearch_shapes_load_ram_t load {.index = &index,
+                                            .executor = loading,
+                                            .outcome = &outcome,
+                                            .path = path_view_of(loaded_path)};
+            if (!outcome.message) usearch_shapes_load_ram(&load);
+        }
+        usearch_executor_free(loading);
+    }
+    else if (residency == "vram") {
         usearch_shapes_init_vram_t init {.index = &index,
                                          .outcome = &outcome,
                                          .metric = kind.metric,
@@ -111,19 +175,34 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, std:
                                         .connectivity = settings.connectivity.value};
         usearch_shapes_init_ram(&init);
     }
-    if (outcome.message) return fmt::println(stderr, "Init: {}", outcome.message), 1;
+    if (outcome.message)
+        return fmt::println(stderr, "{}: {}", loaded_path.empty() ? "Init" : "Load", outcome.message), 1;
     usearch_shapes_index_description_t description {};
     usearch_shapes_describe_t describe {.index = index, .outcome = &outcome, .description = &description};
     usearch_shapes_describe(&describe);
     fmt::println("- Metric: {} · scalar: {} · residency: {} · class: {}", kind.token, half_k ? "f16" : "f32", residency,
                  description.capabilities);
 
+    // A restored checkpoint holds the first base entries, so the build inserts only those past it.
+    std::size_t const loaded = description.size;
+    std::size_t const before_queries = tape.size() - std::min(tape.size(), settings.queries.value);
+    std::size_t const base_entries = settings.max_base_entries.value
+                                         ? std::min(settings.max_base_entries.value, before_queries)
+                                         : before_queries;
+    if (loaded > base_entries)
+        return fmt::println(stderr, "{} holds {} entries, past the {} base ones", loaded_path, loaded, base_entries), 1;
+    if (loaded) fmt::println("- Loaded: {} entries from {}", humanized(loaded), loaded_path);
+
     auto const insert = [&](usearch_executor_t executor, usearch_keys_view_t keys, usearch_tape_view_t entries,
                             std::size_t count, usearch_traversal_stats_t* stats, usearch_outcome_t* reached) {
+        std::size_t const first = static_cast<std::size_t>(entries.offsets - tape.offsets.data());
+        std::size_t const skipped = std::min(count, loaded - std::min(loaded, first));
+        if (skipped == count) return;
+        keys.data += skipped, entries.offsets += skipped;
         usearch_shapes_insert_t arguments {.index = index,
                                            .executor = executor,
                                            .outcome = reached,
-                                           .count = count,
+                                           .count = count - skipped,
                                            .keys = keys,
                                            .shapes = entries,
                                            .expansion_factor = settings.expansion_add.value,
@@ -183,17 +262,19 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, std:
         }
     };
 
-    // An NVMe run saves what it built and searches a view of the checkpoint, on storage threads.
-    std::string const checkpoint =
-        (std::filesystem::temp_directory_path() / "usearch-bench-shapes.safegraphs").string();
-    usearch_bytes_view_t const checkpoint_view {reinterpret_cast<std::uint8_t const*>(checkpoint.data()),
-                                                checkpoint.size()};
+    // A named save keeps what the run built; an NVMe run saves it too and searches a view of the
+    // checkpoint, on storage threads.
+    std::string const checkpoint = checkpoints.save_name.empty() ? (folder / "usearch-bench-shapes.safegraphs").string()
+                                                                 : checkpoint_of(checkpoints.save_name);
+    usearch_bytes_view_t const checkpoint_view = path_view_of(checkpoint);
     usearch_executor_t storage = nullptr;
     auto const serve = [&](usearch_executor_t executor, usearch_outcome_t* reached) {
-        if (residency != "nvme") return executor;
+        if (residency != "nvme" && checkpoints.save_name.empty()) return executor;
         usearch_shapes_save_t save {.index = index, .executor = executor, .outcome = reached, .path = checkpoint_view};
         usearch_shapes_save(&save);
         if (reached->message) return executor;
+        fmt::println("- Saved: {}", checkpoint);
+        if (residency != "nvme") return executor;
         usearch_shapes_free(index);
         index = nullptr;
         usearch_executor_for_nvme_t storage_arguments {.executor = &storage,
@@ -212,7 +293,7 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, std:
         settings, tape, residency == "vram" ? &vram : nullptr, insert, search, exact, serve);
     usearch_shapes_free(index);
     usearch_executor_free(storage);
-    if (residency == "nvme") std::remove(checkpoint.c_str());
+    if (residency == "nvme" && checkpoints.save_name.empty()) std::remove(checkpoint.c_str());
     return exit_code;
 }
 
@@ -220,11 +301,17 @@ int run_shapes(basic_settings_t const& settings, shapes_kind_t const& kind, std:
 int bench_shapes_index_search(int argc, char const* const* argv) {
     basic_settings_t settings;
     std::string_view base_points_path, base_counts_path, residency = "ram";
-    std::array<flag_t, 3> const flags {{
+    shapes_checkpoints_t checkpoints;
+    std::array<flag_t, 6> const flags {{
         {"--base-points", "path", "every shape's points end to end, `.fbin` or `.f16bin` with 3 columns",
          &base_points_path},
         {"--base-counts", "path", "points per shape, `.ibin` with 1 column", &base_counts_path},
-        {"--residency", "name", "where the index lives: ram, vram on GPU zero, or nvme; ram by default", &residency},
+        {"--residency", "name", "where the index lives: ram, vram on the USEARCH_DEVICES GPUs, or nvme; ram by default",
+         &residency},
+        {"--save", "name", "checkpoint name to serialize the index into after ingestion", &checkpoints.save_name},
+        {"--load", "name", "checkpoint name to restore, then insert the entries past it", &checkpoints.load_name},
+        {"--checkpoints-dir", "dir", "directory for checkpoint blobs; the temporary directory by default",
+         &checkpoints.checkpoints_dir},
     }};
     read_basic_settings(argc, argv,
                         "usearch_bench_shapes_index_search --base-points <path> --base-counts <path> [flags]", settings,
@@ -237,6 +324,9 @@ int bench_shapes_index_search(int argc, char const* const* argv) {
     if (!kind) return fmt::println(stderr, "--metric=\"{}\" names no shapes kind", metric_name), 1;
     if (residency != "ram" && residency != "vram" && residency != "nvme")
         return fmt::println(stderr, "--residency=\"{}\" does not parse, expected ram, vram or nvme", residency), 1;
+    counts_t const named = env_devices();
+    std::vector<std::int32_t> const devices(named.view().begin(), named.view().end());
+    usearch_vram_options_t const vram {.devices = devices.data(), .devices_count = devices.size()};
     auto [points_file, points_read_status] = mapped_file_t::read(base_points_path);
     if (failed(points_read_status))
         return fmt::println(stderr, "--base-points=\"{}\" could not be read", base_points_path), 1;
@@ -244,9 +334,11 @@ int bench_shapes_index_search(int argc, char const* const* argv) {
     if (failed(counts_read_status))
         return fmt::println(stderr, "--base-counts=\"{}\" could not be read", base_counts_path), 1;
     if (base_points_path.ends_with(".fbin"))
-        return run_shapes<nk::f32_t>(settings, *kind, residency, points_file.view(), counts_file.view());
+        return run_shapes<nk::f32_t>(settings, *kind, residency, vram, checkpoints, points_file.view(),
+                                     counts_file.view());
     if (base_points_path.ends_with(".f16bin"))
-        return run_shapes<nk::f16_t>(settings, *kind, residency, points_file.view(), counts_file.view());
+        return run_shapes<nk::f16_t>(settings, *kind, residency, vram, checkpoints, points_file.view(),
+                                     counts_file.view());
     return fmt::println(stderr, "--base-points=\"{}\" does not parse, expected a .fbin or .f16bin path",
                         base_points_path),
            1;
