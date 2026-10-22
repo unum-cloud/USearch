@@ -2301,6 +2301,7 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::ser
  *  topology when the list is empty, so a bare init still spans the machine. */
 template <typename multi_type_>
 static status_t place_shards(multi_type_& variant, usearch_ram_options_t const& ram) noexcept {
+    specialized_index {variant}.bound_shards(ram.shard_capacity);
     if (ram.memory_domains && ram.memory_domains_count) {
         for (std::size_t position = 0; position != ram.memory_domains_count; ++position)
             if (status_t const placed = specialized_index {variant}.emplace(
@@ -2369,6 +2370,7 @@ static std::size_t named_ordinal(usearch_vram_options_t const& vram, std::size_t
 /** Appends one VRAM shard per named USearch device ordinal, on that device's vendor ordinal. */
 template <typename multi_type_>
 static status_t place_shards(multi_type_& variant, usearch_vram_options_t const& vram) noexcept {
+    specialized_index {variant}.bound_shards(vram.shard_capacity);
     std::span<gpu_device_t const> const devices = gpu_devices();
     for (std::size_t shard = 0; shard != named_count(vram); ++shard) {
         std::size_t const ordinal = named_ordinal(vram, shard);

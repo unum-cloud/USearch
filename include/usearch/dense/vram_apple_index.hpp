@@ -366,6 +366,10 @@ struct vram_apple_index {
         std::size_t capacity = 0;
         connectivity_t connectivity = connectivity_32_k;
         std::size_t dimensions = 0;
+
+        /** Rows the index may ever host, clamped to the ID space; frozen with the geometry, past it
+         *  every claim answers @c overflow_k. */
+        std::size_t ceiling = max_node_count_k;
     };
 
     /** Ensures the index can host at least @p config.capacity entries; the first success freezes
@@ -398,6 +402,7 @@ struct vram_apple_index {
             if (!counters_) return {0, status_t::bad_alloc_k};
             dimensions_ = config.dimensions;
             connectivity_ = static_cast<std::size_t>(config.connectivity);
+            ceiling_rows_ = min_of(config.ceiling, max_node_count_k);
         }
         status_t const grown = grow_rows_(config.capacity);
         return {capacity(), grown};
@@ -1051,7 +1056,7 @@ struct vram_apple_index {
             if (failed(claim_status)) return {{}, claim_status};
             base = first_id;
         }
-        else if (rows > max_node_count_k - base) return {{}, status_t::overflow_k};
+        else if (rows > ceiling_rows_ - base) return {{}, status_t::overflow_k};
         if (status_t const grown = grow_rows_(base + rows); failed(grown)) {
             unclaim_(base, rows);
             return {{}, grown};
@@ -1080,7 +1085,7 @@ struct vram_apple_index {
      *  snapshot. */
     template <typename, nk_dtype_t, nk_capability_t, typename, typename>
     friend struct vram_apple_indexes;
-    template <typename, typename, typename, template <typename> class, typename>
+    template <typename, typename, typename, typename, template <typename> class, typename>
     friend struct shard_set;
 
   private:
@@ -1931,7 +1936,7 @@ struct vram_apple_index {
     /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone runs and publishes them. */
     expected<node_id_t> claim_(std::size_t rows) noexcept {
-        auto const [first_id, claim_status] = claims_.claim(size(), rows, max_node_count_k);
+        auto const [first_id, claim_status] = claims_.claim(size(), rows, ceiling_rows_);
         return {static_cast<node_id_t>(first_id), claim_status};
     }
 
@@ -1996,6 +2001,9 @@ struct vram_apple_index {
     metal_device_specs_t device_;
     nk_kernel_kind_t kernel_;
     std::size_t dimensions_ = 0, connectivity_ = 0, capacity_rows_ = 0;
+
+    /** Rows the index may ever host, fixed by the first @c reserve. */
+    std::size_t ceiling_rows_ = max_node_count_k;
 
     /** The vectors matrix and norms column backend. */
     vectors_allocator_t vectors_allocator_;

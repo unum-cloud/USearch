@@ -663,6 +663,10 @@ struct vram_shard_core {
         std::size_t capacity = 0;
         connectivity_t connectivity = connectivity_32_k;
         std::size_t dimensions = 0;
+
+        /** Rows the index may ever host, clamped to the ID space; frozen with the geometry, past it
+         *  every claim answers @c overflow_k. */
+        std::size_t ceiling = max_node_count_k;
     };
 
     /** Ensures the index can host at least @p config.capacity entries and answers the capacity now
@@ -713,13 +717,14 @@ struct vram_shard_core {
             std::size_t budget_bytes = device_.vram_bytes;
             if constexpr (vectors_allocator_t::address_space_k == vendor_t::address_space_t::managed_k)
                 budget_bytes = vectors_allocator_t::budget_bytes();
-            std::size_t const ceiling_rows = min_of(max_node_count_k,
+            std::size_t const ceiling_rows = min_of(min_of(config.ceiling, max_node_count_k),
                                                     max_of<std::size_t>(config.capacity, budget_bytes / bytes_per_row));
             // One more vectors row ahead of row zero holds the published-row count.
             if (vectors_matrix_.reserve_range((ceiling_rows + 1) * row_bytes()) != status_t::success_k ||
                 (normed && norms_column_.reserve_range(ceiling_rows * sizeof(norms_t)) != status_t::success_k) ||
                 neighbors_matrix_.reserve_range(ceiling_rows * connectivity * sizeof(u32_t)) != status_t::success_k)
                 return {0, status_t::bad_alloc_k};
+            ceiling_rows_ = ceiling_rows;
         }
         status_t const mapped = map_rows_(config.capacity);
         return {capacity(), mapped};
@@ -1981,7 +1986,7 @@ struct vram_shard_core {
             if (failed(claim_status)) return {{}, claim_status};
             base = first_id;
         }
-        else if (rows > max_node_count_k - base) return {{}, status_t::overflow_k};
+        else if (rows > ceiling_rows_ - base) return {{}, status_t::overflow_k};
         load_plan_t plan {*this, stream, base, rows};
         if (status_t const grown = grow_rows_(base + rows, stream.handle); failed(grown)) return {{}, grown};
         return {std::move(plan), status_t::success_k};
@@ -2397,7 +2402,7 @@ struct vram_shard_core {
     /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone grows, launches and publishes them. */
     expected<node_id_t> claim_(std::size_t rows) noexcept {
-        auto const [first_id, claim_status] = claims_.claim(size(), rows, max_node_count_k);
+        auto const [first_id, claim_status] = claims_.claim(size(), rows, ceiling_rows_);
         return {static_cast<node_id_t>(first_id), claim_status};
     }
 
@@ -2642,6 +2647,9 @@ struct vram_shard_core {
     /** Mapped rows whose neighbors a grow sentinel-filled, read and advanced by the claim's holder
      *  alone; a reservation maps past it and the next claim fills the rest. */
     std::size_t filled_rows_ = 0;
+
+    /** Rows the reserved ranges span, the most any claim reaches; fixed by the first @c reserve. */
+    std::size_t ceiling_rows_ = max_node_count_k;
 
     /** Marks the last sentinel fill, or the copies of a load that died over filled rows, which
      *  every grow's stream follows; recorded and followed by the claim's holder alone. */

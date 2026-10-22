@@ -60,15 +60,17 @@ struct vram_apple_indexes {
     /** The shard type - geometry parameters in the shard's own order, so the two never disagree. */
     using index_t = vram_apple_index<vector_dtype_, capability_>;
 
-    /** The shards, the keys of their rows, the rotation that routes new rows, and the commit word a
-     *  reader spanning the shards snapshots by. */
-    using shards_t = shard_set<index_t, key_type_, key_hash_type_, fu::standard_atomic_ref, wait_type_>;
-
     /** The caller-visible identity, opaque to every shard - indexes store no keys, so the whole
      *  key vocabulary begins here. */
     using key_t = key_type_;
+
+    /** Every shard's keys: one host column, which walks read in place over unified memory. */
+    using keys_column_t = shard_keys_column<index_t, key_t, fu::standard_atomic_ref>;
+
+    /** The shards, the keys of their rows, the rotation that routes new rows, and the commit word a
+     *  reader spanning the shards snapshots by. */
+    using shards_t = shard_set<index_t, keys_column_t, key_t, key_hash_type_, fu::standard_atomic_ref, wait_type_>;
     using key_locator_t = typename shards_t::key_locator_t;
-    using keys_column_t = typename shards_t::keys_column_t;
     using shard_t = typename shards_t::shard_t;
 
     /** The streams and their scratch every bulk verb runs on, paired positionally with the
@@ -122,6 +124,14 @@ struct vram_apple_indexes {
     /** Exchanges two indexes whole; a move implies the caller holds both exclusively. */
     void swap(vram_apple_indexes& other) noexcept { shards_.swap(other.shards_); }
 
+    /** Bounds every shard at @p rows, clamped to the ID space; zero means the ID space. Past it, an
+     *  insertion opens another generation of shards on the same placements. Ignored once storage
+     *  exists. */
+    void bound_shards(std::size_t rows) noexcept { shards_.bound_shards(rows); }
+
+    /** Rows one shard may hold. */
+    std::size_t shard_capacity() const noexcept { return shards_.shard_capacity(); }
+
     /** Appends one shard built here on the device @p stream names, for callers with none to hand
      *  over. */
     status_t emplace(typename executor_t::stream_t const& stream) noexcept {
@@ -134,7 +144,7 @@ struct vram_apple_indexes {
      *  refuses any walking by another kernel, any whose frozen geometry differs from the shards
      *  already here, and any already reserved. @ref reserve closes the shard set. */
     status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
-        return shards_.emplace(std::move(shard), shards_.allocator());
+        return shards_.emplace(std::move(shard), keys_column_t {shards_.allocator()});
     }
 
     /** Empties every shard in place, keeping its placement, geometry and capacity; a kept failure
@@ -516,12 +526,13 @@ struct vram_apple_indexes {
 
         /** An empty plan over @p allocator; only @ref plan_absorb ever fills it. */
         explicit refine_plan_t(forkunion_allocator_t allocator) noexcept
-            : traversals_(allocator), shard_plans_(allocator), part_bases_(allocator), part_offsets_(allocator) {}
+            : traversals_(allocator), shard_plans_(allocator), part_bases_(allocator), part_offsets_(allocator),
+              landings_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : traversals_(std::move(other.traversals_)), shard_plans_(std::move(other.shard_plans_)),
               part_bases_(std::move(other.part_bases_)), part_offsets_(std::move(other.part_offsets_)),
-              donors_(other.donors_), landed_donors_(other.landed_donors_), config_(other.config_),
-              population_(other.population_), owner_(std::exchange(other.owner_, nullptr)) {}
+              landings_(std::move(other.landings_)), donors_(other.donors_), landed_donors_(other.landed_donors_),
+              config_(other.config_), population_(other.population_), owner_(std::exchange(other.owner_, nullptr)) {}
         refine_plan_t& operator=(refine_plan_t&&) = delete;
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
@@ -555,7 +566,7 @@ struct vram_apple_indexes {
             for (; landed_donors_ != donors_.size(); ++landed_donors_) {
                 vram_apple_indexes*& donor = donors_[landed_donors_];
                 if (status_t const closed = donor->shards_.close(); failed(closed)) return closed;
-                status_t const landed = owner_->absorb_(*donor, executor, *this);
+                status_t const landed = owner_->absorb_(*donor, landings_of_(), executor, *this);
                 // Emptied donor shards are fresh and open, so only a failure leaves them closed.
                 donor->shards_.reopen();
                 if (failed(landed)) return landed;
@@ -600,15 +611,30 @@ struct vram_apple_indexes {
       private:
         friend vram_apple_indexes;
 
+        /** The landings of the first pending donor: donors land in order, so the shards of every
+         *  later one close the landings. */
+        std::span<landing_t const> landings_of_() const noexcept {
+            std::size_t later = 0;
+            for (std::size_t donor = landed_donors_ + 1; donor != donors_.size(); ++donor)
+                later += donors_[donor]->shards_.size();
+            std::size_t const count = donors_[landed_donors_]->shards_.size();
+            return to_span(landings_).subspan(landings_.size() - later - count, count);
+        }
+
         /** Opens every shard's pass over its parts on its own context, once no donor is pending. */
         status_t open_shards_() noexcept {
             for (std::size_t shard = 0; shard != owner_->shards_.size(); ++shard) {
                 std::span<node_id_t const> parts;
-                if (!part_offsets_.empty())
+                // A refine re-selects every row; a landing only the rows appended after the
+                // resident part.
+                iota_view<node_id_t> nodes {0, node_id_unknown_k};
+                if (!part_offsets_.empty()) {
                     parts = {part_bases_.data() + part_offsets_[shard],
                              part_offsets_[shard + 1] - part_offsets_[shard]};
-                auto [plan, status] = owner_->shards_[shard].index->plan_refine({0, node_id_unknown_k},
-                                                                                traversals_[shard], config_, parts);
+                    nodes.first = parts.size() > 1 ? parts[1] : node_id_unknown_k;
+                }
+                auto [plan, status] = owner_->shards_[shard].index->plan_refine(nodes, traversals_[shard], config_,
+                                                                                parts);
                 if (failed(status)) return shard_plans_.clear(), status;
                 shard_plans_.push_back_reserved(std::move(plan));
             }
@@ -657,6 +683,10 @@ struct vram_apple_indexes {
         /** Where each shard's run of @ref part_bases_ starts, and one past the last; empty with no
          *  donors. */
         growing_buffer<std::size_t, forkunion_allocator_t> part_offsets_;
+
+        /** One landing per donor shard, in landing order, as @ref plan_absorb packed them; empty
+         *  with no donors. */
+        growing_buffer<landing_t, forkunion_allocator_t> landings_;
 
         /** The caller's donor slots, each nulled once landed. */
         std::span<vram_apple_indexes*> donors_;
@@ -707,16 +737,17 @@ struct vram_apple_indexes {
 
     /**
      *  @brief Opens an absorb of @p donors, whose plan's first phase moves every row of each into
-     *      this index, one donor after another: donor shard @c s appends to shard @c s modulo the
-     *      shard count with its edges rebased and its keys beside it, as a part of its own.
+     *      this index, one donor after another: donor shards, largest first, each append to the
+     *      shard with the fewest rows that keeps it under @ref shard_capacity, one on its own
+     *      device on ties, with its edges rebased and its keys beside it, as a part of its own.
      *
      *  Each donor lands through one plan that does every fallible thing first: a load claiming all
      *  the rows each receiving shard takes, the key slots, the locator seats and the donor's fresh
      *  empty shards. A donor shard then crosses as one host copy per column, its keys beside them;
      *  every part lands before any shard publishes, and only then do the keys resolve. The donor
      *  empties into its fresh shards, which keep their devices but no capacity, its slot nulls, and
-     *  its shards join the receiving shards' parts in the plan, so at most one donor's rows are
-     *  ever held twice.
+     *  its shards land among the receiving shards' parts in the plan, so at most one donor's rows
+     *  are ever held twice.
      *
      *  Once the last donor landed, the plan's re-selection walks every shard across the parts the
      *  landings appended, round by round; a cancel pauses only that walk. This index's claim words
@@ -734,6 +765,8 @@ struct vram_apple_indexes {
      *      does not drive, or this index itself.
      *  @retval contended_k A batch, load or save in flight on this index, or another refine or
      *      absorb.
+     *  @retval unsupported_k A donor shard past @ref shard_capacity, which would have to be cut.
+     *  @retval overflow_k A donor shard no shard has room for, since no generation opens here.
      */
     expected<refine_plan_t> plan_absorb(std::span<vram_apple_indexes*> donors, executor_t& executor,
                                         refine_config_t config = {}) noexcept {
@@ -761,18 +794,25 @@ struct vram_apple_indexes {
         plan.config_ = config;
         if (failed(plan.shard_plans_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
 
-        // A shard's parts: its resident one, and one per donor shard landing in it.
         if (!donors.empty()) {
-            if (failed(plan.part_offsets_.resize(shards + 1))) return {{}, status_t::bad_alloc_k};
-            std::size_t parts = 0;
-            for (std::size_t into = 0; into != shards; ++into) {
-                plan.part_offsets_[into] = parts++;
-                for (vram_apple_indexes const* donor : donors)
-                    for (std::size_t from = into; from < donor->shards_.size(); from += shards) ++parts;
-            }
-            plan.part_offsets_[shards] = parts;
-            if (failed(plan.part_bases_.resize(parts))) return {{}, status_t::bad_alloc_k};
-            for (node_id_t& base : plan.part_bases_) base = node_id_unknown_k;
+            std::size_t sources = 0;
+            for (vram_apple_indexes const* donor : donors) sources += donor->shards_.size();
+            if (failed(plan.landings_.resize(sources))) return {{}, status_t::bad_alloc_k};
+            auto source_shard = [&](std::size_t from) noexcept -> shard_t const& {
+                std::size_t donor = 0;
+                for (; from >= donors[donor]->shards_.size(); ++donor) from -= donors[donor]->shards_.size();
+                return donors[donor]->shards_[from];
+            };
+            auto device_of = [](shard_t const& shard) noexcept { return shard.index->device_specs().ordinal; };
+            auto open = []() noexcept { return status_t::overflow_k; };
+            if (status_t const packed = shards_.pack(to_writable_span(plan.landings_), 0, shards_.shard_capacity(),
+                                                     source_shard, device_of, rank_fewest_rows, open);
+                failed(packed))
+                return {{}, packed};
+            if (status_t const sized = shards_t::size_parts(to_span(plan.landings_), shards, plan.part_offsets_,
+                                                            plan.part_bases_);
+                failed(sized))
+                return {{}, sized};
         }
         // A refine's walk contexts own their buffers, so they open as any verb's do.
         if (status_t const opened = fanout_t::reserve_traversals(shards_, plan.traversals_, executor); failed(opened))
@@ -1471,8 +1511,7 @@ struct vram_apple_indexes {
                 return readied;
             if (failed(visible_.resize(shards_.size())) || failed(pending_.reserve_exactly(shards_.size())))
                 return status_t::bad_alloc_k;
-            shards_.snapshot(to_writable_span(visible_));
-            return status_t::success_k;
+            return shards_.snapshot(to_writable_span(visible_)).status;
         }
 
         /** Submits @p submit under the snapshot on every shard before awaiting any, hands each
@@ -1606,10 +1645,12 @@ struct vram_apple_indexes {
         return build_(like.device_specs().ordinal);
     }
 
-    /** Lands every row of @p donor and consumes it, under both indexes' closed claim words and the
-     *  executor's hold @p refining keeps: every fallible step first, then one host copy per column,
-     *  one drain, and the publication, and the donor's shards join the plan's parts. */
-    status_t absorb_(vram_apple_indexes& donor, executor_t& executor, refine_plan_t& refining) noexcept {
+    /** Lands every row of @p donor where @p landings, one per donor shard, put it and consumes it,
+     *  under both indexes' closed claim words and the executor's hold @p refining keeps: every
+     *  fallible step first, then one host copy per column, one drain, and the publication, and the
+     *  donor's shards land among the plan's parts. */
+    status_t absorb_(vram_apple_indexes& donor, std::span<landing_t const> landings, executor_t& executor,
+                     refine_plan_t& refining) noexcept {
         std::size_t const shards = shards_.size();
         if (!donor.size()) return status_t::success_k;
         if (!capacity())
@@ -1621,7 +1662,7 @@ struct vram_apple_indexes {
 
         // Every shard claims all its rows first, and the donor's fresh shards exist before any
         // lands, so a failure before publication releases them all.
-        std::size_t const donors = donor.shards_.size();
+        std::size_t const donors = landings.size();
         growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {shards_.allocator()};
         growing_buffer<std::unique_ptr<index_t>, forkunion_allocator_t> emptied {shards_.allocator()};
         if (failed(plans.reserve_exactly(shards)) || failed(emptied.reserve_exactly(donors)))
@@ -1629,7 +1670,8 @@ struct vram_apple_indexes {
         std::size_t landing = 0;
         for (std::size_t into = 0; into != shards; ++into) {
             std::size_t rows = 0;
-            for (std::size_t from = into; from < donors; from += shards) rows += donor.shards_[from].index->size();
+            for (std::size_t from = 0; from != donors; ++from)
+                if (landings[from].into == into) rows += donor.shards_[from].index->size();
             auto [plan, status] = shards_[into].index->plan_load(rows);
             if (failed(status)) return status;
             plans.push_back_reserved(std::move(plan));
@@ -1650,7 +1692,8 @@ struct vram_apple_indexes {
             shard_t& one = shards_[into];
             typename index_t::load_plan_t& plan = plans[into];
             node_id_t base = plan.base;
-            for (std::size_t from = into; from < donors && succeeded(queued); from += shards) {
+            for (std::size_t from = 0; from != donors && succeeded(queued); ++from) {
+                if (landings[from].into != into) continue;
                 shard_t const& part = donor.shards_[from];
                 node_id_t const part_rows = static_cast<node_id_t>(part.index->size());
                 if (!part_rows) continue;
@@ -1671,7 +1714,8 @@ struct vram_apple_indexes {
                 shards_.locators().insert(seats, shards_[into].keys[row], key_locator_t {into, row});
 
         // Each donor shard becomes a part of its own in the plan, which sized every shard's run.
-        shards_.record_parts(donor.shards_, plans, refining.part_bases_.data(), to_span(refining.part_offsets_));
+        shards_.record_parts(donor.shards_, landings, plans, refining.part_bases_.data(),
+                             to_span(refining.part_offsets_));
         for (std::size_t from = 0; from != donors; ++from) {
             shard_t& part = donor.shards_[from];
             part.index = std::move(emptied[from]);

@@ -81,18 +81,19 @@ struct vram_shard_fanout {
     template <typename... usage_types_>
     static status_t reserve_traversals(shards_t const& shards, traversals_t& traversals, executor_t& executor,
                                        usage_types_ const&... usage) noexcept {
+        // Counted once, so a generation opening meanwhile gets no context and no scratch here.
+        std::size_t const count = shards.size();
         std::size_t bytes_per_shard = 0, shards_per_stream = 0;
-        for (std::size_t shard = 0; shard != shards.size(); ++shard)
+        for (std::size_t shard = 0; shard != count; ++shard)
             bytes_per_shard = max_of(bytes_per_shard, shards[shard].index->traversal_memory_usage(usage...));
         for (std::size_t stream = 0; stream != executor.size(); ++stream) {
             std::size_t served = 0;
-            for (std::size_t shard = 0; shard != shards.size(); ++shard)
-                served += stream_of(shards, executor, shard) == stream;
+            for (std::size_t shard = 0; shard != count; ++shard) served += stream_of(shards, executor, shard) == stream;
             shards_per_stream = max_of(shards_per_stream, served);
         }
         if (status_t const sized = executor.reserve(bytes_per_shard * shards_per_stream); failed(sized)) return sized;
-        if (failed(traversals.reserve_exactly(shards.size()))) return status_t::bad_alloc_k;
-        for (std::size_t shard = 0; shard != shards.size(); ++shard) {
+        if (failed(traversals.reserve_exactly(count))) return status_t::bad_alloc_k;
+        for (std::size_t shard = 0; shard != count; ++shard) {
             typename executor_t::stream_t& stream = executor.stream(stream_of(shards, executor, shard));
             traversals.push_back_reserved(
                 traversal_context_t {typename traversal_context_t::allocator_t {stream.arena, stream}});
@@ -119,8 +120,13 @@ struct vram_shard_fanout {
     /** The executor every window queues on, held by the fan-out since @ref begin. */
     executor_t& executor() noexcept { return executor_; }
 
+    /** Shards the snapshot counted, which every window walks; a generation opened since takes no
+     *  part. */
+    std::size_t shards() const noexcept { return visible_.size(); }
+
     /** Claims the executor, sizes one context per shard for @p window_rows rows under @p config and
-     *  any indexer @p heads, and snapshots the shards' visible rows. */
+     *  any indexer @p heads, and snapshots the shards' visible rows, sizing again for a generation
+     *  opened meanwhile. */
     template <typename traversal_config_type_, typename... heads_types_>
     status_t begin(std::size_t window_rows, traversal_config_type_ config, heads_types_ const&... heads) noexcept {
         // The executor serializes, never the index: a second caller with its own executor searches
@@ -128,13 +134,18 @@ struct vram_shard_fanout {
         auto [claim, claim_status] = executor_.claim();
         if (failed(claim_status)) return claim_status;
         claim_ = std::move(claim);
-        if (status_t const readied = reserve_traversals(shards_, traversals_, executor_, window_rows, config, heads...);
-            failed(readied))
-            return readied;
-        if (failed(visible_.resize(shards_.size())) || failed(pending_.reserve_exactly(shards_.size())))
-            return status_t::bad_alloc_k;
-        shards_.snapshot(to_writable_span(visible_));
-        return status_t::success_k;
+        while (true) {
+            traversals_.clear();
+            if (status_t const readied = reserve_traversals(shards_, traversals_, executor_, window_rows, config,
+                                                            heads...);
+                failed(readied))
+                return readied;
+            std::size_t const shards = traversals_.size();
+            if (failed(visible_.resize(shards)) || failed(pending_.reserve_exactly(shards)))
+                return status_t::bad_alloc_k;
+            status_t const taken = shards_.snapshot(to_writable_span(visible_)).status;
+            if (taken != status_t::shape_mismatch_k) return taken;
+        }
     }
 
     /**
@@ -149,7 +160,7 @@ struct vram_shard_fanout {
     template <typename submit_type_, typename merge_type_>
     expected<search_result_t> for_each_shard(submit_type_&& submit, merge_type_&& merge,
                                              std::span<std::size_t const> counts) noexcept {
-        std::size_t const shards = shards_.size();
+        std::size_t const shards = this->shards();
 
         // Queue every shard before awaiting any, so the batch costs the slowest device rather than
         // the sum. From here to the last landing there must be no return: the caller's rows and
@@ -213,7 +224,7 @@ struct vram_shard_fanout {
     expected<search_result_t> search_landed(rows_view_t queries, search_config_t config, nk::matrix_span<key_t> keys,
                                             nk::matrix_span<score_type_> distances, std::span<std::size_t> counts,
                                             heads_types_ const&... heads) noexcept {
-        std::size_t const queries_count = queries.rows, shards = shards_.size();
+        std::size_t const queries_count = queries.rows, shards = this->shards();
         std::size_t const landing_entries = queries_count * shards * config.count;
         frame_.clear();
         if (failed(landed_ids_.reserve_exactly(landing_entries)) ||
@@ -243,7 +254,7 @@ struct vram_shard_fanout {
                 std::size_t const live = repack_landed_matches_(
                     shard_ids.row(query).as_vector(), shard_distances.row(query).as_vector(), to_writable_span(frame_));
                 counts[query] = merge_search_results(std::span<scored_node_t const> {frame_.data(), live},
-                                                     shards_[shard].keys, to_span(keys.row(query).as_vector()),
+                                                     shards_[shard].keys.host, to_span(keys.row(query).as_vector()),
                                                      to_span(distances.row(query).as_vector()), counts[query]);
             }
         };

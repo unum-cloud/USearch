@@ -28,6 +28,7 @@
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator` - the plans' placement
 #include "usearch/utilities/safegraphs_format.hpp" // SafeGraphs monoliths, manifests & catalogs
 #include "usearch/dense/types.hpp"
+#include "usearch/dense/sharded_indexes.hpp" // `host_keys` - a shard's host key column
 
 namespace unum::usearch::dense {
 
@@ -59,11 +60,14 @@ status_t shard_custom_fields(shards_type_ const& shards, save_config_t const& co
     return status_t::success_k;
 }
 
-/** The monolith header for @p nodes rows of @p shards under @p config 's alignment. */
+/** The monolith header for @p nodes rows of @p shards under @p config 's alignment; more rows than
+ *  32-bit IDs address answer @c overflow_k, so a save refuses before it writes anything. */
 template <typename shards_type_>
 expected<safegraphs_header_t> shard_monolith_header(shards_type_ const& shards, std::size_t nodes,
                                                     save_config_t const& config,
                                                     std::span<safegraphs_custom_field_t const> fields) noexcept {
+    // The neighbor column is u32, and a monolith rebases every shard's IDs into one space.
+    if (nodes > shards_type_::index_t::max_node_count_k) return {{}, status_t::overflow_k};
     safegraphs_regular_shape_t const shape {nodes,
                                             safegraphs_key_dtype<typename shards_type_::key_t>(),
                                             shard_value_dtype<shards_type_>(),
@@ -265,7 +269,7 @@ struct [[nodiscard]] shard_save_plan {
             bytes_span_t const key_rows = header.rows_of(target, header.key, base, nodes);
             std::size_t written = 0;
             status_t wrote = status_t::success_k;
-            (*shards_)[shard].keys.for_each_span({0, nodes}, [&](std::span<key_t const> run) noexcept {
+            host_keys((*shards_)[shard].keys).for_each_span({0, nodes}, [&](std::span<key_t const> run) noexcept {
                 if (succeeded(wrote))
                     wrote = copy_bytes(key_rows.subspan(written, run.size_bytes()), bytes_of(run.data(), run.size()));
                 written += run.size_bytes();
@@ -618,14 +622,15 @@ struct [[nodiscard]] shard_load_plan {
     status_t land_rows_(std::size_t shard, iota_view<std::size_t> rows, key_of_type_& key_of) noexcept {
         shards_type_& shards = *shards_;
         typename shards_type_::shard_t& one = shards[shard];
+        auto& keys = host_keys(one.keys);
         std::size_t written = 0;
-        one.keys.for_each_span(rows, [&](std::span<key_t> run) noexcept {
+        keys.for_each_span(rows, [&](std::span<key_t> run) noexcept {
             for (key_t& key : run) key = key_of(written++);
         });
         if (status_t const landed = residency_.land_keys(shards, shard, rows, plans_[shard]); failed(landed))
             return landed;
         for (std::size_t row = rows.first; row != rows.bound; ++row)
-            shards.locators().insert(seats_, one.keys[row], key_locator_t {shard, static_cast<node_id_t>(row)});
+            shards.locators().insert(seats_, keys[row], key_locator_t {shard, static_cast<node_id_t>(row)});
         return status_t::success_k;
     }
 
@@ -652,16 +657,18 @@ struct [[nodiscard]] shard_load_plan {
 
     /**
      *  @brief Vets the plan's parts, assigns them onto the shards per @p config 's placement,
-     *      reserves from it, and opens one load plan per shard over the rows it ends up with,
-     *      covering their keys and claiming their locator seats.
+     *      opening generations until no shard passes the bound, reserves every shard for its own
+     *      rows, and opens one load plan per shard over them, covering their keys and claiming
+     *      their locator seats.
      *
      *  A shard takes its parts in order and appends them at one base, so the flat steps are the
      *  intersections of each part's rows with the chunks or batches they land in - a part that
-     *  spans two answers two steps, and two parts sharing one answer one each.
+     *  spans two answers two steps, and two parts sharing one answer one each. A residency that
+     *  builds no shards answers @c overflow_k where another generation would be needed.
      */
     status_t open_shards_(load_config_t const& config) noexcept {
+        using shard_t = typename shards_type_::shard_t;
         shards_type_& shards = *shards_;
-        std::size_t const shards_count = shards.size();
         if (parts_.empty()) return status_t::malformed_k;
         safegraphs_header_t const& first = parts_[0].header;
         for (safegraphs_catalog_part_t const& part : parts_)
@@ -672,37 +679,78 @@ struct [[nodiscard]] shard_load_plan {
         std::size_t const dimensions = regular_width(first.value.shape).value_or(0);
         if (!dimensions) return status_t::malformed_k;
 
-        // Parts onto shards per the placement, and the rows each shard ends up with.
+        // Parts onto shards per the placement, and the rows each shard ends up with, over the
+        // fewest generations no shard passes the bound under: as many as the rows need, and more
+        // while whole parts land unevenly, until each part has a shard of its own.
         growing_buffer<std::size_t, forkunion_allocator_t> part_rows {shards.allocator()};
         growing_buffer<std::size_t, forkunion_allocator_t> shard_rows {shards.allocator()};
-        if (failed(part_rows.reserve_exactly(parts_.size())) || failed(shard_rows.resize(shards_count)))
-            return status_t::bad_alloc_k;
-        for (safegraphs_catalog_part_t const& part : parts_) part_rows.push_back_reserved(part.nodes);
-        status_t kept = status_t::success_k;
-        assign_parts(config.placement, to_span(part_rows), shards_count,
-                     [&](checkpoint_assignment_t assignment) noexcept {
-                         if (failed(landings_.push_back(assignment))) kept = status_t::bad_alloc_k;
-                         shard_rows[assignment.shard] += assignment.rows.size();
-                     });
-        if (failed(kept)) return kept;
-        std::size_t widest = 0;
-        for (std::size_t const rows : shard_rows) widest = max_of(widest, rows);
+        if (failed(part_rows.reserve_exactly(parts_.size()))) return status_t::bad_alloc_k;
+        std::size_t total = 0;
+        for (safegraphs_catalog_part_t const& part : parts_) {
+            part_rows.push_back_reserved(part.nodes);
+            total += part.nodes;
+        }
+        std::size_t const width = shards.open_generation().width, bound = shards.shard_capacity();
+        std::size_t shards_count = max_of(shards.size(), width * divide_round_up(total, width * bound));
+        while (true) {
+            landings_.clear();
+            if (failed(shard_rows.resize(shards_count))) return status_t::bad_alloc_k;
+            for (std::size_t& rows : shard_rows) rows = 0;
+            status_t kept = status_t::success_k;
+            assign_parts(config.placement, to_span(part_rows), shards_count,
+                         [&](checkpoint_assignment_t assignment) noexcept {
+                             if (failed(landings_.push_back(assignment))) kept = status_t::bad_alloc_k;
+                             shard_rows[assignment.shard] += assignment.rows.size();
+                         });
+            if (failed(kept)) return kept;
+            std::size_t widest = 0;
+            for (std::size_t const rows : shard_rows) widest = max_of(widest, rows);
+            if (widest <= bound) break;
+            if (shards_count >= part_rows.size()) return status_t::overflow_k;
+            shards_count += width;
+        }
 
-        // Growth ahead of the rows the parts carry - the config's or the widest shard times the
-        // shard count - and the frozen geometry, when there is one, must match the parts'.
-        std::size_t const wanted = max_of(config.capacity, widest * shards_count);
+        // The frozen geometry, when there is one, must match the parts'.
         if (shards.capacity() && (dimensions != shards.dimensions() || connectivity != shards.connectivity()))
             return status_t::config_mismatch_k;
-        if (!shards.capacity() && !wanted) return status_t::success_k;
-        if (status_t const reserved = shards.reserve({wanted, connectivity, dimensions}).status; failed(reserved))
-            return reserved;
+        if (!shards.capacity() && !total && !config.capacity) return status_t::success_k;
+
+        // The geometry freezes on the shards present, the generations past them open closed like
+        // the rest, and each shard grows ahead of its own rows or its share of the config's, under
+        // the bound.
+        typename index_t::reserve_capacity_t per_shard {};
+        per_shard.connectivity = connectivity;
+        per_shard.dimensions = dimensions;
+        per_shard.ceiling = bound;
+        for (std::size_t shard = 0; shard != shards.size(); ++shard)
+            if (status_t const reserved = shards[shard].index->reserve(per_shard).status; failed(reserved))
+                return reserved;
+        if constexpr (requires(residency_type_ const& residency, shard_t const& like) { residency.build_shard(like); })
+            while (shards.size() < shards_count) {
+                std::size_t const first = shards.size();
+                if (status_t const opened = shards.open_generation_(
+                        shards.open_generation(),
+                        [this](shard_t const& like) noexcept { return residency_.build_shard(like); });
+                    failed(opened))
+                    return opened;
+                if (status_t const closed = shards.close(first); failed(closed)) return closed;
+            }
+        if (shards.size() < shards_count) return status_t::overflow_k;
+        std::size_t const share = divide_round_up(config.capacity, shards_count);
+        for (std::size_t shard = 0; shard != shards_count; ++shard) {
+            per_shard.capacity = min_of(max_of(shard_rows[shard], share), bound);
+            if (status_t const reserved = shards[shard].index->reserve(per_shard).status; failed(reserved))
+                return reserved;
+        }
+        if (status_t const indexed = shards.locators().reserve(max_of(total, config.capacity)); failed(indexed))
+            return indexed;
 
         if (failed(plans_.reserve_exactly(shards_count))) return status_t::bad_alloc_k;
         for (std::size_t shard = 0; shard != shards_count; ++shard) {
             auto [inner, status] = residency_.open_shard_load(shards, shard, shard_rows[shard]);
             if (failed(status)) return status;
             plans_.push_back_reserved(std::move(inner));
-            if (status_t const covered = shards[shard].keys.cover(plans_[shard].base + plans_[shard].rows);
+            if (status_t const covered = host_keys(shards[shard].keys).cover(plans_[shard].base + plans_[shard].rows);
                 failed(covered))
                 return covered;
         }

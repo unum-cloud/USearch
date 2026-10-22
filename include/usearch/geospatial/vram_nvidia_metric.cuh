@@ -46,7 +46,7 @@ __device__ __forceinline__ tangent_frame_t cuda_tangent_frame(earth_fixed_t base
     if (norm != 0) {
         f64_t const up_x = x / norm, up_y = y / norm, up_z = z / norm;
         // The axis least aligned with the position keeps the cross product's length above 0.816.
-        f64_t const magnitude_x = fabs(up_x), magnitude_y = fabs(up_y), magnitude_z = fabs(up_z);
+        f64_t const magnitude_x = std::fabs(up_x), magnitude_y = std::fabs(up_y), magnitude_z = std::fabs(up_z);
         bool const along_y = magnitude_y < magnitude_x;
         bool const along_z = magnitude_z < (along_y ? magnitude_y : magnitude_x);
         f64_t const axis_x = !along_y && !along_z, axis_y = along_y && !along_z, axis_z = along_z;

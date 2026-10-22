@@ -868,7 +868,7 @@ struct ram_index {
     template <typename, typename, typename, typename, typename, typename, typename, template <typename> class, typename,
               typename>
     friend struct ram_indexes;
-    template <typename, typename, typename, template <typename> class, typename>
+    template <typename, typename, typename, typename, template <typename> class, typename>
     friend struct shard_set;
 
     /** The distance kit @c src/ picked; its step is the row pitch the chunks round to. */
@@ -1125,6 +1125,10 @@ struct ram_index {
 
         /** Scalar dimensions per vector; required before the first insertion. */
         std::size_t dimensions = 0;
+
+        /** Rows the index may ever host, clamped to the ID space; frozen with the geometry, past it
+         *  every claim answers @c overflow_k. */
+        std::size_t ceiling = max_node_count_k;
     };
 
     /**
@@ -1147,6 +1151,10 @@ struct ram_index {
             !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
             return {0, status_t::config_mismatch_k};
 
+        // Stored ahead of the freeze, the ceiling reaches every claim that sees the geometry.
+        if (!geometry())
+            atomic_ref<std::size_t>(ceiling_rows_)
+                .store(min_of(config.ceiling, max_node_count_k), std::memory_order_relaxed);
         // Freeze the geometry exactly once; competing first-reservations are decided by one CAS.
         geometry_t const desired_geometry {config.dimensions, config.connectivity};
         geometry_t expected_geometry {};
@@ -3321,9 +3329,12 @@ struct ram_index {
         geometry_t const frozen = geometry();
         if (!frozen) return {0, status_t::uninitialized_k};
 
+        std::size_t const ceiling_rows = atomic_ref<std::size_t const>(ceiling_rows_).load(std::memory_order_relaxed);
         std::size_t added_capacity = 0;
         while (added_capacity < minimal_capacity) {
-            if (chunks_count_ == max_chunks_k) return {added_capacity, status_t::overflow_k};
+            std::size_t const hosted_rows = chunk_schedule_t::rows_before(chunks_count_);
+            if (chunks_count_ == max_chunks_k || hosted_rows >= ceiling_rows)
+                return {added_capacity, status_t::overflow_k};
 
             std::size_t const covered_rows = chunk_schedule_t::rows_before(chunks_count_ + 1u);
             // Norms exist only when the finalize reads them, which a dot does on compensated kits
@@ -3335,7 +3346,8 @@ struct ram_index {
             if (succeeded(covered)) covered = neighbors_.cover(covered_rows, frozen.connectivity(), 0xFF);
             if (failed(covered)) return {added_capacity, covered};
 
-            added_capacity += chunk_schedule_t::rows_in(chunks_count_);
+            // A chunk crossing the ceiling hosts only the rows below it.
+            added_capacity += min_of(chunk_schedule_t::rows_in(chunks_count_), ceiling_rows - hosted_rows);
             ++chunks_count_;
             // The all-ones ID is the sentinel: account one row less in the final chunk, so no
             // claim can dispense it and the dispenser never wraps.
@@ -3359,7 +3371,8 @@ struct ram_index {
     expected<node_id_t> claim_capacity(std::size_t count) noexcept {
         // Rejected before the counter dance, so it neither grows the index in vain nor overflows
         // the signed capacity arithmetic below.
-        if (count > max_node_count_k) return {node_id_unknown_k, status_t::overflow_k};
+        if (count > atomic_ref<std::size_t const>(ceiling_rows_).load(std::memory_order_relaxed))
+            return {node_id_unknown_k, status_t::overflow_k};
         while (true) {
             // One unconditional subtract, and its sign says what happened; the deficit it can
             // leave behind is exactly the signal the waiters below watch.
@@ -3648,6 +3661,12 @@ struct ram_index {
                 neighbors.store_slot(slot, node_id_unknown_k);
             neighbors.unlock(refined[0].node_id);
         }
+    }
+
+    /** Rows claimed by batches and loads, published or not - what a shard set measures its bound
+     *  against. */
+    std::size_t claimed_() const noexcept {
+        return atomic_ref<node_id_t const>(last_allocated_id_).load(std::memory_order_acquire);
     }
 
     /** Dispenses one range of IDs for every row @p claim holds with one bounded add, and
@@ -4638,6 +4657,9 @@ struct ram_index {
 
     /** Read-mostly after the freeze - kept off the watermark's line with the other cold members. */
     alignas(default_alignment_k) geometry_t geometry_ {};
+
+    /** Rows the index may ever host, stored by the reservation that froze the geometry. */
+    std::size_t ceiling_rows_ = max_node_count_k;
 
     /** The distance kind every walk ranks by; only the distance epilogue and the norms chunks
      *  read it. */

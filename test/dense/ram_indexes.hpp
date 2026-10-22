@@ -169,6 +169,109 @@ static std::size_t test_ram_indexes_abandoned_plan(u64_t seed) {
     return failures;
 }
 
+/** Past @c shard_capacity, rows open generations of shards on the same placements: one batch fills
+ *  as many as it needs, a batch crossing the bound tops the open generation up and lands whole, one
+ *  row past a full generation opens the next, and a load striping a checkpoint over the bound opens
+ *  as many as its rows need. A monolith past the 32-bit IDs refuses to frame. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+static std::size_t test_ram_indexes_generations(u64_t seed) {
+    using scalar_t = typename indexes_type_::index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    constexpr std::size_t bound = 1000, rows = 5000;
+    std::size_t failures = 0;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_generations"));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    auto rows_of = [&](std::size_t first, std::size_t count) {
+        return vectors(nk::range(first, first + count), nk::slice);
+    };
+    auto keys_of = [&](std::size_t first, std::size_t count) {
+        return std::span<key_t const> {keys.data() + first, count};
+    };
+    auto shard_sizes = [](indexes_type_ const& indexes) {
+        std::vector<std::size_t> sizes;
+        for (std::size_t shard = 0; shard != indexes.shards_count(); ++shard)
+            sizes.push_back(indexes.shard(shard).size());
+        return sizes;
+    };
+    auto miscounted = [&](indexes_type_ const& indexes, std::size_t count) {
+        std::size_t wrong = 0;
+        for (std::size_t row = 0; row != count; ++row) wrong += indexes.count(keys[row]) != 1;
+        return wrong;
+    };
+    auto bounded = [&](indexes_type_& indexes) {
+        indexes.bound_shards(bound);
+        return succeeded(place_shards(indexes)) &&
+               succeeded(indexes.reserve({bound, connectivity_16_k, dimensions}).status) &&
+               indexes.shard_capacity() == bound;
+    };
+
+    // One batch over two empty shards fills two generations and half a third.
+    indexes_type_ filled {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(bounded(filled));
+    failures += expect(succeeded(filled.insert(keys_of(0, rows), rows_of(0, rows), driver.executor).status));
+    failures += expect_eq(filled.size(), rows);
+    failures += expect((shard_sizes(filled) == std::vector<std::size_t> {1000, 1000, 1000, 1000, 500, 500}));
+    failures += expect_eq(miscounted(filled, rows), 0u);
+
+    // 750 rows a shard, then a batch of 1000 tops both up to the bound and opens a generation for
+    // the other 500, whole, and a search reaches the new generation's rows.
+    indexes_type_ crossed {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(bounded(crossed));
+    failures += expect(succeeded(crossed.insert(keys_of(0, 1500), rows_of(0, 1500), driver.executor).status));
+    failures += expect_eq(crossed.shards_count(), 2u);
+    failures += expect(succeeded(crossed.insert(keys_of(1500, 1000), rows_of(1500, 1000), driver.executor).status));
+    failures += expect((shard_sizes(crossed) == std::vector<std::size_t> {1000, 1000, 250, 250}));
+    failures += expect_eq(miscounted(crossed, 2500), 0u);
+    dense_indexes_row_driver<indexes_type_> rows_driver {crossed, driver};
+    failures += expect(succeeded(rows_driver.status));
+    if constexpr (kernel_ != nk_kernel_dot_k) {
+        std::array<key_t, 8> found_keys {};
+        std::array<typename indexes_type_::distance_t, 8> found_distances {};
+        auto const [result, status] = crossed.search(vectors.view().row(2499).as_vector(), rows_driver.handle(), {},
+                                                     std::span<key_t> {found_keys}, std::span {found_distances});
+        failures += expect(succeeded(status) && result.count > 0);
+        failures += expect(std::find(found_keys.begin(), found_keys.begin() + result.count, keys[2499]) !=
+                           found_keys.begin() + result.count);
+    }
+
+    // A batch filling the second generation exactly opens none, and one more row opens a third.
+    failures += expect(succeeded(crossed.insert(keys_of(2500, 1500), rows_of(2500, 1500), driver.executor).status));
+    failures += expect_eq(crossed.shards_count(), 4u);
+    failures += expect(
+        succeeded(crossed.insert(keys[4000], vectors.view().row(4000).as_vector(), rows_driver.handle()).status));
+    failures += expect_eq(crossed.shards_count(), 6u);
+    failures += expect_eq(crossed.size(), 4001u);
+    failures += expect_eq(miscounted(crossed, 4001), 0u);
+
+    // A monolith of the filled index striped back over two bounded shards opens three generations.
+    save_config_t const monolith = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k);
+    auto const [bytes, measure_status] = filled.storage_requirements(monolith);
+    failures += expect(succeeded(measure_status));
+    std::vector<std::byte> buffer(bytes);
+    failures += expect(succeeded(filled.save(bytes_span_t {buffer}, monolith, driver.executor)));
+    indexes_type_ restored {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    restored.bound_shards(bound);
+    failures += expect(succeeded(place_shards(restored)));
+    load_config_t striped;
+    striped.placement = checkpoint_placement_t::split_k;
+    failures += expect(succeeded(restored.load(bytes_view_t {buffer}, striped, driver.executor)));
+    failures += expect_eq(restored.size(), rows);
+    failures += expect((shard_sizes(restored) == std::vector<std::size_t> {834, 834, 833, 833, 833, 833}));
+    failures += expect_eq(miscounted(restored, rows), 0u);
+
+    // The guard every monolith save frames through, reached without four billion rows.
+    typename indexes_type_::shards_t const unplaced {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect_eq(shard_monolith_header(unplaced, indexes_type_::index_t::max_node_count_k + 1,
+                                                save_config_t {}, std::span<safegraphs_custom_field_t const> {})
+                              .status,
+                          status_t::overflow_k);
+    return failures;
+}
+
 /** The filtered algebra verbs keep only what their predicate admits: products name even documents
  *  alone and refuse a scan, MaxSim ranks even documents at their exact scores under a walk and a
  *  scan alike, and attention folds no key a predicate rejects. */
@@ -305,6 +408,7 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     failures_count += test_dense_indexes_absorb_many<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_absorb_refusals<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_abandoned_plan<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_generations<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_split<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_growth<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);

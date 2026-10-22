@@ -380,6 +380,75 @@ std::size_t test_vram_indexes_configuration(char const*, u64_t, executor_type_&)
     return 0;
 }
 
+/** Past @c shard_capacity, rows open generations of device shards on the same placements: one batch
+ *  fills as many as it needs with every key resolving once, and a batch crossing the bound tops the
+ *  open generation up and lands whole, its newest rows reachable by a search. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_vram_indexes_generations(u64_t seed, typename indexes_type_::executor_t& placement) {
+    using scalar_t = typename indexes_type_::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    constexpr std::size_t bound = 1000, rows = 5000;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+
+    dense_indexes_executor<indexes_type_> driver {placement};
+    if (failed(driver.status)) return failures + expect(false);
+    auto const vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_generations"));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    auto insert = [&](indexes_type_& indexes, std::size_t first, std::size_t count) {
+        return indexes
+            .insert(std::span<key_t const> {keys.data() + first, count},
+                    vectors(nk::range(first, first + count), nk::slice), driver.executor)
+            .status;
+    };
+    auto shard_sizes = [](indexes_type_ const& indexes) {
+        std::vector<std::size_t> sizes;
+        for (std::size_t shard = 0; shard != indexes.shards_count(); ++shard)
+            sizes.push_back(indexes.shard(shard).size());
+        return sizes;
+    };
+    auto miscounted = [&](indexes_type_ const& indexes, std::size_t count) {
+        std::size_t wrong = 0;
+        for (std::size_t row = 0; row != count; ++row) wrong += indexes.count(keys[row]) != 1;
+        return wrong;
+    };
+    auto bounded = [&](indexes_type_& indexes) {
+        indexes.bound_shards(bound);
+        return succeeded(place_shards(indexes, placement)) && succeeded(place_shards(indexes, placement)) &&
+               succeeded(indexes.reserve({bound, connectivity_16_k, dimensions}).status) &&
+               indexes.shard_capacity() == bound;
+    };
+
+    // One batch over two empty shards fills two generations and half a third.
+    indexes_type_ filled {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(bounded(filled));
+    failures += expect_eq(insert(filled, 0, rows), status_t::success_k);
+    failures += expect_eq(filled.size(), rows);
+    failures += expect((shard_sizes(filled) == std::vector<std::size_t> {1000, 1000, 1000, 1000, 500, 500}));
+    failures += expect_eq(miscounted(filled, rows), 0u);
+
+    // 750 rows a shard, then a batch of 1000 tops both up to the bound and opens a generation for
+    // the other 500, whole, and a search reaches the new generation's rows.
+    indexes_type_ crossed {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(bounded(crossed));
+    failures += expect_eq(insert(crossed, 0, 1500), status_t::success_k);
+    failures += expect_eq(crossed.shards_count(), 2u);
+    failures += expect_eq(insert(crossed, 1500, 1000), status_t::success_k);
+    failures += expect((shard_sizes(crossed) == std::vector<std::size_t> {1000, 1000, 250, 250}));
+    failures += expect_eq(miscounted(crossed, 2500), 0u);
+    if constexpr (kernel_ != nk_kernel_dot_k) {
+        std::array<key_t, 8> found_keys {};
+        std::array<typename indexes_type_::distance_t, 8> found_distances {};
+        auto const [result, status] = crossed.search(vectors.view().row(2499).as_vector(), driver.executor, {},
+                                                     std::span<key_t> {found_keys}, std::span {found_distances});
+        bool reached = false;
+        for (std::size_t match = 0; match != result.count; ++match) reached |= found_keys[match] == keys[2499];
+        failures += expect(succeeded(status) && reached);
+    }
+    return failures;
+}
+
 /** Composes one (dtype, kernel) cell's sharded suite over the collection of @p executor 's vendor
  *  on its device, reported under @p name prefixed by the vendor's toolkit. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename executor_type_>
@@ -403,6 +472,9 @@ std::size_t test_vram_indexes_configuration(char const* name, u64_t seed, execut
     if constexpr (executor_type_::vendor_k == gpu_vendor_t::nvidia_k)
         failures_count += test_dense_indexes_scan<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_planned_insert<indexes_t, kernel_>(seed, executor);
+    // Apple's tower opens no generations of shards.
+    if constexpr (executor_type_::vendor_k != gpu_vendor_t::apple_k)
+        failures_count += test_dense_vram_indexes_generations<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_absorb<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_absorb_many<indexes_t, kernel_>(seed, executor);

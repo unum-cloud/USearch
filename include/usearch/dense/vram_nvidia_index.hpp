@@ -1403,6 +1403,7 @@ struct vram_nvidia_index {
     friend struct vram_shard_fanout;
 
     expected<node_id_t> claim_(std::size_t rows) noexcept { return core_.claim_(rows); }
+    std::size_t claimed_() const noexcept { return core_.claimed_(); }
     void unclaim_(std::size_t first, std::size_t rows) noexcept { core_.unclaim_(first, rows); }
     status_t publish_(std::size_t first, std::size_t rows) noexcept { return core_.publish_(first, rows); }
     status_t fail_(status_t failure) noexcept { return core_.fail_(failure); }

@@ -1048,6 +1048,21 @@ check_c_limit_macros() {
         "$file spells a C limit macro - write std::numeric_limits<type>::lowest(), max(), quiet_NaN() or infinity():"
 }
 
+# The C library's math functions are spelled through `std::`, so overload resolution picks the `float`
+# or `double` flavour and no `<math.h>` macro shadows them; a bare `sqrt(` or a global `::atan2(` reaches
+# the C symbol. Members, other qualified calls and a like-named function's own definition pass. `round`
+# stays out, since the walks name their callables so.
+libc_math_names='sqrt|cbrt|pow|exp|exp2|expm1|log|log2|log10|log1p|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|asinh|acosh|atanh|hypot|fabs|fmod|remainder|floor|ceil|trunc|lround|llround|nearbyint|rint|fma|fmin|fmax|fdim|copysign|ldexp|frexp|modf|scalbn|ilogb|logb|erf|erfc|tgamma|lgamma'
+check_bare_libc_math() {
+    local bare
+    bare=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(#|//|/\*|\*( |/|$))' |
+        sed -E 's/"([^"\\]|\\.)*"//g; s://.*$::' |
+        grep -E "(^\+|[^A-Za-z0-9_:.>]|(^\+|[^A-Za-z0-9_])::)($libc_math_names)[[:space:]]*\(" |
+        grep -vE "\b(void|auto|bool|float|double|[a-z0-9_]+_t)[[:space:]]+($libc_math_names)[[:space:]]*\(" || true)
+    [ -z "$bare" ] || fail "$bare" \
+        "$file calls a C math function bare - spell it std::sqrt(x) or std::atan2(y, x):"
+}
+
 # `std::min` / `std::max` re-derive what the shared vocabulary already names, and the parenthesized
 # `(std::min<...>)` spelling exists only to dodge the `windows.h` min/max macros - a ritual that
 # `min_of` / `max_of` remove outright. Library code says what it means; tests and benches, where the
@@ -1882,6 +1897,7 @@ judge_path() {
     *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
         check_qualified_namespace
         check_c_limit_macros
+        check_bare_libc_math
         check_template_parameter_underscores
         check_template_type_suffixes
         check_requires_clauses

@@ -278,6 +278,7 @@ struct specialized_index {
 
     index_type_& index;
 
+    void bound_shards(std::size_t rows) noexcept;
     status_t emplace(fu_memory_domain_id_t memory_domain) noexcept
         requires is_ram_index<index_type_>;
     status_t emplace(int device) noexcept
@@ -389,6 +390,10 @@ struct specialized_index {
     static save_config_t save_config_of(std::string_view path) noexcept;
 };
 
+template <typename index_type_>
+void specialized_index<index_type_>::bound_shards(std::size_t rows) noexcept {
+    index.bound_shards(rows);
+}
 template <typename index_type_>
 status_t specialized_index<index_type_>::emplace(fu_memory_domain_id_t memory_domain) noexcept
     requires is_ram_index<index_type_>

@@ -3274,9 +3274,8 @@ std::size_t dense_indexes_expect_restored(indexes_type_& indexes, vectors_type_ 
 
 /** Two indexes built over the halves of one dataset merge into one, the second half passing through
  *  an index never reserved, which takes its geometry: the donors end empty, every key resolves to
- *  one row with its vector intact, the refine re-selects every row of the recipient's shards that
- *  took an appended part while the rest heal, and the merged search finds rows of either half -
- *  while absorbing itself refuses. */
+ *  one row with its vector intact, the refine re-selects at least every appended row while the rest
+ *  heal, and the merged search finds rows of either half - while absorbing itself refuses. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
@@ -3319,10 +3318,8 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
     failures += expect(succeeded(absorbed_status));
     failures += expect_eq(relay.size(), 0u);
     failures += dense_indexes_expect_restored(recipient, vectors, keys, dimensions, executor, seed);
-    // Relay shard s lands in recipient shard s, every row of which the refine must re-select.
-    std::size_t refined_rows = 0;
-    for (std::size_t shard = 0; shard != relay.shards_count(); ++shard) refined_rows += recipient.shard(shard).size();
-    failures += expect(absorbed.visited_nodes >= refined_rows && absorbed.changed_nodes > 0);
+    // Every appended row re-selects, whatever shard it landed in.
+    failures += expect(absorbed.visited_nodes >= rows - half && absorbed.changed_nodes > 0);
     // The refine heals while its island count shrinks, which a dot graph's hubs can stall short of
     // every row.
     auto const [health, health_status] = recipient.health(executor);
@@ -3363,8 +3360,8 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
  *  a group naming a null donor refuses before any lands, leaving every donor whole; a plan whose
  *  first run is cancelled mid re-selection has consumed every donor and refuses insertions, and on
  *  a GPU saves, while it lives; the next run continues it, and it finishes having re-selected
- *  exactly as many nodes as an uncancelled absorb of the same quarters, every key resolving to its
- *  own row. */
+ *  exactly as many nodes as an uncancelled absorb of the same quarters, its rows spread evenly over
+ *  the recipient's shards and every key resolving to its own row. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
@@ -3458,6 +3455,11 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
         failures += expect(absorbed.visited_nodes >= baseline_visited);
     }
     failures += expect_eq(recipient.size(), rows);
+    // Donor shards differ by a row at most, and each lands on the recipient shard with the fewest.
+    std::size_t fewest = rows, most = 0;
+    for (std::size_t shard = 0; shard != recipient.shards_count(); ++shard)
+        fewest = std::min(fewest, recipient.shard(shard).size()), most = std::max(most, recipient.shard(shard).size());
+    failures += expect(most - fewest <= donors.size());
     failures += dense_indexes_expect_restored(recipient, vectors, keys, dimensions, executor, seed);
     auto const [health, health_status] = recipient.health(executor);
     failures += expect(succeeded(health_status));

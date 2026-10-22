@@ -687,6 +687,10 @@ typedef struct usearch_ram_options_t {
 
     /** Number of entries in @c memory_domains; zero derives. */
     size_t memory_domains_count;
+
+    /** Rows one shard may hold before the index opens another generation of shards on the same
+     *  domains; zero, or anything past the 32-bit ID space, means 2^32 - 2. */
+    size_t shard_capacity;
 } usearch_ram_options_t;
 
 /**
@@ -714,6 +718,11 @@ typedef struct usearch_vram_options_t {
 
     /** Number of entries in @c devices; zero derives. */
     size_t devices_count;
+
+    /** Rows one shard may hold before the index opens another generation of shards on the same
+     *  devices, while their memory lasts; zero, or anything past the 32-bit ID space, means
+     *  2^32 - 2. */
+    size_t shard_capacity;
 } usearch_vram_options_t;
 
 /**
