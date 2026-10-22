@@ -1,4 +1,4 @@
 # NumKong: the distance kits and tensors, header-only, as every unit inlines the kernels its CPU or GPU class runs.
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong 20feb3c1b1a24fabe4bfb177c62a1260e3b5729a
+    numkong numkong::header https://github.com/ashvardanian/NumKong 3ab2df21bf540a11dcc5a7fd6a9dbe9d4a568ede
 )
