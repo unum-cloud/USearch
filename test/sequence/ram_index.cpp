@@ -3,7 +3,8 @@
  *  @author Ash Vardanian
  *  @date October 13, 2026
  *  @brief The sequence suite: the basic scenarios over owned strings under byte Levenshtein, rune
- *      Levenshtein and window overlap, then every compiled kit against exact oracles.
+ *      Levenshtein, window overlap and Needleman-Wunsch over packed nucleotides, then every
+ *      compiled kit against exact oracles.
  *
  *  Strings are eight planted templates with an eighth of their symbols edited, so distances
  *  cluster by template while the bytes differ. The Levenshtein alphabet mixes runes of one to
@@ -13,6 +14,8 @@
  *  the two-row Wagner-Fischer recurrence over bytes or runes, and a brute-force count of the
  *  windows two strings share.
  */
+#include <cstring> // `std::memcmp` - the folded nucleotide costs
+
 #include <algorithm>   // `std::min`, `std::max`
 #include <array>       // `std::array` - the window widths, the handmade triples, a round's distances
 #include <memory>      // `std::unique_ptr`
@@ -144,6 +147,77 @@ static sz_size_t overlap_oracle(std::string_view query, std::string_view stored)
     return static_cast<sz_size_t>((longer - hits) * static_cast<u64_t>(overlap_resolution_k) / longer);
 }
 
+/** The Needleman-Wunsch fixture's costs over the nucleotides, packed two bits a code: transitions
+ *  cost one, transversions and gaps two. */
+constexpr needleman_wunsch_costs_t nucleotide_costs() noexcept {
+    needleman_wunsch_costs_t costs {};
+    costs.code_bits = 2, costs.classes = 4, costs.gap = 2;
+    for (std::size_t first = 0; first != 4; ++first)
+        for (std::size_t second = 0; second != 4; ++second)
+            costs.substitutions[first][second] = first == second ? 0 : (first & 1) == (second & 1) ? 1 : 2;
+    return costs;
+}
+
+constexpr needleman_wunsch_costs_t nucleotide_costs_k = nucleotide_costs();
+
+/** The codes of a packed @p row: its bits read low first from the byte past the first, as many as
+ *  fit less the unused slots that first byte counts. */
+static std::vector<u32_t> unpacked_codes(std::string_view row, u32_t code_bits) {
+    std::vector<u32_t> codes;
+    if (row.empty()) return codes;
+    std::size_t const count = (row.size() - 1) * 8 / code_bits - static_cast<u8_t>(row[0]);
+    for (std::size_t index = 0; index != count; ++index) {
+        u32_t code = 0;
+        for (u32_t bit = 0; bit != code_bits; ++bit) {
+            std::size_t const position = index * code_bits + bit;
+            code |= (static_cast<u8_t>(row[1 + position / 8]) >> (position % 8) & 1u) << bit;
+        }
+        codes.push_back(code);
+    }
+    return codes;
+}
+
+/** @p codes packed at @p code_bits apiece behind the count of unused slots, as the metric reads
+ *  them. */
+static std::string packed_row(std::span<u32_t const> codes, u32_t code_bits) {
+    std::size_t const data_bytes = (codes.size() * code_bits + 7) / 8;
+    std::string row(1 + data_bytes, '\0');
+    row[0] = static_cast<char>(data_bytes * 8 / code_bits - codes.size());
+    for (std::size_t index = 0; index != codes.size(); ++index)
+        for (u32_t bit = 0; bit != code_bits; ++bit) {
+            std::size_t const position = index * code_bits + bit;
+            row[1 + position / 8] = static_cast<char>(static_cast<u8_t>(row[1 + position / 8]) |
+                                                      ((codes[index] >> bit & 1u) << (position % 8)));
+        }
+    return row;
+}
+
+/** The Needleman-Wunsch cost between two packed rows under @p costs through the two-row
+ *  recurrence: the oracle, sharing no code with the metric's kernels or unpacking. */
+static sz_size_t needleman_wunsch_oracle(std::string_view first, std::string_view second,
+                                         needleman_wunsch_costs_t const& costs) {
+    std::vector<u32_t> const rows = unpacked_codes(first, costs.code_bits);
+    std::vector<u32_t> const columns = unpacked_codes(second, costs.code_bits);
+    std::vector<sz_size_t> previous_row(columns.size() + 1), current_row(columns.size() + 1);
+    for (std::size_t column = 0; column <= columns.size(); ++column) previous_row[column] = column * costs.gap;
+    for (std::size_t row = 1; row <= rows.size(); ++row) {
+        current_row[0] = row * costs.gap;
+        for (std::size_t column = 1; column <= columns.size(); ++column)
+            current_row[column] = std::min(
+                {previous_row[column - 1] + costs.substitutions[rows[row - 1]][columns[column - 1]],
+                 previous_row[column] + costs.gap, current_row[column - 1] + costs.gap});
+        std::swap(previous_row, current_row);
+    }
+    return previous_row[columns.size()];
+}
+
+/** The nucleotides of @p text packed two bits a code, A, C, G and T in that order. */
+static std::string packed_nucleotides(std::string_view text) {
+    std::vector<u32_t> codes;
+    for (char const nucleotide : text) codes.push_back(static_cast<u32_t>(overlap_alphabet_k.find(nucleotide)));
+    return packed_row(codes, 2);
+}
+
 /** Three stored strings and their pairwise distances, stated by hand. */
 struct sequence_handmade_t {
     std::array<sequence_value_t, 3> values;
@@ -220,10 +294,46 @@ struct overlap_fixture_t {
     }
 };
 
+struct needleman_wunsch_fixture_t {
+    using index_t = sequence_index_t;
+    using value_t = sequence_value_t;
+    using allocator_t = index_t::allocator_t;
+    using metric_t = needleman_wunsch_metric_t;
+
+    static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
+    }
+    static metric_t make_metric() noexcept {
+        metric_t metric;
+        [[maybe_unused]] status_t const sized = metric.init(sequence_staging_limit_k, nucleotide_costs_k);
+        return metric;
+    }
+    static codec_t make_codec() noexcept { return {}; }
+    static us::utilities::uuid_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0A11C0DEull + ordinal); }
+    static sz_size_t oracle(std::string_view query, std::string_view stored) {
+        return needleman_wunsch_oracle(query, stored, nucleotide_costs_k);
+    }
+    static bool value_equals(std::string_view first, std::string_view second) noexcept { return first == second; }
+
+    /** "ACGT", "ACGA" and "TTTT": one transversion apart, then two transversions and a transition,
+     *  then three transversions and a transition. */
+    static sequence_handmade_t make_handmade(allocator_t const& allocator) {
+        return {{make_value(packed_nucleotides("ACGT"), allocator), make_value(packed_nucleotides("ACGA"), allocator),
+                 make_value(packed_nucleotides("TTTT"), allocator)},
+                {{{0, 2, 5}, {2, 0, 7}, {5, 7, 0}}}};
+    }
+    static std::vector<value_t> make_values(std::size_t count, u64_t seed, allocator_t const& allocator) {
+        std::vector<value_t> values = generate_values(count, seed, overlap_alphabet_k, overlap_symbols_k, allocator);
+        for (value_t& value : values) value = make_value(packed_nucleotides(std::string_view {value}), allocator);
+        return values;
+    }
+};
+
 static_assert(value<sequence_value_t>);
 static_assert(metric<levenshtein_bytes_fixture_t::metric_t, sequence_value_t, sz_size_t>);
 static_assert(metric<levenshtein_runes_fixture_t::metric_t, sequence_value_t, sz_size_t>);
 static_assert(metric<overlap_fixture_t::metric_t, sequence_value_t, sz_size_t>);
+static_assert(metric<needleman_wunsch_fixture_t::metric_t, sequence_value_t, sz_size_t>);
 static_assert(query<std::string_view, levenshtein_runes_fixture_t::metric_t, sequence_value_t>);
 static_assert(query<std::string_view, overlap_fixture_t::metric_t, sequence_value_t>);
 static_assert(value_codec<codec_t, sequence_value_t>);
@@ -323,6 +433,77 @@ std::size_t check_overlap_kit(u64_t seed) {
     return failures;
 }
 
+/** One Needleman-Wunsch kit against the two-row oracle over five-bit codes. The fold first: the
+ *  nucleotides' scores into the fixture's costs, a table whose gap passes 15 scaled into it, and a
+ *  pair scoring above its mean self-score refused. Then every length from empty to one whose cost
+ *  from a short query passes a 16-bit cell, exact within the radius and above it otherwise, at an
+ *  unbounded radius and at a tight one that stops columns early. */
+template <sz_capability_t capability_>
+std::size_t check_needleman_wunsch_kit(u64_t seed) {
+    constexpr std::size_t side_k = needleman_wunsch_byte_alphabet_k, classes_k = 24, generated_k = 40;
+    constexpr std::size_t longest_k = 4500;
+    constexpr sz_size_t tight_radius_k = 40;
+    std::size_t failures = 0;
+
+    std::vector<i8_t> nucleotides(side_k * side_k);
+    for (std::size_t first = 0; first != 4; ++first)
+        for (std::size_t second = 0; second != 4; ++second)
+            nucleotides[first * side_k + second] = first == second ? 2 : (first & 1) == (second & 1) ? 1 : 0;
+    auto const [nucleotide_folded, nucleotide_status] = needleman_wunsch_costs_t::fold(nucleotides, 2);
+    failures += expect_eq(nucleotide_status, status_t::success_k);
+    failures += expect(std::memcmp(&nucleotide_folded, &nucleotide_costs_k, sizeof(nucleotide_costs_k)) == 0);
+
+    // Self-scores of 8 to 11 and cross-scores of -3 to 3 keep every cost at 14 or below, so the gap
+    // of 20 alone scales the table by 3/4.
+    std::vector<i8_t> similarities(side_k * side_k);
+    for (std::size_t first = 0; first != classes_k; ++first)
+        for (std::size_t second = 0; second != classes_k; ++second)
+            similarities[first * side_k + second] = static_cast<i8_t>(
+                first == second ? 8 + first % 4 : static_cast<int>(first * second % 7) - 3);
+    auto const [costs, fold_status] = needleman_wunsch_costs_t::fold(similarities, 20);
+    failures += expect_eq(fold_status, status_t::success_k);
+    failures += expect_eq(costs.code_bits, 5u);
+    failures += expect_eq(costs.classes, classes_k);
+    failures += expect_eq(costs.gap, 15u);
+    // Codes 0 and 1 cost (8 + 9) / 2 + 3 = 11.5, scaled to 8.625 and rounded to 9.
+    failures += expect_eq(costs.substitutions[0][1], 9u);
+    failures += expect_eq(costs.substitutions[5][5], 0u);
+    similarities[1] = 100;
+    failures += expect_eq(needleman_wunsch_costs_t::fold(similarities, 20).status, status_t::config_mismatch_k);
+
+    splitmix64_t random_generator {stream_key(seed, "needleman_wunsch")};
+    uniform_below<u32_t> const code_distribution {classes_k}, length_distribution {60};
+    std::vector<std::string> candidates;
+    for (std::size_t candidate = 0; candidate != generated_k; ++candidate) {
+        std::size_t const length = candidate == 0                 ? 0
+                                   : candidate == 1               ? 1
+                                   : candidate + 1 == generated_k ? longest_k
+                                                                  : length_distribution(random_generator) + 1;
+        std::vector<u32_t> codes(length);
+        for (u32_t& code : codes) code = code_distribution(random_generator);
+        candidates.push_back(packed_row(codes, costs.code_bits));
+    }
+
+    needleman_wunsch_metric<typename needleman_wunsch_ladder<capability_>::kit_t> metric;
+    failures += expect_eq(metric.init(generated_k, costs), status_t::success_k);
+    for (sz_size_t const radius : {unbounded_radius<sz_size_t>(), tight_radius_k}) {
+        for (std::size_t const query : {std::size_t {2}, std::size_t {0}, generated_k - 1}) {
+            metric.reset(std::string_view {candidates[query]});
+            for (std::string const& candidate : candidates)
+                failures += expect(metric.push(std::string_view {candidate}) == metric_staging_t::staged_k);
+            std::array<sz_size_t, generated_k> distances;
+            metric.drain(distances, radius);
+            failures += expect_eq(metric.status(), status_t::success_k);
+            for (std::size_t candidate = 0; candidate != generated_k; ++candidate) {
+                sz_size_t const truth = needleman_wunsch_oracle(candidates[query], candidates[candidate], costs);
+                failures += truth <= radius ? expect_eq(distances[candidate], truth)
+                                            : expect(distances[candidate] > radius);
+            }
+        }
+    }
+    return failures;
+}
+
 /** A saved monolith read back from storage, its strings ragged rows the view locates through its
  *  directory: generated strings, the empty one, and one crossing a 4 KiB block. */
 std::size_t check_sequence_nvme(u64_t seed) {
@@ -405,6 +586,7 @@ std::size_t check_sequence(settings_t const& settings) {
     failures += test_basic_scenarios<levenshtein_bytes_fixture_t>(settings.seed);
     failures += test_basic_scenarios<levenshtein_runes_fixture_t>(settings.seed);
     failures += test_basic_scenarios<overlap_fixture_t>(settings.seed);
+    failures += test_basic_scenarios<needleman_wunsch_fixture_t>(settings.seed);
     failures += test_basic_safegraphs_roundtrip<levenshtein_bytes_fixture_t>(settings.seed, "uuid", "levenshtein");
     failures += test_basic_safegraphs_roundtrip<levenshtein_runes_fixture_t>(settings.seed, "uuid", "levenshtein-utf8");
     failures += test_basic_safegraphs_roundtrip<overlap_fixture_t>(settings.seed, "uuid", "overlap");
@@ -417,6 +599,8 @@ std::size_t check_sequence(settings_t const& settings) {
     failures += check_levenshtein_kit<sz_cap_any_k, sz_levenshtein_runes_k>(settings.seed);
     failures += check_overlap_kit<sz_cap_serial_k>(settings.seed);
     failures += check_overlap_kit<sz_cap_any_k>(settings.seed);
+    failures += check_needleman_wunsch_kit<sz_cap_serial_k>(settings.seed);
+    failures += check_needleman_wunsch_kit<sz_cap_any_k>(settings.seed);
     failures += check_sequence_nvme(settings.seed);
     failures += check_sequence_nvme_node_ids(settings.seed);
     return report("sequence", failures);

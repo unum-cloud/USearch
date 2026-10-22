@@ -52,6 +52,7 @@ inline std::string_view token_of(usearch_sequence_metric_t metric) noexcept {
     case usearch_sequence_metric_levenshtein_bytes_k: return "levenshtein";
     case usearch_sequence_metric_levenshtein_utf8_k: return "levenshtein-utf8";
     case usearch_sequence_metric_overlap_k: return "overlap";
+    case usearch_sequence_metric_needleman_wunsch_k: return "needleman-wunsch";
     default: return {};
     }
 }
@@ -60,29 +61,32 @@ inline std::string_view token_of(usearch_sequence_metric_t metric) noexcept {
 inline usearch_sequence_metric_t sequence_metric_of(std::string_view token) noexcept {
     for (usearch_sequence_metric_t metric :
          {usearch_sequence_metric_levenshtein_bytes_k, usearch_sequence_metric_levenshtein_utf8_k,
-          usearch_sequence_metric_overlap_k})
+          usearch_sequence_metric_overlap_k, usearch_sequence_metric_needleman_wunsch_k})
         if (token == token_of(metric)) return metric;
     return usearch_sequence_metric_unknown_k;
 }
 
-/** The kind, window widths and connectivity a sequence handle freezes, as an init or a checkpoint
- *  states them; every variant holds one. */
+/** The kind, window widths, costs and connectivity a sequence handle freezes, as an init or a
+ *  checkpoint states them; every variant holds one. */
 struct sequence_geometry_t {
     usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
 
     /** The window widths the overlap kind hashes, in bytes; empty for every other kind. */
     growing_buffer<std::size_t, forkunion_allocator_t> window_widths {forkunion_allocator_t {no_memory_domain_k}};
 
+    /** The folded table and gap cost the Needleman-Wunsch kind scores with; unfolded for every
+     *  other kind. */
+    us::sequence::needleman_wunsch_costs_t costs {};
+
     /** Neighbors per node the insertions select; zero until frozen, which takes the default. */
     std::size_t connectivity = 0;
 };
 
-/** Calls @p callback with a factory of the metric @p metric names over a thread's arena, sized for
- *  a round of candidates, scoring with the kits @p capability_ picks and prefetching through
- *  @p cache_hints_type_; @p window_widths are the overlap kind's alone. */
+/** Calls @p callback with a factory of the metric @p geometry names over a thread's arena, sized
+ *  for a round of candidates, scoring with the kits @p capability_ picks and prefetching through
+ *  @p cache_hints_type_. */
 template <sz_capability_t capability_, typename cache_hints_type_, typename callback_type_>
-decltype(auto) with_sequence_metric(usearch_sequence_metric_t metric, std::span<std::size_t const> window_widths,
-                                    callback_type_&& callback) noexcept {
+decltype(auto) with_sequence_metric(sequence_geometry_t const& geometry, callback_type_&& callback) noexcept {
     using bytes_t = us::sequence::levenshtein_metric<
         typename us::sequence::levenshtein_ladder<sz_levenshtein_bytes_k, capability_>::kit_t, thread_allocator_t,
         cache_hints_type_>;
@@ -91,6 +95,9 @@ decltype(auto) with_sequence_metric(usearch_sequence_metric_t metric, std::span<
         cache_hints_type_>;
     using overlap_t = us::sequence::overlap_metric<typename us::sequence::overlap_ladder<capability_>::kit_t,
                                                    thread_allocator_t, cache_hints_type_>;
+    using needleman_wunsch_t =
+        us::sequence::needleman_wunsch_metric<typename us::sequence::needleman_wunsch_ladder<capability_>::kit_t,
+                                              thread_allocator_t, cache_hints_type_>;
     auto levenshtein = [&]<typename metric_type_>(std::type_identity<metric_type_>) noexcept {
         return callback([](thread_allocator_t const& allocator, std::size_t staging) noexcept {
             metric_type_ made {allocator};
@@ -98,13 +105,20 @@ decltype(auto) with_sequence_metric(usearch_sequence_metric_t metric, std::span<
             return expected<metric_type_> {std::move(made), ready};
         });
     };
-    switch (metric) {
+    switch (geometry.metric) {
     case usearch_sequence_metric_levenshtein_utf8_k: return levenshtein(std::type_identity<runes_t> {});
     case usearch_sequence_metric_overlap_k:
-        return callback([window_widths](thread_allocator_t const& allocator, std::size_t staging) noexcept {
+        return callback([window_widths = to_span(geometry.window_widths)](thread_allocator_t const& allocator,
+                                                                          std::size_t staging) noexcept {
             overlap_t made {allocator};
             status_t const ready = made.init(staging, window_widths);
             return expected<overlap_t> {std::move(made), ready};
+        });
+    case usearch_sequence_metric_needleman_wunsch_k:
+        return callback([&costs = geometry.costs](thread_allocator_t const& allocator, std::size_t staging) noexcept {
+            needleman_wunsch_t made {allocator};
+            status_t const ready = made.init(staging, costs);
+            return expected<needleman_wunsch_t> {std::move(made), ready};
         });
     default: return levenshtein(std::type_identity<bytes_t> {});
     }
@@ -169,8 +183,7 @@ expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::insert(usearch
         return insert_entries(index, arguments.keys, arguments.count, connectivity,
                               expansion ? expansion : connectivity * 2, make_metric, build, ticks, executor);
     };
-    return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
-                                                             with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry, with_metric);
 }
 
 template <cpu_class_t cpu_class_>
@@ -186,8 +199,7 @@ expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::search(usearch
                               arguments.expansion_factor, arguments.traversal, arguments.predicate, make_metric,
                               query_of, landing, ticks, executor);
     };
-    return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
-                                                             with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry, with_metric);
 }
 
 template <cpu_class_t cpu_class_>
@@ -199,8 +211,7 @@ status_t sequence_ram_variant<cpu_class_>::refine(refine_plan_t& plan, progress_
         if (failed(prepare_status)) return prepare_status;
         return drive_refinement(plan, scratch, basic::keep_diverse_t {geometry.connectivity}, ticks, executor);
     };
-    return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
-                                                             with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry, with_metric);
 }
 
 template <cpu_class_t cpu_class_>
@@ -215,12 +226,23 @@ status_t sequence_ram_variant<cpu_class_>::save(std::string_view path, executor_
         if (!widths_text.empty()) widths_text.push_back_reserved(',');
         for (char const digit : decimal_of(width, width_text)) widths_text.push_back_reserved(digit);
     }
-    std::array<safegraphs_custom_field_t, 2> const fields {{
-        {"connectivity", decimal_of(geometry.connectivity, connectivity_text)},
-        {"window_widths", to_string_view(widths_text)},
-    }};
+    // The folded costs as one hexadecimal digit per cell, row by row over the classes.
+    us::sequence::needleman_wunsch_costs_t const& costs = geometry.costs;
+    std::array<char, 24> gap_text;
+    std::array<char, us::sequence::needleman_wunsch_classes_k * us::sequence::needleman_wunsch_classes_k> costs_text;
+    std::size_t const cells = std::size_t {costs.classes} * costs.classes;
+    for (std::size_t cell = 0; cell != cells; ++cell)
+        costs_text[cell] = "0123456789abcdef"[costs.substitutions[cell / costs.classes][cell % costs.classes]];
+    std::array<safegraphs_custom_field_t, 3> fields {
+        {{"connectivity", decimal_of(geometry.connectivity, connectivity_text)}}};
+    std::size_t recorded = 1;
+    if (!widths.empty()) fields[recorded++] = {"window_widths", to_string_view(widths_text)};
+    if (costs.code_bits) {
+        fields[recorded++] = {"substitution_costs", std::string_view {costs_text.data(), cells}};
+        fields[recorded++] = {"gap_cost", decimal_of(costs.gap, gap_text)};
+    }
     save_config_t config;
-    config.provenance = std::span {fields}.first(widths.empty() ? 1 : 2);
+    config.provenance = std::span {fields}.first(recorded);
     return safegraphs_write_index(path, index, us::sequence::codec_t {}, executor, config, token_of(geometry.metric),
                                   ticks);
 }
@@ -274,8 +296,7 @@ expected<traversal_telemetry_t> sequence_nvme_variant<cpu_class_>::search(usearc
         return search_entries(index, arguments.count, arguments.wanted, arguments.expansion_factor, arguments.traversal,
                               arguments.predicate, make_metric, query_of, landing, ticks, executor);
     };
-    return with_sequence_metric<capability_k, cache_hints_t>(geometry.metric, to_span(geometry.window_widths),
-                                                             with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry, with_metric);
 }
 
 #if USEARCH_ARCH_CUDA_
@@ -301,6 +322,9 @@ extern template struct us::sequence::vram_nvidia_index<
 extern template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_overlap_k, u32_t,
                                                        sequence_nvidia_capabilities_k,
                                                        sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
+extern template struct us::sequence::vram_nvidia_index<
+    usearch_sequence_metric_needleman_wunsch_k, u32_t, sequence_nvidia_capabilities_k,
+    sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>>;
 
 /** A GPU overlap index scores in the same fixed point as the RAM metric. */
 template <typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
@@ -309,7 +333,8 @@ inline constexpr usearch_distance_t distance_unit<
     1.0 / us::sequence::overlap_resolution_k;
 
 /** The sequence alternative on any NVIDIA GPU: the basic VRAM index under the sequence kind
- *  @p metric_ - Levenshtein over bytes or UTF-8 runes, or overlap - with 32-bit node IDs. */
+ *  @p metric_ - Levenshtein over bytes or UTF-8 runes, overlap, or Needleman-Wunsch - with 32-bit
+ *  node IDs. */
 template <usearch_sequence_metric_t metric_>
 struct sequence_vram_nvidia_variant
     : vram_nvidia_variant<us::sequence::vram_nvidia_index<metric_, u32_t, sequence_nvidia_capabilities_k,

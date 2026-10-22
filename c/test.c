@@ -1661,9 +1661,10 @@ void test_sequence_round_trip(void) {
 }
 
 /** A GPU sequence index takes byte and rune Levenshtein, inserts and describes its rows, and lands
- *  a search's matches in its executor's device arena; alignments and the verbs it lacks refuse. An
- *  overlap index lands its scores in a host arena on the scale a RAM one does. Skipped without a
- *  GPU. */
+ *  a search's matches in its executor's device arena; local alignments, a global one without
+ *  weights and the verbs it lacks refuse. An overlap index lands its scores in a host arena on the
+ *  scale a RAM one does, and a Needleman-Wunsch one its exact costs over packed codes. Skipped
+ *  without a GPU. */
 void test_sequence_vram(void) {
     usearch_outcome_t outcome = {0};
     size_t devices_count = 0;
@@ -1678,8 +1679,7 @@ void test_sequence_vram(void) {
                                                                 .outcome = &outcome,
                                                                 .metric = usearch_sequence_metric_needleman_wunsch_k,
                                                                 .vram = vram});
-    expect_eq(outcome.status, usearch_status_unsupported_k, "No alignment serves a GPU yet");
-    expect(refused == NULL, "A refused initialization returns no handle");
+    expect_eq(outcome.status, usearch_status_config_mismatch_k, "An alignment needs weights");
     usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &refused,
                                                                 .outcome = &outcome,
                                                                 .metric = usearch_sequence_metric_levenshtein_bytes_k,
@@ -1768,8 +1768,47 @@ void test_sequence_vram(void) {
     expect(overlaps.counts[0] == 2 && value_of(overlaps.keys[0]) == 0 && overlaps.scores[0] == 0,
            "A stored overlap query finds itself first");
     expect(value_of(overlaps.keys[1]) == 2 && overlaps.scores[1] == 0.25, "Missing a quarter of windows scores 0.25");
-    usearch_arena_free(host_arena);
     usearch_sequence_free(overlap);
+
+    // "ACGT", "ACGA", "ACG" and "TTTT" packed four nucleotides a byte behind their unused slots,
+    // scored with transitions at 1, transversions and gaps at 2.
+    static int8_t similarities[256 * 256];
+    for (size_t first = 0; first != 4; ++first)
+        for (size_t second = 0; second != 4; ++second)
+            similarities[first * 256 + second] = first == second ? 2 : (first & 1) == (second & 1) ? 1 : 0;
+    usearch_sequence_weights_t const weights = {.substitution_matrix = similarities, .gap = 2};
+    unsigned char const packed[] = {0x00, 0xE4, 0x00, 0x24, 0x01, 0x24, 0x00, 0xFF};
+    size_t const packed_offsets[] = {0, 2, 4, 6, 8};
+    usearch_sequence_index_t aligned = NULL;
+    usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &aligned,
+                                                                .outcome = &outcome,
+                                                                .metric = usearch_sequence_metric_needleman_wunsch_k,
+                                                                .weights = &weights,
+                                                                .vram = vram});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = aligned,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 4,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .sequences = {packed, packed_offsets, usearch_scalar_u8_k}});
+    expect(!outcome.message, outcome.message);
+    usearch_matches_view_t alignments = {0};
+    usearch_sequence_search(&(usearch_sequence_search_t) {.index = aligned,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 1,
+                                                          .queries = {packed, packed_offsets, usearch_scalar_u8_k},
+                                                          .matches = &alignments,
+                                                          .arena = host_arena,
+                                                          .wanted = 4});
+    expect(!outcome.message, outcome.message);
+    expect(alignments.counts[0] == 4 && value_of(alignments.keys[0]) == 0 && alignments.scores[0] == 0,
+           "A stored alignment query finds itself first");
+    expect(alignments.scores[1] == 2 && alignments.scores[2] == 2 && alignments.scores[3] == 5,
+           "A transversion and a gap cost 2, and two transversions with a transition 5");
+    usearch_arena_free(host_arena);
+    usearch_sequence_free(aligned);
 
     char const path[] = "usearch-test-c-sequence-vram.safegraphs";
     usearch_sequence_save(&(usearch_sequence_save_t) {.index = index,

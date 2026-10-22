@@ -72,11 +72,8 @@ struct sequence_index_options_t {
     /** Row-major @c alphabet_k × @c alphabet_k scores; empty under a uniform metric. */
     std::vector<us::utilities::i8_t> substitution;
 
-    /** Cost of opening a gap, and the flat gap cost of the linear kind. */
-    us::utilities::i8_t gap_open = 0;
-
-    /** Cost of extending an open gap; the linear kind ignores it. */
-    us::utilities::i8_t gap_extend = 0;
+    /** Cost of one unaligned symbol. */
+    us::utilities::i8_t gap = 0;
 
     /** Window widths in bytes the overlap kind compares at; empty under every other kind. */
     std::vector<std::size_t> window_widths;
@@ -95,8 +92,8 @@ using sequence_cursor_t = graph_cursor<sequence_index_t>;
  *  kind, weights, window widths and connectivity. */
 static bool same_kind(sequence_index_options_t const& index, sequence_index_options_t const& receiver) {
     return index.metric == receiver.metric && index.connectivity == receiver.connectivity &&
-           index.substitution == receiver.substitution && index.gap_open == receiver.gap_open &&
-           index.gap_extend == receiver.gap_extend && index.window_widths == receiver.window_widths;
+           index.substitution == receiver.substitution && index.gap == receiver.gap &&
+           index.window_widths == receiver.window_widths;
 }
 
 /** Whether the kind scores without scoring parameters, and so refuses any weights. */
@@ -107,10 +104,7 @@ static bool levenshtein_metric(usearch_sequence_metric_t metric) {
 
 /** Whether the kind reads a substitution matrix and gap costs. */
 static bool alignment_metric(usearch_sequence_metric_t metric) {
-    return metric == usearch_sequence_metric_needleman_wunsch_k ||
-           metric == usearch_sequence_metric_needleman_wunsch_gotoh_k ||
-           metric == usearch_sequence_metric_smith_waterman_k ||
-           metric == usearch_sequence_metric_smith_waterman_gotoh_k;
+    return metric == usearch_sequence_metric_needleman_wunsch_k;
 }
 
 /** Whether the kind is one this build implements at all. */
@@ -163,77 +157,30 @@ static double levenshtein(std::span<unit_ const> first, std::span<unit_ const> s
     return static_cast<double>(row[second.size()]);
 }
 
-/** Global alignment with affine gaps - Needleman-Wunsch-Gotoh - as a negated similarity.
- *  Three recurrences run together: an aligned pair, a gap in the first, a gap in the second.
- *  An @p extend equal to @c gap_open collapses it to the flat-gap Needleman-Wunsch kind. */
+/** Needleman-Wunsch with a linear gap: the least cost turning @p first into @p second, a
+ *  substitution costing the mean of the two symbols' self-scores less their shared score and every
+ *  unaligned symbol @c gap, as the header defines the kind. */
 static double global_alignment(bytes_view_t first, bytes_view_t second, sequence_index_options_t const& parameters,
-                               us::utilities::i64_t extend, std::vector<us::utilities::i64_t>& scratch) {
-    us::utilities::i64_t const open = parameters.gap_open;
-    us::utilities::i64_t const unreachable = std::numeric_limits<us::utilities::i64_t>::min() / 4;
-    std::size_t const width = second.size() + 1;
-    scratch.assign(width * 3, 0);
-    std::span<us::utilities::i64_t> const rows {scratch};
-    std::span<us::utilities::i64_t> aligned = rows.subspan(0, width);
-    std::span<us::utilities::i64_t> gap_in_first = rows.subspan(width, width);
-    std::span<us::utilities::i64_t> gap_in_second = rows.subspan(width * 2, width);
-
-    for (std::size_t column = 0; column != width; ++column) {
-        aligned[column] = column ? -(open + static_cast<us::utilities::i64_t>(column - 1) * extend) : 0;
-        gap_in_first[column] = column ? aligned[column] : unreachable;
-        gap_in_second[column] = unreachable;
-    }
+                               std::vector<double>& row) {
+    auto const score = [&](std::byte a, std::byte b) {
+        return static_cast<double>(
+            parameters.substitution[std::to_integer<std::size_t>(a) * alphabet_k + std::to_integer<std::size_t>(b)]);
+    };
+    double const gap = parameters.gap;
+    row.resize(second.size() + 1);
+    for (std::size_t column = 0; column != row.size(); ++column) row[column] = static_cast<double>(column) * gap;
     for (std::size_t above = 0; above != first.size(); ++above) {
-        us::utilities::i64_t diagonal = aligned[0];
-        aligned[0] = -(open + static_cast<us::utilities::i64_t>(above) * extend);
-        gap_in_first[0] = unreachable;
-        gap_in_second[0] = aligned[0];
+        double diagonal = row[0];
+        row[0] = static_cast<double>(above + 1) * gap;
         for (std::size_t column = 0; column != second.size(); ++column) {
-            std::size_t const cell = std::to_integer<std::size_t>(first[above]) * alphabet_k +
-                                     std::to_integer<std::size_t>(second[column]);
-            us::utilities::i64_t const carried = diagonal + parameters.substitution[cell];
-            diagonal = aligned[column + 1];
-
-            gap_in_first[column + 1] = std::max(aligned[column] - open, gap_in_first[column] - extend);
-            gap_in_second[column + 1] = std::max(aligned[column + 1] - open, gap_in_second[column + 1] - extend);
-            aligned[column + 1] = std::max(carried, std::max(gap_in_first[column + 1], gap_in_second[column + 1]));
+            std::byte const a = first[above], b = second[column];
+            double const cost = (score(a, a) + score(b, b)) / 2 - score(a, b);
+            double const aligned = diagonal + cost;
+            diagonal = row[column + 1];
+            row[column + 1] = std::min(aligned, std::min(row[column], row[column + 1]) + gap);
         }
     }
-    return -static_cast<double>(aligned[second.size()]);
-}
-
-/** Local alignment with affine gaps - Smith-Waterman-Gotoh - as a negated similarity.
- *  The same three recurrences under a zero floor, reporting the best cell anywhere in the
- *  table. An @p extend equal to @c gap_open collapses it to the flat-gap Smith-Waterman kind. */
-static double local_alignment(bytes_view_t first, bytes_view_t second, sequence_index_options_t const& parameters,
-                              us::utilities::i64_t extend, std::vector<us::utilities::i64_t>& scratch) {
-    us::utilities::i64_t const open = parameters.gap_open;
-    std::size_t const width = second.size() + 1;
-    scratch.assign(width * 3, 0);
-    std::span<us::utilities::i64_t> const rows {scratch};
-    std::span<us::utilities::i64_t> aligned = rows.subspan(0, width);
-    std::span<us::utilities::i64_t> gap_in_first = rows.subspan(width, width);
-    std::span<us::utilities::i64_t> gap_in_second = rows.subspan(width * 2, width);
-
-    us::utilities::i64_t best = 0;
-    for (std::size_t above = 0; above != first.size(); ++above) {
-        us::utilities::i64_t diagonal = 0;
-        aligned[0] = 0;
-        gap_in_first[0] = 0;
-        for (std::size_t column = 0; column != second.size(); ++column) {
-            std::size_t const cell = std::to_integer<std::size_t>(first[above]) * alphabet_k +
-                                     std::to_integer<std::size_t>(second[column]);
-            us::utilities::i64_t const carried = diagonal + parameters.substitution[cell];
-            diagonal = aligned[column + 1];
-
-            gap_in_first[column + 1] = std::max(aligned[column] - open, gap_in_first[column] - extend);
-            gap_in_second[column + 1] = std::max(aligned[column + 1] - open, gap_in_second[column + 1] - extend);
-            us::utilities::i64_t const cell_best = std::max<us::utilities::i64_t>(
-                0, std::max(carried, std::max(gap_in_first[column + 1], gap_in_second[column + 1])));
-            aligned[column + 1] = cell_best;
-            best = std::max(best, cell_best);
-        }
-    }
-    return -static_cast<double>(best);
+    return row[second.size()];
 }
 
 /** Reusable buffers, so scoring a whole corpus allocates once rather than per pair. */
@@ -241,7 +188,7 @@ struct sequence_search_scratch_t {
     std::vector<us::utilities::u32_t> query_points;
     std::vector<us::utilities::u32_t> entry_points;
     std::vector<std::size_t> unsigned_row;
-    std::vector<us::utilities::i64_t> signed_row;
+    std::vector<double> cost_row;
     std::vector<std::string_view> query_windows;
 };
 
@@ -268,7 +215,7 @@ static double window_overlap(bytes_view_t query, bytes_view_t stored, std::span<
 }
 
 /** Scores one pair under the frozen kind. The constructor and @c adopt refuse a kind
- *  this build does not know, so every enumerator reaching here is one of the seven. */
+ *  this build does not know, so every enumerator reaching here is one of the four. */
 static double distance(sequence_index_t const& index, bytes_view_t query, bytes_view_t stored,
                        sequence_search_scratch_t& scratch) {
     sequence_index_options_t const& parameters = index.options;
@@ -278,13 +225,7 @@ static double distance(sequence_index_t const& index, bytes_view_t query, bytes_
         decode_utf8(stored, scratch.entry_points);
         return levenshtein<us::utilities::u32_t>(scratch.query_points, scratch.entry_points, scratch.unsigned_row);
     case usearch_sequence_metric_needleman_wunsch_k:
-        return global_alignment(query, stored, parameters, parameters.gap_open, scratch.signed_row);
-    case usearch_sequence_metric_needleman_wunsch_gotoh_k:
-        return global_alignment(query, stored, parameters, parameters.gap_extend, scratch.signed_row);
-    case usearch_sequence_metric_smith_waterman_k:
-        return local_alignment(query, stored, parameters, parameters.gap_open, scratch.signed_row);
-    case usearch_sequence_metric_smith_waterman_gotoh_k:
-        return local_alignment(query, stored, parameters, parameters.gap_extend, scratch.signed_row);
+        return global_alignment(query, stored, parameters, scratch.cost_row);
     case usearch_sequence_metric_overlap_k:
         return window_overlap(query, stored, parameters.window_widths, scratch.query_windows);
     default: return levenshtein<std::byte>(query, stored, scratch.unsigned_row);
@@ -376,11 +317,8 @@ struct sequence_checkpoint_prefix_t {
     /** What entries are compared by; it alone says whether a matrix follows. */
     usearch_sequence_metric_t metric;
 
-    /** Cost of opening a gap, and the flat gap cost of the linear kinds. */
-    us::utilities::i8_t gap_open;
-
-    /** Cost of extending an open gap. */
-    us::utilities::i8_t gap_extend;
+    /** Cost of one unaligned symbol. */
+    us::utilities::i8_t gap;
 
     /** How many window widths follow the matrix, each a @c std::size_t. */
     std::size_t window_widths_count;
@@ -409,8 +347,7 @@ static void write_into(sequence_index_t const& index, std::size_t rows, bytes_sp
     prefix.entries = rows;
     prefix.payload_bytes = payload_extent(index, rows);
     prefix.metric = index.options.metric;
-    prefix.gap_open = index.options.gap_open;
-    prefix.gap_extend = index.options.gap_extend;
+    prefix.gap = index.options.gap;
     prefix.window_widths_count = index.options.window_widths.size();
     write_pod(target, prefix);
     bytes_span_t cursor = target.subspan(sizeof(prefix));
@@ -474,8 +411,7 @@ static bool read_from(sequence_index_t& index, bytes_view_t blob, usearch_outcom
         propagate_error(usearch_status_unknown_kind_k, outcome, "The checkpoint names a metric this build lacks");
         return false;
     }
-    index.options.gap_open = prefix.gap_open;
-    index.options.gap_extend = prefix.gap_extend;
+    index.options.gap = prefix.gap;
 
     bytes_view_t cursor = blob.subspan(sizeof(sequence_checkpoint_prefix_t));
     index.options.substitution.clear();
@@ -577,8 +513,7 @@ void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
         // Copied rather than borrowed, so a binding whose matrix dies after this call still scores.
         index->options.substitution.assign(weights->substitution_matrix,
                                            weights->substitution_matrix + alphabet_k * alphabet_k);
-        index->options.gap_open = weights->gap_open;
-        index->options.gap_extend = weights->gap_extend;
+        index->options.gap = weights->gap;
     }
     *arguments->index = index;
 }

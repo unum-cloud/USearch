@@ -15,7 +15,7 @@ static char const doc_SequenceIndex[] =                                         
     "SequenceIndex(...)\n"                                                                //
     "\n"                                                                                  //
     "Similarity search over variable-length sequences - Levenshtein, Needleman-Wunsch,\n" //
-    "and Smith-Waterman scoring over byte and UTF-8 tapes.\n"                             //
+    "and overlap scoring over byte and UTF-8 tapes.\n"                                    //
     "\n"                                                                                  //
     "Not yet instantiated in this build; constructing one raises NotImplementedError.";
 

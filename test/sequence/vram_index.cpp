@@ -11,9 +11,10 @@
  *  another needs the four-word one, and the last needs a block per walk, its rows past 1 KiB split
  *  over four lanes each, so the walks, the selections and the merges run three kits. A fourth
  *  spells its nucleotides as runes of one to three bytes, for the rune kits, and a fifth scores
- *  window overlap at two widths, a warp to a row. Rows insert in three batches whose tapes start
- *  past their own first byte, as an Arrow slice's do, so the later batches walk graphs whose
- *  reverse links earlier batches merged.
+ *  window overlap at two widths, a warp to a row. The last two align nucleotides packed two bits
+ *  apiece, one query a stripe and the longer ones several. Rows insert in three batches whose
+ *  tapes start past their own first byte, as an Arrow slice's do, so the later batches walk graphs
+ *  whose reverse links earlier batches merged.
  */
 #include <algorithm> // `std::min`, `std::nth_element`
 #include <array>     // `std::array` - the templates
@@ -87,8 +88,33 @@ static void respell_as_runes(std::vector<std::string>& strings) {
     }
 }
 
+/** Packs every string's nucleotides two bits a code, A, C, G and T in that order. */
+static void pack_as_codes(std::vector<std::string>& strings) {
+    constexpr std::string_view nucleotides_k = "ACGT";
+    for (std::string& symbols : strings) {
+        std::vector<u8_t> codes;
+        for (char const symbol : symbols) codes.push_back(static_cast<u8_t>(nucleotides_k.find(symbol)));
+        std::string row(packed_codes_bytes(codes.size(), 2), '\0');
+        pack_codes(codes, 2, bytes_of(row.data(), row.size()));
+        symbols = std::move(row);
+    }
+}
+
 /** The window widths the overlap cell hashes at, in bytes. */
 static constexpr std::size_t vram_overlap_widths_k[] = {4, 8};
+
+/** The Needleman-Wunsch cell's costs over the nucleotides: transitions one, transversions and gaps
+ *  two. */
+static constexpr needleman_wunsch_costs_t vram_nucleotide_costs() noexcept {
+    needleman_wunsch_costs_t costs {};
+    costs.code_bits = 2, costs.classes = 4, costs.gap = 2;
+    for (std::size_t first = 0; first != 4; ++first)
+        for (std::size_t second = 0; second != 4; ++second)
+            costs.substitutions[first][second] = first == second ? 0 : (first & 1) == (second & 1) ? 1 : 2;
+    return costs;
+}
+
+static constexpr needleman_wunsch_costs_t vram_nucleotide_costs_k = vram_nucleotide_costs();
 
 /** The metric @p metric_ scores with on the CPU under @p capability_, sized for @p staging
  *  candidates. */
@@ -97,6 +123,11 @@ static auto make_sequence_metric(std::size_t staging, std::size_t& failures) {
     if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
         overlap_metric<typename overlap_ladder<capability_>::kit_t> metric;
         failures += expect_eq(metric.init(staging, vram_overlap_widths_k), status_t::success_k);
+        return metric;
+    }
+    else if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k) {
+        needleman_wunsch_metric<typename needleman_wunsch_ladder<capability_>::kit_t> metric;
+        failures += expect_eq(metric.init(staging, vram_nucleotide_costs_k), status_t::success_k);
         return metric;
     }
     else {
@@ -135,6 +166,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
 
     std::vector<std::string> strings = generate_nucleotides(count + queries_count, length, seed);
     if constexpr (metric_ == usearch_sequence_metric_levenshtein_utf8_k) respell_as_runes(strings);
+    if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k) pack_as_codes(strings);
     std::string tape(origin_k, '\0');
     std::vector<std::size_t> offsets {origin_k};
     for (std::string const& symbols : strings) tape += symbols, offsets.push_back(tape.size());
@@ -180,6 +212,8 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     vram_index_t vram_index {cuda_virtual_memory_allocator<byte_t> {device}};
     if constexpr (metric_ == usearch_sequence_metric_overlap_k)
         failures += expect_eq(vram_index.window_widths(vram_overlap_widths_k), status_t::success_k);
+    if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k)
+        failures += expect_eq(vram_index.costs(vram_nucleotide_costs_k), status_t::success_k);
     failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                           status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
@@ -263,6 +297,13 @@ std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& 
     failures += report(
         "sequence_vram 200 nt overlap",
         check_sequence_vram_collection<overlap_k>(stream_key(settings.seed, "overlap"), executor, 512, 200, 64));
+    constexpr usearch_sequence_metric_t aligned_k = usearch_sequence_metric_needleman_wunsch_k;
+    failures += report(
+        "sequence_vram 200 nt needleman-wunsch",
+        check_sequence_vram_collection<aligned_k>(stream_key(settings.seed, "aligned"), executor, 512, 200, 64));
+    failures += report("sequence_vram 1100 nt needleman-wunsch",
+                       check_sequence_vram_collection<aligned_k>(stream_key(settings.seed, "aligned_stripes"), executor,
+                                                                 256, 1100, 32));
     return failures;
 }
 

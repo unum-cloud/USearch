@@ -3,8 +3,8 @@
  *  @author Ash Vardanian
  *  @date August 14, 2026
  *  @brief The sequence-modality C interface: similarity search over variable-length sequences -
- *      textual documents, DNA, RNA, and protein strings - under Levenshtein, window overlap,
- *      Needleman-Wunsch, Smith-Waterman, and Gotoh-affine scoring.
+ *      textual documents, DNA, RNA, and protein strings - under Levenshtein, window overlap, and
+ *      Needleman-Wunsch scoring.
  *
  *  Variable-length payloads cannot ride a run of equal rows, so every batch input is a @b tape:
  *  the bytes of every sequence end to end, and @c count + 1 Apache Arrow offsets around them - the
@@ -20,8 +20,9 @@
  *      save: write a checkpoint         save         save         none
  *
  *  Each is spelled @c usearch_sequence_ and the suffix above. A VRAM handle serves byte and UTF-8
- *  Levenshtein, on one GPU, through the insertion, search and description verbs, refusing the rest
- *  with @c usearch_status_unsupported_k, and a search there takes no @c predicate.
+ *  Levenshtein, window overlap and Needleman-Wunsch, on one GPU, through the insertion, search and
+ *  description verbs, refusing the rest with @c usearch_status_unsupported_k, and a search there
+ *  takes no @c predicate.
  *
  *  A viewed handle is read-only, refusing every mutating verb with @c usearch_status_read_only_k.
  *  An NVMe handle answers every read verb as a RAM handle does, its rows read through the
@@ -88,21 +89,9 @@ typedef struct usearch_sequence_refinement_handle_t* usearch_sequence_refinement
 /**
  *  @brief The sequence scoring kinds supported out of the box.
  *
- *  The alignment kinds form a grid: global or local, against linear or affine gaps. All of
- *  them fill the same @b [|a|+1,|b|+1] table of cell @c D[i,j], the best score for the two
- *  prefixes ending at @c i and @c j, so every kind here is quadratic in time. Only the live width
- *  differs: the linear kinds carry one row, the affine kinds three.
- *
- *  Only the global half can weigh the index's own edges. A local score is blind to everything
- *  outside its matched window, so every superstring of a sequence scores as that sequence
- *  does and an index built on one would collapse distinct entries onto a single point. Each
- *  local kind is therefore served from an index built under its own global counterpart, which
- *  shares its costs and bounds it - picked by the library and never named by the caller.
- *
- *  The global kinds minimize a cost, writing @c c for the substitution cost and @c g, @c o,
- *  @c e for the flat, opening and extending gap costs. The local kinds maximize a similarity,
- *  writing @c w for the substitution score, so a matrix admissible for one is not admissible
- *  for the other with its signs unchanged.
+ *  The edit kinds fill a @b [|a|+1,|b|+1] table of cell @c D[i,j], the least cost of turning the
+ *  prefix of @c a ending at @c i into the prefix of @c b ending at @c j, carrying one row, so each
+ *  is quadratic in time. They write @c c for the substitution cost and @c g for the gap cost.
  */
 typedef enum usearch_sequence_metric_t {
     usearch_sequence_metric_unknown_k = 0,
@@ -155,69 +144,6 @@ typedef enum usearch_sequence_metric_t {
     usearch_sequence_metric_needleman_wunsch_k = 3,
 
     /**
-     *  @brief Local alignment with affine gap costs - Smith-Waterman-Gotoh. Ranks only.
-     *
-     *  The affine recurrence under a zero floor, reporting the best cell anywhere in the
-     *  table rather than the corner. The floor is the blindness: a prefix or suffix that
-     *  aligns badly is dropped at no cost instead of being charged.
-     *
-     *  S[i,j] = max( 0, X[i,j], Y[i,j], S[i-1,j-1] + w(a[i], b[j]) ),  score = max_{i,j} S[i,j]
-     *
-     *  @code{.py}
-     *  # the needleman_wunsch_gotoh loop with max for min, w for c, and a 0 floor on S[i][j],
-     *  # returning max(S) over every cell rather than the last one
-     *  @endcode
-     */
-    usearch_sequence_metric_smith_waterman_gotoh_k = 4,
-
-    /**
-     *  @brief Global alignment with affine gap costs - Needleman-Wunsch-Gotoh.
-     *
-     *  Charges a gap run @c o for opening and @c e for each symbol after, so one long gap is
-     *  cheaper than several short ones - the realistic model for an indel. Needs three live tracks:
-     *  the aligned cell and one per gap direction. Both gap tracks reopen from the
-     *  combined cell rather than from the aligned one, which is what lets a deletion become
-     *  an insertion directly and keeps the kind a metric.
-     *
-     *  X[i,j] = min( D[i-1,j] + o, X[i-1,j] + e )
-     *  Y[i,j] = min( D[i,j-1] + o, Y[i,j-1] + e )
-     *  D[i,j] = min( D[i-1,j-1] + c(a[i], b[j]), X[i,j], Y[i,j] )
-     *
-     *  @code{.py}
-     *  D = [0 if j == 0 else o + (j - 1) * e for j in range(len(b) + 1)]
-     *  X = [inf] * (len(b) + 1)                     # gap in b, carried down the column
-     *  for i, x in enumerate(a, 1):
-     *      D, prev, Y = [o + (i - 1) * e] + [0] * len(b), D, inf
-     *      for j, y in enumerate(b, 1):
-     *          X[j] = min(prev[j] + o, X[j] + e)
-     *          Y = min(D[j - 1] + o, Y + e)         # gap in a, carried along the row
-     *          D[j] = min(prev[j - 1] + c[x][y], X[j], Y)
-     *  gotoh = D[-1]
-     *  @endcode
-     */
-    usearch_sequence_metric_needleman_wunsch_gotoh_k = 5,
-
-    /**
-     *  @brief Local alignment with linear gap costs - Smith-Waterman. Ranks only.
-     *
-     *  Needleman-Wunsch under a zero floor, reporting the best cell anywhere in the table.
-     *  Finds the single best-matching window and charges nothing for what surrounds it.
-     *
-     *  S[i,j] = max( 0, S[i-1,j] − g, S[i,j-1] − g, S[i-1,j-1] + w(a[i], b[j]) )
-     *
-     *  @code{.py}
-     *  best, row = 0, [0] * (len(b) + 1)
-     *  for i, x in enumerate(a, 1):
-     *      row, prev = [0] * (len(b) + 1), row
-     *      for j, y in enumerate(b, 1):
-     *          row[j] = max(0, prev[j] - g, row[j - 1] - g, prev[j - 1] + w[x][y])
-     *          best = max(best, row[j])             # the 0 floor is the blindness
-     *  smith_waterman = best
-     *  @endcode
-     */
-    usearch_sequence_metric_smith_waterman_k = 6,
-
-    /**
      *  @brief Window overlap: the share of the larger window set the other side misses.
      *
      *  Every window of every configured width is taken from both sequences, and a window of the
@@ -236,21 +162,27 @@ typedef enum usearch_sequence_metric_t {
      *  overlap = (longer - hits) / longer if longer else 1
      *  @endcode
      */
-    usearch_sequence_metric_overlap_k = 7,
+    usearch_sequence_metric_overlap_k = 4,
 } usearch_sequence_metric_t;
 
-/** The substitution matrix and gap costs an alignment kind scores with; the Levenshtein kinds
- *  score with unit costs and take none. */
+/**
+ *  @brief The substitution matrix and gap costs an alignment kind scores with; the Levenshtein
+ *      kinds score with unit costs and take none.
+ *
+ *  Needleman-Wunsch reads the matrix as similarities @c s between class codes, the classes ending
+ *  at the last code scoring anything, at most 32 of them, and its sequences as those codes packed
+ *  two bits apiece up to four classes and five past, little-endian behind one byte counting the
+ *  slots the last bytes leave unused. It scores with @c c(a,b) = (s(a,a) + s(b,b)) / 2 − s(a,b),
+ *  costs that must not be negative, rounded to integers of at most 15 together with the gap cost,
+ *  all scaled down by one factor when either passes it.
+ */
 typedef struct usearch_sequence_weights_t {
 
     /** Row-major 256×256 signed scores over byte alphabets. */
     int8_t const* substitution_matrix;
 
-    /** Cost of opening a gap; the linear kinds use it as the flat gap cost. */
-    int8_t gap_open;
-
-    /** Cost of extending an open gap; ignored by the linear kinds. */
-    int8_t gap_extend;
+    /** Cost of one unaligned symbol. */
+    int8_t gap;
 } usearch_sequence_weights_t;
 
 /** The arguments of @c usearch_sequence_init_ram. */
@@ -299,7 +231,8 @@ typedef struct usearch_sequence_init_vram_t {
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** The scoring kind; byte and UTF-8 Levenshtein serve a GPU. */
+    /** The scoring kind; byte and UTF-8 Levenshtein, window overlap and Needleman-Wunsch serve a
+     *  GPU. */
     usearch_sequence_metric_t metric;
 
     /** The weights an alignment kind needs; @c NULL for the Levenshtein kinds, which refuse any. */
@@ -324,8 +257,8 @@ typedef struct usearch_sequence_init_vram_t {
 
 /**
  *  @brief Creates an empty, mutable sequence index in device memory.
- *  @retval usearch_status_unsupported_k A kind other than byte or UTF-8 Levenshtein, a
- *      @c values_per_key bound, or more than one device.
+ *  @retval usearch_status_unsupported_k A kind other than byte or UTF-8 Levenshtein, window overlap
+ *      or Needleman-Wunsch, a @c values_per_key bound, or more than one device.
  *  @retval usearch_status_device_k A device past the listing, one whose vendor no kernel serves, or
  *      a build without GPU kernels.
  *

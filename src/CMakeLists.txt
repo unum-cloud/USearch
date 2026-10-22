@@ -663,7 +663,7 @@ usearch_variants(
 )
 usearch_variants(
     sequence vram nvidia nvidia
-    KERNELS levenshtein_bytes levenshtein_utf8 overlap
+    KERNELS levenshtein_bytes levenshtein_utf8 overlap needleman_wunsch
     DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
     LIBRARIES stringzilla::header
 )

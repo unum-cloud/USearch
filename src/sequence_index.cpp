@@ -9,7 +9,7 @@
  *  Variants are ordered newest class first, the serial floor last. Their bodies compile in the
  *  basic class units, never here: the @c extern declarations below keep them out.
  */
-#include <cstring> // `std::memcpy` - strings landing in an arena
+#include <cstring> // `std::memcpy` - strings landing in an arena, `std::memcmp` - a donor's costs
 
 #include <string_view> // `std::string_view` - checkpoint paths and fields
 #include <variant>     // `std::variant`
@@ -54,6 +54,7 @@ using sequence_variant_t = std::variant< //
     sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_bytes_k>, //
     sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k>,  //
     sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k>,           //
+    sequence_vram_nvidia_variant<usearch_sequence_metric_needleman_wunsch_k>,  //
 #endif
 #if USEARCH_TARGET_INTEL_SKYLAKE
     sequence_ram_variant<cpu_class_t::intel_skylake_k>,  //
@@ -93,7 +94,8 @@ static bool accepts_sequences(usearch_tape_view_t const& sequences, std::size_t 
     return true;
 }
 
-/** What the sequence verbs differ in: Levenshtein and overlap kinds over u8 strings. */
+/** What the sequence verbs differ in: Levenshtein, overlap and Needleman-Wunsch kinds over u8
+ *  strings. */
 struct sequence_traits_t {
     using geometry_t = sequence_geometry_t;
 
@@ -115,17 +117,34 @@ struct sequence_traits_t {
         return true;
     }
 
-    /** Reads the kind, widths and connectivity a checkpoint at @p path recorded, the widths spelled
-     *  as decimals between commas. */
+    /** Reads the kind, widths, costs and connectivity a checkpoint at @p path recorded, the widths
+     *  spelled as decimals between commas, the costs as a hexadecimal digit per cell. */
     static status_t recall(std::string_view path, geometry_t& geometry) noexcept {
-        status_t widths_status = status_t::success_k;
+        status_t fields_status = status_t::success_k;
         auto per_field = [&](safegraphs_custom_field_t field) noexcept {
             if (field.key == "connectivity") geometry.connectivity = decimal_in(field.value);
+            else if (field.key == "gap_cost") geometry.costs.gap = static_cast<u8_t>(decimal_in(field.value));
+            else if (field.key == "substitution_costs") {
+                us::sequence::needleman_wunsch_costs_t& costs = geometry.costs;
+                std::size_t classes = 0;
+                while (classes * classes < field.value.size()) ++classes;
+                if (classes * classes != field.value.size() || classes > us::sequence::needleman_wunsch_classes_k) {
+                    fields_status = status_t::malformed_k;
+                    return;
+                }
+                costs.classes = static_cast<u8_t>(classes);
+                costs.code_bits = us::sequence::packed_code_bits(classes);
+                for (std::size_t cell = 0; cell != field.value.size(); ++cell) {
+                    char const digit = field.value[cell];
+                    costs.substitutions[cell / classes][cell % classes] = static_cast<u8_t>(
+                        digit <= '9' ? digit - '0' : digit - 'a' + 10);
+                }
+            }
             else if (field.key == "window_widths") {
                 std::size_t windows = 1;
                 for (char const character : field.value) windows += character == ',';
-                widths_status = geometry.window_widths.reserve_exactly(windows);
-                for (std::string_view rest = field.value; succeeded(widths_status) && !rest.empty();) {
+                fields_status = geometry.window_widths.reserve_exactly(windows);
+                for (std::string_view rest = field.value; succeeded(fields_status) && !rest.empty();) {
                     std::size_t const comma = rest.find(',');
                     geometry.window_widths.push_back_reserved(decimal_in(rest.substr(0, comma)));
                     rest = comma == std::string_view::npos ? std::string_view {} : rest.substr(comma + 1);
@@ -134,7 +153,7 @@ struct sequence_traits_t {
         };
         auto const [metadata, status] = safegraphs_read_index_metadata(path, std::allocator<byte_t> {}, per_field);
         geometry.metric = sequence_metric_of(metadata.metric.view());
-        return failed(status) ? status : widths_status;
+        return failed(status) ? status : fields_status;
     }
 
     /** Refuses the kinds no CPU or GPU kit serves and the parameters a kind does not take. */
@@ -144,16 +163,18 @@ struct sequence_traits_t {
         switch (geometry.metric) {
         case usearch_sequence_metric_levenshtein_bytes_k:
         case usearch_sequence_metric_levenshtein_utf8_k:
-        case usearch_sequence_metric_overlap_k: break;
-        case usearch_sequence_metric_needleman_wunsch_k:
-        case usearch_sequence_metric_needleman_wunsch_gotoh_k:
-        case usearch_sequence_metric_smith_waterman_k:
-        case usearch_sequence_metric_smith_waterman_gotoh_k:
-            return propagate_error(usearch_status_unsupported_k, outcome, "No alignment kernels serve this kind yet");
+        case usearch_sequence_metric_overlap_k:
+        case usearch_sequence_metric_needleman_wunsch_k: break;
         default: return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown sequence metric");
         }
-        if (arguments.weights)
+        bool const aligned = geometry.metric == usearch_sequence_metric_needleman_wunsch_k;
+        if (arguments.weights && !aligned)
             return propagate_error(usearch_status_config_mismatch_k, outcome, "Only an alignment kind takes weights");
+        if (arguments.weights && !arguments.weights->substitution_matrix)
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The substitution matrix is null");
+        // A checkpoint recalls the costs it was built with, which weights given at load replace.
+        if (aligned && !arguments.weights && !geometry.costs.code_bits)
+            return propagate_error(usearch_status_config_mismatch_k, outcome, "An alignment kind needs weights");
         bool const overlap = geometry.metric == usearch_sequence_metric_overlap_k;
         if (overlap == geometry.window_widths.empty())
             return propagate_error(usearch_status_config_mismatch_k, outcome,
@@ -164,36 +185,59 @@ struct sequence_traits_t {
     }
 
     /** Whether a donor of @p donor geometry lands in an index of @p index geometry: the same kind,
-     *  window widths and connectivity. */
+     *  window widths, costs and connectivity. */
     static bool matches(geometry_t const& index, geometry_t const& donor) noexcept {
         if (index.metric != donor.metric || index.connectivity != donor.connectivity ||
-            index.window_widths.size() != donor.window_widths.size())
+            index.window_widths.size() != donor.window_widths.size() ||
+            std::memcmp(&index.costs, &donor.costs, sizeof(index.costs)) != 0)
             return false;
         for (std::size_t window = 0; window != index.window_widths.size(); ++window)
             if (index.window_widths[window] != donor.window_widths[window]) return false;
         return true;
     }
 
-    /** Moves @p geometry into @p variant, a zero connectivity taking the default. */
+    /** Folds the weights @p arguments name into the costs of @p geometry, keeping recalled costs
+     *  when they name none: the 256×256 scores read as similarities between class codes; false
+     *  once @p outcome records why not. */
+    template <typename arguments_type_>
+    static bool fold(geometry_t& geometry, arguments_type_ const& arguments, usearch_outcome_t* outcome) noexcept {
+        if (!arguments.weights) return true;
+        constexpr std::size_t side_k = us::sequence::needleman_wunsch_byte_alphabet_k;
+        usearch_sequence_weights_t const& weights = *arguments.weights;
+        auto const [costs, fold_status] = us::sequence::needleman_wunsch_costs_t::fold(
+            std::span<i8_t const> {weights.substitution_matrix, side_k * side_k}, weights.gap);
+        if (failed(fold_status))
+            return propagate_error(
+                usearch_status_config_mismatch_k, outcome,
+                "The weights need at most 32 classes, a non-negative gap, and no pair above its mean self-score");
+        geometry.costs = costs;
+        return true;
+    }
+
+    /** Moves @p geometry into @p variant, its weights folded, a zero connectivity taking the
+     *  default. */
     template <typename variant_type_, typename arguments_type_>
-    static bool freeze(variant_type_& variant, geometry_t& geometry, arguments_type_ const&,
-                       usearch_outcome_t*) noexcept {
+    static bool freeze(variant_type_& variant, geometry_t& geometry, arguments_type_ const& arguments,
+                       usearch_outcome_t* outcome) noexcept {
         if (!geometry.connectivity) geometry.connectivity = connectivity_32_k;
+        if (!fold(geometry, arguments, outcome)) return false;
         variant.geometry = std::move(geometry);
         return true;
     }
 
 #if USEARCH_ARCH_CUDA_
 
-    /** Moves @p geometry into the GPU @p variant and hands its index the window widths, which its
-     *  first reservation uploads. */
+    /** Moves @p geometry into the GPU @p variant, its weights folded, and hands its index the
+     *  window widths and the costs, which its first reservation uploads. */
     template <typename variant_type_, typename arguments_type_>
         requires requires(arguments_type_ const& arguments) { arguments.vram; }
-    static bool freeze(variant_type_& variant, geometry_t& geometry, arguments_type_ const&,
+    static bool freeze(variant_type_& variant, geometry_t& geometry, arguments_type_ const& arguments,
                        usearch_outcome_t* outcome) noexcept {
         if (!geometry.connectivity) geometry.connectivity = connectivity_32_k;
+        if (!fold(geometry, arguments, outcome)) return false;
         variant.geometry = std::move(geometry);
-        status_t const kept = variant.index.window_widths(to_span(variant.geometry.window_widths));
+        status_t kept = variant.index.window_widths(to_span(variant.geometry.window_widths));
+        if (succeeded(kept)) kept = variant.index.costs(variant.geometry.costs);
         return succeeded(kept) || propagate_error(kept, outcome);
     }
 #endif

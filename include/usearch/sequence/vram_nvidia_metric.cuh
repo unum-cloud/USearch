@@ -14,8 +14,10 @@
  *  which each kernel takes beside the ladder's inputs, so a rung's kernels only reach the scorers
  *  of the word counts below it and keep their registers as narrow as the queries allow. Every
  *  scorer is out of line, one body per word count and symbol in the unit, whatever number of walks
- *  call it. The overlap kit scores on one rung, a warp to a row. Only the modality's NVIDIA unit
- *  compiles this file, so dispatch never names a kit.
+ *  call it. The overlap kit scores on one rung, a warp to a row. The Needleman-Wunsch kit scores a
+ *  row with a warp, an anti-diagonal wavefront over stripes of query codes, each lane holding a
+ *  rung's worth of rows in registers. Only the modality's NVIDIA unit compiles this file, so
+ *  dispatch never names a kit.
  */
 #pragma once
 
@@ -362,14 +364,233 @@ struct overlap_ladder<caps_> {
     static constexpr sz_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
-/** The kit scoring the sequence kind @p metric_ under @p caps_: the overlap ladder's, or the
- *  Levenshtein ladder's over the kind's symbols. */
+/** Bytes of a Needleman-Wunsch profile stripe: a 64-bit word of costs per class and lane. */
+inline constexpr std::size_t cuda_needleman_wunsch_stripe_bytes_k = needleman_wunsch_classes_k * cuda_warp_t::width_k *
+                                                                    sizeof(u64_t);
+
+/** Codes of the longest row the widest Needleman-Wunsch rung scores, as many as the widest
+ *  Levenshtein rung's bytes; longer ones are refused. */
+inline constexpr std::size_t cuda_needleman_wunsch_widest_codes_k = vram_levenshtein_widest_bytes_k;
+
+/** Query codes each lane holds for a query of @p codes: the fewest that fit the query in one
+ *  stripe of a warp's lanes, the widest rung's past it. */
+constexpr u32_t cuda_needleman_wunsch_rows_per_lane(std::size_t codes) noexcept {
+    constexpr u32_t widest_k = vram_needleman_wunsch_rows_k[std::size(vram_needleman_wunsch_rows_k) - 1];
+    return static_cast<u32_t>(min_of<std::size_t>(
+        widest_k, max_of<std::size_t>(1, divide_round_up<std::size_t>(codes, cuda_warp_t::width_k))));
+}
+
+/** Stripes a query of @p codes takes, one at least. */
+constexpr u32_t cuda_needleman_wunsch_stripes(std::size_t codes) noexcept {
+    std::size_t const stripe_rows = std::size_t {cuda_warp_t::width_k} * cuda_needleman_wunsch_rows_per_lane(codes);
+    return static_cast<u32_t>(max_of<std::size_t>(1, divide_round_up(codes, stripe_rows)));
+}
+
+/** A query a Needleman-Wunsch walk scores rows against, laid out in its span. */
+struct cuda_needleman_wunsch_query_t {
+
+    /** The span: a profile stripe per stripe of the query, the cost of every class against each
+     *  lane's codes, then, past one stripe, a boundary row per warp of a block. */
+    byte_t* span;
+
+    /** Codes of the query. */
+    u32_t codes;
+
+    /** Query codes each lane holds, at most its rung's. */
+    u8_t rows_per_lane;
+
+    /** Bits a packed code takes. */
+    u8_t code_bits;
+
+    /** Cost of one code facing a gap. */
+    u8_t gap;
+};
+
+/** Lays the packed @p row out as a query in @p span under the costs at @p parameters, every lane of
+ *  the warp writing its own profile words. */
+__device__ __forceinline__ cuda_needleman_wunsch_query_t cuda_needleman_wunsch_prepare_ampere(byte_t const* parameters,
+                                                                                              basic::vram_row_t row,
+                                                                                              byte_t* span,
+                                                                                              u32_t lane) noexcept {
+    needleman_wunsch_costs_t const& costs = *reinterpret_cast<needleman_wunsch_costs_t const*>(parameters);
+    cuda_needleman_wunsch_query_t query;
+    query.span = span, query.code_bits = costs.code_bits, query.gap = costs.gap;
+    query.codes = static_cast<u32_t>(packed_codes_count(row.data, row.bytes, costs.code_bits));
+    query.rows_per_lane = static_cast<u8_t>(cuda_needleman_wunsch_rows_per_lane(query.codes));
+    u32_t const stripes = cuda_needleman_wunsch_stripes(query.codes);
+    u64_t* const profile = reinterpret_cast<u64_t*>(span);
+    for (u32_t stripe = 0; stripe != stripes; ++stripe) {
+        u32_t const lane_first = (stripe * cuda_warp_t::width_k + lane) * query.rows_per_lane;
+        for (u32_t code = 0; code != needleman_wunsch_classes_k; ++code) {
+            u64_t costs_word = 0;
+            for (u32_t row_in_lane = 0; row_in_lane != query.rows_per_lane; ++row_in_lane) {
+                u32_t const index = lane_first + row_in_lane;
+                if (index < query.codes)
+                    costs_word |= u64_t {costs.substitutions[packed_code_at(row.data, index, costs.code_bits)][code]}
+                                  << (8 * row_in_lane);
+            }
+            profile[(stripe * needleman_wunsch_classes_k + code) * cuda_warp_t::width_k + lane] = costs_word;
+        }
+    }
+    cuda_warp_t::sync();
+    return query;
+}
+
+/**
+ *  @brief The Needleman-Wunsch cost from @p query to @p row, a warp's anti-diagonal wavefront over
+ *      stripes of query codes, @p rows_ codes at most to a lane: exact within @p radius, and past
+ *      it a stripe's bottom row minimum above it.
+ *
+ *  Lane @c l holds a stripe's rows from its @c l -th share down and enters column @c j at step
+ *  @c j+l, taking the cell above and the next column's code from lane @c l-1 in one shuffled word,
+ *  the first lane from a word the warp loads per 32 columns. Each stripe hands its bottom row to
+ *  the next through the warp's boundary row, which the last lane writes 31 columns behind the
+ *  warp's reads. Out of line, so the body compiles once per rung and unit.
+ */
+template <u32_t rows_>
+__device__ __noinline__ distance_t cuda_needleman_wunsch_score_ampere(cuda_needleman_wunsch_query_t query,
+                                                                      basic::vram_row_t row, distance_t radius,
+                                                                      u32_t lane) noexcept {
+    using warp_t = cuda_warp_t;
+    constexpr u32_t lanes_k = warp_t::width_k;
+    u32_t const gap = query.gap, rows = query.codes, rows_per_lane = query.rows_per_lane;
+    u32_t const columns = static_cast<u32_t>(packed_codes_count(row.data, row.bytes, query.code_bits));
+    if (!rows || !columns) return static_cast<distance_t>((rows + columns) * gap);
+    u32_t const stripe_rows = lanes_k * rows_per_lane, stripes = cuda_needleman_wunsch_stripes(rows);
+    u64_t const* const profile = reinterpret_cast<u64_t const*>(query.span);
+    u32_t* const boundary = reinterpret_cast<u32_t*>(query.span + stripes * cuda_needleman_wunsch_stripe_bytes_k) +
+                            (threadIdx.x / lanes_k) * (cuda_needleman_wunsch_widest_codes_k + 1);
+    u32_t result = 0;
+    for (u32_t stripe = 0; stripe != stripes; ++stripe) {
+        u32_t const first_row = stripe * stripe_rows, lane_first = first_row + lane * rows_per_lane;
+        u32_t const active = min_of(lanes_k, divide_round_up(rows - first_row, rows_per_lane));
+        u32_t const last_lane = (rows - 1 - first_row) / rows_per_lane,
+                    last_cell = (rows - 1 - first_row) % rows_per_lane;
+        bool const closing = stripe + 1 == stripes;
+        u32_t cells[rows_];
+#pragma unroll
+        for (u32_t cell = 0; cell != rows_; ++cell) cells[cell] = (lane_first + cell + 1) * gap;
+        u64_t const* const stripe_profile = profile + stripe * needleman_wunsch_classes_k * lanes_k + lane;
+        // The first lane's top cell of a column and the next column's code, a column to a lane.
+        auto const load_columns = [&](u32_t first_column) noexcept {
+            u32_t const column = first_column + lane;
+            u32_t const top = column > columns ? 0u : stripe ? boundary[column] : column * gap;
+            u32_t const next_code = column < columns ? packed_code_at(row.data, column, query.code_bits) : 0u;
+            return top << 5 | next_code;
+        };
+        // A cell rides one word with the code its receiver scores a step later, the cell in the
+        // high bits, as far as 2^27 reaches; so each step loads the next step's costs before its
+        // own cells.
+        u32_t const first_code = packed_code_at(row.data, 0, query.code_bits);
+        u32_t handed = lane == 0 ? first_code : 0u, loaded = load_columns(1);
+        u64_t costs_word = stripe_profile[first_code * lanes_k];
+        u32_t diagonal_above = lane_first * gap, bottom_minimum = (stripe + 1) * stripe_rows * gap;
+        u32_t const steps = columns + active - 1;
+        for (u32_t step = 0; step != steps; ++step) {
+            if (step % lanes_k == 0 && step) loaded = load_columns(step + 1);
+            u32_t const from_loaded = warp_t::shuffle(loaded, step % lanes_k);
+            u32_t const from_above = warp_t::shuffle_up(handed, 1);
+            u32_t const incoming = lane == 0 ? from_loaded : from_above;
+            u32_t const next_code = incoming & 31u, top = incoming >> 5;
+            u64_t const next_costs_word = stripe_profile[next_code * lanes_k];
+            u32_t const column = step - lane + 1;
+            u32_t above = top;
+            if (lane < active && step >= lane && column <= columns) {
+                u32_t diagonal = diagonal_above;
+#pragma unroll
+                for (u32_t cell = 0; cell != rows_; ++cell)
+                    if (cell < rows_per_lane) {
+                        u32_t const substitution = static_cast<u32_t>(costs_word >> (8 * cell)) & 0xFFu;
+                        u32_t const opened = min_of(diagonal + substitution, cells[cell] + gap);
+                        u32_t const scored = min_of(opened, above + gap);
+                        diagonal = cells[cell], cells[cell] = scored, above = scored;
+                    }
+                diagonal_above = top;
+                if (!closing && lane == lanes_k - 1)
+                    boundary[column] = above, bottom_minimum = min_of(bottom_minimum, above);
+                if (closing && lane == last_lane && column == columns)
+#pragma unroll
+                    for (u32_t cell = 0; cell != rows_; ++cell)
+                        if (cell == last_cell) result = cells[cell];
+            }
+            handed = above << 5 | next_code, costs_word = next_costs_word;
+        }
+        warp_t::sync();
+        if (closing) return static_cast<distance_t>(warp_t::shuffle(result, last_lane));
+        // Every alignment crosses a stripe's bottom row, so none ends below its minimum.
+        u32_t const crossing = warp_t::shuffle(bottom_minimum, lanes_k - 1);
+        if (static_cast<distance_t>(crossing) > radius) return static_cast<distance_t>(crossing);
+    }
+    return static_cast<distance_t>(result);
+}
+
+/** Needleman-Wunsch over packed codes on the Ampere floor: a warp to a row, an anti-diagonal
+ *  wavefront down stripes of the query, its costs a profile the walk lays out in its span from the
+ *  folded table the face uploads as the parameters. */
+struct packed_ampere_needleman_wunsch_kit_t {
+    inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
+    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
+
+    using warp_t = cuda_warp_t;
+    using query_t = cuda_needleman_wunsch_query_t;
+    using selector_t = basic::vram_keep_diverse_t;
+
+    /** Every rung scores a row with the whole warp. */
+    static constexpr u32_t lanes_per_row(u32_t) noexcept { return warp_t::width_k; }
+
+    /** A rung serves queries of up to @p codes whose stripe it holds whole, the widest one any
+     *  number of its stripes. */
+    static constexpr bool serves(u32_t rows, std::size_t codes) noexcept {
+        constexpr u32_t widest_k = vram_needleman_wunsch_rows_k[std::size(vram_needleman_wunsch_rows_k) - 1];
+        return rows == widest_k ? codes <= cuda_needleman_wunsch_widest_codes_k
+                                : codes <= std::size_t {rows} * warp_t::width_k;
+    }
+
+    /** Bytes the packed @p bytes long row at @p data takes once prepared: its profile stripes, and
+     *  a boundary row per warp of a block when it takes more than one. */
+    static std::size_t span_bytes(u32_t code_bits, byte_t const* data, std::size_t bytes) noexcept {
+        u32_t const stripes = cuda_needleman_wunsch_stripes(packed_codes_count(data, bytes, code_bits));
+        std::size_t const boundaries =
+            stripes > 1 ? vram_warps_per_block_k * (cuda_needleman_wunsch_widest_codes_k + 1) * sizeof(u32_t) : 0;
+        return stripes * cuda_needleman_wunsch_stripe_bytes_k + boundaries;
+    }
+
+    static __device__ __forceinline__ query_t prepare(byte_t const* parameters, basic::vram_row_t row, byte_t* span,
+                                                      u32_t lane) noexcept {
+        return cuda_needleman_wunsch_prepare_ampere(parameters, row, span, lane);
+    }
+
+    /** Every code one side holds past the other's length faces a gap. */
+    static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const& query,
+                                                             basic::vram_row_t row) noexcept {
+        u32_t const columns = static_cast<u32_t>(packed_codes_count(row.data, row.bytes, query.code_bits));
+        u32_t const difference = columns > query.codes ? columns - query.codes : query.codes - columns;
+        return static_cast<distance_t>(difference * query.gap);
+    }
+    template <u32_t rows_>
+    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query, basic::vram_row_t row,
+                                                       distance_t radius, u32_t lane) noexcept {
+        return cuda_needleman_wunsch_score_ampere<rows_>(query, row, radius, lane);
+    }
+};
+
+template <sz_capability_t caps_>
+    requires((caps_ & sz_cap_cuda_k) != 0)
+struct needleman_wunsch_ladder<caps_> {
+    using kit_t = typename highest_kit<caps_, packed_ampere_needleman_wunsch_kit_t>::type;
+    static constexpr sz_capability_t picked_k = caps_ & kit_t::capability_k;
+};
+
+/** The kit scoring the sequence kind @p metric_ under @p caps_: the overlap or Needleman-Wunsch
+ *  ladder's, or the Levenshtein ladder's over the kind's symbols. */
 template <usearch_sequence_metric_t metric_, sz_capability_t caps_>
 using vram_sequence_kit = std::conditional_t<
-    metric_ == usearch_sequence_metric_overlap_k, typename overlap_ladder<caps_>::kit_t,
-    typename levenshtein_ladder<metric_ == usearch_sequence_metric_levenshtein_utf8_k ? sz_levenshtein_runes_k
-                                                                                      : sz_levenshtein_bytes_k,
-                                caps_>::kit_t>;
+    metric_ == usearch_sequence_metric_needleman_wunsch_k, typename needleman_wunsch_ladder<caps_>::kit_t,
+    std::conditional_t<
+        metric_ == usearch_sequence_metric_overlap_k, typename overlap_ladder<caps_>::kit_t,
+        typename levenshtein_ladder<metric_ == usearch_sequence_metric_levenshtein_utf8_k ? sz_levenshtein_runes_k
+                                                                                          : sz_levenshtein_bytes_k,
+                                    caps_>::kit_t>>;
 
 #pragma endregion Kits
 
@@ -382,13 +603,27 @@ status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::w
     if ((metric_ == usearch_sequence_metric_overlap_k) == widths.empty()) return status_t::config_mismatch_k;
     if (widths.empty()) return status_t::success_k;
     // The count leads, as the kit reads the parameters.
-    if (status_t const reserved = window_widths_.reserve_exactly(widths.size() + 1); failed(reserved)) return reserved;
-    window_widths_.clear();
-    window_widths_.push_back_reserved(static_cast<u32_t>(widths.size()));
+    if (status_t const reserved = host_parameters_.reserve_exactly(widths.size() + 1); failed(reserved))
+        return reserved;
+    host_parameters_.clear();
+    host_parameters_.push_back_reserved(static_cast<u32_t>(widths.size()));
     for (std::size_t const width : widths) {
         if (!width || width > std::numeric_limits<u32_t>::max()) return status_t::config_mismatch_k;
-        window_widths_.push_back_reserved(static_cast<u32_t>(width));
+        host_parameters_.push_back_reserved(static_cast<u32_t>(width));
     }
+    return status_t::success_k;
+}
+
+template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
+          typename kernels_type_>
+status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::costs(
+    needleman_wunsch_costs_t const& costs) noexcept {
+    if ((metric_ == usearch_sequence_metric_needleman_wunsch_k) != (costs.code_bits != 0))
+        return status_t::config_mismatch_k;
+    if (!costs.code_bits) return status_t::success_k;
+    if (status_t const sized = host_parameters_.resize(divide_round_up(sizeof(costs), sizeof(u32_t))); failed(sized))
+        return sized;
+    std::memcpy(host_parameters_.data(), &costs, sizeof(costs));
     return status_t::success_k;
 }
 
@@ -398,13 +633,18 @@ std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>
     std::size_t longest) const noexcept {
     using kit_t = vram_sequence_kit<metric_, capability_>;
     constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
+    // A Needleman-Wunsch rung serves codes, the most a row of these bytes packs.
+    if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k) {
+        if (host_parameters_.empty()) return rungs_k;
+        longest = longest ? (longest - 1) * 8 / costs_().code_bits : 0;
+    }
     std::size_t rung = 0;
     while (rung != rungs_k && !kit_t::serves(rungs[rung], longest)) ++rung;
     if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
         // Lanes past the longest row's widest windows would roll none of their own.
         u32_t widest = 0;
-        for (std::size_t index = 1; index < window_widths_.size(); ++index)
-            widest = max_of(widest, window_widths_[index]);
+        for (std::size_t index = 1; index < host_parameters_.size(); ++index)
+            widest = max_of(widest, host_parameters_[index]);
         while (rung + 1 < rungs_k && std::size_t {rungs[rung + 1]} * widest <= longest) ++rung;
     }
     return rung;
@@ -424,14 +664,18 @@ std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>
     byte_t const* data, std::size_t bytes) const noexcept {
     using kit_t = vram_sequence_kit<metric_, capability_>;
     if constexpr (metric_ == usearch_sequence_metric_overlap_k)
-        return kit_t::span_bytes(to_span(window_widths_).subspan(1), bytes);
+        return kit_t::span_bytes(to_span(host_parameters_).subspan(1), bytes);
+    else if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k)
+        return kit_t::span_bytes(costs_().code_bits, data, bytes);
     else return kit_t::span_bytes(data, bytes);
 }
 
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
           typename kernels_type_>
 status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::load_kernels_(int device) noexcept {
-    if (metric_ == usearch_sequence_metric_overlap_k && window_widths_.empty()) return status_t::uninitialized_k;
+    bool const parametrized = metric_ == usearch_sequence_metric_overlap_k ||
+                              metric_ == usearch_sequence_metric_needleman_wunsch_k;
+    if (parametrized && host_parameters_.empty()) return status_t::uninitialized_k;
     auto [module, status] = cuda_module_t::load(device, kernels_type_::bytes());
     if (failed(status)) return status;
     module_ = std::move(module);
@@ -446,10 +690,11 @@ status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::l
                 kernels_[rung][static_cast<u32_t>(instantiated.kernel)][gpu_rung_index(instantiated.slots)];
             if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
         }
-    if (window_widths_.empty()) return status_t::success_k;
-    device_widths_ = cuda_make_unique(cuda_device_allocator<u32_t> {}, window_widths_.size());
-    if (!device_widths_) return status_t::bad_alloc_k;
-    if (cuda_copy(device_widths_.get(), window_widths_.data(), window_widths_.size() * sizeof(u32_t)) != cuda_success_k)
+    if (host_parameters_.empty()) return status_t::success_k;
+    device_parameters_ = cuda_make_unique(cuda_device_allocator<u32_t> {}, host_parameters_.size());
+    if (!device_parameters_) return status_t::bad_alloc_k;
+    if (cuda_copy(device_parameters_.get(), host_parameters_.data(), host_parameters_.size() * sizeof(u32_t)) !=
+        cuda_success_k)
         return status_t::device_error_k;
     return status_t::success_k;
 }
