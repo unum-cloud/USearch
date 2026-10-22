@@ -527,6 +527,9 @@ class index_dense_gt {
     /// @brief Mutex, controlling concurrent access to `free_keys_`.
     mutable std::mutex free_keys_mutex_;
 
+    /// @brief Serializes `add` calls that rewrite a removed node's slot in place.
+    mutable std::mutex reuse_node_mutex_;
+
     /// @brief A constant for the reserved key value, used to mark deleted entries.
     vector_key_t free_key_ = default_free_value<vector_key_t>();
 
@@ -2225,9 +2228,11 @@ class index_dense_gt {
         update_config.expansion = config_.expansion_add;
 
         metric_proxy_t metric{*this};
-        return reuse_node //
-                   ? typed_->update(typed_->iterator_at(free_slot), key, vector_data, metric, update_config, on_success)
-                   : typed_->add(key, vector_data, metric, update_config, on_success);
+        if (reuse_node) {
+            std::unique_lock<std::mutex> reuse_lock(reuse_node_mutex_);
+            return typed_->update(typed_->iterator_at(free_slot), key, vector_data, metric, update_config, on_success);
+        }
+        return typed_->add(key, vector_data, metric, update_config, on_success);
     }
 
     template <typename scalar_at, typename predicate_at>
