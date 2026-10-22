@@ -869,7 +869,7 @@ struct ram_index {
               typename>
     friend struct ram_indexes;
     template <typename, typename, typename, typename, template <typename> class, typename>
-    friend struct shard_set;
+    friend struct utilities::shard_set;
 
     /** The distance kit @c src/ picked; its step is the row pitch the chunks round to. */
     using quads_kit_t = quads_kit_type_;
@@ -3815,7 +3815,8 @@ struct ram_index {
     /** Forgets every row below @p visible - what a split's source becomes once its rows published
      *  elsewhere: the watermark drops to zero, an open dispenser with it, the neighbor rows refill
      *  with the sentinel, and their storage returns to the free rows, so the IDs restart from zero
-     *  and a closed dispenser reopens there. Nothing may reach the index meanwhile. */
+     *  and a closed dispenser reopens there. No claim may start meanwhile; a walk still reaching
+     *  the index reads storage nothing frees, and its caller's epoch discards what it read. */
     void forget_(node_id_t visible) noexcept {
         atomic_ref<node_id_t>(last_visible_id_).store(0, std::memory_order_release);
         node_id_t dispensed = visible;

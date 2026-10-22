@@ -21,6 +21,7 @@
 #include "usearch/dense_index.h"
 #include "usearch/dense/nvme_indexes.hpp"
 #include "usearch/dense/ram_indexes.hpp"
+#include "usearch/dense/ram_compaction.hpp"
 #if USEARCH_ARCH_CUDA_
 #include "usearch/dense/vram_nvidia_indexes.hpp"
 #endif
@@ -126,7 +127,7 @@ struct cuda_fatbin {
  *  the fatbin its kernels sit in. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
 using vram_nvidia_indexes = dense::vram_nvidia_indexes<us::utilities::uuid_t, dtype_, cuda_fatbin<gpu_class_, dtype_>,
-                                                       fu::preferred_cache_hints_t>;
+                                                       fu::preferred_cache_hints_t, fu::standard_yield_t>;
 #endif
 
 /** One AMD class's code object of one dtype's kernels, an offload bundle of its listed processors;
@@ -142,7 +143,7 @@ struct hip_code_object {
  *  code object its kernels sit in. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
 using vram_amd_indexes = dense::vram_amd_indexes<us::utilities::uuid_t, dtype_, hip_code_object<gpu_class_, dtype_>,
-                                                 fu::preferred_cache_hints_t>;
+                                                 fu::preferred_cache_hints_t, fu::standard_yield_t>;
 #endif
 
 /** One Apple alternative: the class names the rung and the capability ceiling its kernels compile
@@ -150,7 +151,7 @@ using vram_amd_indexes = dense::vram_amd_indexes<us::utilities::uuid_t, dtype_, 
 #if USEARCH_ARCH_METAL_
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
 using vram_apple_indexes =
-    dense::vram_apple_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
+    dense::vram_apple_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(gpu_class_), fu::standard_yield_t>;
 #endif
 
 /** One traversal context per executor thread, carved after the call's one rewind from that
@@ -313,6 +314,15 @@ struct specialized_index {
     /** Opens a refinement the caller holds, landing @p donors first when any are named. */
     expected<refine_plan_t> plan_absorb(std::span<index_type_*> donors, executor_t& executor,
                                         refine_config_t config) noexcept;
+
+    /** Compacts @p sources into the index under @p config, in place when the index is one of them,
+     *  the closing re-selection reported through @p ticks; a GPU index answers @c unsupported_k. */
+    expected<dense::compact_result_t> compact(std::span<index_type_* const> sources, executor_t& executor,
+                                              dense::compact_config_t config, progress_ticks_t& ticks) noexcept
+        requires is_ram_index<index_type_>;
+    expected<dense::compact_result_t> compact(std::span<index_type_* const> sources, executor_t& executor,
+                                              dense::compact_config_t config, progress_ticks_t& ticks) noexcept
+        requires is_vram_index<index_type_>;
     status_t run(refine_plan_t& plan, executor_t& executor, scratch_t& scratch, progress_ticks_t& ticks) noexcept;
     expected<refine_result_t> finish(refine_plan_t& plan, executor_t& executor, scratch_t& scratch) noexcept;
     expected<health_result_t> health(executor_t& executor) noexcept;
@@ -505,6 +515,24 @@ expected<typename specialized_index<index_type_>::refine_result_t> specialized_i
                         [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
 }
 template <typename index_type_>
+expected<dense::compact_result_t> specialized_index<index_type_>::compact(std::span<index_type_* const> sources,
+                                                                          executor_t& executor,
+                                                                          dense::compact_config_t config,
+                                                                          progress_ticks_t& ticks) noexcept
+    requires is_ram_index<index_type_>
+{
+    return dense::compact(sources, index, executor, config,
+                          [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
+}
+template <typename index_type_>
+expected<dense::compact_result_t> specialized_index<index_type_>::compact(std::span<index_type_* const>, executor_t&,
+                                                                          dense::compact_config_t,
+                                                                          progress_ticks_t&) noexcept
+    requires is_vram_index<index_type_>
+{
+    return {{}, status_t::unsupported_k};
+}
+template <typename index_type_>
 expected<typename specialized_index<index_type_>::refine_plan_t> specialized_index<index_type_>::plan_absorb(
     std::span<index_type_*> donors, executor_t& executor, refine_config_t config) noexcept {
     return index.plan_absorb(donors, executor, config);
@@ -671,7 +699,7 @@ template <typename index_type_>
 template <typename cursor_type_>
 expected<std::size_t> specialized_index<index_type_>::read(cursor_type_& walk, std::span<key_t> keys, rows_span_t rows,
                                                            executor_t&) noexcept {
-    return {walk.read(index, keys, rows), status_t::success_k};
+    return walk.read(index, keys, rows);
 }
 template <typename index_type_>
 save_config_t specialized_index<index_type_>::save_config_of(std::string_view path) noexcept {

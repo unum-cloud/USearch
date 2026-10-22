@@ -302,6 +302,14 @@ status_t rows_refusal(std::size_t rows, nk::matrix_span<value_type_> span, std::
     return status_t::success_k;
 }
 
+/** Whether @p first and @p second walk by one kernel over one frozen geometry, as two shards of a
+ *  plural or the two sides of a copy between indexes must. */
+template <typename index_type_>
+bool same_geometry(index_type_ const& first, index_type_ const& second) noexcept {
+    return first.kernel() == second.kernel() && first.dimensions() == second.dimensions() &&
+           first.connectivity() == second.connectivity();
+}
+
 /** Bytes @p count logical values of @p dtype span packed back to back. */
 inline std::size_t packed_bytes(nk_dtype_t dtype, std::size_t count) noexcept {
     return divide_round_up<std::size_t>(nk_dtype_bits(dtype) * count, 8);

@@ -36,6 +36,9 @@
 namespace unum::usearch::basic {
 using namespace unum::usearch::utilities;
 
+template <typename, typename, typename, typename, typename>
+struct vram_nvidia_indexes;
+
 #pragma region Kernel Records
 
 /** The ragged storage a kernel reads, mirroring the shared ragged view field by field. */
@@ -331,14 +334,18 @@ struct vram_ragged_graph {
 
 #pragma region Reservation
 
-    /** Requested geometry & capacity for a @c reserve() call; the connectivity is frozen by the
-     *  first success. */
+    /** Requested geometry & capacity for a @c reserve() call; the connectivity and the ceiling are
+     *  frozen by the first success. */
     struct reserve_capacity_t {
         std::size_t capacity = 0;
         connectivity_t connectivity = connectivity_32_k;
 
         /** Value bytes across every row to host. */
         std::size_t bytes = 0;
+
+        /** Rows the index may ever host, clamped to the ID space and the device's memory; past it
+         *  every claim answers @c overflow_k. */
+        std::size_t ceiling = max_node_count_k;
     };
 
     /** Ensures the index can host at least @p config.capacity rows of @p config.bytes value bytes
@@ -359,7 +366,7 @@ struct vram_ragged_graph {
             // No column maps more than the device's memory, whatever the first capacity.
             std::size_t const budget_bytes = device_.vram_bytes;
             std::size_t const row_bytes = config.connectivity * sizeof(node_id_t) + sizeof(u64_t);
-            std::size_t const ceiling_rows = min_of(max_node_count_k,
+            std::size_t const ceiling_rows = min_of(min_of(config.ceiling, max_node_count_k),
                                                     max_of<std::size_t>(config.capacity, budget_bytes / row_bytes));
             // The offsets column holds one start past the last row.
             if (offsets_column_.reserve_range((ceiling_rows + 1) * sizeof(u64_t)) != status_t::success_k ||
@@ -367,6 +374,7 @@ struct vram_ragged_graph {
                     status_t::success_k ||
                 values_tape_.reserve_range(max_of(config.bytes, budget_bytes) + tape_margin_k) != status_t::success_k)
                 return {0, status_t::bad_alloc_k};
+            ceiling_rows_ = ceiling_rows;
             standard_atomic_ref<std::size_t>(connectivity_).store(config.connectivity, std::memory_order_release);
         }
         if (status_t const mapped = map_rows_(config.capacity); failed(mapped)) return {capacity(), mapped};
@@ -447,8 +455,10 @@ struct vram_ragged_graph {
         expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
                                          insert_config_t config = {}) noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
-            if (tape.offsets.size() != rows + 1) return {{}, status_t::config_mismatch_k};
-            return std::exchange(index_, nullptr)->launch_claimed_(first_id, tape, context, config);
+            vram_ragged_graph& index = *index_;
+            expected<insert_result_t> const launched = index.launch_(*this, tape, context, config);
+            if (succeeded(launched.status)) index.publish_(launched.value.new_size);
+            return launched;
         }
 
       private:
@@ -459,7 +469,7 @@ struct vram_ragged_graph {
     };
 
     /** Claims @p rows for one batch, exposing their first ID before any of them launches; refuses a
-     *  kept failure, rows past @c max_node_count_k, and another batch in flight with
+     *  kept failure, rows past the reserved ceiling, and another batch in flight with
      *  @c contended_k. */
     expected<insert_plan_t> plan_insert(std::size_t rows) noexcept {
         insert_plan_t plan;
@@ -489,10 +499,43 @@ struct vram_ragged_graph {
         return plan.insert(tape, context, config);
     }
 
+    /** Rows claimed by batches, visible or not: where the next claim starts, and what a modality
+     *  face's shard set measures its bound against. */
+    std::size_t claimed_() const noexcept { return claims_.claimed(size()); }
+
+    /** Closes the claim word at the watermark, so every claim refuses until @ref reopen_; refused
+     *  while a batch or load is in flight. */
+    status_t close_() noexcept { return claims_.close(size()); }
+
+    /** Reopens a closed claim word at the watermark, past every row a load published meanwhile; an
+     *  open one stays as it is. */
+    void reopen_() noexcept { claims_.reopen(size()); }
+
   private:
 
-    /** Launches the rows claimed from @p first_id, as @ref insert describes; every refusal before
-     *  the launch gives the claim back. */
+    /** A plural walks its shards below one snapshot of their watermarks, and publishes a batch on
+     *  every shard inside one commit. */
+    template <typename, typename, typename, typename, typename>
+    friend struct vram_nvidia_indexes;
+
+    /** Launches and drains the rows @p plan claimed, spending it unless the arguments mismatch, and
+     *  leaves them for @ref publish_ to turn visible; the claim word holds until then. */
+    expected<insert_result_t> launch_(insert_plan_t& plan, tape_view<byte_t const> tape, traversal_context_t& context,
+                                      insert_config_t config) noexcept {
+        if (plan.index_ != this) return {{}, status_t::uninitialized_k};
+        if (tape.offsets.size() != plan.rows + 1) return {{}, status_t::config_mismatch_k};
+        plan.index_ = nullptr;
+        return launch_claimed_(plan.first_id, tape, context, config);
+    }
+
+    /** Turns every row below @p rows visible, the end of a batch @ref launch_ drained, which also
+     *  frees the claim word for the next batch. */
+    void publish_(std::size_t rows) noexcept {
+        standard_atomic_ref<std::size_t>(last_visible_id_).store(rows, std::memory_order_release);
+    }
+
+    /** Launches the rows claimed from @p first_id, as @ref insert describes, without publishing
+     *  them; every refusal before the launch gives the claim back. */
     expected<insert_result_t> launch_claimed_(node_id_t first_id, tape_view<byte_t const> tape,
                                               traversal_context_t& context, insert_config_t config) noexcept {
         std::size_t const rows = tape.size();
@@ -558,7 +601,6 @@ struct vram_ragged_graph {
         longest_row_ = longest;
         span_bytes_ = span_bytes;
         if (status_t const drained = context.wait(); failed(drained)) return {{}, fail_(drained)};
-        standard_atomic_ref<std::size_t>(last_visible_id_).store(total_rows, std::memory_order_release);
 
         vram_telemetry_block_t const spent = context.spent();
         insert_result_t result;
@@ -631,6 +673,16 @@ struct vram_ragged_graph {
     expected<search_result_t> search(tape_view<byte_t const> queries, nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
+        return search_below_(queries, result_ids, result_distances, context, config, size());
+    }
+
+  private:
+
+    /** The walk behind @ref search, seeded and bounded below @p visible, the watermark the caller
+     *  took: the index's own, or one a plural snapshot consistent across its shards. */
+    expected<search_result_t> search_below_(tape_view<byte_t const> queries, nk::matrix_span<node_id_t> result_ids,
+                                            nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                            search_config_t config, std::size_t visible) noexcept {
         std::size_t const queries_count = queries.size();
         if (!queries_count) return {{}, status_t::success_k};
         if (!connectivity()) return {{}, status_t::uninitialized_k};
@@ -638,7 +690,6 @@ struct vram_ragged_graph {
         if (result_ids.extent(0) != queries_count || result_ids.extent(1) < config.count ||
             result_distances.extent(0) != queries_count || result_distances.extent(1) < config.count)
             return {{}, status_t::config_mismatch_k};
-        std::size_t const visible = size();
         std::size_t longest = 0;
         u32_t const span_bytes = static_cast<u32_t>(span_bytes_of_(queries, longest));
         std::size_t const rung = kits_.rung_serving_(longest);
@@ -715,6 +766,8 @@ struct vram_ragged_graph {
         result.visited_saturations = spent.visited_saturations;
         return {result, status_t::success_k};
     }
+
+  public:
 
 #pragma endregion Search
 
@@ -1164,7 +1217,7 @@ struct vram_ragged_graph {
      *  @retval config_mismatch_k A null donor, this index itself, or one of another device,
      *      connectivity or metric.
      *  @retval contended_k A batch, a load or a plan in flight on this index or on a donor.
-     *  @retval overflow_k Rows past @c max_node_count_k.
+     *  @retval overflow_k Rows past the reserved ceiling.
      */
     template <typename owner_type_>
     expected<refine_plan_t> plan_absorb(std::span<owner_type_*> donors, vram_ragged_graph owner_type_::* graph,
@@ -1186,7 +1239,7 @@ struct vram_ragged_graph {
         if (status_t const closed = close_(); failed(closed)) return {std::move(plan), closed};
         plan.index_ = this;
         std::size_t const base = size();
-        if (landed_rows > max_node_count_k - base) return {std::move(plan), status_t::overflow_k};
+        if (landed_rows > ceiling_rows_ - base) return {std::move(plan), status_t::overflow_k};
         // Donors close one by one, and a refusal reopens the ones closed before it.
         std::size_t closed_donors = 0;
         auto const reopen_donors = [&]() noexcept {
@@ -2052,27 +2105,16 @@ struct vram_ragged_graph {
         return failure;
     }
 
-    /** Rows claimed by batches, visible or not: where the next claim starts. */
-    std::size_t claimed_() const noexcept { return claims_.claimed(size()); }
-
     /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone grows, launches and publishes them. */
     expected<node_id_t> claim_(std::size_t rows) noexcept {
-        auto const [first_id, claim_status] = claims_.claim(size(), rows, max_node_count_k);
+        auto const [first_id, claim_status] = claims_.claim(size(), rows, ceiling_rows_);
         return {static_cast<node_id_t>(first_id), claim_status};
     }
 
     /** Gives back the claim over @p rows from @p first, which launched nothing; a word that moved
      *  on, closed by a caller around a load, stays as it is. */
     void unclaim_(std::size_t first, std::size_t rows) noexcept { claims_.unclaim(first, rows); }
-
-    /** Closes the claim word at the watermark, so every claim refuses until @ref reopen_; refused
-     *  while a batch or load is in flight. */
-    status_t close_() noexcept { return claims_.close(size()); }
-
-    /** Reopens a closed claim word at the watermark, past every row a load published meanwhile; an
-     *  open one stays as it is. */
-    void reopen_() noexcept { claims_.reopen(size()); }
 
     /** Maps the offsets column and the neighbors matrix up to @p rows, host work alone, so it rides
      *  no stream, and leaves the fresh neighbor rows for @ref grow_rows_ to fill. */
@@ -2753,6 +2795,9 @@ struct vram_ragged_graph {
 
     /** Held by the one batch claiming, growing and linking at a time, until its drain. */
     claim_word_t claims_;
+
+    /** Rows the reserved ranges span, the most any claim reaches; fixed by the first @c reserve. */
+    std::size_t ceiling_rows_ = max_node_count_k;
 
     /** The value bytes every published batch holds in the tape. */
     std::size_t tape_bytes_ = 0;

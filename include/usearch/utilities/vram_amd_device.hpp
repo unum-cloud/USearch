@@ -19,6 +19,7 @@
 #include <cstddef> // `std::size_t`
 
 #include <atomic>      // `std::memory_order` - the committed extent
+#include <bitset>      // `std::bitset` - the devices a range maps its slabs for
 #include <memory>      // `std::unique_ptr` for owned device allocations
 #include <mutex>       // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
 #include <span>        // `std::span` - the device list an executor opens over, a code object's bytes
@@ -137,6 +138,7 @@ struct hip_api_t {
     hip_result_t (*get_device_attribute)(int*, hip_device_attribute_t, int) = nullptr;
     hip_result_t (*get_device_name)(char*, int, int) = nullptr;
     hip_result_t (*get_device_memory)(std::size_t*, int) = nullptr;
+    hip_result_t (*can_access_peer)(int*, int, int) = nullptr;
     hip_result_t (*set_device)(int) = nullptr;
     hip_result_t (*malloc_async)(void**, std::size_t, hip_stream_handle_t) = nullptr;
     hip_result_t (*free_async)(void*, hip_stream_handle_t) = nullptr;
@@ -197,6 +199,7 @@ struct hip_api_t {
             library.resolve("hipDeviceGetAttribute", runtime.get_device_attribute) &&
             library.resolve("hipDeviceGetName", runtime.get_device_name) &&
             library.resolve("hipDeviceTotalMem", runtime.get_device_memory) &&
+            library.resolve("hipDeviceCanAccessPeer", runtime.can_access_peer) &&
             library.resolve("hipSetDevice", runtime.set_device) &&
             library.resolve("hipMallocAsync", runtime.malloc_async) &&
             library.resolve("hipFreeAsync", runtime.free_async) &&
@@ -421,22 +424,27 @@ struct hip_virtual_memory_allocator {
     std::size_t slab_bytes_ = 0;
     int device_ = 0;
 
+    /** HIP ordinals besides the owner that every slab maps for, each able to reach the owner. */
+    std::bitset<gpu_devices_capacity_k> peers_;
+
     hip_virtual_memory_allocator() = default;
 
     /** Names the GPU the future reservation pins to - placement only, no runtime call. */
     explicit hip_virtual_memory_allocator(int device) noexcept : device_(device) {}
 
     /** Copies the placement only, never a live reservation. */
-    hip_virtual_memory_allocator(hip_virtual_memory_allocator const& other) noexcept : device_(other.device_) {}
+    hip_virtual_memory_allocator(hip_virtual_memory_allocator const& other) noexcept
+        : device_(other.device_), peers_(other.peers_) {}
 
     /** Takes over a live reservation, so a table of them relocates without remapping. */
     hip_virtual_memory_allocator(hip_virtual_memory_allocator&& other) noexcept
         : base_(std::exchange(other.base_, nullptr)),
           virtual_address_bytes_(std::exchange(other.virtual_address_bytes_, 0)),
-          mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), slab_bytes_(other.slab_bytes_), device_(other.device_) {
-    }
+          mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), slab_bytes_(other.slab_bytes_), device_(other.device_),
+          peers_(other.peers_) {}
     template <typename other_>
-    hip_virtual_memory_allocator(hip_virtual_memory_allocator<other_> const& other) noexcept : device_(other.device_) {}
+    hip_virtual_memory_allocator(hip_virtual_memory_allocator<other_> const& other) noexcept
+        : device_(other.device_), peers_(other.peers_) {}
     hip_virtual_memory_allocator& operator=(hip_virtual_memory_allocator const&) = delete;
     ~hip_virtual_memory_allocator() noexcept { release(); }
 
@@ -459,22 +467,65 @@ struct hip_virtual_memory_allocator {
         return status_t::success_k;
     }
 
-    /** Maps and zeroes physical slabs until at least @p bytes are usable; never unmaps early. Each
-     *  handle is released right after mapping, since the mapping alone keeps the memory alive. */
+    /** Maps every slab for those of @p devices that can reach the owner too, so their kernels and
+     *  copies read and write it directly; placement only, named before the first @ref commit. */
+    void share_with(std::bitset<gpu_devices_capacity_k> devices) noexcept {
+        peers_.reset();
+        hip_api_t const& runtime = hip_api();
+        if (!runtime) return;
+        for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
+            int reaches = 0;
+            if (!devices[ordinal] || static_cast<int>(ordinal) == device_) continue;
+            peers_[ordinal] = runtime.can_access_peer(&reaches, static_cast<int>(ordinal), device_) == hip_success_k &&
+                              reaches;
+        }
+    }
+
+    /** Whether kernels and copies on HIP ordinal @p device reach the mapped slabs. */
+    bool shared_with(int device) const noexcept {
+        return device == device_ || peers_[static_cast<std::size_t>(device)];
+    }
+
+    /** Maps every slab, those committed already included, for @p devices too, as a plural absorbing
+     *  this storage names its own; refuses with @c config_mismatch_k, granting nothing, when one of
+     *  them cannot reach the owner. No slab may be committed meanwhile. */
+    status_t grant(std::bitset<gpu_devices_capacity_k> devices) noexcept {
+        hip_api_t const& runtime = hip_api();
+        if (!runtime) return status_t::device_error_k;
+        std::bitset<gpu_devices_capacity_k> granted = peers_;
+        for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
+            int reaches = 0;
+            if (!devices[ordinal] || static_cast<int>(ordinal) == device_ || granted[ordinal]) continue;
+            if (runtime.can_access_peer(&reaches, static_cast<int>(ordinal), device_) != hip_success_k || !reaches)
+                return status_t::config_mismatch_k;
+            granted[ordinal] = true;
+        }
+        if (granted == peers_) return status_t::success_k;
+        hip_access_descriptor_t access[gpu_devices_capacity_k];
+        std::size_t const readers = access_of_(granted, access);
+        for (std::size_t offset = 0; offset != mapped_bytes_; offset += slab_bytes_)
+            if (runtime.memory_set_access(base_ + offset, slab_bytes_, access, readers) != hip_success_k)
+                return status_t::device_error_k;
+        peers_ = granted;
+        return status_t::success_k;
+    }
+
+    /** Maps and zeroes physical slabs until at least @p bytes are usable, for the owner and every
+     *  peer; never unmaps early. Each handle is released right after mapping, since the mapping
+     *  alone keeps the memory alive. */
     status_t commit(std::size_t bytes) noexcept {
         if (bytes > virtual_address_bytes_) return status_t::overflow_k;
         hip_api_t const& runtime = hip_api();
         hip_allocation_properties_t const properties = allocation_properties_(device_);
-        hip_access_descriptor_t access;
-        access.location = properties.location;
-        access.flags = hip_access_descriptor_t::read_write_k;
+        hip_access_descriptor_t access[gpu_devices_capacity_k];
+        std::size_t const readers = access_of_(peers_, access);
         while (mapped_bytes_ < bytes) {
             hip_allocation_handle_t handle = nullptr;
             if (runtime.memory_create(&handle, slab_bytes_, &properties, 0) != hip_success_k)
                 return status_t::bad_alloc_k;
             byte_t* const slab = base_ + mapped_bytes_;
             bool const mapped = runtime.memory_map(slab, slab_bytes_, 0, handle, 0) == hip_success_k &&
-                                runtime.memory_set_access(slab, slab_bytes_, &access, 1) == hip_success_k;
+                                runtime.memory_set_access(slab, slab_bytes_, access, readers) == hip_success_k;
             runtime.memory_release(handle);
             if (!mapped) return status_t::device_error_k;
             if (runtime.fill(slab, 0, slab_bytes_) != hip_success_k) return status_t::device_error_k;
@@ -504,6 +555,19 @@ struct hip_virtual_memory_allocator {
         properties.location.type = hip_memory_location_t::device_k;
         properties.location.id = device;
         return properties;
+    }
+
+    /** Writes the owner's read-write access, then each of @p peers', into @p access, and answers
+     *  how many it wrote. */
+    std::size_t access_of_(std::bitset<gpu_devices_capacity_k> peers,
+                           hip_access_descriptor_t (&access)[gpu_devices_capacity_k]) const noexcept {
+        access[0] = {allocation_properties_(device_).location, hip_access_descriptor_t::read_write_k};
+        std::size_t readers = 1;
+        for (std::size_t ordinal = 0; ordinal != peers.size(); ++ordinal)
+            if (peers[ordinal])
+                access[readers++] = {{hip_memory_location_t::device_k, static_cast<int>(ordinal)},
+                                     hip_access_descriptor_t::read_write_k};
+        return readers;
     }
 };
 

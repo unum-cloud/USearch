@@ -102,7 +102,7 @@ struct vram_nvidia_kits {
     static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept { return copy_bytes(stored, saved); }
 
     /** Loads the fatbin onto @p device, finds every kernel of every rung by its symbol, and uploads
-     *  the window widths the kits read beside the rows. */
+     *  the parameters the kits read beside the rows. */
     status_t load_kernels_(int device) noexcept;
 
     cuda_function_handle_t kernel_function_(std::size_t rung, vram_kernel_t kernel, u32_t slots) const noexcept {
@@ -241,6 +241,19 @@ struct vram_nvidia_index {
     }
 
   private:
+
+    /** A plural's shard table measures, closes and reopens the graph's claims. */
+    template <typename, typename, typename, typename, template <typename> class, typename>
+    friend struct utilities::shard_set;
+
+    /** A plural walks the graph below its snapshot and publishes its batches inside one commit. */
+    template <typename, typename, typename, typename, typename>
+    friend struct basic::vram_nvidia_indexes;
+
+    std::size_t claimed_() const noexcept { return graph_.claimed_(); }
+    status_t close_() noexcept { return graph_.close_(); }
+    void reopen_() noexcept { graph_.reopen_(); }
+
     graph_t graph_;
 };
 

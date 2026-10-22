@@ -315,8 +315,9 @@ class chunked_multimap {
         return *this;
     }
 
-    /** Forgets every entry and seat, keeping the chunks - single-threaded: the caller certifies no concurrent
-     *  readers or writers for the call. */
+    /** Forgets every entry and seat, keeping the chunks - no writer may run alongside, and a reader
+     *  running alongside must discard what it found, as one bracketed by an epoch the caller moves
+     *  does. */
     void clear() noexcept {
         for (std::size_t index = 0; index != max_chunks_k; ++index) {
             std::span<slot_state_t> const states = states_.chunk(index);
@@ -392,7 +393,8 @@ class chunked_multimap {
                 slot_state_t const state =
                     atomic_ref<slot_state_t const>(states[position]).load(std::memory_order_acquire);
                 if (state == slot_state_t::empty_k) break;
-                if (state == tag && slots[position].key == key) return {slots[position].value, status_t::success_k};
+                if (state == tag && slots[position].key == key)
+                    return {value_of_(slots[position]), status_t::success_k};
             }
         }
         return {value_t {}, status_t::malformed_k};
@@ -414,9 +416,31 @@ class chunked_multimap {
                     atomic_ref<slot_state_t const>(states[position]).load(std::memory_order_acquire);
                 if (state == slot_state_t::empty_k) break;
                 // A building slot's key is still in flight - occupied, and never equal to a tag.
-                if (state == tag && slots[position].key == key) callback(slots[position].value);
+                if (state == tag && slots[position].key == key) callback(value_of_(slots[position]));
             }
         }
+    }
+
+    /** Swaps the one slot holding exactly @p key and @p from to @p to, as one atomic store, and
+     *  answers whether it found one; readers see the old value or the new, never a mix. */
+    bool replace(key_t const& key, value_t from, value_t to) noexcept {
+        u64_t const hash = mixed_hash_of(key);
+        slot_state_t const tag = probe_tag_of(hash);
+        for (std::size_t index = 0; index != max_chunks_k; ++index) {
+            std::span<slot_state_t const> const states = states_.chunk(index);
+            std::span<slot_t> const slots = slots_.chunk(index);
+            if (slots.empty()) return false;
+            for (std::size_t position = first_probe_of(hash, states.size());;
+                 position = (position + 1) & (states.size() - 1)) {
+                slot_state_t const state =
+                    atomic_ref<slot_state_t const>(states[position]).load(std::memory_order_acquire);
+                if (state == slot_state_t::empty_k) break;
+                if (state != tag || slots[position].key != key || value_of_(slots[position]) != from) continue;
+                atomic_ref<value_t>(slots[position].value).store(to, std::memory_order_relaxed);
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Number of values stored under @p key. */
@@ -440,6 +464,11 @@ class chunked_multimap {
         key_t key;
         value_t value;
     };
+
+    /** The value of a published @p slot, loaded whole, since @ref replace may swap it meanwhile. */
+    value_t value_of_(slot_t const& slot) const noexcept {
+        return atomic_ref<value_t const>(slot.value).load(std::memory_order_relaxed);
+    }
 
     /** Slots the columns hold - every chunk of the doubling phase, past any table a machine holds. */
     inline static constexpr std::size_t max_slots_k = slots_schedule_t::doubling_rows_k;

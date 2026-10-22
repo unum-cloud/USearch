@@ -10,7 +10,8 @@
  *  runtime, or on a GPU; the oracle scores with the widest kit this binary compiled. Queries are
  *  the file's last entries, kept out of the index, so no query finds itself. A hit counts when its
  *  distance is within the exact k-th, so integer edit distances, where many entries tie, are not
- *  undercounted.
+ *  undercounted. An oracle rejects an entry with an infinite distance, and a query admitting fewer
+ *  than k entries is judged over those it admits, one admitting none not at all.
  *
  *  @verbatim
  *  --metric            per binary                Distance kind, by its checkpoint token
@@ -19,8 +20,8 @@
  *  --expansion-search  96                        Candidates while searching, like 32,64,128
  *  --top-k             10                        Matches per query to judge
  *  --max-base-entries  the file but the queries  Cap on ingested entries
- *  --queries           1000                      Entries held out of the file's tail as queries
- *  --oracle-queries    16                        Queries the exact oracle judges
+ *  --queries           100,000                   Entries held out of the file's tail as queries
+ *  --oracle-queries    256                       Queries the exact oracle judges
  *  --threads           7/8 of the logical cores  Worker threads
  *  --inserts-per-core  2048                      Entries per insert call for each thread
  *  --queries-per-core  2048                      Queries per search call for each thread
@@ -31,6 +32,7 @@
 #include <cmath> // `std::fabs`
 
 #include <algorithm> // `std::partial_sort`, `std::min`, `std::max`
+#include <limits>    // `std::numeric_limits` - the distance of a rejected entry
 #include <span>      // `std::span`
 #include <vector>    // `std::vector`
 
@@ -70,10 +72,10 @@ struct basic_settings_t {
     count_t max_base_entries;
 
     /** Entries held out of the file's tail as queries. */
-    count_t queries {.value = 1000};
+    count_t queries {.value = 100000};
 
     /** Queries the exact oracle judges. */
-    count_t oracle_queries {.value = 16};
+    count_t oracle_queries {.value = 256};
 
     /** Worker threads; absent takes 7/8 of the logical cores. */
     count_t threads;
@@ -100,8 +102,8 @@ inline std::array<flag_t, 11> basic_flags(basic_settings_t& settings) noexcept {
         {"--top-k", "count", "matches per query to judge; 10 by default", &settings.top_k},
         {"--max-base-entries", "count", "cap on ingested entries; every entry the queries leave by default",
          &settings.max_base_entries},
-        {"--queries", "count", "entries held out of the file's tail as queries; 1000 by default", &settings.queries},
-        {"--oracle-queries", "count", "queries the exact oracle judges; 16 by default", &settings.oracle_queries},
+        {"--queries", "count", "entries held out of the file's tail as queries; 100,000 by default", &settings.queries},
+        {"--oracle-queries", "count", "queries the exact oracle judges; 256 by default", &settings.oracle_queries},
         {"--threads", "count", "threads; 7/8 of the logical cores by default", &settings.threads},
         {"--inserts-per-core", "entries", "entries per insert call, per thread; 2048 by default",
          &settings.inserts_per_core},
@@ -176,8 +178,9 @@ struct serve_in_place_t {
  *      `(executor, keys, entries, count, stats, outcome)`.
  *  @param[in] search Answers queries into an arena at a breadth:
  *      `(executor, arena, queries, count, expansion, matches, stats, outcome)`.
- *  @param[in] exact Fills one distance per base entry for the query at a tape row, from any of
- *      `--threads` threads at once, each with its own scratch: `(thread, row, distances)`.
+ *  @param[in] exact Fills one distance per base entry for the query at a tape row, infinite for an
+ *      entry the query rejects, from any of `--threads` threads at once, each with its own
+ *      scratch: `(thread, row, distances)`.
  *  @param[in] serve Moves the built index where the searches read it, answering the executor they
  *      run on, as `(executor, outcome)`; an NVMe residency saves it and views the checkpoint.
  *  @return The process exit code.
@@ -246,11 +249,20 @@ int run_basic_bench(basic_settings_t const& settings, tape_t const& tape, usearc
     std::size_t const judged = std::min(settings.oracle_queries.value, query_count);
     std::size_t const kept = std::min(top_k, base_count);
     std::vector<double> nearest_exact(judged), kept_exact(judged), scanned(threads * base_count);
+    std::vector<std::size_t> tied_exact(judged), admitted_exact(judged);
     auto judge_exactly = [&](std::size_t query, std::size_t thread) noexcept {
         std::span<double> const distances {scanned.data() + thread * base_count, base_count};
         exact(thread, query_first + query, distances);
-        std::partial_sort(distances.begin(), distances.begin() + kept, distances.end());
-        nearest_exact[query] = distances[0], kept_exact[query] = distances[kept - 1];
+        // One past the kept, so a tie across the cut counts as one too.
+        std::size_t const ranked = std::min(kept + 1, base_count);
+        std::partial_sort(distances.begin(), distances.begin() + ranked, distances.end());
+        std::size_t admitted = 0;
+        while (admitted != kept && distances[admitted] != std::numeric_limits<double>::infinity()) ++admitted;
+        admitted_exact[query] = admitted;
+        nearest_exact[query] = distances[0], kept_exact[query] = distances[admitted ? admitted - 1 : 0];
+        for (std::size_t rank = 0; rank != admitted; ++rank)
+            tied_exact[query] += (rank && distances[rank] == distances[rank - 1]) ||
+                                 (rank + 1 < ranked && distances[rank] == distances[rank + 1]);
     };
     using judge_t = decltype(judge_exactly);
     fu_topology_t topology = nullptr;
@@ -268,8 +280,13 @@ int run_basic_bench(basic_settings_t const& settings, tape_t const& tape, usearc
     if (pool) fu_pool_delete(pool);
     if (topology) fu_topology_delete(topology);
     if (!judging) return fmt::println(stderr, "The exact scan could not spread over {} threads", threads), 1;
-    fmt::println("- Exact scan: {} queries in {:.2f} s", judged,
-                 stdc::duration<double>(steady_clock_t::now() - judge_start).count());
+    std::size_t tied = 0, admitted = 0, answerable = 0;
+    for (std::size_t const query_tied : tied_exact) tied += query_tied;
+    for (std::size_t const query_admitted : admitted_exact)
+        admitted += query_admitted, answerable += query_admitted != 0;
+    fmt::println("- Exact scan: {} queries in {:.2f} s · {:.4f} of the top {} distances tied", judged,
+                 stdc::duration<double>(steady_clock_t::now() - judge_start).count(),
+                 static_cast<double>(tied) / static_cast<double>(admitted), kept);
 
     std::vector<double> found_scores(query_count * top_k);
     std::vector<std::size_t> found_counts(query_count);
@@ -297,17 +314,19 @@ int run_basic_bench(basic_settings_t const& settings, tape_t const& tape, usearc
         double const search_seconds = stdc::duration<double>(steady_clock_t::now() - search_start).count();
         double recall_at_one = 0, recall_at_k = 0;
         for (std::size_t query = 0; query != judged; ++query) {
+            if (!admitted_exact[query]) continue;
             double const* const scores = found_scores.data() + query * top_k;
             std::size_t hits = 0;
             for (std::size_t rank = 0; rank != found_counts[query]; ++rank)
                 hits += within(scores[rank], kept_exact[query]);
             recall_at_one += found_counts[query] && within(scores[0], nearest_exact[query]);
-            recall_at_k += static_cast<double>(std::min(hits, kept)) / static_cast<double>(kept);
+            recall_at_k += static_cast<double>(std::min(hits, admitted_exact[query])) /
+                           static_cast<double>(admitted_exact[query]);
         }
         fmt::println("- Expansion {}: recall@1 {:.4f} · recall@{} {:.4f} over {} judged · " //
                      "{} queries in {:.2f} s · {}/s · {:.0f} distances per query",          //
-                     expansion, recall_at_one / judged, kept, recall_at_k / judged, judged, humanized(query_count),
-                     search_seconds, humanized(query_count / search_seconds),
+                     expansion, recall_at_one / answerable, kept, recall_at_k / answerable, answerable,
+                     humanized(query_count), search_seconds, humanized(query_count / search_seconds),
                      static_cast<double>(searched.computed_distances) / static_cast<double>(query_count));
     }
 

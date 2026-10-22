@@ -694,6 +694,43 @@ void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
+void usearch_dense_compact(usearch_dense_compact_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    if (arguments->changed) *arguments->changed = 0;
+    if (reject_if(arguments->count && !arguments->sources, usearch_status_invalid_argument_k,
+                  "The sources must name handles", outcome))
+        return;
+    usearch_dense_index_handle_t& target = *arguments->target;
+    if (reject_read_only(target, outcome)) return;
+    std::size_t const sources_count = arguments->count;
+    usearch_dense_index_t* const sources = arguments->sources;
+    std::size_t landing = target.entries.size();
+    for (std::size_t position = 0; position != sources_count; ++position) {
+        if (reject_if(!sources[position], usearch_status_invalid_argument_k, "A source must not be null", outcome))
+            return;
+        for (std::size_t earlier = 0; earlier != position; ++earlier)
+            if (reject_if(sources[earlier] == sources[position], usearch_status_config_mismatch_k,
+                          "A source must not repeat", outcome))
+                return;
+        if (sources[position] != arguments->target) landing += sources[position]->entries.size();
+    }
+    // One flat list holds no shards, so in place nothing moves and every other source appends.
+    std::unique_lock writers(target.mutex);
+    if (reject_if(!target.accommodate(landing), usearch_status_out_of_memory_k,
+                  "The sources' rows could not be accommodated", outcome))
+        return;
+    for (std::size_t position = 0; position != sources_count; ++position) {
+        if (sources[position] == arguments->target) continue;
+        for (dense_entry_t const& entry : sources[position]->entries) target.append(entry.key, entry.payload);
+    }
+    for (std::size_t position = 0; position != sources_count; ++position)
+        if (sources[position] != arguments->target) delete std::exchange(sources[position], nullptr);
+    std::size_t const rows = target.entries.size();
+    if (arguments->stats) arguments->stats->visited_members = rows;
+    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+}
+
 /** The stand-in's refinement: the donors it still lands, and how far its sweep got. It closes
  *  nothing, so insertions and saves meanwhile proceed. */
 struct usearch_dense_refinement_handle_t {

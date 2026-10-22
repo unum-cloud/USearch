@@ -18,19 +18,25 @@
  *  closes around a refine, an absorb, a checkpoint load or a save, which refuse with
  *  @c contended_k while a batch is in flight; a shard's kept failure refuses every later mutation,
  *  and the commit sequence word lets a reader spanning the shards see each batch whole or not at
- *  all.
+ *  all. Mutators hold one gate's shared side per call, and the destructive windows - a clear, each
+ *  close, and an absorb emptying its donor in place - take its unique side or answer
+ *  @c contended_k. Readers bracket each call with the shard set's epoch, retry once when a window
+ *  overlapped them, and answer @c contended_k when a second one did; emptied shards keep their
+ *  storage until the index dies.
  *
  *  Plain host C++ like the shard's own face: the attend gather launches through the shard's
  *  declarations, which the kernel side defines.
  */
 #pragma once
 
-#include <bit>         // `std::bit_ceil` - the key staging's halves
-#include <memory>      // `std::unique_ptr` - an index holds atomics and never moves
-#include <span>        // `std::span` - the caller's keys & the merged ranking
-#include <string_view> // `std::string_view` - the checkpoint paths
-#include <type_traits> // `std::is_same_v`, `std::remove_cvref_t`
-#include <utility>     // `std::move`, `std::exchange`, `std::swap`
+#include <bit>          // `std::bit_ceil` - the key staging's halves
+#include <memory>       // `std::unique_ptr` - an index holds atomics and never moves
+#include <mutex>        // `std::unique_lock` - the windows' hold on the gate
+#include <shared_mutex> // `std::shared_lock` - the mutators' hold on the gate
+#include <span>         // `std::span` - the caller's keys & the merged ranking
+#include <string_view>  // `std::string_view` - the checkpoint paths
+#include <type_traits>  // `std::is_same_v`, `std::remove_cvref_t`, `std::invoke_result_t`
+#include <utility>      // `std::move`, `std::exchange`, `std::swap`
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the shard set's words
 
@@ -38,13 +44,16 @@
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer` - the plans' state & the key staging
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator` - the host columns' placement
 #include "usearch/utilities/safegraphs_format.hpp" // `save_config_t`, `load_config_t`, `safegraphs_read_metadata`
+#include "usearch/utilities/ram_shards.hpp"        // `shard_set` - the shards, their keys & routing
 #include "usearch/dense/types.hpp"
-#include "usearch/dense/sharded_indexes.hpp"
 #include "usearch/dense/shard_checkpoints.hpp"
 #include "usearch/dense/vram_shard_fanout.hpp"
 #include "usearch/dense/vram_amd_index.hpp"
 
 namespace unum::usearch::dense {
+
+template <typename vram_indexes_type_, typename ram_indexes_type_>
+struct vram_amd_compact_plan;
 
 /**
  *  @brief The sharded index: same-geometry GPU-resident shards viewed as one.
@@ -64,6 +73,8 @@ template <                                            //
     typename key_hash_type_ = std::hash<key_type_>    //
     >
 struct vram_amd_indexes {
+    template <typename, typename>
+    friend struct vram_amd_compact_plan;
 
     /** The shard type - geometry parameters in the shard's own order, so the two never disagree. */
     using index_t = vram_amd_index<vector_dtype_, kernels_type_, cache_hints_type_>;
@@ -160,8 +171,8 @@ struct vram_amd_indexes {
      *  columns, locator map and checkpoint catalogs sit on; nothing is placed by default. */
     vram_amd_indexes() = delete;
     explicit vram_amd_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
-        : shards_(kernel, allocator) {}
-    vram_amd_indexes(vram_amd_indexes&& other) noexcept : shards_(other.kernel(), other.shards_.allocator()) {
+        : shards_(allocator), kernel_(kernel) {}
+    vram_amd_indexes(vram_amd_indexes&& other) noexcept : shards_(other.shards_.allocator()), kernel_(other.kernel_) {
         swap(other);
     }
     vram_amd_indexes& operator=(vram_amd_indexes&& other) noexcept { return swap(other), *this; }
@@ -172,7 +183,10 @@ struct vram_amd_indexes {
     ~vram_amd_indexes() noexcept = default;
 
     /** Exchanges two indexes whole, every shard's keys with it. */
-    void swap(vram_amd_indexes& other) noexcept { shards_.swap(other.shards_); }
+    void swap(vram_amd_indexes& other) noexcept {
+        shards_.swap(other.shards_);
+        std::swap(kernel_, other.kernel_);
+    }
 
     /** Bounds every shard at @p rows, clamped to the ID space; zero means the ID space. Past it, an
      *  insertion opens another generation of shards on the same placements. Ignored once storage
@@ -195,25 +209,35 @@ struct vram_amd_indexes {
      *  refuses any walking by another kernel, any whose frozen geometry differs from the shards
      *  already here, and any already reserved. @ref reserve closes the shard set. */
     status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
-        if (!shard) return status_t::config_mismatch_k;
+        if (!shard || shard->kernel() != kernel_ || (!shards_.empty() && !same_geometry(*shard, *shards_[0].index)))
+            return status_t::config_mismatch_k;
         int const device = shard->device_specs().ordinal;
         if (hip_set_device(device) != hip_success_k) return status_t::device_error_k;
-        return shards_.emplace(std::move(shard),
-                               device_shard_keys_t {keys_column_t {shards_.allocator()},
-                                                    hip_virtual_memory_allocator<key_t> {device}, key_staging_t {}});
+        if (status_t const placed = shards_.emplace(
+                std::move(shard), device_shard_keys_t {keys_column_t {shards_.allocator()},
+                                                       hip_virtual_memory_allocator<key_t> {device}, key_staging_t {}});
+            failed(placed))
+            return placed;
+        // Every shard is still unreserved, so each maps its slabs for every device placed so far.
+        std::bitset<gpu_devices_capacity_k> const devices = devices_();
+        for (shard_t& one : shards_) one.index->share_with_(devices);
+        return status_t::success_k;
     }
 
-    /** Empties every shard in place, keeping its placement, geometry and capacity; a kept failure
-     *  drops with the rows. Demands the same quiescence as @ref reserve. */
+    /** Empties every shard in place, keeping its placement, geometry and capacity, and every
+     *  generation past the first as idle shards the next ones reuse; a kept failure drops with the
+     *  rows. Takes the gate alone and closes every shard first, so a call in flight, a batch or
+     *  load holding claims or a plan holding the index closed refuses it with @c contended_k; a
+     *  search it lands under retries. */
     status_t clear() noexcept {
-        reserve_capacity_t const geometry {capacity(), static_cast<connectivity_t>(connectivity()), dimensions()};
-        for (shard_t& one : shards_) {
-            std::unique_ptr<index_t> fresh = rebuild_(*one.index);
-            if (!fresh) return status_t::bad_alloc_k;
-            one.index = std::move(fresh);
-        }
-        shards_.forget_rows();
-        return geometry.capacity ? reserve(geometry).status : status_t::success_k;
+        unique_lock_t const held {gate_, std::try_to_lock};
+        if (!held) return status_t::contended_k;
+        if (status_t const closed = shards_.close(); failed(closed)) return closed;
+        shards_.begin_window();
+        clear_();
+        shards_.end_window();
+        shards_.reopen();
+        return status_t::success_k;
     }
 
 #pragma endregion Placement
@@ -221,7 +245,7 @@ struct vram_amd_indexes {
 #pragma region Measures and Reservation
 
     /** The metric every shard scores by, fixed at construction. */
-    nk_kernel_kind_t kernel() const noexcept { return shards_.kernel(); }
+    nk_kernel_kind_t kernel() const noexcept { return kernel_; }
 
     /** Shards in the index, in placement order. */
     std::size_t shards_count() const noexcept { return shards_.size(); }
@@ -315,6 +339,7 @@ struct vram_amd_indexes {
         status_t insert(std::size_t first_row, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
             if (!owner_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
+            shared_lock_t const held {owner_->gate_};
             std::size_t const count = rows.rows;
             if (keys.size() != count || first_row > rows_ || count > rows_ - first_row ||
                 (count && rows.columns != owner_->dimensions()))
@@ -353,6 +378,7 @@ struct vram_amd_indexes {
             std::size_t launched = 0;
             for (share_t const& share : shares_) launched += share.launched;
             if (succeeded(status_) && launched != rows_) return {{owner_->size()}, status_t::config_mismatch_k};
+            shared_lock_t const held {owner_->gate_};
             insert_result_t result = result_;
             status_t status = settle_(result);
             vram_amd_indexes& owner = *owner_;
@@ -376,7 +402,7 @@ struct vram_amd_indexes {
                     std::size_t const placed = generation_.first + shard;
                     node_id_t const node = static_cast<node_id_t>(shares_[shard].first_id + row);
                     owner.shards_.locators().insert(seats_, owner.shards_[placed].keys.host[node],
-                                                    key_locator_t {placed, node});
+                                                    key_locator_t {static_cast<u32_t>(placed), node});
                 }
             owner_ = nullptr;
             result.new_size = owner.size();
@@ -531,6 +557,8 @@ struct vram_amd_indexes {
     expected<insert_plan_t> plan_insert(std::size_t rows, executor_t& executor, insert_config_t config = {}) noexcept {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return {{}, paired};
+        shared_lock_t const held {gate_};
+        if (shards_.sealed()) return {{}, status_t::contended_k};
         insert_plan_t plan {shards_.allocator()};
         plan.rows_ = rows;
         plan.config_ = config;
@@ -670,7 +698,7 @@ struct vram_amd_indexes {
             : arenas_(std::move(other.arenas_)), traversals_(std::move(other.traversals_)),
               shard_plans_(std::move(other.shard_plans_)), part_bases_(std::move(other.part_bases_)),
               part_offsets_(std::move(other.part_offsets_)), landings_(std::move(other.landings_)),
-              donors_(other.donors_), landed_donors_(other.landed_donors_), config_(other.config_),
+              donors_(std::exchange(other.donors_, {})), landed_donors_(other.landed_donors_), config_(other.config_),
               population_(other.population_), owner_(std::exchange(other.owner_, nullptr)) {}
         refine_plan_t& operator=(refine_plan_t&&) = delete;
         refine_plan_t(refine_plan_t const&) = delete;
@@ -681,7 +709,7 @@ struct vram_amd_indexes {
         ~refine_plan_t() noexcept {
             if (!owner_) return;
             shard_plans_.clear();
-            owner_->shards_.reopen();
+            release_();
         }
 
         /**
@@ -689,8 +717,8 @@ struct vram_amd_indexes {
          *      cancels; @c cancelled_k means a later call continues where this one stopped.
          *
          *  Lands the donors still pending first, as @ref plan_absorb describes; a failing one stays
-         *  pending, with every later one, for the next call. The executor is held only for the
-         *  call.
+         *  pending and closed, with every later one, for the next call, and a landed one stays
+         *  empty, closed and sealed. The executor is held only for the call.
          *
          *  @param[inout] executor The executor the plan was opened over.
          *  @param[in] on_visited Fires per re-selecting phase with the nodes visited so far and the
@@ -704,11 +732,8 @@ struct vram_amd_indexes {
             if (failed(claim_status)) return claim_status;
             for (; landed_donors_ != donors_.size(); ++landed_donors_) {
                 vram_amd_indexes*& donor = donors_[landed_donors_];
-                if (status_t const closed = donor->shards_.close(); failed(closed)) return closed;
-                status_t const landed = owner_->absorb_(*donor, landings_of_(), executor, *this);
-                // Emptied donor shards are fresh and open, so only a failure leaves them closed.
-                donor->shards_.reopen();
-                if (failed(landed)) return landed;
+                if (status_t const landed = owner_->absorb_(*donor, landings_of_(), executor, *this); failed(landed))
+                    return landed;
                 donor = nullptr;
             }
             if (shard_plans_.empty())
@@ -736,7 +761,7 @@ struct vram_amd_indexes {
             }
             refine_result_t const result = running();
             shard_plans_.clear();
-            std::exchange(owner_, nullptr)->shards_.reopen();
+            release_();
             return {result, healed};
         }
 
@@ -752,6 +777,13 @@ struct vram_amd_indexes {
 
       private:
         friend vram_amd_indexes;
+
+        /** Reopens this index and every donor still pending; the plan is unbound after. */
+        void release_() noexcept {
+            std::exchange(owner_, nullptr)->shards_.reopen();
+            for (vram_amd_indexes* pending : donors_.subspan(landed_donors_)) pending->shards_.reopen();
+            donors_ = {};
+        }
 
         /** The landings of the first pending donor: donors land in order, so the shards of every
          *  later one close the landings. */
@@ -836,7 +868,7 @@ struct vram_amd_indexes {
          *  with no donors. */
         growing_buffer<landing_t, forkunion_allocator_t> landings_;
 
-        /** The caller's donor slots, each nulled once landed. */
+        /** The caller's donor slots, each closed at planning and nulled once landed. */
         std::span<vram_amd_indexes*> donors_;
 
         /** Donors landed so far. */
@@ -890,20 +922,25 @@ struct vram_amd_indexes {
      *      device on ties, with its edges rebased and its keys beside it, as a part of its own;
      *      when none has room, a generation opens on the same devices.
      *
-     *  Each donor lands through one plan that does every fallible thing first: a load claiming all
-     *  the rows each receiving shard takes, the key slots, the locator seats and the donor's fresh
-     *  empty shards. A donor shard then crosses one column at a time on the receiving shard's
-     *  stream, its keys beside them; every part lands before any shard publishes, and only then do
-     *  the keys resolve. The donor empties into its fresh shards, which keep their devices but no
-     *  capacity, its slot nulls, and its shards land among the receiving shards' parts in the plan,
-     *  so at most one donor's rows are ever held twice.
+     *  Each donor lands through one plan that does every fallible thing first: the donor's gate, a
+     *  load claiming all the rows each receiving shard takes, the key slots and the locator seats.
+     *  Every donor's committed storage maps for this index's devices at planning, so a donor shard
+     *  then crosses device to device, one column at a time on the receiving shard's stream, its
+     *  keys beside them; every part lands before any shard publishes, and only then do the keys
+     *  resolve. The donor then forgets its rows in place inside its window, keeping its shards and
+     *  their storage, its slot nulls, it stays closed and sealed, consumed, and its shards land
+     *  among the receiving shards' parts in the plan, so at most one donor's rows are ever held
+     *  twice.
      *
      *  Once the last donor landed, the plan's re-selection walks every shard across the parts the
-     *  landings appended, round by round; a cancel pauses only that walk. This index's claim words
-     *  stay closed while the plan lives and the donor's while it lands, so a batch, load or save in
-     *  flight on either refuses it with @c contended_k, and an insertion into this index arriving
-     *  meanwhile is refused. Searches may not overlap on either index, and nothing may start an
-     *  insertion into a donor. An index never reserved takes the first donor's geometry.
+     *  landings appended, round by round; a cancel pauses only that walk. This index and every
+     *  donor close here, each under its own gate, so the packing never goes stale: this index stays
+     *  closed while the plan lives and each donor until it lands, a batch, load or save in flight
+     *  on any of them refuses the plan with @c contended_k, and an insertion into any of them
+     *  arriving meanwhile is refused. Searches of this index may not overlap the plan's
+     *  re-selection, whose merge rewrites neighbors in place; searches of a donor run throughout,
+     *  retrying once around the window that empties it. An index never reserved takes the first
+     *  donor's geometry.
      *
      *  @param[inout] donors The indexes giving their rows up, each nulled once consumed; the slots
      *      must outlive the landings.
@@ -911,9 +948,10 @@ struct vram_amd_indexes {
      *      every index.
      *  @param[in] config The refine's knobs; zeros mean "derive from connectivity".
      *  @retval config_mismatch_k A null donor, another metric or geometry, a device the executor
-     *      does not drive, or this index itself.
-     *  @retval contended_k A batch, load or save in flight on this index, or another refine or
-     *      absorb.
+     *      does not drive, a donor device one of this index's devices cannot reach, or this index
+     *      itself.
+     *  @retval contended_k A call, batch, load or save in flight on this index or a donor, a
+     *      repeated donor, or another refine or absorb holding either.
      *  @retval unsupported_k A donor shard past @ref shard_capacity, which would have to be cut.
      */
     expected<refine_plan_t> plan_absorb(std::span<vram_amd_indexes*> donors, executor_t& executor,
@@ -933,11 +971,21 @@ struct vram_amd_indexes {
                 return {{}, status_t::config_mismatch_k};
         }
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return {{}, paired};
-        if (status_t const closed = shards_.close(); failed(closed)) return {{}, closed};
+        if (status_t const closed = close_gated_(); failed(closed)) return {{}, closed};
         refine_plan_t plan {shards_.allocator()};
         plan.owner_ = this;
-        plan.donors_ = donors;
         plan.config_ = config;
+        for (std::size_t closing = 0; closing != donors.size(); ++closing)
+            if (status_t const closed = donors[closing]->close_gated_(); failed(closed)) {
+                while (closing) donors[--closing]->shards_.reopen();
+                return {{}, closed};
+            }
+        plan.donors_ = donors;
+        // Closed, a donor commits no slab meanwhile, so this index's devices join its mapped ones.
+        std::bitset<gpu_devices_capacity_k> const devices = devices_();
+        for (vram_amd_indexes* donor : donors)
+            for (shard_t& one : donor->shards_)
+                if (status_t const granted = one.index->grant_(devices); failed(granted)) return {{}, granted};
         if (!donors.empty()) {
             std::size_t sources = 0;
             for (vram_amd_indexes const* donor : donors) sources += donor->shards_.size();
@@ -950,19 +998,16 @@ struct vram_amd_indexes {
             auto device_of = [](shard_t const& shard) noexcept { return shard.index->device_specs().ordinal; };
             // Only a donor with rows needs a generation, so the geometry to take exists.
             auto open = [&]() noexcept {
-                std::size_t const opened_after = shards_.size();
                 vram_amd_indexes const& like = shaped ? *shaped : *this;
                 if (!capacity())
                     if (status_t const reserved =
                             reserve({0, static_cast<connectivity_t>(like.connectivity()), like.dimensions()}).status;
                         failed(reserved))
                         return reserved;
-                if (status_t const opened = shards_.open_generation_(
-                        shards_.open_generation(),
-                        [this](shard_t const& built) noexcept { return build_shard_(built); });
-                    failed(opened))
-                    return opened;
-                return shards_.close(opened_after);
+                // This index is sealed, so the generation opens closed like the rest, past the
+                // seal.
+                return shards_.open_generation_past_seal_(
+                    shards_.open_generation(), [this](shard_t const& built) noexcept { return build_shard_(built); });
             };
             if (status_t const packed = shards_.pack(to_writable_span(plan.landings_), 0, shards_.shard_capacity(),
                                                      source_shard, device_of, rank_fewest_rows, open);
@@ -1029,30 +1074,34 @@ struct vram_amd_indexes {
 
     /**
      *  @brief Measures how much of every shard a search can reach, shard by shard on its own
-     *      device: reachable nodes summed, depth the deepest shard's. Read-only.
+     *      device: reachable nodes summed, depth the deepest shard's. Read-only, and bracketed by
+     *      the epoch as every reader is.
      *  @param[inout] executor The streams and their scratch, one per shard.
      */
     expected<health_result_t> health(executor_t& executor) noexcept {
-        std::size_t const shards = shards_.size();
-        if (!shards) return {{}, status_t::uninitialized_k};
-        if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return {{}, paired};
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {{}, claim_status};
+        return bracketed_([&]() noexcept -> expected<health_result_t> {
+            std::size_t const shards = shards_.size();
+            if (!shards) return {{}, status_t::uninitialized_k};
+            if (status_t const kept = status(); failed(kept)) return {{}, kept};
+            if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return {{}, paired};
+            auto [claim, claim_status] = executor.claim();
+            if (failed(claim_status)) return {{}, claim_status};
 
-        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {shards_.allocator()};
-        if (status_t const ready = fanout_t::reserve_traversals(shards_, traversals, executor, 1, insert_config_t {});
-            failed(ready))
-            return {{}, ready};
+            growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {shards_.allocator()};
+            if (status_t const ready = fanout_t::reserve_traversals(shards_, traversals, executor, 1,
+                                                                    insert_config_t {});
+                failed(ready))
+                return {{}, ready};
 
-        health_result_t result;
-        for (std::size_t shard = 0; shard != traversals.size(); ++shard) {
-            if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return {{}, entered};
-            auto const [shard_health, status] = shards_[shard].index->health(traversals[shard]);
-            if (failed(status)) return {{}, status};
-            result += shard_health;
-        }
-        return {result, status_t::success_k};
+            health_result_t result;
+            for (std::size_t shard = 0; shard != traversals.size(); ++shard) {
+                if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return {{}, entered};
+                auto const [shard_health, status] = shards_[shard].index->health(traversals[shard]);
+                if (failed(status)) return {{}, status};
+                result += shard_health;
+            }
+            return {result, status_t::success_k};
+        });
     }
 
 #pragma endregion Refinement
@@ -1081,22 +1130,24 @@ struct vram_amd_indexes {
      */
     expected<search_result_t> search(vector_view_t query_vector, executor_t& executor, search_config_t config,
                                      std::span<key_t> keys, std::span<distance_t> distances) noexcept {
-        if (shards_.empty()) return {{}, status_t::uninitialized_k};
-        if (!query_vector.is_contiguous()) return {{}, status_t::unsupported_layout_k};
-        std::size_t const width = min_of(keys.size(), distances.size());
-        if (!width) return {{}, fanout_t::pairs_with(shards_, executor)};
-        config.expansion_factor = static_cast<typename index_t::small_size_t>(
-            shards_[0].index->non_zero_expansion_factor(config));
-        config.count = static_cast<typename index_t::small_size_t>(width);
-        fanout_t fanout {shards_, executor};
-        if (status_t const begun = fanout.begin(1, config); failed(begun)) return {{}, begun};
-        std::size_t count = 0;
-        expected<search_result_t> found = search_window_(
-            fanout, vectors_view_t {query_vector.data(), 1u, query_vector.size()}, config,
-            nk::matrix_span<key_t> {keys.data(), 1u, width}, nk::matrix_span<distance_t> {distances.data(), 1u, width},
-            std::span<std::size_t> {&count, 1u});
-        found.value.count = count;
-        return found;
+        return bracketed_([&]() noexcept -> expected<search_result_t> {
+            if (shards_.empty()) return {{}, status_t::uninitialized_k};
+            if (!query_vector.is_contiguous()) return {{}, status_t::unsupported_layout_k};
+            std::size_t const width = min_of(keys.size(), distances.size());
+            if (!width) return {{}, fanout_t::pairs_with(shards_, executor)};
+            config.expansion_factor = static_cast<typename index_t::small_size_t>(
+                shards_[0].index->non_zero_expansion_factor(config));
+            config.count = static_cast<typename index_t::small_size_t>(width);
+            fanout_t fanout {shards_, executor};
+            if (status_t const begun = fanout.begin(1, config); failed(begun)) return {{}, begun};
+            std::size_t count = 0;
+            expected<search_result_t> found = search_window_(
+                fanout, vectors_view_t {query_vector.data(), 1u, query_vector.size()}, config,
+                nk::matrix_span<key_t> {keys.data(), 1u, width},
+                nk::matrix_span<distance_t> {distances.data(), 1u, width}, std::span<std::size_t> {&count, 1u});
+            found.value.count = count;
+            return found;
+        });
     }
 
     /**
@@ -1128,19 +1179,21 @@ struct vram_amd_indexes {
     expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
                                      nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                      std::span<std::size_t> counts) noexcept {
-        if (status_t const refusal = fanout_t::refusal(shards_, executor, queries.rows, keys, distances, counts);
-            failed(refusal) || !queries.rows)
-            return {{}, refusal};
-        config.count = static_cast<typename index_t::small_size_t>(keys.extent(1));
-        fanout_t fanout {shards_, executor};
-        if (status_t const begun = fanout.begin(min_of(queries.rows, window_rows_k), config); failed(begun))
-            return {{}, begun};
-        auto search_window = [&](std::size_t first, std::size_t taking) noexcept {
-            nk::range_t const rows = nk::range(first, first + taking);
-            return search_window_(fanout, queries.slice(first, taking), config, keys(rows, nk::slice),
-                                  distances(rows, nk::slice), counts.subspan(first, taking));
-        };
-        return for_each_window<search_result_t>(queries.rows, window_rows_k, search_window);
+        return bracketed_([&]() noexcept -> expected<search_result_t> {
+            if (status_t const refusal = fanout_t::refusal(shards_, executor, queries.rows, keys, distances, counts);
+                failed(refusal) || !queries.rows)
+                return {{}, refusal};
+            config.count = static_cast<typename index_t::small_size_t>(keys.extent(1));
+            fanout_t fanout {shards_, executor};
+            if (status_t const begun = fanout.begin(min_of(queries.rows, window_rows_k), config); failed(begun))
+                return {{}, begun};
+            auto search_window = [&](std::size_t first, std::size_t taking) noexcept {
+                nk::range_t const rows = nk::range(first, first + taking);
+                return search_window_(fanout, queries.slice(first, taking), config, keys(rows, nk::slice),
+                                      distances(rows, nk::slice), counts.subspan(first, taking));
+            };
+            return for_each_window<search_result_t>(queries.rows, window_rows_k, search_window);
+        });
     }
 
     /** The batched @c search ranked by a lightning indexer: every shard walks the queries under the
@@ -1152,26 +1205,28 @@ struct vram_amd_indexes {
                                      nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept
         requires floating_scalar<scalar_t>
     {
-        if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = fanout_t::refusal(shards_, executor, queries.rows, keys, distances, counts);
-            failed(refusal) || !queries.rows)
-            return {{}, refusal};
-        std::size_t const heads_count = heads.weights.extent(1);
-        if (heads.weights.extent(0) != queries.rows || heads.heads.extent(0) != queries.rows * heads_count)
-            return {{}, status_t::config_mismatch_k};
-        config.count = static_cast<typename index_t::small_size_t>(keys.extent(1));
-        fanout_t fanout {shards_, executor};
-        if (status_t const begun = fanout.begin(min_of(queries.rows, window_rows_k), config, heads); failed(begun))
-            return {{}, begun};
-        auto search_window = [&](std::size_t first, std::size_t taking) noexcept {
-            nk::range_t const rows = nk::range(first, first + taking);
-            indexer_heads<scalar_t> const window_heads {
-                heads.heads(nk::range(first * heads_count, (first + taking) * heads_count), nk::slice),
-                heads.weights(rows, nk::slice)};
-            return search_window_(fanout, queries.slice(first, taking), config, keys(rows, nk::slice),
-                                  distances(rows, nk::slice), counts.subspan(first, taking), window_heads);
-        };
-        return for_each_window<search_result_t>(queries.rows, window_rows_k, search_window);
+        return bracketed_([&]() noexcept -> expected<search_result_t> {
+            if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+            if (status_t const refusal = fanout_t::refusal(shards_, executor, queries.rows, keys, distances, counts);
+                failed(refusal) || !queries.rows)
+                return {{}, refusal};
+            std::size_t const heads_count = heads.weights.extent(1);
+            if (heads.weights.extent(0) != queries.rows || heads.heads.extent(0) != queries.rows * heads_count)
+                return {{}, status_t::config_mismatch_k};
+            config.count = static_cast<typename index_t::small_size_t>(keys.extent(1));
+            fanout_t fanout {shards_, executor};
+            if (status_t const begun = fanout.begin(min_of(queries.rows, window_rows_k), config, heads); failed(begun))
+                return {{}, begun};
+            auto search_window = [&](std::size_t first, std::size_t taking) noexcept {
+                nk::range_t const rows = nk::range(first, first + taking);
+                indexer_heads<scalar_t> const window_heads {
+                    heads.heads(nk::range(first * heads_count, (first + taking) * heads_count), nk::slice),
+                    heads.weights(rows, nk::slice)};
+                return search_window_(fanout, queries.slice(first, taking), config, keys(rows, nk::slice),
+                                      distances(rows, nk::slice), counts.subspan(first, taking), window_heads);
+            };
+            return for_each_window<search_result_t>(queries.rows, window_rows_k, search_window);
+        });
     }
 
     /**
@@ -1197,71 +1252,74 @@ struct vram_amd_indexes {
     expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config,
                                        nk::matrix_span<key_t> keys, nk::matrix_span<product_type_> products,
                                        std::span<std::size_t> counts) noexcept {
-        std::size_t const rows_count = left.rows, wanted = keys.extent(1);
-        if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
-        if (status_t const paired = fanout_t::pairs_with(shards_, executor); paired != status_t::success_k)
-            return {{}, paired};
-        if (counts.size() != rows_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = rankings_refusal(rows_count, keys, products); failed(refusal))
-            return {{}, refusal};
-        if (!rows_count) return {{}, status_t::success_k};
-        if (left.columns != dimensions()) return {{}, status_t::config_mismatch_k};
+        return bracketed_([&]() noexcept -> expected<search_result_t> {
+            std::size_t const rows_count = left.rows, wanted = keys.extent(1);
+            if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+            if (status_t const paired = fanout_t::pairs_with(shards_, executor); paired != status_t::success_k)
+                return {{}, paired};
+            if (counts.size() != rows_count) return {{}, status_t::config_mismatch_k};
+            if (status_t const refusal = rankings_refusal(rows_count, keys, products); failed(refusal))
+                return {{}, refusal};
+            if (!rows_count) return {{}, status_t::success_k};
+            if (left.columns != dimensions()) return {{}, status_t::config_mismatch_k};
 
-        // Every shard lands its own columns of one host landing, as tall as a window and reused by
-        // every one, and its context is sized for that width.
-        config.count = static_cast<typename index_t::small_size_t>(wanted);
-        std::size_t const landing_rows = min_of(rows_count, window_rows_k);
-        fanout_t fanout {shards_, executor};
-        if (status_t const begun = fanout.begin(landing_rows, config); failed(begun)) return {{}, begun};
-        std::size_t const shards = fanout.shards(), landing_entries = landing_rows * shards * wanted;
-        growing_buffer<node_id_t, forkunion_allocator_t> ids_landing {shards_.allocator()};
-        growing_buffer<dot_result_t, forkunion_allocator_t> products_landing {shards_.allocator()};
-        growing_buffer<u32_t, forkunion_allocator_t> counts_landing {shards_.allocator()};
-        if (failed(ids_landing.resize_uninitialized(landing_entries)) ||
-            failed(products_landing.resize_uninitialized(landing_entries)) ||
-            failed(counts_landing.resize_uninitialized(shards * landing_rows)))
-            return {{}, status_t::bad_alloc_k};
+            // Every shard lands its own columns of one host landing, as tall as a window and reused
+            // by every one, and its context is sized for that width.
+            config.count = static_cast<typename index_t::small_size_t>(wanted);
+            std::size_t const landing_rows = min_of(rows_count, window_rows_k);
+            fanout_t fanout {shards_, executor};
+            if (status_t const begun = fanout.begin(landing_rows, config); failed(begun)) return {{}, begun};
+            std::size_t const shards = fanout.shards(), landing_entries = landing_rows * shards * wanted;
+            growing_buffer<node_id_t, forkunion_allocator_t> ids_landing {shards_.allocator()};
+            growing_buffer<dot_result_t, forkunion_allocator_t> products_landing {shards_.allocator()};
+            growing_buffer<u32_t, forkunion_allocator_t> counts_landing {shards_.allocator()};
+            if (failed(ids_landing.resize_uninitialized(landing_entries)) ||
+                failed(products_landing.resize_uninitialized(landing_entries)) ||
+                failed(counts_landing.resize_uninitialized(shards * landing_rows)))
+                return {{}, status_t::bad_alloc_k};
 
-        auto shard_columns = [&](std::size_t shard) noexcept {
-            return nk::range(shard * wanted, (shard + 1) * wanted);
-        };
-        auto multiply_window = [&](std::size_t first, std::size_t taking) noexcept {
-            // Shards add to these as they land, on the host.
-            for (std::size_t& count : counts.subspan(first, taking)) count = 0;
-            rows_view_t const window_left = left.slice(first, taking);
-            nk::matrix_span<node_id_t> const ids_wide {ids_landing.data(), taking, shards * wanted};
-            nk::matrix_span<dot_result_t> const products_wide {products_landing.data(), taking, shards * wanted};
-            auto shard_counts = [&](std::size_t shard) noexcept {
-                return to_writable_span(counts_landing).subspan(shard * taking, taking);
+            auto shard_columns = [&](std::size_t shard) noexcept {
+                return nk::range(shard * wanted, (shard + 1) * wanted);
             };
-            auto multiply_shard = [&](std::size_t shard, traversal_context_t& traversal, std::size_t visible) noexcept {
-                return shards_[shard]
-                    .index
-                    ->submit_multiply_(window_left, ids_wide(nk::all, shard_columns(shard), nk::slice),
-                                       products_wide(nk::all, shard_columns(shard), nk::slice), shard_counts(shard),
-                                       traversal, config, visible)
-                    .status;
-            };
-            // Shards append as they land until a row fills, so a full row keeps whichever pairs
-            // came first.
-            auto merge_shard = [&](std::size_t shard, traversal_context_t const&) noexcept {
-                nk::matrix_span<node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
-                nk::matrix_span<dot_result_t> const shard_products = products_wide(nk::all, shard_columns(shard),
-                                                                                   nk::slice);
-                std::span<u32_t> const scored_counts = shard_counts(shard);
-                for (std::size_t row = 0; row != taking; ++row) {
-                    std::size_t const kept = min_of(counts[first + row], wanted);
-                    std::size_t const scored = scored_counts[row];
-                    for (std::size_t pair = 0; pair != min_of(scored, wanted - kept); ++pair) {
-                        keys(first + row, kept + pair) = shards_[shard].keys.host[shard_ids(row, pair)];
-                        products(first + row, kept + pair) = shard_products(row, pair);
+            auto multiply_window = [&](std::size_t first, std::size_t taking) noexcept {
+                // Shards add to these as they land, on the host.
+                for (std::size_t& count : counts.subspan(first, taking)) count = 0;
+                rows_view_t const window_left = left.slice(first, taking);
+                nk::matrix_span<node_id_t> const ids_wide {ids_landing.data(), taking, shards * wanted};
+                nk::matrix_span<dot_result_t> const products_wide {products_landing.data(), taking, shards * wanted};
+                auto shard_counts = [&](std::size_t shard) noexcept {
+                    return to_writable_span(counts_landing).subspan(shard * taking, taking);
+                };
+                auto multiply_shard = [&](std::size_t shard, traversal_context_t& traversal,
+                                          std::size_t visible) noexcept {
+                    return shards_[shard]
+                        .index
+                        ->submit_multiply_(window_left, ids_wide(nk::all, shard_columns(shard), nk::slice),
+                                           products_wide(nk::all, shard_columns(shard), nk::slice), shard_counts(shard),
+                                           traversal, config, visible)
+                        .status;
+                };
+                // Shards append as they land until a row fills, so a full row keeps whichever pairs
+                // came first.
+                auto merge_shard = [&](std::size_t shard, traversal_context_t const&) noexcept {
+                    nk::matrix_span<node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
+                    nk::matrix_span<dot_result_t> const shard_products = products_wide(nk::all, shard_columns(shard),
+                                                                                       nk::slice);
+                    std::span<u32_t> const scored_counts = shard_counts(shard);
+                    for (std::size_t row = 0; row != taking; ++row) {
+                        std::size_t const kept = min_of(counts[first + row], wanted);
+                        std::size_t const scored = scored_counts[row];
+                        for (std::size_t pair = 0; pair != min_of(scored, wanted - kept); ++pair) {
+                            keys(first + row, kept + pair) = shards_[shard].keys.host[shard_ids(row, pair)];
+                            products(first + row, kept + pair) = shard_products(row, pair);
+                        }
+                        counts[first + row] += scored;
                     }
-                    counts[first + row] += scored;
-                }
+                };
+                return fanout.for_each_shard(multiply_shard, merge_shard, counts.subspan(first, taking));
             };
-            return fanout.for_each_shard(multiply_shard, merge_shard, counts.subspan(first, taking));
-        };
-        return for_each_window<search_result_t>(rows_count, window_rows_k, multiply_window);
+            return for_each_window<search_result_t>(rows_count, window_rows_k, multiply_window);
+        });
     }
 
     /**
@@ -1291,48 +1349,51 @@ struct vram_amd_indexes {
                                      search_config_t config, nk::matrix_span<key_t> keys,
                                      nk::matrix_span<score_type_> scores, std::span<std::size_t> counts,
                                      std::span<std::size_t> scored) noexcept {
-        std::size_t const rows_count = queries.rows;
-        if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
-        if (status_t const paired = fanout_t::pairs_with(shards_, executor); paired != status_t::success_k)
-            return {{}, paired};
-        if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
-        std::size_t const groups_count = rows_count / rows_per_query;
-        if (counts.size() != groups_count || scored.size() != groups_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = rankings_refusal(groups_count, keys, scores); failed(refusal))
-            return {{}, refusal};
-        if (!groups_count) return {{}, status_t::success_k};
+        return bracketed_([&]() noexcept -> expected<search_result_t> {
+            std::size_t const rows_count = queries.rows;
+            if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+            if (status_t const paired = fanout_t::pairs_with(shards_, executor); paired != status_t::success_k)
+                return {{}, paired};
+            if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
+            std::size_t const groups_count = rows_count / rows_per_query;
+            if (counts.size() != groups_count || scored.size() != groups_count)
+                return {{}, status_t::config_mismatch_k};
+            if (status_t const refusal = rankings_refusal(groups_count, keys, scores); failed(refusal))
+                return {{}, refusal};
+            if (!groups_count) return {{}, status_t::success_k};
 
-        // Every token row keeps all of its ranked candidates, its keys resolved and merged across
-        // the shards; a window holds whole queries, so none splits across two.
-        std::size_t const width = shards_[0].index->non_zero_expansion_factor(config);
-        std::size_t const window_rows = max_of<std::size_t>(window_rows_k / rows_per_query, 1) * rows_per_query;
-        std::size_t const landing_rows = min_of(rows_count, window_rows);
-        growing_buffer<key_t, forkunion_allocator_t> row_keys {shards_.allocator()};
-        growing_buffer<distance_t, forkunion_allocator_t> row_distances {shards_.allocator()};
-        growing_buffer<std::size_t, forkunion_allocator_t> row_counts {shards_.allocator()};
-        maxsim_reducer<key_t, distance_t, forkunion_allocator_t> reduce {shards_.allocator()};
-        if (failed(row_keys.resize_uninitialized(landing_rows * width)) ||
-            failed(row_distances.resize_uninitialized(landing_rows * width)) ||
-            failed(row_counts.resize_uninitialized(landing_rows)) || failed(reduce.reserve(rows_per_query, width)))
-            return {{}, status_t::bad_alloc_k};
-        config.count = static_cast<typename index_t::small_size_t>(width);
-        fanout_t fanout {shards_, executor};
-        if (status_t const begun = fanout.begin(landing_rows, config); failed(begun)) return {{}, begun};
-        auto maxsim_window = [&](std::size_t first, std::size_t taking) noexcept {
-            nk::matrix_span<key_t> const ranked_keys {row_keys.data(), taking, width};
-            nk::matrix_span<distance_t> const ranked_distances {row_distances.data(), taking, width};
-            std::span<std::size_t> const ranked_counts = to_writable_span(row_counts).first(taking);
-            expected<search_result_t> ranked = search_window_(fanout, queries.slice(first, taking), config, ranked_keys,
-                                                              ranked_distances, ranked_counts);
-            if (!ranked) return ranked;
-            std::size_t const first_group = first / rows_per_query, groups = taking / rows_per_query;
-            nk::range_t const window_groups = nk::range(first_group, first_group + groups);
-            ranked.value.count = reduce(ranked_keys, ranked_distances, ranked_counts, keys(window_groups, nk::slice),
-                                        scores(window_groups, nk::slice), counts.subspan(first_group, groups),
-                                        scored.subspan(first_group, groups));
-            return ranked;
-        };
-        return for_each_window<search_result_t>(rows_count, window_rows, maxsim_window);
+            // Every token row keeps all of its ranked candidates, its keys resolved and merged
+            // across the shards; a window holds whole queries, so none splits across two.
+            std::size_t const width = shards_[0].index->non_zero_expansion_factor(config);
+            std::size_t const window_rows = max_of<std::size_t>(window_rows_k / rows_per_query, 1) * rows_per_query;
+            std::size_t const landing_rows = min_of(rows_count, window_rows);
+            growing_buffer<key_t, forkunion_allocator_t> row_keys {shards_.allocator()};
+            growing_buffer<distance_t, forkunion_allocator_t> row_distances {shards_.allocator()};
+            growing_buffer<std::size_t, forkunion_allocator_t> row_counts {shards_.allocator()};
+            maxsim_reducer<key_t, distance_t, forkunion_allocator_t> reduce {shards_.allocator()};
+            if (failed(row_keys.resize_uninitialized(landing_rows * width)) ||
+                failed(row_distances.resize_uninitialized(landing_rows * width)) ||
+                failed(row_counts.resize_uninitialized(landing_rows)) || failed(reduce.reserve(rows_per_query, width)))
+                return {{}, status_t::bad_alloc_k};
+            config.count = static_cast<typename index_t::small_size_t>(width);
+            fanout_t fanout {shards_, executor};
+            if (status_t const begun = fanout.begin(landing_rows, config); failed(begun)) return {{}, begun};
+            auto maxsim_window = [&](std::size_t first, std::size_t taking) noexcept {
+                nk::matrix_span<key_t> const ranked_keys {row_keys.data(), taking, width};
+                nk::matrix_span<distance_t> const ranked_distances {row_distances.data(), taking, width};
+                std::span<std::size_t> const ranked_counts = to_writable_span(row_counts).first(taking);
+                expected<search_result_t> ranked = search_window_(fanout, queries.slice(first, taking), config,
+                                                                  ranked_keys, ranked_distances, ranked_counts);
+                if (!ranked) return ranked;
+                std::size_t const first_group = first / rows_per_query, groups = taking / rows_per_query;
+                nk::range_t const window_groups = nk::range(first_group, first_group + groups);
+                ranked.value.count = reduce(ranked_keys, ranked_distances, ranked_counts,
+                                            keys(window_groups, nk::slice), scores(window_groups, nk::slice),
+                                            counts.subspan(first_group, groups), scored.subspan(first_group, groups));
+                return ranked;
+            };
+            return for_each_window<search_result_t>(rows_count, window_rows, maxsim_window);
+        });
     }
 
     /**
@@ -1365,81 +1426,86 @@ struct vram_amd_indexes {
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
                                      f32_t score_scale, rows_span_t outputs, std::span<softmax_state_t> carry,
                                      executor_t& executor, search_config_t config = {}) noexcept {
-        using shard_lookup_t = vram_keyed_lookup<key_t, std::remove_cvref_t<value_lookup_type_>>;
-        std::size_t const rows_count = queries.rows;
-        if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
-        if (status_t const paired = fanout_t::pairs_with(shards_, executor); paired != status_t::success_k)
-            return {{}, paired};
-        if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
-        if (status_t const refusal = shards_[0].index->landing_refusal_(rows_count, outputs, carry); failed(refusal))
-            return {{}, refusal};
-        if (!rows_count) return {{}, status_t::success_k};
-        std::size_t const dimensions = this->dimensions();
-        if (queries.columns != dimensions) return {{}, status_t::config_mismatch_k};
+        return bracketed_([&]() noexcept -> expected<search_result_t> {
+            using shard_lookup_t = vram_keyed_lookup<key_t, std::remove_cvref_t<value_lookup_type_>>;
+            std::size_t const rows_count = queries.rows;
+            if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+            if (status_t const paired = fanout_t::pairs_with(shards_, executor); paired != status_t::success_k)
+                return {{}, paired};
+            if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
+            if (status_t const refusal = shards_[0].index->landing_refusal_(rows_count, outputs, carry);
+                failed(refusal))
+                return {{}, refusal};
+            if (!rows_count) return {{}, status_t::success_k};
+            std::size_t const dimensions = this->dimensions();
+            if (queries.columns != dimensions) return {{}, status_t::config_mismatch_k};
 
-        // A window holds whole tokens, so none splits its heads across two.
-        std::size_t const window_rows = max_of<std::size_t>(window_rows_k / head_count, 1) * head_count;
-        fanout_t fanout {shards_, executor};
-        if (status_t const begun = fanout.begin(min_of(rows_count, window_rows), config, head_count, shards_.size());
-            failed(begun))
-            return {{}, begun};
-        std::size_t const shards = fanout.shards();
-        auto attend_window = [&](std::size_t first, std::size_t taking) noexcept -> expected<search_result_t> {
-            rows_view_t const window_queries = queries.slice(first, taking);
-            rows_span_t const window_outputs = outputs.slice(first, taking);
-            std::span<softmax_state_t> const window_carry = carry.empty() ? carry : carry.subspan(first, taking);
-            // Shard 0 stages one block of rows and carries per shard, its own first and the others
-            // copied in.
-            std::size_t const outputs_bytes = taking * dimensions * sizeof(f32_t);
-            std::size_t const block_bytes = outputs_bytes + taking * sizeof(softmax_state_t);
-            byte_t* blocks = nullptr;
-            traversal_context_t* first_traversal = nullptr;
-            auto attend_shard = [&](std::size_t shard, traversal_context_t& traversal, std::size_t visible) noexcept {
-                shard_lookup_t const lookup {shards_[shard].keys.device.base(), value_lookup};
-                expected<f32_t*> const landed = shards_[shard].index->submit_attend_(
-                    window_queries, head_count, lookup, score_scale, traversal, config, shard ? 1 : shards,
-                    shard ? 0 : shards_[0].index->exported_bytes_(window_outputs), visible);
-                if (!landed) return landed.status;
-                if (!shard) {
-                    blocks = reinterpret_cast<byte_t*>(landed.value);
-                    first_traversal = &traversal;
-                    return status_t::success_k;
-                }
-                // On the shard's own stream, so the copy follows its walks; unified addressing
-                // tells the two devices apart. Shard 0's staging may have grown on its stream,
-                // which its context marked when it queued, so following that mark orders the
-                // copy after it.
-                return succeeded(traversal.follow(*first_traversal)) &&
-                               hip_api().copy_async(blocks + shard * block_bytes, landed.value, block_bytes,
-                                                    hip_copy_default_k, traversal.stream()) == hip_success_k
-                           ? status_t::success_k
-                           : status_t::device_error_k;
+            // A window holds whole tokens, so none splits its heads across two.
+            std::size_t const window_rows = max_of<std::size_t>(window_rows_k / head_count, 1) * head_count;
+            fanout_t fanout {shards_, executor};
+            if (status_t const begun = fanout.begin(min_of(rows_count, window_rows), config, head_count,
+                                                    shards_.size());
+                failed(begun))
+                return {{}, begun};
+            std::size_t const shards = fanout.shards();
+            auto attend_window = [&](std::size_t first, std::size_t taking) noexcept -> expected<search_result_t> {
+                rows_view_t const window_queries = queries.slice(first, taking);
+                rows_span_t const window_outputs = outputs.slice(first, taking);
+                std::span<softmax_state_t> const window_carry = carry.empty() ? carry : carry.subspan(first, taking);
+                // Shard 0 stages one block of rows and carries per shard, its own first and the
+                // others copied in.
+                std::size_t const outputs_bytes = taking * dimensions * sizeof(f32_t);
+                std::size_t const block_bytes = outputs_bytes + taking * sizeof(softmax_state_t);
+                byte_t* blocks = nullptr;
+                traversal_context_t* first_traversal = nullptr;
+                auto attend_shard = [&](std::size_t shard, traversal_context_t& traversal,
+                                        std::size_t visible) noexcept {
+                    shard_lookup_t const lookup {shards_[shard].keys.device.base(), value_lookup};
+                    expected<f32_t*> const landed = shards_[shard].index->submit_attend_(
+                        window_queries, head_count, lookup, score_scale, traversal, config, shard ? 1 : shards,
+                        shard ? 0 : shards_[0].index->exported_bytes_(window_outputs), visible);
+                    if (!landed) return landed.status;
+                    if (!shard) {
+                        blocks = reinterpret_cast<byte_t*>(landed.value);
+                        first_traversal = &traversal;
+                        return status_t::success_k;
+                    }
+                    // On the shard's own stream, so the copy follows its walks; unified addressing
+                    // tells the two devices apart. Shard 0's staging may have grown on its stream,
+                    // which its context marked when it queued, so following that mark orders the
+                    // copy after it.
+                    return succeeded(traversal.follow(*first_traversal)) &&
+                                   hip_api().copy_async(blocks + shard * block_bytes, landed.value, block_bytes,
+                                                        hip_copy_default_k, traversal.stream()) == hip_success_k
+                               ? status_t::success_k
+                               : status_t::device_error_k;
+                };
+                status_t merged = status_t::success_k;
+                std::size_t landed = 0;
+                auto merge_shard = [&](std::size_t, traversal_context_t const& traversal) noexcept {
+                    // A shard whose walk met a node without its value row folded a wrong softmax.
+                    if (traversal.missed()) merged = status_t::shape_mismatch_k;
+                    if (++landed != shards || failed(merged)) return;
+                    // The last shard landed, so every block did; the merge and the landing ride
+                    // shard 0's stream, which its context's event drains.
+                    hip_stream_handle_t const stream = first_traversal->stream();
+                    u32_t const rows = static_cast<u32_t>(taking);
+                    if (hip_set_device(first_traversal->device()) != hip_success_k ||
+                        failed(shards_[0].index->launch_merge_attention_(blocks, rows, static_cast<u32_t>(dimensions),
+                                                                         static_cast<u32_t>(shards), stream)) ||
+                        failed(shards_[0].index->land_attended_(reinterpret_cast<f32_t*>(blocks), shards,
+                                                                window_outputs, window_carry, stream)) ||
+                        failed(first_traversal->wait()))
+                        merged = status_t::device_error_k;
+                };
+                expected<search_result_t> attended = fanout.for_each_shard(attend_shard, merge_shard, {});
+                if (!attended) return attended;
+                if (failed(merged)) return {{}, merged};
+                attended.value.count = taking;
+                return attended;
             };
-            status_t merged = status_t::success_k;
-            std::size_t landed = 0;
-            auto merge_shard = [&](std::size_t, traversal_context_t const& traversal) noexcept {
-                // A shard whose walk met a node without its value row folded a wrong softmax.
-                if (traversal.missed()) merged = status_t::shape_mismatch_k;
-                if (++landed != shards || failed(merged)) return;
-                // The last shard landed, so every block did; the merge and the landing ride
-                // shard 0's stream, which its context's event drains.
-                hip_stream_handle_t const stream = first_traversal->stream();
-                u32_t const rows = static_cast<u32_t>(taking);
-                if (hip_set_device(first_traversal->device()) != hip_success_k ||
-                    failed(shards_[0].index->launch_merge_attention_(blocks, rows, static_cast<u32_t>(dimensions),
-                                                                     static_cast<u32_t>(shards), stream)) ||
-                    failed(shards_[0].index->land_attended_(reinterpret_cast<f32_t*>(blocks), shards, window_outputs,
-                                                            window_carry, stream)) ||
-                    failed(first_traversal->wait()))
-                    merged = status_t::device_error_k;
-            };
-            expected<search_result_t> attended = fanout.for_each_shard(attend_shard, merge_shard, {});
-            if (!attended) return attended;
-            if (failed(merged)) return {{}, merged};
-            attended.value.count = taking;
-            return attended;
-        };
-        return for_each_window<search_result_t>(rows_count, window_rows, attend_window);
+            return for_each_window<search_result_t>(rows_count, window_rows, attend_window);
+        });
     }
 
 #pragma endregion Search
@@ -1487,6 +1553,9 @@ struct vram_amd_indexes {
             return owner->upload_keys_(shard, rows, plan.stream);
         }
         void end_save(shards_t& shards) noexcept { shards.reopen(); }
+
+        /** Closes every shard of the loading index under its unique side. */
+        status_t close(shards_t&) noexcept { return owner->close_gated_(); }
 
         /** One shard of a new generation and its keys on the device @p like sits on. */
         shard_t build_shard(shard_t const& like) const noexcept { return owner->build_shard_(like); }
@@ -1648,7 +1717,9 @@ struct vram_amd_indexes {
 
 #pragma region Lookups
 
-    /** Entries stored under @p key; a concurrent insertion can only make it under-report. */
+    /** Entries stored under @p key; a concurrent insertion can only make it under-report. Exact
+     *  without an epoch: a compaction swaps each locator whole, and a clear empties the map inside
+     *  its window. */
     std::size_t count(key_t const& key) const noexcept { return shards_.locators().count(key); }
 
     /** Whether at least one entry is stored under @p key. */
@@ -1665,10 +1736,12 @@ struct vram_amd_indexes {
      *  on, leaves rows unwritten with the total honest.
      */
     std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted, executor_t& executor) const noexcept {
-        std::size_t const total = queue_rows_(key, vectors, wanted, executor);
-        if (total) [[maybe_unused]]
-            status_t const drained = executor.wait();
-        return total;
+        return settled_([&]() noexcept {
+            std::size_t const total = queue_rows_(key, vectors, wanted, executor);
+            if (total) [[maybe_unused]]
+                status_t const drained = executor.wait();
+            return total;
+        });
     }
 
     /**
@@ -1718,17 +1791,27 @@ struct vram_amd_indexes {
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return paired;
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
-        for (std::size_t position = 0; position != keys.size(); ++position) {
-            std::size_t const first = position * wanted;
-            entries[position] = queue_rows_(keys[position], vectors(nk::range(first, first + wanted), nk::slice),
-                                            wanted, executor);
-        }
-        return executor.wait();
+        return bracketed_([&]() noexcept {
+            for (std::size_t position = 0; position != keys.size(); ++position) {
+                std::size_t const first = position * wanted;
+                entries[position] = queue_rows_(keys[position], vectors(nk::range(first, first + wanted), nk::slice),
+                                                wanted, executor);
+            }
+            return executor.wait();
+        });
     }
 
 #pragma endregion Lookups
 
   private:
+
+    /** Every device a shard sits on, which each shard maps its storage for, so a load reads a shard
+     *  on another device directly. */
+    std::bitset<gpu_devices_capacity_k> devices_() const noexcept {
+        std::bitset<gpu_devices_capacity_k> devices;
+        for (shard_t const& one : shards_) devices[static_cast<std::size_t>(one.index->device_specs().ordinal)] = true;
+        return devices;
+    }
 
     /** One unreserved shard placed on @p device; null when the allocation fails. */
     std::unique_ptr<index_t> build_(int device) const noexcept {
@@ -1736,16 +1819,59 @@ struct vram_amd_indexes {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel(), allocator, allocator));
     }
 
-    /** One unreserved shard on the device @p like sits on. */
-    std::unique_ptr<index_t> rebuild_(index_t const& like) const noexcept {
-        return build_(like.device_specs().ordinal);
+    /** Forgets every published shard's rows in place, each keeping its storage, then every key's
+     *  locators, keeping the generations past the first as idle shards: what a clear and an emptied
+     *  donor become, inside their own window with every shard closed. */
+    void clear_() noexcept {
+        for (shard_t& one : shards_) one.index->forget_();
+        shards_.forget_rows();
+    }
+
+    /** Closes every shard under the unique side, refusing a call in flight, a claim outstanding or
+     *  a plan holding the index closed with @c contended_k; closing moves nothing a reader sees, so
+     *  it moves no epoch. */
+    status_t close_gated_() noexcept {
+        unique_lock_t const held {gate_, std::try_to_lock};
+        return held ? shards_.close() : status_t::contended_k;
+    }
+
+    /** Runs the reader @p read under the epoch, again once if a destructive window overlapped it,
+     *  and answers @c contended_k if one overlapped that too, so whatever it returns was read whole
+     *  between windows; @p read answers an @c expected or a @c status_t. */
+    template <typename read_type_>
+    std::invoke_result_t<read_type_&> bracketed_(read_type_&& read) const noexcept {
+        using read_result_t = std::invoke_result_t<read_type_&>;
+        for (std::size_t attempt = 0; attempt != 2; ++attempt) {
+            u64_t const epoch = shards_.read_epoch();
+            read_result_t result = read();
+            if (shards_.still_valid(epoch)) return result;
+        }
+        if constexpr (std::is_same_v<read_result_t, status_t>) return status_t::contended_k;
+        else return {{}, status_t::contended_k};
+    }
+
+    /** Runs the single-key lookup @p read until no destructive window overlapped it, since its
+     *  answer has no room for @c contended_k; every window ends without waiting on a reader. */
+    template <typename read_type_>
+    std::invoke_result_t<read_type_&> settled_(read_type_&& read) const noexcept {
+        while (true) {
+            u64_t const epoch = shards_.read_epoch();
+            std::invoke_result_t<read_type_&> result = read();
+            if (shards_.still_valid(epoch)) return result;
+        }
     }
 
     /** One shard of a new generation and its keys, on the device @p like sits on, current while the
-     *  staging's events are born; a null index when the device or the allocation fails. */
+     *  staging's events are born, mapped for every device placed and reserved in the frozen
+     *  geometry under the bound; a null index when the device, the allocation or the reservation
+     *  fails. */
     shard_t build_shard_(shard_t const& like) const noexcept {
         int const device = like.index->device_specs().ordinal;
         std::unique_ptr<index_t> index = hip_set_device(device) == hip_success_k ? build_(device) : nullptr;
+        if (index) index->share_with_(devices_());
+        reserve_capacity_t const geometry {0, static_cast<connectivity_t>(connectivity()), dimensions(),
+                                           shards_.shard_capacity()};
+        if (index && failed(index->reserve(geometry).status)) index.reset();
         return shard_t {std::move(index),
                         device_shard_keys_t {keys_column_t {shards_.allocator()},
                                              hip_virtual_memory_allocator<key_t> {device}, key_staging_t {}}};
@@ -1821,13 +1947,17 @@ struct vram_amd_indexes {
     }
 
     /** Lands every row of @p donor where @p landings, one per donor shard, put it and consumes it,
-     *  under both indexes' closed claim words and the executor's hold @p refining keeps: every
-     *  fallible step first, then the copies, one drain, and the publication, and the donor's shards
-     *  land among the plan's parts. */
+     *  under both indexes' closed claim words and the executor's hold @p refining keeps: the
+     *  donor's gate and every other fallible step first, then the copies, one drain, and the
+     *  publication, and the donor's shards land among the plan's parts as it forgets its rows in
+     *  its window. */
     status_t absorb_(vram_amd_indexes& donor, std::span<landing_t const> landings, executor_t& executor,
                      refine_plan_t& refining) noexcept {
         std::size_t const shards = refining.traversals_.size();
         if (!donor.size()) return status_t::success_k;
+        // The donor empties once its rows land, so its gate comes before anything a refusal undoes.
+        unique_lock_t const emptying {donor.gate_, std::try_to_lock};
+        if (!emptying) return status_t::contended_k;
         if (!capacity())
             if (status_t const reserved = reserve({donor.size(), static_cast<connectivity_t>(donor.connectivity()),
                                                    donor.dimensions()})
@@ -1835,13 +1965,10 @@ struct vram_amd_indexes {
                 failed(reserved))
                 return reserved;
 
-        // Every shard claims all its rows first, and the donor's fresh shards exist before any
-        // lands, so a failure before publication releases them all.
+        // Every shard claims all its rows first, so a failure before publication releases them all.
         std::size_t const donors = landings.size();
         growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {shards_.allocator()};
-        growing_buffer<std::unique_ptr<index_t>, forkunion_allocator_t> emptied {shards_.allocator()};
-        if (failed(plans.reserve_exactly(shards)) || failed(emptied.reserve_exactly(donors)))
-            return status_t::bad_alloc_k;
+        if (failed(plans.reserve_exactly(shards))) return status_t::bad_alloc_k;
         std::size_t landing = 0;
         for (std::size_t into = 0; into != shards; ++into) {
             std::size_t rows = 0;
@@ -1851,14 +1978,6 @@ struct vram_amd_indexes {
             auto [plan, status] = shards_[into].index->plan_load(
                 rows, executor.stream(fanout_t::stream_of(shards_, executor, into)));
             if (failed(status)) return status;
-            // Only a donor on another device crosses through the host, so only it pins a bounce.
-            bool crossing = false;
-            for (std::size_t from = 0; from != donors; ++from)
-                if (landings[from].into == into)
-                    crossing |= donor.shards_[from].index->device_specs().ordinal !=
-                                shards_[into].index->device_specs().ordinal;
-            if (crossing)
-                if (status_t const pinned = plan.pin_bounce(); failed(pinned)) return pinned;
             plans.push_back_reserved(std::move(plan));
             if (status_t const covered = shards_[into].keys.host.cover(plans[into].base + rows); failed(covered))
                 return covered;
@@ -1868,10 +1987,6 @@ struct vram_amd_indexes {
         }
         auto [seats, seat_status] = shards_.locators().claim(landing);
         if (failed(seat_status)) return seat_status;
-        for (shard_t const& part : donor.shards_) {
-            emptied.push_back_reserved(donor.rebuild_(*part.index));
-            if (!emptied.back()) return status_t::bad_alloc_k;
-        }
 
         // A refused copy still waits for those queued before it, whose rows go to the next claim.
         status_t queued = status_t::success_k;
@@ -1888,7 +2003,7 @@ struct vram_amd_indexes {
                 step.index_rows = {base, base + part_rows};
                 step.source_rows = {0, part_rows};
                 for (node_id_t row : step.source_rows) one.keys.host[base + row] = part.keys.host[row];
-                queued = land_part_(into, plan, step, donor, from, executor);
+                queued = land_part_(into, plan, step, donor, from);
                 base += part_rows;
             }
         }
@@ -1898,31 +2013,26 @@ struct vram_amd_indexes {
             if (status_t const published = plan.finish(); failed(published)) return published;
         for (std::size_t into = 0; into != shards; ++into)
             for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
-                shards_.locators().insert(seats, shards_[into].keys.host[row], key_locator_t {into, row});
+                shards_.locators().insert(seats, shards_[into].keys.host[row],
+                                          key_locator_t {static_cast<u32_t>(into), row});
 
         // Each donor shard becomes a part of its own in the plan, which sized every shard's run.
         shards_.record_parts(donor.shards_, landings, plans, refining.part_bases_.data(),
                              to_span(refining.part_offsets_));
-        for (std::size_t from = 0; from != donors; ++from) {
-            shard_t& part = donor.shards_[from];
-            part.index = std::move(emptied[from]);
-            part.keys.host = keys_column_t {donor.shards_.allocator()};
-        }
-        donor.shards_.forget_rows();
+        donor.shards_.begin_window();
+        donor.clear_();
+        donor.shards_.end_window();
         return status_t::success_k;
     }
 
-    /** Queues donor shard @p from 's columns by @p step of shard @p into 's load @p plan on the
-     *  donor's stream, then its device keys on the plan's: another device's keys may not map here,
-     *  so they cross from the host column. */
+    /** Queues donor shard @p from 's columns by @p step of shard @p into 's load @p plan, then its
+     *  device keys, all on the plan's stream: another device's keys may not map here, so they cross
+     *  from the host column. */
     status_t land_part_(std::size_t into, typename index_t::load_plan_t& plan,
                         typename index_t::load_plan_t::step_t const& step, vram_amd_indexes const& donor,
-                        std::size_t from, executor_t& executor) noexcept {
+                        std::size_t from) noexcept {
         index_t const& part = *donor.shards_[from].index;
-        if (status_t const queued = plan.load(step, part, step.source_rows,
-                                              executor.stream(fanout_t::stream_of(donor.shards_, executor, from)));
-            failed(queued))
-            return queued;
+        if (status_t const queued = plan.load(step, part, step.source_rows); failed(queued)) return queued;
         node_id_t const base = step.index_rows.first, rows = step.source_rows.bound;
         if (part.device_specs().ordinal != shards_[into].index->device_specs().ordinal)
             return upload_keys_(into, {base, base + rows}, plan.stream);
@@ -1959,7 +2069,7 @@ struct vram_amd_indexes {
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return {{}, paired};
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
-        if (status_t const closed = shards_.close(); failed(closed)) return {{}, closed};
+        if (status_t const closed = close_gated_(); failed(closed)) return {{}, closed};
         return {checkpoint_residency_t {this, &executor, std::move(claim)}, status_t::success_k};
     }
 
@@ -2124,9 +2234,21 @@ struct vram_amd_indexes {
         return found;
     }
 
-    /** The shards, the keys of their rows, their routing and the commit word every reader
-     *  snapshots by. */
+    /** The gate every mutator holds shared for one call and every destructive window takes alone,
+     *  through @c try_lock, so a window never waits; readers never touch it. */
+    using shared_mutex_t = shared_mutex<wait_type_, fu::standard_atomic_ref>;
+    using shared_lock_t = std::shared_lock<shared_mutex_t>;
+    using unique_lock_t = std::unique_lock<shared_mutex_t>;
+
+    /** The shards, the keys of their rows, their routing, the commit word every reader snapshots by
+     *  and the epoch every reader brackets itself with. */
     shards_t shards_;
+
+    /** The metric every shard this index builds or accepts scores by. */
+    nk_kernel_kind_t kernel_;
+
+    /** Shared by every mutator for one call, alone by every destructive window; never swapped. */
+    alignas(default_alignment_k) shared_mutex_t gate_;
 };
 
 } // namespace unum::usearch::dense

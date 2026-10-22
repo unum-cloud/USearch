@@ -1,0 +1,63 @@
+/**
+ *  @brief An insert plan's `finish` beside a `clear`: the shared side `finish` holds keeps its
+ *      locator insert from landing after a clear forgot the row.
+ *
+ *  The one shard holds one row dispensed and landed, short of its watermark turn. `finish`, holding
+ *  the gate's shared side, takes the turn and then inserts the key's locator. The clearer takes the
+ *  unique side or is refused, closes the shard, which `close_` refuses while a dispensed row awaits
+ *  its turn, and inside its window forgets the row and wipes the locator map. Once both are done,
+ *  the locator names no row the index forgot.
+ *
+ *  @verify pass sc
+ *  @verify fail sc insert_hold=none: every mutator holds the shared side for its call; without it, a
+ *      clear lands between `finish`'s turn and its locator insert, finds the row published, forgets
+ *      it, and the insert leaves a locator naming the forgotten row
+ */
+#define thread_count 2
+#define location_count 6
+#define history_depth 1
+#include "protocol.pml"
+
+// The word past the protocol's: the key's locator slot, zero when empty and one past its row.
+#define locator 5
+
+proctype finisher(byte t) {
+    int observed, watermark;
+    hold_shared(t, observed);
+    take_turn(t, watermark(0), 0, 1, order_release, watermark);
+    store(t, locator, order_release, 1);
+    release_shared(t, observed)
+}
+
+proctype clearer(byte t) {
+    int observed, seen, epoch_seen;
+    byte shard;
+    bool succeeded, refused;
+    try_lock(t, gate, observed, succeeded);
+    if
+    :: succeeded ->
+        close_shards(t, 1, refused);
+        if
+        :: !refused ->
+            begin_window(t, epoch_seen);
+            forget(t, 0);
+            store(t, locator, order_relaxed, 0);
+            end_window(t, epoch_seen);
+            reopen_shards(1)
+        :: else
+        fi;
+        unlock(t, gate, observed)
+    :: else
+    fi
+}
+
+init {
+    atomic {
+        claimed[0] = 1;
+        dispensed[0] = 1;
+        run finisher(0);
+        run clearer(1)
+    };
+    _nr_pr == 1;
+    assert(newest_value(locator) == 0 || newest_value(locator) - 1 < newest_value(watermark(0)))
+}

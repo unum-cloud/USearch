@@ -3616,6 +3616,58 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
     });
 }
 
+USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments) {
+    // Outside the deferred table, so even a deferred call runs in place, behind the calls held
+    // before it.
+    if (arguments->executor) run_held(*arguments->executor, ~std::size_t {0});
+    call_outcome_t outcome(arguments->outcome);
+    if (arguments->stats) *arguments->stats = {};
+    if (arguments->count && !arguments->sources)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The sources must name handles"), void();
+    visit_writable(*arguments->target, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
+        if (!executor) return;
+        growing_buffer<variant_type_*> typed_sources {global_allocator};
+        if (failed(typed_sources.reserve_exactly(arguments->count)))
+            return propagate_error(status_t::bad_alloc_k, outcome), void();
+        std::size_t population = 0;
+        for (std::size_t position = 0; position != arguments->count; ++position) {
+            usearch_dense_index_t const source = arguments->sources[position];
+            if (!source)
+                return propagate_error(usearch_status_invalid_argument_k, outcome, "A source must not be null"), void();
+            variant_type_* const typed = std::get_if<variant_type_>(&source->variant);
+            if (!typed)
+                return propagate_error(usearch_status_config_mismatch_k, outcome,
+                                       "A source must share the target's residency, scalar and class"),
+                       void();
+            if (source != arguments->target) finish_calls_using(source);
+            typed_sources.push_back_reserved(typed);
+            population += specialized_index {*typed}.size();
+        }
+        us::dense::compact_config_t config;
+        config.shard_capacity = arguments->shard_capacity;
+        config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
+        progress_ticks_t ticks {arguments->progress, population};
+        auto const [compacted, status] = specialized_index {variant}.compact(to_span(typed_sources), *executor, config,
+                                                                             ticks);
+        // Only a whole compaction consumed every other source; a failure frees none of them.
+        if (succeeded(status) || status == status_t::cancelled_k)
+            for (std::size_t position = 0; position != arguments->count; ++position)
+                if (arguments->sources[position] != arguments->target)
+                    delete std::exchange(arguments->sources[position], nullptr);
+        accumulate_stats(arguments->stats, compacted.graph);
+        if (failed(status) && status != status_t::cancelled_k) return propagate_error(status, outcome), void();
+        if (arguments->changed) *arguments->changed = compacted.graph.changed_nodes;
+        if (arguments->reachability)
+            *arguments->reachability = {compacted.graph.health.audited_nodes, compacted.graph.health.reachable_nodes,
+                                        compacted.graph.health.sweeps, compacted.graph.health.back_sweeps};
+        if (failed(status)) return propagate_error(status, outcome), void();
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
+}
+
 USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_t* arguments) {
     if (submitted<usearch_dense_refinement_init>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);

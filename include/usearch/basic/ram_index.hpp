@@ -35,6 +35,11 @@
 namespace unum::usearch::basic {
 using namespace unum::usearch::utilities;
 
+/** The plural spanning many basic RAM shards, defined in @c basic/ram_indexes.hpp; it walks and
+ *  scans each shard below a watermark it took across all of them. */
+template <typename>
+struct ram_indexes;
+
 /** One traversal candidate; both halves are the caller's chosen widths. */
 template <typename node_id_type_ = u64_t, typename distance_type_ = f64_t>
 struct scored_node {
@@ -448,163 +453,6 @@ concept selector = requires(selector_type_ const& selector, index_type_ const& i
     { selector.connectivity } -> std::convertible_to<std::size_t>;
 };
 
-/** A reference spelling the verbs the index posts past the standard's - the no-return add,
- *  subtract and bit clear, and the bounded add - as ForkUnion's do. For the standard's own
- *  reference, which does not, the functions below spell them; ForkUnion's references carry the
- *  same names as free functions in their namespace, reached through argument lookup, so a site
- *  reads the same whichever reference the index was given. */
-template <typename reference_type_, typename value_type_>
-concept extended_atomic_ref = requires(reference_type_ reference, value_type_ value) {
-    reference.add(value, std::memory_order_relaxed);
-    reference.sub(value, std::memory_order_relaxed);
-    reference.clear_bits(value, std::memory_order_relaxed);
-    reference.fetch_add_if_at_most(value, value, std::memory_order_relaxed);
-};
-
-/** A reference spelling only the standard's verbs, such as @c std::atomic_ref, for which the
- *  functions below spell the rest. */
-template <typename reference_type_, typename value_type_>
-concept plain_atomic_ref = !extended_atomic_ref<reference_type_, value_type_>;
-
-template <typename reference_type_, typename value_type_>
-    requires plain_atomic_ref<reference_type_, value_type_>
-void atomic_add(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    reference.fetch_add(operand, order);
-}
-template <typename reference_type_, typename value_type_>
-    requires plain_atomic_ref<reference_type_, value_type_>
-void atomic_sub(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    reference.fetch_sub(operand, order);
-}
-template <typename reference_type_, typename value_type_>
-    requires plain_atomic_ref<reference_type_, value_type_>
-void atomic_clear_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
-    reference.fetch_and(static_cast<value_type_>(~bits), order);
-}
-
-/** Adds @p operand only if the sum stays at most @p limit; returns the value held before. */
-template <typename reference_type_, typename value_type_>
-    requires plain_atomic_ref<reference_type_, value_type_>
-value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ operand, value_type_ limit,
-                                        std::memory_order order) noexcept {
-    value_type_ observed = reference.load(std::memory_order_relaxed);
-    while (observed <= limit && limit - observed >= operand &&
-           !reference.compare_exchange_weak(observed, observed + operand, order, std::memory_order_relaxed)) {}
-    return observed;
-}
-
-/** Raises the word to @p operand if it is larger; returns the value held before. */
-template <typename reference_type_, typename value_type_>
-    requires plain_atomic_ref<reference_type_, value_type_>
-value_type_ atomic_fetch_max(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    value_type_ observed = reference.load(std::memory_order_relaxed);
-    while (observed < operand &&
-           !reference.compare_exchange_weak(observed, operand, order, std::memory_order_relaxed)) {}
-    return observed;
-}
-template <typename reference_type_, typename value_type_>
-    requires extended_atomic_ref<reference_type_, value_type_>
-value_type_ atomic_fetch_max(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    return reference.fetch_max(operand, order);
-}
-
-/**
- *  @brief Shared among mutators, try-unique for stop-the-world, wait-free to probe - one
- *      @c std::atomic word, so every reading is a consistent joint snapshot.
- *
- *  The word packs forty-one generation bits on top, a dedicated unique bit, and twenty-two
- *  holder bits - the OS pid ceiling bounds simultaneous holders well below that. The
- *  generation steps on every shared @b and unique acquisition: a whole acquisition that
- *  opens and closes between two probes still moves it, and wrapping it inside one probe
- *  bracket would need days of saturated acquisitions. With the generation on top its carry
- *  leaves the word, so the shared side is one blind add of a holder and a step, backed off
- *  when the unique bit was already set; only the unique side compare-exchanges, from a
- *  free word.
- */
-template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = standard_atomic_ref>
-struct shared_mutex {
-    template <typename word_type_>
-    using atomic_ref = atomic_ref_template_<word_type_>;
-
-    u64_t word {0};
-
-    /** Bits counting holders: Linux's @c PID_MAX_LIMIT, 2^22, bounds the threads alive at once. */
-    inline static constexpr std::size_t holder_bits_k = 22;
-
-    inline static constexpr u64_t holders_mask_k = (u64_t {1} << holder_bits_k) - 1;
-    inline static constexpr u64_t unique_bit_k = u64_t {1} << holder_bits_k;
-    inline static constexpr u64_t generation_unit_k = unique_bit_k << 1;
-    inline static constexpr u64_t generation_mask_k = ~(generation_unit_k - 1);
-
-    /** One consistent reading: how the gate is held & how often it has been. */
-    struct snapshot_t {
-        u64_t generation = 0;
-        std::size_t holders = 0;
-        bool unique = false;
-
-        bool unlocked() const noexcept { return !holders && !unique; }
-    };
-
-    /** Joins the shared side, waiting out a unique holder through the waiter. */
-    void lock_shared() noexcept {
-        annotate_lock_shared_started(&word);
-        // A masked compare-exchange kept the fields apart while the generation sat under the
-        // unique bit; it retried under contention where this one add does not.
-        while (true) {
-            u64_t const observed = atomic_ref<u64_t>(word).fetch_add(generation_unit_k + 1, std::memory_order_acquire);
-            if (!(observed & unique_bit_k)) break;
-            // Joined behind a unique holder: hand the holder back, then wait for the word to move.
-            u64_t const backed_off = atomic_ref<u64_t>(word).fetch_sub(1, std::memory_order_release) - 1;
-            wait_type_ {}(&word, backed_off, 0u);
-        }
-        // Pairs with the acquire fence before a certified probe's exit snapshot: a row read that
-        // returned a store made under this hold proves the acquisition to that snapshot, which
-        // can then no longer read the word from before it. Arm and POWER need the fence as much as
-        // the C++ model does: an acquire orders the add's read before the row stores, not its write.
-        std::atomic_thread_fence(std::memory_order_release);
-        annotate_lock_shared_acquired(&word);
-    }
-
-    void unlock_shared() noexcept {
-        // The raw release precedes the bracket: inside it TSan ignores the word's own
-        // atomics, and the certified probes' acquire would otherwise pair with nothing.
-        annotate_release(&word);
-        annotate_unlock_shared_started(&word);
-        atomic_sub(atomic_ref<u64_t>(word), u64_t {1}, std::memory_order_release);
-        annotate_unlock_shared_finished(&word);
-    }
-
-    /** Takes the unique side only from a genuinely free word - generation churn
-     *  retries, it is not contention - and never waits: a refusal is the answer. */
-    [[nodiscard]] bool try_lock() noexcept {
-        annotate_try_lock_started(&word);
-        u64_t observed = atomic_ref<u64_t>(word).load(std::memory_order_relaxed);
-        while ((observed & (holders_mask_k | unique_bit_k)) == 0)
-            if (atomic_ref<u64_t>(word).compare_exchange_weak(observed, (observed + generation_unit_k) | unique_bit_k,
-                                                              std::memory_order_acquire, std::memory_order_relaxed)) {
-                annotate_try_lock_acquired(&word);
-                return true;
-            }
-        annotate_try_lock_refused(&word);
-        return false;
-    }
-
-    void unlock() noexcept {
-        annotate_release(&word);
-        annotate_unlock_started(&word);
-        atomic_clear_bits(atomic_ref<u64_t>(word), unique_bit_k, std::memory_order_release);
-        annotate_unlock_finished(&word);
-    }
-
-    /** The wait-free probe the certified readers bracket their walks with. */
-    snapshot_t snapshot() noexcept {
-        u64_t const observed = atomic_ref<u64_t const>(word).load(std::memory_order_acquire);
-        annotate_acquire(&word);
-        return {observed & generation_mask_k, static_cast<std::size_t>(observed & holders_mask_k),
-                (observed & unique_bit_k) != 0};
-    }
-};
-
 /** Per-thread traversal scratch: the candidate queues, the exact visited set,
  *  the staging surfaces of batched metric rounds, and running telemetry. */
 template <typename node_id_type_ = u64_t, typename distance_type_ = f64_t,
@@ -794,6 +642,15 @@ struct ram_index {
     template <typename cursor_index_type_, synchronization_t cursor_synchronization_, typename cursor_allocator_type_>
     friend struct ram_cursor;
 
+    /** The plural walks and scans its shards below one watermark per shard, and measures, closes
+     *  and reopens their claims. */
+    template <typename>
+    friend struct ram_indexes;
+
+    /** The plural's shard table measures, closes and reopens the claims. */
+    template <typename, typename, typename, typename, template <typename> class, typename>
+    friend struct utilities::shard_set;
+
     using neighbors_buffer_t = growing_buffer<node_id_t, allocator_t>;
 
     /** One node record: its state, the payload, its key and the neighbors it links to. The value &
@@ -905,16 +762,34 @@ struct ram_index {
      *  stored value - the one a caller builds the values it inserts with. */
     allocator_t get_allocator() const noexcept { return allocator_; }
 
-    /** Covers the node records & the key multimap for @p capacity entries ahead of the inserts,
-     *  which cover what they claim on their own, so this is a hint callable any time beside every
-     *  other verb. Neighbor rows start empty and grow with wiring. Answers the node capacity
-     *  covered so far: @c overflow_k past @c max_node_count_k, and @c bad_alloc_k keeps the chunks
-     *  it did cover, so the same call retries. */
-    expected<std::size_t> reserve(std::size_t capacity) noexcept {
-        if (status_t const covered = nodes_.cover(capacity); failed(covered)) return {nodes_.capacity(), covered};
-        if (status_t const keyed = key_map_.reserve(capacity); failed(keyed)) return {nodes_.capacity(), keyed};
+    /** A reservation: the rows to host, and the most this index may ever claim. */
+    struct reserve_capacity_t {
+
+        /** Rows to cover ahead of the inserts. */
+        std::size_t capacity = 0;
+
+        /** Rows the claims may reach, clamped to @c max_node_count_k; past it every batch and
+         *  absorb answers @c overflow_k. */
+        std::size_t ceiling = max_node_count_k;
+    };
+
+    /** Covers the node records & the key multimap for @p config.capacity entries ahead of the
+     *  inserts, which cover what they claim on their own, so this is a hint callable any time
+     *  beside every other verb, and bounds every later claim by @p config.ceiling. Neighbor rows
+     *  start empty and grow with wiring. Answers the node capacity covered so far: @c overflow_k
+     *  past @c max_node_count_k, and @c bad_alloc_k keeps the chunks it did cover, so the same
+     *  call retries. */
+    expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
+        atomic_ref<std::size_t>(ceiling_rows_)
+            .store(min_of(config.ceiling, max_node_count_k), std::memory_order_relaxed);
+        if (status_t const covered = nodes_.cover(config.capacity); failed(covered))
+            return {nodes_.capacity(), covered};
+        if (status_t const keyed = key_map_.reserve(config.capacity); failed(keyed)) return {nodes_.capacity(), keyed};
         return {nodes_.capacity(), status_t::success_k};
     }
+
+    /** Covers @p capacity entries, bounded by the ID space alone. */
+    expected<std::size_t> reserve(std::size_t capacity) noexcept { return reserve(reserve_capacity_t {capacity}); }
 
     /** Forgets every node and key and keeps every covered chunk for the next build: each record
      *  below the dispenser gets a fresh value from the index allocator, an empty row and no key.
@@ -1120,7 +995,7 @@ struct ram_index {
      *  @brief Opens a batched insertion of @p count values: joins the shared side, claims the key
      *      seats, claims and covers the node records, then dispenses the whole ID range in one add.
      *
-     *  Every refusal precedes the dispense: @c overflow_k past @c max_node_count_k, or a refused
+     *  Every refusal precedes the dispense: @c overflow_k past the reserved ceiling, or a refused
      *  cover's status once the claim is given back; a refused seat claim or cover strands its
      *  seats, which only leaves their chunks emptier. Everything else fallible belongs before this
      *  call, since nothing may refuse once the range is dispensed: building the values, sizing each
@@ -1130,37 +1005,9 @@ struct ram_index {
      *  holding a save or load plan deadlocks on its own hold, by construction.
      */
     expected<insert_plan_t> plan_insert(std::size_t count) noexcept {
-        // The gate opens before the claim, so a batch parked behind a unique holder never
-        // sits on committed capacity, spuriously overflowing its peers.
-        shared_lock_t hold {shared_mutex_};
-        if (!count) return {insert_plan_t {this, {}, {}, std::move(hold)}, status_t::success_k};
-        // Refused before the seats, so batches retried against a refine strand none.
-        if (atomic_ref<std::size_t>(claimed_count_).load(std::memory_order_relaxed) == closed_claims_k)
-            return {{}, status_t::contended_k};
-
-        // Key seats come first, so a refused seat claim leaves no capacity claimed.
-        auto [seats, seat_status] = key_map_.claim(count);
-        if (failed(seat_status)) return {{}, seat_status};
-
-        // Claims convert one-to-one into dispensed IDs once covered, and commit only within the
-        // ID ceiling, so peers never observe an overshoot. Covering to this claim's end suffices:
-        // of the batches dispensed up to this one, the last to claim covered past this range, and
-        // the dispenser's acquire-release carries its cover along.
-        std::size_t const claimed = atomic_fetch_add_if_at_most(atomic_ref<std::size_t>(claimed_count_), count,
-                                                                max_node_count_k, std::memory_order_acq_rel);
-        if (claimed == closed_claims_k) return {{}, status_t::contended_k};
-        if (max_node_count_k - claimed < count) return {{}, status_t::overflow_k};
-        if (status_t const covered = nodes_.cover(claimed + count); failed(covered)) {
-            atomic_sub(atomic_ref<std::size_t>(claimed_count_), count, std::memory_order_release);
-            return {{}, covered};
-        }
-
-        // One add dispenses the range one turn will publish, so nothing past it may fail; the steps
-        // run between the two, so a slow scorer delays the batches dispensed after this one.
-        node_id_t const first_id = atomic_ref<node_id_t>(next_dispensed_id_)
-                                       .fetch_add(static_cast<node_id_t>(count), std::memory_order_acq_rel);
-        iota_view<node_id_t> const range {first_id, static_cast<node_id_t>(first_id + count)};
-        return {insert_plan_t {this, range, seats, std::move(hold)}, status_t::success_k};
+        auto [claim, status] = claim_(count);
+        if (failed(status)) return {{}, status};
+        return {dispense_(std::move(claim)), status_t::success_k};
     }
 
     /** Sizes @p context for walks under @p connectivity and @p config - the fallible half of an
@@ -2232,7 +2079,7 @@ struct ram_index {
      *      must outlive the plan.
      *  @retval config_mismatch_k A null donor, this index itself, or a zero budget.
      *  @retval contended_k A batch in flight on this index or on a donor, or another refine.
-     *  @retval overflow_k Rows past @c max_node_count_k.
+     *  @retval overflow_k Rows past the reserved ceiling.
      */
     template <typename selector_type_ = keep_diverse_t>
     expected<refine_plan_t> plan_absorb(std::span<ram_index*> donors, traversal_context_t& context,
@@ -2265,7 +2112,7 @@ struct ram_index {
      *  @retval config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
      *      index itself, or a zero budget.
      *  @retval contended_k A batch in flight on this index or on a receiver, or another refine.
-     *  @retval overflow_k Part slots past the node ID type.
+     *  @retval overflow_k Part slots past the node ID type, or a part past a receiver's ceiling.
      */
     template <typename selector_type_ = keep_diverse_t>
     expected<refine_plan_t> plan_split(std::span<ram_index*> receivers, traversal_context_t& context,
@@ -2435,7 +2282,7 @@ struct ram_index {
             return context.results.size() == wanted ? context.results.top().distance : unbounded_radius<distance_t>();
         };
         predicate_fold fold {relation, predicate, context.results, wanted};
-        return scan_rounds_(query, metric, radius, fold, context, wanted);
+        return scan_below_(query, metric, radius, fold, context, wanted, static_cast<node_id_t>(size()));
     }
 
     /**
@@ -2454,7 +2301,7 @@ struct ram_index {
                                    traversal_context_over<context_allocator_type_>& context) noexcept {
         context.results.clear();
         auto const radius = []() noexcept { return unbounded_radius<distance_t>(); };
-        return scan_rounds_(query, metric, radius, fold, context, 1);
+        return scan_below_(query, metric, radius, fold, context, 1, static_cast<node_id_t>(size()));
     }
 
 #pragma endregion Search
@@ -3038,6 +2885,97 @@ struct ram_index {
     /** Reopens closed claims at the watermark, past every row a landing published meanwhile. */
     void reopen_() noexcept { atomic_ref<std::size_t>(claimed_count_).store(size(), std::memory_order_release); }
 
+    /** Rows claimed by batches and loads, published or not, and the watermark while the claims are
+     *  closed: what a shard set measures its bound against. */
+    std::size_t claimed_() const noexcept {
+        std::size_t const claimed = atomic_ref<std::size_t const>(claimed_count_).load(std::memory_order_acquire);
+        return claimed == closed_claims_k ? size() : claimed;
+    }
+
+    /**
+     *  @brief One batch's capacity, claimed and covered but not dispensed: the shared hold, the key
+     *      seats and the rows, so a plural claims on every shard before it dispenses on any.
+     *
+     *  Dying undispensed gives the rows back, still under the hold, and strands the seats, which
+     *  only leaves their chunks emptier; @ref dispense_ turns it into the batch's plan.
+     */
+    struct [[nodiscard]] capacity_claim_t {
+        capacity_claim_t() noexcept = default;
+        capacity_claim_t(ram_index* index, std::size_t rows, typename key_map_t::seats_t seats,
+                         shared_lock_t&& hold) noexcept
+            : index_(index), rows_(rows), seats_(seats), hold_(std::move(hold)) {}
+        capacity_claim_t(capacity_claim_t&& other) noexcept
+            : index_(std::exchange(other.index_, nullptr)), rows_(std::exchange(other.rows_, 0)), seats_(other.seats_),
+              hold_(std::move(other.hold_)) {}
+        capacity_claim_t& operator=(capacity_claim_t&&) = delete;
+        capacity_claim_t(capacity_claim_t const&) = delete;
+        capacity_claim_t& operator=(capacity_claim_t const&) = delete;
+        ~capacity_claim_t() noexcept {
+            if (index_ && rows_)
+                atomic_sub(atomic_ref<std::size_t>(index_->claimed_count_), rows_, std::memory_order_release);
+        }
+
+      private:
+        friend ram_index;
+
+        /** The index claimed in, whose shared side @c hold_ occupies; null in the empty claim. */
+        ram_index* index_ = nullptr;
+
+        /** Rows claimed and covered, none dispensed; zero once dispensed. */
+        std::size_t rows_ = 0;
+
+        /** One key seat per row, claimed before the rows. */
+        typename key_map_t::seats_t seats_ {};
+
+        shared_lock_t hold_;
+    };
+
+    /** The fallible half of @ref plan_insert: joins the shared side, claims the key seats, then
+     *  claims and covers @p count rows, dispensing none; it refuses as @ref plan_insert does. */
+    expected<capacity_claim_t> claim_(std::size_t count) noexcept {
+        // The gate opens before the claim, so a batch parked behind a unique holder never
+        // sits on committed capacity, spuriously overflowing its peers.
+        shared_lock_t hold {shared_mutex_};
+        if (!count) return {capacity_claim_t {this, 0, {}, std::move(hold)}, status_t::success_k};
+        // Refused before the seats, so batches retried against a refine strand none.
+        if (atomic_ref<std::size_t>(claimed_count_).load(std::memory_order_relaxed) == closed_claims_k)
+            return {{}, status_t::contended_k};
+
+        // Key seats come first, so a refused seat claim leaves no capacity claimed.
+        auto [seats, seat_status] = key_map_.claim(count);
+        if (failed(seat_status)) return {{}, seat_status};
+
+        // Claims convert one-to-one into dispensed IDs once covered, and commit only within the
+        // ceiling, so peers never observe an overshoot. Covering to this claim's end suffices:
+        // of the batches dispensed up to this one, the last to claim covered past this range, and
+        // the dispenser's acquire-release carries its cover along.
+        std::size_t const ceiling = atomic_ref<std::size_t>(ceiling_rows_).load(std::memory_order_relaxed);
+        std::size_t const claimed = atomic_fetch_add_if_at_most(atomic_ref<std::size_t>(claimed_count_), count, ceiling,
+                                                                std::memory_order_acq_rel);
+        if (claimed == closed_claims_k) return {{}, status_t::contended_k};
+        // A ceiling lowered under the claims refuses every batch rather than wrapping.
+        if (claimed > ceiling || ceiling - claimed < count) return {{}, status_t::overflow_k};
+        if (status_t const covered = nodes_.cover(claimed + count); failed(covered)) {
+            atomic_sub(atomic_ref<std::size_t>(claimed_count_), count, std::memory_order_release);
+            return {{}, covered};
+        }
+        return {capacity_claim_t {this, count, seats, std::move(hold)}, status_t::success_k};
+    }
+
+    /** The half of @ref plan_insert that cannot fail: one add dispenses the rows of @p claim as the
+     *  range one turn will publish; the empty claim opens the empty plan. */
+    insert_plan_t dispense_(capacity_claim_t&& claim) noexcept {
+        if (!claim.index_) return {};
+        std::size_t const count = std::exchange(claim.rows_, 0);
+        if (!count) return {this, {}, claim.seats_, std::move(claim.hold_)};
+        // The steps run between this add and the turn, so a slow scorer delays the batches
+        // dispensed after this one.
+        node_id_t const first_id = atomic_ref<node_id_t>(next_dispensed_id_)
+                                       .fetch_add(static_cast<node_id_t>(count), std::memory_order_acq_rel);
+        iota_view<node_id_t> const range {first_id, static_cast<node_id_t>(first_id + count)};
+        return {this, range, claim.seats_, std::move(claim.hold_)};
+    }
+
     /** An audit over the IDs below @p visible, its bitsets placed by @p allocator. */
     expected<health_plan_t> plan_audit_(node_id_t visible, allocator_t const& allocator) noexcept {
         // An empty graph is audited, not refused: no words to sweep, no steps, zero reached.
@@ -3072,13 +3010,15 @@ struct ram_index {
         if (failed(plan.donor_holds_.reserve_exactly(donors.size()))) return refuse(status_t::bad_alloc_k);
         node_id_t const visible = static_cast<node_id_t>(size());
         std::size_t rows = visible, parts = visible != 0;
+        std::size_t const ceiling = atomic_ref<std::size_t>(ceiling_rows_).load(std::memory_order_relaxed);
         for (ram_index* donor : donors) {
             unique_lock_t donor_hold {donor->shared_mutex_, std::try_to_lock};
             if (!donor_hold) return refuse(status_t::contended_k);
             auto const [donor_rows, watermark_status] = donor->watermark_();
             if (failed(watermark_status)) return refuse(watermark_status);
             plan.donor_holds_.push_back_reserved(std::move(donor_hold));
-            if (static_cast<std::size_t>(donor_rows) > max_node_count_k - rows) return refuse(status_t::overflow_k);
+            // Both terms stay within the address space's records, so their sum never wraps.
+            if (rows + static_cast<std::size_t>(donor_rows) > ceiling) return refuse(status_t::overflow_k);
             rows += donor_rows;
             parts += donor_rows != 0;
         }
@@ -3172,6 +3112,8 @@ struct ram_index {
             if (status_t const closed = receiver->close_(); failed(closed)) return refuse(closed);
             plan.receiver_holds_.push_back_reserved(std::move(receiver_hold));
             if (receiver->size()) return refuse(status_t::config_mismatch_k);
+            if (capacity > atomic_ref<std::size_t>(receiver->ceiling_rows_).load(std::memory_order_relaxed))
+                return refuse(status_t::overflow_k);
         }
         for (ram_index* receiver : receivers) {
             if (status_t const covered = receiver->nodes_.cover(capacity); failed(covered)) return refuse(covered);
@@ -3579,15 +3521,16 @@ struct ram_index {
         return walk_step_t::advanced_k;
     }
 
-    /** The rounds of both scans: every row below the watermark snapshot staged as many at a time as
-     *  the metric takes, drained within @p radius, and handed to @p fold, which may end the scan
-     *  with @c sated_k. A metric refusing an empty round can never finish, which a scan reports as
-     *  a refused allocation. */
+    /** The rounds of every scan: each row below the watermark @p first_invisible_id the caller
+     *  took, the index's own or one consistent across shards, staged as many at a time as the
+     *  metric takes, drained within @p radius, and handed to @p fold, which may end the scan with
+     *  @c sated_k. A metric refusing an empty round can never finish, which a scan reports as a
+     *  refused allocation. */
     template <typename query_type_, typename metric_type_, typename radius_type_, typename fold_type_,
               typename context_type_>
-    expected<search_result_t> scan_rounds_(query_type_ const& query, metric_type_& metric, radius_type_ const& radius,
-                                           fold_type_& fold, context_type_& context, std::size_t wanted) noexcept {
-        node_id_t const first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+    expected<search_result_t> scan_below_(query_type_ const& query, metric_type_& metric, radius_type_ const& radius,
+                                          fold_type_& fold, context_type_& context, std::size_t wanted,
+                                          node_id_t first_invisible_id) noexcept {
         if (!first_invisible_id) return {};
         // A scan stages rounds and ranks, and never touches the frontier or the visited set.
         std::size_t const staging = round_capacity(connectivity(), {wanted});
@@ -3615,13 +3558,48 @@ struct ram_index {
     }
 
     /** The one walk behind @c search and @c search_if: @p fold reads every scored round and the
-     *  walk stops on @p stopping, its own candidates or the admitted set. */
+     *  walk stops on @p stopping, its own candidates or the admitted set. One watermark snapshot
+     *  bounds the whole walk; a certified mode proves its own certification through the shared
+     *  mutex's wait-free probes instead of trusting it. */
     template <synchronization_t synchronization_, typename metric_type_, typename fold_type_, typename stopping_type_,
               typename context_allocator_type_, typename query_type_>
     expected<search_result_t> fold_walk_(query_type_ const& query, metric_type_& metric, fold_type_&& fold,
                                          stopping_type_ const& stopping,
                                          traversal_context_over<context_allocator_type_>& context,
                                          search_config_t config) noexcept {
+        if constexpr (synchronization_ == synchronization_t::concurrent_k)
+            return fold_walk_below_<synchronization_>(
+                query, metric, fold, stopping, context, config,
+                atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire));
+        else {
+            auto const entry_probe = shared_mutex_.snapshot();
+            if (!entry_probe.unlocked()) return {{}, status_t::contended_k};
+            auto const [first_invisible_id, watermark_status] = watermark_();
+            if (failed(watermark_status)) return {{}, watermark_status};
+            expected<search_result_t> found = fold_walk_below_<synchronization_>(query, metric, fold, stopping, context,
+                                                                                 config, first_invisible_id);
+            // The fence pairs with the release fence in `lock_shared`: a walk read that met a
+            // mutator's write proves its acquisition to the reload, which then reads a moved
+            // word. The watermark equality is the belt against generation wrap driven by inserts.
+            std::atomic_thread_fence(std::memory_order_acquire);
+            auto const exit_probe = shared_mutex_.snapshot();
+            if (succeeded(found.status) &&
+                (!exit_probe.unlocked() || exit_probe.generation != entry_probe.generation ||
+                 atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire) != first_invisible_id))
+                found.status = status_t::contended_k;
+            return found;
+        }
+    }
+
+    /** The walk behind every search below the watermark @p first_invisible_id the caller took: the
+     *  index's own, or one consistent across shards. A certified @p synchronization_ compiles the
+     *  row locks out, and its caller proves the certification. */
+    template <synchronization_t synchronization_, typename metric_type_, typename fold_type_, typename stopping_type_,
+              typename context_allocator_type_, typename query_type_>
+    expected<search_result_t> fold_walk_below_(query_type_ const& query, metric_type_& metric, fold_type_&& fold,
+                                               stopping_type_ const& stopping,
+                                               traversal_context_over<context_allocator_type_>& context,
+                                               search_config_t config, node_id_t first_invisible_id) noexcept {
         std::size_t const widest_row = connectivity();
         insert_config_t const walk = resolved_config_({config.expansion_factor}, widest_row);
         if (status_t const sized = reserve_traversal(context, widest_row, walk); failed(sized)) return {{}, sized};
@@ -3629,21 +3607,6 @@ struct ram_index {
         context.results.clear();
         context.frontier.clear();
         context.visited.clear();
-
-        // One watermark snapshot bounds the whole walk; a certified mode proves its own
-        // certification through the shared mutex's wait-free probes instead of trusting it.
-        node_id_t first_invisible_id = 0;
-        [[maybe_unused]] u64_t entry_generation = 0;
-        if constexpr (synchronization_ == synchronization_t::concurrent_k)
-            first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-        else {
-            auto const entry_probe = shared_mutex_.snapshot();
-            if (!entry_probe.unlocked()) return {{}, status_t::contended_k};
-            entry_generation = entry_probe.generation;
-            auto const [watermark, watermark_status] = watermark_();
-            if (failed(watermark_status)) return {{}, watermark_status};
-            first_invisible_id = watermark;
-        }
         if (!first_invisible_id) return {};
 
         traversal_telemetry_t const telemetry_before = context.telemetry;
@@ -3653,20 +3616,9 @@ struct ram_index {
         // A refused walk still ranked whatever it reached; the telemetry says the ranking is
         // short because scratch ran out, not because the graph had nothing better.
         search_result_t result;
-        status_t status = status_t::success_k;
         result.count = context.results.size();
         result.telemetry = context.telemetry - telemetry_before;
-        if constexpr (synchronization_ != synchronization_t::concurrent_k) {
-            // The fence pairs with the release fence in `lock_shared`: a walk read that met a
-            // mutator's write proves its acquisition to the reload, which then reads a moved
-            // word. The watermark equality is the belt against generation wrap driven by inserts.
-            std::atomic_thread_fence(std::memory_order_acquire);
-            auto const exit_probe = shared_mutex_.snapshot();
-            if (!exit_probe.unlocked() || exit_probe.generation != entry_generation ||
-                atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire) != first_invisible_id)
-                status = status_t::contended_k;
-        }
-        return {result, status};
+        return {result, status_t::success_k};
     }
 
     /**
@@ -3893,12 +3845,15 @@ struct ram_index {
     /** The node records, covered by each claim and by @c reserve, addresses stable forever. */
     nodes_column_t nodes_;
 
-    /** Batch capacity claims - the all-or-nothing admission, separate from
-     *  identity: claims convert one-to-one into dispensed IDs, so dispensing never
-     *  overflows, and a refused cover gives its claim back before anything is dispensed.
-     *  The bounded add commits only within @c max_node_count_k, so a rejected batch
-     *  never writes and the count never overshoots. */
+    /** Batch capacity claims - the all-or-nothing admission, separate from identity: claims
+     *  convert one-to-one into dispensed IDs, so dispensing never overflows, and a refused cover
+     *  gives its claim back before anything is dispensed. The bounded add commits only within
+     *  @c ceiling_rows_, so a rejected batch never writes and the count never overshoots. */
     alignas(default_alignment_k) std::size_t claimed_count_ {0};
+
+    /** The most the claims may reach, stored by @c reserve; on the claim word's line, which every
+     *  claim reading it already holds. */
+    std::size_t ceiling_rows_ {max_node_count_k};
 
     /** Node-ID dispenser; one add hands a batch its whole range before the first walk.
      *  Its per-batch RMW gets its own line, so it never invalidates the watermark line

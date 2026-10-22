@@ -26,9 +26,9 @@
 #include "usearch/utilities/blocking_files.hpp"    // `mapped_file_t`, `copy_bytes` - the checkpoints' bytes
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer` - the plans' catalogs
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator` - the plans' placement
+#include "usearch/utilities/ram_shards.hpp"        // `host_keys` - a shard's host key column
 #include "usearch/utilities/safegraphs_format.hpp" // SafeGraphs monoliths, manifests & catalogs
 #include "usearch/dense/types.hpp"
-#include "usearch/dense/sharded_indexes.hpp" // `host_keys` - a shard's host key column
 
 namespace unum::usearch::dense {
 
@@ -606,11 +606,12 @@ struct [[nodiscard]] shard_load_plan {
 
   private:
 
-    /** Closes every claim word of @p shards for the plan, whose death reopens them, and checks
-     *  emptiness beneath them, where no batch can land before the load does. */
+    /** Closes every claim word of @p shards for the plan through the residency, under its tower's
+     *  unique side, the plan's death reopening them, and checks emptiness beneath them, where no
+     *  batch can land before the load does. */
     status_t gate_(shards_type_& shards) noexcept {
         if (shards.empty()) return status_t::uninitialized_k;
-        if (status_t const closed = shards.close(); failed(closed)) return closed;
+        if (status_t const closed = residency_.close(shards); failed(closed)) return closed;
         shards_ = &shards;
         return shards.rows() ? status_t::config_mismatch_k : status_t::success_k;
     }
@@ -630,7 +631,8 @@ struct [[nodiscard]] shard_load_plan {
         if (status_t const landed = residency_.land_keys(shards, shard, rows, plans_[shard]); failed(landed))
             return landed;
         for (std::size_t row = rows.first; row != rows.bound; ++row)
-            shards.locators().insert(seats_, keys[row], key_locator_t {shard, static_cast<node_id_t>(row)});
+            shards.locators().insert(seats_, keys[row],
+                                     key_locator_t {static_cast<u32_t>(shard), static_cast<node_id_t>(row)});
         return status_t::success_k;
     }
 
@@ -726,15 +728,12 @@ struct [[nodiscard]] shard_load_plan {
             if (status_t const reserved = shards[shard].index->reserve(per_shard).status; failed(reserved))
                 return reserved;
         if constexpr (requires(residency_type_ const& residency, shard_t const& like) { residency.build_shard(like); })
-            while (shards.size() < shards_count) {
-                std::size_t const first = shards.size();
-                if (status_t const opened = shards.open_generation_(
+            while (shards.size() < shards_count)
+                if (status_t const opened = shards.open_generation_past_seal_(
                         shards.open_generation(),
                         [this](shard_t const& like) noexcept { return residency_.build_shard(like); });
                     failed(opened))
                     return opened;
-                if (status_t const closed = shards.close(first); failed(closed)) return closed;
-            }
         if (shards.size() < shards_count) return status_t::overflow_k;
         std::size_t const share = divide_round_up(config.capacity, shards_count);
         for (std::size_t shard = 0; shard != shards_count; ++shard) {

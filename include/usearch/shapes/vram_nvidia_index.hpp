@@ -188,6 +188,19 @@ struct vram_nvidia_index {
     }
 
   private:
+
+    /** A plural's shard table measures, closes and reopens the graph's claims. */
+    template <typename, typename, typename, typename, template <typename> class, typename>
+    friend struct utilities::shard_set;
+
+    /** A plural walks the graph below its snapshot and publishes its batches inside one commit. */
+    template <typename, typename, typename, typename, typename>
+    friend struct basic::vram_nvidia_indexes;
+
+    std::size_t claimed_() const noexcept { return graph_.claimed_(); }
+    status_t close_() noexcept { return graph_.close_(); }
+    void reopen_() noexcept { graph_.reopen_(); }
+
     graph_t graph_;
 };
 

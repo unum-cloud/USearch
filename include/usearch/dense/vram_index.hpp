@@ -15,6 +15,7 @@
 #include <cstddef> // `std::size_t`
 
 #include <bit>         // `std::bit_width` - a refine's rounds, `std::has_single_bit` - the connectivity
+#include <bitset>      // `std::bitset` - the devices a plural shares the storage with
 #include <limits>      // `std::numeric_limits` - the unit-RMS import's epsilon
 #include <memory>      // `std::unique_ptr` - an audit's landing
 #include <span>        // `std::span` - the parts' bases, the counts of a graph product
@@ -728,6 +729,20 @@ struct vram_shard_core {
         }
         status_t const mapped = map_rows_(config.capacity);
         return {capacity(), mapped};
+    }
+
+    /** Maps the storage for those of @p devices that can reach this one, as the plural holding the
+     *  shard names its devices, so their copies read the rows directly; precedes @ref reserve. */
+    void share_with_(std::bitset<gpu_devices_capacity_k> devices) noexcept {
+        vectors_matrix_.share_with(devices), norms_column_.share_with(devices), neighbors_matrix_.share_with(devices);
+    }
+
+    /** Maps the storage, the rows committed already included, for @p devices too, as a plural
+     *  absorbing this shard names its own; @c config_mismatch_k when one cannot reach this one. */
+    status_t grant_(std::bitset<gpu_devices_capacity_k> devices) noexcept {
+        if (status_t const granted = vectors_matrix_.grant(devices); failed(granted)) return granted;
+        if (status_t const granted = norms_column_.grant(devices); failed(granted)) return granted;
+        return neighbors_matrix_.grant(devices);
     }
 
 #pragma endregion Reservation
@@ -1740,8 +1755,8 @@ struct vram_shard_core {
          *  would. */
         std::size_t half_rows() const noexcept { return divide_round_up<std::size_t>(batch_rows(), 2); }
 
-        /** Pins the bounce at planning, for a plan whose steps cross host memory or another
-         *  device's storage; a plan whose rows move between matrices on one device never pins. */
+        /** Pins the bounce at planning, for a plan whose steps cross host memory; a plan whose rows
+         *  move between device matrices never pins. */
         status_t pin_bounce() noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const row_bytes = index_->packed_row_bytes() + index_->connectivity() * sizeof(node_id_t) +
@@ -1831,85 +1846,45 @@ struct vram_shard_core {
          *      an absorb drives it, one donor shard at a time, its step naming the rows in that
          *      shard's row and ID spaces.
          *
-         *  Both matrices keep fragment-padded rows of one geometry, so on one device every column
-         *  moves as one copy on the plan's stream. Another device's storage is mapped for that
-         *  device alone, so its rows cross through the bounce half a batch at a time, read out on
-         *  @p source_stream and written in on the plan's, each stream waiting on the other's event
-         *  rather than the host, so one half reads out while the other writes in. The neighbors
-         *  then rebase on the plan's stream. Nothing waits, so @p source_shard must stay quiescent
-         *  until the caller drains both streams.
+         *  Both matrices keep fragment-padded rows of one geometry, so every column moves as one
+         *  copy on the plan's stream, from another device's storage as well once its plural mapped
+         *  it for this one; storage this device cannot reach is refused. The neighbors then rebase
+         *  on the plan's stream. Nothing waits, so @p source_shard must stay quiescent until the
+         *  caller drains that stream.
          *
          *  @param[in] step The step to fill; its source rows address @p source_shard.
          *  @param[in] source_shard The shard the rows come from, read through its core.
          *  @param[in] source_range The ID space the source's rows speak.
-         *  @param[inout] source_stream An executor stream on @p source_shard 's device, which reads
-         *      the rows out when the devices differ and marks each half filled on its event.
+         *  @retval config_mismatch_k Another geometry, rows outside the plan, or storage on a
+         *      device this one cannot reach.
          */
         template <typename shard_type_>
-        status_t load(step_t const& step, shard_type_ const& source_shard, iota_view<node_id_t> source_range,
-                      typename executor_t::stream_t& source_stream) noexcept {
+        status_t load(step_t const& step, shard_type_ const& source_shard, iota_view<node_id_t> source_range) noexcept {
             vram_shard_core const& source = source_shard.core();
             if (!index_) return status_t::uninitialized_k;
-            int const device = index_->device_specs().ordinal, source_device = source.device_specs().ordinal;
+            int const device = index_->device_specs().ordinal;
             if (failed(vendor_t::select(device))) return status_t::device_error_k;
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty() || range.size() != step.source_rows.size() || range.first < base ||
                 range.bound > base + rows || step.source_rows.bound > source.size() ||
-                source.dimensions() != index_->dimensions() || source.connectivity() != index_->connectivity())
+                source.dimensions() != index_->dimensions() || source.connectivity() != index_->connectivity() ||
+                !source.vectors_matrix_.shared_with(device) || !source.neighbors_matrix_.shared_with(device))
                 return status_t::config_mismatch_k;
             node_id_t const shift = range.first - step.source_rows.first + source_range.first;
             if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
-            std::size_t const row_bytes = index_->row_bytes(), scalar_row_bytes = index_->packed_row_bytes();
+            std::size_t const row_bytes = index_->row_bytes();
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(node_id_t);
             std::size_t const count = range.size(), into = range.first, from = step.source_rows.first;
             bool const normed = index_->stores_norms() && source.stores_norms();
-            if (device == source_device) {
-                if (failed(vendor_t::copy(index_->vectors_rows_() + into * row_bytes,
-                                          source.vectors_rows_() + from * row_bytes, count * row_bytes, stream)) ||
-                    failed(vendor_t::copy(index_->neighbors_matrix_.base() + into * neighbors_row_bytes,
-                                          source.neighbors_matrix_.base() + from * neighbors_row_bytes,
-                                          count * neighbors_row_bytes, stream)) ||
-                    (normed && failed(vendor_t::copy(index_->norms_column_.base() + into * sizeof(norms_t),
-                                                     source.norms_column_.base() + from * sizeof(norms_t),
-                                                     count * sizeof(norms_t), stream))))
-                    return index_->fail_(status_t::device_error_k);
-            }
-            else {
-                if (bounce.empty()) return status_t::uninitialized_k;
-                stream_handle_t const reading = source_stream.handle;
-                for (std::size_t done = 0; done < count; done += half_rows()) {
-                    std::size_t const batch = min_of(half_rows(), count - done);
-                    std::size_t const read = from + done, written = into + done;
-                    std::size_t const half = chunks_++ % 2;
-                    byte_t* const bounce_vectors =
-                        bounce.data() + half * half_rows() * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
-                    byte_t* const bounce_neighbors = bounce_vectors + half_rows() * scalar_row_bytes;
-                    byte_t* const bounce_norms = bounce_neighbors + half_rows() * neighbors_row_bytes;
-                    // The source refills a half only once the plan's stream wrote it in; an event
-                    // never recorded holds nothing back.
-                    if (failed(vendor_t::select(source_device)) || failed(vendor_t::follow(reading, crossed_[half])) ||
-                        failed(vendor_t::copy_2d(bounce_vectors, scalar_row_bytes,
-                                                 source.vectors_rows_() + read * row_bytes, row_bytes, scalar_row_bytes,
-                                                 batch, reading)) ||
-                        failed(vendor_t::copy(bounce_neighbors,
-                                              source.neighbors_matrix_.base() + read * neighbors_row_bytes,
-                                              batch * neighbors_row_bytes, reading)) ||
-                        (normed &&
-                         failed(vendor_t::copy(bounce_norms, source.norms_column_.base() + read * sizeof(norms_t),
-                                               batch * sizeof(norms_t), reading))) ||
-                        failed(source_stream.event.record(reading)))
-                        return index_->fail_(status_t::device_error_k);
-                    if (failed(vendor_t::select(device)) || failed(vendor_t::follow(stream, source_stream.event)) ||
-                        failed(vendor_t::copy_2d(index_->vectors_rows_() + written * row_bytes, row_bytes,
-                                                 bounce_vectors, scalar_row_bytes, scalar_row_bytes, batch, stream)) ||
-                        failed(vendor_t::copy(index_->neighbors_matrix_.base() + written * neighbors_row_bytes,
-                                              bounce_neighbors, batch * neighbors_row_bytes, stream)) ||
-                        (normed && failed(vendor_t::copy(index_->norms_column_.base() + written * sizeof(norms_t),
-                                                         bounce_norms, batch * sizeof(norms_t), stream))) ||
-                        failed(crossed_[half].record(stream)))
-                        return index_->fail_(status_t::device_error_k);
-                }
-            }
+            if (failed(vendor_t::copy(index_->vectors_rows_() + into * row_bytes,
+                                      source.vectors_rows_() + from * row_bytes, count * row_bytes, stream)) ||
+                failed(vendor_t::copy(index_->neighbors_matrix_.base() + into * neighbors_row_bytes,
+                                      source.neighbors_matrix_.base() + from * neighbors_row_bytes,
+                                      count * neighbors_row_bytes, stream)) ||
+                (normed && failed(vendor_t::copy(index_->norms_column_.base() + into * sizeof(norms_t),
+                                                 source.norms_column_.base() + from * sizeof(norms_t),
+                                                 count * sizeof(norms_t), stream))))
+                return index_->fail_(status_t::device_error_k);
             if (failed(index_->launch_rebase_links_(range, source_range, shift, stream)))
                 return index_->fail_(status_t::device_error_k);
             if (normed) standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(count, std::memory_order_acq_rel);
@@ -2417,6 +2392,16 @@ struct vram_shard_core {
     /** Reopens a closed claim word at the watermark, past every row a load published meanwhile; an
      *  open one stays as it is. */
     void reopen_() noexcept { claims_.reopen(size()); }
+
+    /** Forgets every row under the closed claim word: the watermark drops to zero, a kept failure
+     *  with it, and the next claim sentinel-fills every mapped row again and zeroes the published
+     *  count, so IDs restart from zero on the storage already mapped, which nothing frees. A walk
+     *  still reaching the index reads that retained storage, and its caller's epoch discards it. */
+    void forget_() noexcept {
+        standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
+        standard_atomic_ref<status_t>(status_).store(status_t::success_k, std::memory_order_release);
+        filled_rows_ = 0;
+    }
 
     /** Turns the watermark from @p first over @p rows drained rows once every batch claimed before
      *  has turned it, so the visible rows are always whole batches; a failure kept meanwhile

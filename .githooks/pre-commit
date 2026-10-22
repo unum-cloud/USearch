@@ -1924,7 +1924,7 @@ judge_path() {
         ;;&
     # The code every GPU vendor shares, and the C verbs above every residency.
     include/usearch/*/vram_index.cuh | include/usearch/*/vram_index.hpp | include/usearch/utilities/vram_queue.cuh | \
-        include/usearch/dense/sharded_indexes.hpp | include/usearch/dense/shard_checkpoints.hpp | \
+        include/usearch/utilities/ram_shards.hpp | include/usearch/dense/shard_checkpoints.hpp | \
         include/usearch/dense/vram_shard_fanout.hpp | src/*_index.cpp | src/*_index.cuh)
         check_vendor_neutral
         ;;&

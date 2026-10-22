@@ -1064,7 +1064,7 @@ struct vram_amd_index {
     template <typename, nk_dtype_t, typename, typename, typename, typename>
     friend struct vram_amd_indexes;
     template <typename, typename, typename, typename, template <typename> class, typename>
-    friend struct shard_set;
+    friend struct utilities::shard_set;
     template <typename, typename>
     friend struct vram_shard_fanout;
 
@@ -1075,6 +1075,9 @@ struct vram_amd_index {
     status_t fail_(status_t failure) noexcept { return core_.fail_(failure); }
     status_t close_() noexcept { return core_.close_(); }
     void reopen_() noexcept { core_.reopen_(); }
+    void forget_() noexcept { core_.forget_(); }
+    void share_with_(std::bitset<gpu_devices_capacity_k> devices) noexcept { core_.share_with_(devices); }
+    status_t grant_(std::bitset<gpu_devices_capacity_k> devices) noexcept { return core_.grant_(devices); }
     std::size_t exported_bytes_(rows_span_t outputs) const noexcept { return core_.exported_bytes_(outputs); }
 
     expected<insert_result_t> submit_insert_(rows_view_t new_rows, node_id_t first_id, node_ids_span_t assigned_ids,

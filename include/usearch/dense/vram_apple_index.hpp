@@ -991,8 +991,7 @@ struct vram_apple_index {
             if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty() || range.size() != step.source_rows.size() || step.source_rows.bound > source.size() ||
-                source.kernel() != index_->kernel() || source.dimensions() != index_->dimensions() ||
-                source.connectivity() != index_->connectivity())
+                !same_geometry(source, *index_))
                 return status_t::config_mismatch_k;
             node_id_t const shift = range.first - step.source_rows.first + source_range.first;
             if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
@@ -1086,7 +1085,7 @@ struct vram_apple_index {
     template <typename, nk_dtype_t, nk_capability_t, typename, typename>
     friend struct vram_apple_indexes;
     template <typename, typename, typename, typename, template <typename> class, typename>
-    friend struct shard_set;
+    friend struct utilities::shard_set;
 
   private:
 
@@ -1951,6 +1950,18 @@ struct vram_apple_index {
     /** Reopens a closed claim word at the watermark, past every row a load published meanwhile; an
      *  open one stays as it is. */
     void reopen_() noexcept { claims_.reopen(size()); }
+
+    /** Forgets every row under the closed claim word: the published neighbor rows refill with the
+     *  sentinel once the walks sharing the storage drained, and the watermark drops to zero, a kept
+     *  failure with it, so IDs restart from zero on the storage already grown, which nothing frees.
+     *  */
+    void forget_() noexcept {
+        std::unique_lock storage {storage_};
+        if (std::size_t const rows = size())
+            std::memset(neighbors_matrix_.host, 0xFF, rows * connectivity() * sizeof(u32_t));
+        standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
+        standard_atomic_ref<status_t>(status_).store(status_t::success_k, std::memory_order_release);
+    }
 
     /** Row zero of the neighbors matrix, as the IDs its rows hold. */
     node_id_t* neighbor_rows_() const noexcept { return reinterpret_cast<node_id_t*>(neighbors_matrix_.host); }

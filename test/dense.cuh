@@ -296,6 +296,8 @@ struct counting_device_allocator {
     std::size_t reserved_bytes() const noexcept { return virtual_memory_.reserved_bytes(); }
     std::size_t committed_bytes() const noexcept { return virtual_memory_.committed_bytes(); }
     int device() const noexcept { return virtual_memory_.device(); }
+    void share_with(std::bitset<gpu_devices_capacity_k> devices) noexcept { virtual_memory_.share_with(devices); }
+    bool shared_with(int device) const noexcept { return virtual_memory_.shared_with(device); }
     void release() noexcept {
         if (ledger_ && tallied_bytes_) ledger_->live_bytes.fetch_sub(static_cast<std::ptrdiff_t>(tallied_bytes_));
         tallied_bytes_ = 0;

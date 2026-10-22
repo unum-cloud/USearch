@@ -421,6 +421,14 @@ std::size_t test_basic_guards(u64_t seed) {
         failures += expect_eq(index.reserve(0).value, capacity);
         failures += expect_eq(index.reserve(index_t::max_node_count_k + 1).status, status_t::overflow_k);
         failures += expect_eq(index.capacity(), capacity);
+
+        // A ceiling at the current size refuses the next row whole, and a plain reserve lifts it.
+        failures += expect_eq(index.reserve({0, batch_k}).status, status_t::success_k);
+        failures += expect_eq(
+            index.insert({values.data() + batch_k, 1}, {keys.data() + batch_k, 1}, metric, {}, context).status,
+            status_t::overflow_k);
+        failures += expect_eq(index.size(), batch_k);
+        failures += expect_eq(index.reserve(0).status, status_t::success_k);
         failures += expect_eq(
             index.insert({values.data() + batch_k, 1}, {keys.data() + batch_k, 1}, metric, {}, context).status,
             status_t::success_k);

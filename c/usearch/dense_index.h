@@ -92,6 +92,18 @@
  *  optimistically instead, reporting @c usearch_status_contended_k when an insertion was in flight
  *  or published under it, and concurrent readers keep searching throughout every save.
  *
+ *  Every verb is safe beside every other on the same handle, with no rule to keep any of them from
+ *  starting. Each RAM or VRAM handle carries one gate: insertions hold its shared side for their
+ *  own call, and the verbs that empty or move rows in place - a clear, an absorb consuming a donor,
+ *  a compaction, a split emptying its source, and the closing step of every refinement, absorb,
+ *  compaction, split, load and VRAM save - take it alone or report @c usearch_status_contended_k,
+ *  never waiting. Readers take no lock at all: a search, a product, an attention call, a lookup of
+ *  rows or a cursor pull reads one epoch word before and after its work, repeats once when a
+ *  destructive step ran in between, and reports @c usearch_status_contended_k when another one did.
+ *  Nothing a reader can reach is freed while the handle lives: an emptied shard keeps its memory
+ *  until the handle is freed, and a count of a key stays exact throughout, as a compaction moves
+ *  each key's entry with one atomic store.
+ *
  *  The executor, not the handle, is what orders: a handle admits any number of concurrent
  *  callers, while calls on one executor run in the order they were submitted. Callers wanting
  *  genuine parallelism give each thread its own executor, and a @c NULL executor runs the call on
@@ -566,9 +578,9 @@ typedef struct usearch_dense_clear_t {
     usearch_completion_t completion;
 } usearch_dense_clear_t;
 
-/** Erases all entries, keeping the reserved capacity and frozen geometry. On a RAM handle an
- *  insertion in flight refuses it with @c usearch_status_contended_k; no other verb may start on
- *  the same handle while it runs. */
+/** Erases all entries, keeping the reserved capacity and frozen geometry. An insertion in flight,
+ *  or a refinement, absorb, compaction, split or load holding the handle, refuses it with
+ *  @c usearch_status_contended_k; a search it lands under repeats or reports the same. */
 USEARCH_EXPORT void usearch_dense_clear(usearch_dense_clear_t* arguments);
 
 /** The arguments of @c usearch_dense_insert. */
@@ -948,8 +960,8 @@ typedef struct usearch_dense_absorb_t {
  *  donors appended, round by round, so a group of donors costs one refinement rather than one per
  *  donor. Readers of a RAM @c index may keep searching throughout, since unpublished rows hide
  *  behind the watermark, while a VRAM one rewrites neighbors in place and admits no overlapping
- *  search, as refinement does. Insertions into @c index arriving meanwhile are refused with
- *  @c usearch_status_contended_k, while nothing may search a donor or start an insertion into it.
+ *  search, as refinement does. Insertions into @c index or into a donor arriving meanwhile are
+ *  refused with @c usearch_status_contended_k, while searches of a donor run throughout.
  *
  *  A failure leaves the donor it struck and every later one as live handles the caller still owns
  *  and must free, and @c index holding the donors before it; every consumed slot is nulled, so the
@@ -968,6 +980,74 @@ typedef struct usearch_dense_absorb_t {
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments);
+
+/** The arguments of @c usearch_dense_compact. */
+typedef struct usearch_dense_compact_t {
+
+    /** The handle the sources compact into, possibly one of them. */
+    usearch_dense_index_t target;
+
+    /** The executor every landing and the closing refinement fan out over. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Source handles to compact. */
+    size_t count;
+
+    /** Array of @c count distinct handles; each but @c target is freed and nulled once every
+     *  source landed. */
+    usearch_dense_index_t* sources;
+
+    /** The @b optional most rows one target shard holds; zero, or more than the target's own bound,
+     *  means that bound. */
+    size_t shard_capacity;
+
+    /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
+    size_t expansion_factor;
+
+    /** The @b optional output for the nodes the closing refine changed. */
+    size_t* changed;
+
+    /** The @b optional output for the audit closing the heal. */
+    usearch_reachability_t* reachability;
+
+    /** The @b optional handler, called with nodes the closing refine re-selected; a cancel stops it
+     *  as it stops @c usearch_dense_refine, never a landing. */
+    usearch_progress_t progress;
+
+    /** The @b optional traversal telemetry; @c NULL skips reporting. */
+    usearch_traversal_stats_t* stats;
+} usearch_dense_compact_t;
+
+/**
+ *  @brief Compacts every shard of the handles in @c sources into @c target under @c shard_capacity
+ *      rows per shard, largest first, each into the first shard with room, so it ends with as few
+ *      shards as fit; in place when @c target is among @c sources.
+ *  @retval usearch_status_read_only_k @c target is an NVMe view.
+ *  @retval usearch_status_invalid_argument_k A @c NULL slot in @c sources, or @c NULL @c sources
+ *      for a nonzero @c count.
+ *  @retval usearch_status_config_mismatch_k A repeated source, or one of another residency, scalar,
+ *      class, metric or geometry.
+ *  @retval usearch_status_contended_k An insertion in flight on @c target or a source, or another
+ *      call holding either; nothing moves.
+ *  @retval usearch_status_unsupported_k A source shard past @c shard_capacity, which would have to
+ *      be cut first, or a target outside RAM.
+ *
+ *  The shard a bin keeps stays resident with its IDs, every other source shard lands after it with
+ *  its edges rebased and its keys beside it, and only the appended rows walk the target across the
+ *  parts and link in, then each target shard re-links what that strands, as @c usearch_dense_refine
+ *  does. In place, a moved row's key moves with one atomic store, so lookups and searches of
+ *  @c target run throughout and emptied shards stay as idle slots for its next generation. Once the
+ *  call landed every source, each one but @c target is freed and nulled, as @c usearch_dense_absorb
+ *  frees its donors; a failure frees none, those it consumed left empty and refusing insertions, so
+ *  every handle in @c sources stays the caller's to free.
+ */
+USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments);
 
 /** The arguments of @c usearch_dense_split. */
 typedef struct usearch_dense_split_t {
@@ -1032,8 +1112,8 @@ typedef struct usearch_dense_split_t {
  *  its edges into other parts dropped, and the rows that lost one placed first; @c index clears
  *  once every part landed. Each receiver closes by refining the rows that lost an edge and
  *  re-linking what that strands, as @c usearch_dense_refine does. Insertions into @c index or a
- *  receiver arriving meanwhile are refused with @c usearch_status_contended_k, and nothing may
- *  search either until the call is final.
+ *  receiver arriving meanwhile are refused with @c usearch_status_contended_k, while searches of
+ *  either run throughout.
  *
  *  The handler reports and cancels the closing refinements alone, exactly as in
  *  @c usearch_dense_refine: a cancel skips the rest of the re-selection, still re-links, and

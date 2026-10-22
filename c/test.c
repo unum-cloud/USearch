@@ -453,6 +453,95 @@ void test_add_progress(void) {
     printf("Test: Add Progress - PASSED\n");
 }
 
+/** A RAM index bounded at a quarter of its rows holds four shards, and compacts in place under a
+ *  bound of half its rows: nothing is consumed, and every key still resolves to one row. A fresh
+ *  index then compacts two halves into itself, which frees and nulls both sources. */
+void test_compact(size_t const dimensions) {
+    printf("Test: Compact... %zu dimensions\n", dimensions);
+
+    enum { rows_count = 1200, quarter = rows_count / 4 };
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_ram(&(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &outcome, .threads = 2});
+    expect(!outcome.message, outcome.message);
+    float* const data = create_vectors(rows_count, dimensions);
+    usearch_key_t* const keys = (usearch_key_t*)malloc(rows_count * sizeof(usearch_key_t));
+    expect(keys, "Failed to allocate keys");
+    for (size_t row = 0; row != rows_count; ++row) keys[row] = key_of(row);
+
+    usearch_dense_index_t indexes[3] = {NULL, NULL, NULL};
+    size_t const shard_capacities[3] = {quarter, 0, 0};
+    for (size_t which = 0; which != 3; ++which) {
+        usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &indexes[which],
+                                                            .outcome = &outcome,
+                                                            .metric = usearch_dense_metric_angular_k,
+                                                            .quantization = usearch_scalar_bf16_k,
+                                                            .dimensions = dimensions,
+                                                            .connectivity = 16,
+                                                            .ram = {.shard_capacity = shard_capacities[which]}});
+        expect(!outcome.message, outcome.message);
+    }
+    // The bounded index takes every row, one generation of shards per quarter.
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = indexes[0],
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = rows_count,
+                                   .keys = {keys, sizeof(usearch_key_t)},
+                                   .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+
+    usearch_dense_compact(&(usearch_dense_compact_t) {.target = indexes[0],
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .count = 1,
+                                                      .sources = indexes,
+                                                      .shard_capacity = rows_count / 2});
+    expect(!outcome.message, outcome.message);
+    expect(indexes[0] != NULL, "Compacting in place consumes nothing");
+    for (size_t row = 0; row != rows_count; ++row) {
+        size_t entries = 0;
+        usearch_dense_count(&(usearch_dense_count_t) {.index = indexes[0],
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .key = keys[row],
+                                                      .entries = &entries});
+        expect(!outcome.message, outcome.message);
+        expect_eq(entries, 1, "Every key must resolve to one row after compacting in place");
+    }
+
+    // Out of place, both halves land in the fresh index, and their handles go.
+    usearch_dense_index_t const target = indexes[2];
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = indexes[1],
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = quarter,
+                                   .keys = {keys, sizeof(usearch_key_t)},
+                                   .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_compact(&(usearch_dense_compact_t) {.target = target,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .count = 2,
+                                                      .sources = indexes});
+    expect(!outcome.message, outcome.message);
+    expect(indexes[0] == NULL && indexes[1] == NULL, "Every consumed source must be freed and nulled");
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = target,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, rows_count + quarter, "Every source row must land in the target");
+
+    free(keys);
+    free(data);
+    usearch_executor_free(executor);
+    usearch_dense_free(target);
+    printf("Test: Compact - PASSED\n");
+}
+
 /** The first of four indexes over the quarters of one dataset absorbs the rest: a handler
  *  cancelling the closing refine of a one-shot absorb still leaves both its donors consumed, the
  *  call answering @c usearch_status_cancelled_k, and the last donor lands through a refinement
@@ -3569,6 +3658,7 @@ int main(int argc, char* argv[]) {
         }
     if (selected("add_progress")) test_add_progress();
     if (selected("absorb")) test_absorb(dimension_counts[0]);
+    if (selected("compact")) test_compact(dimension_counts[0]);
     if (selected("sequence_absorb")) test_sequence_absorb();
     if (selected("count_and_get")) test_count_and_get(dimension_counts[0]);
     if (selected("count_and_get")) test_count_and_get(dimension_counts[1]);

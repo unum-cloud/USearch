@@ -25,6 +25,7 @@
 #include <cstdint> // `std::uintptr_t` for device-pointer casts
 
 #include <atomic>      // `std::memory_order` - the committed extent, `std::atomic` - the primary contexts
+#include <bitset>      // `std::bitset` - the devices a range maps its slabs for
 #include <memory>      // `std::unique_ptr` for owned device allocations
 #include <mutex>       // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
 #include <span>        // `std::span` - the device list an executor opens over, a fatbin's bytes
@@ -195,6 +196,7 @@ struct cuda_api_t {
     cuda_result_t (*get_device_attribute)(int*, cuda_device_attribute_t, int) = nullptr;
     cuda_result_t (*get_device_name)(char*, int, int) = nullptr;
     cuda_result_t (*get_device_memory)(std::size_t*, int) = nullptr;
+    cuda_result_t (*can_access_peer)(int*, int, int) = nullptr;
     cuda_result_t (*retain_primary_context)(cuda_context_handle_t*, int) = nullptr;
     cuda_result_t (*set_current_context)(cuda_context_handle_t) = nullptr;
     cuda_result_t (*allocate_async)(cuda_device_address_t*, std::size_t, cuda_stream_handle_t) = nullptr;
@@ -267,6 +269,7 @@ struct cuda_api_t {
             library.resolve("cuDeviceGetAttribute", api.get_device_attribute) &&
             library.resolve("cuDeviceGetName", api.get_device_name) &&
             library.resolve("cuDeviceTotalMem_v2", api.get_device_memory) &&
+            library.resolve("cuDeviceCanAccessPeer", api.can_access_peer) &&
             library.resolve("cuDevicePrimaryCtxRetain", api.retain_primary_context) &&
             library.resolve("cuCtxSetCurrent", api.set_current_context) &&
             library.resolve("cuMemAllocAsync", api.allocate_async) &&
@@ -557,22 +560,26 @@ struct cuda_virtual_memory_allocator {
     std::size_t slab_bytes_ = 0;
     int device_ = 0;
 
+    /** CUDA ordinals besides the owner that every slab maps for, each able to reach the owner. */
+    std::bitset<gpu_devices_capacity_k> peers_;
+
     cuda_virtual_memory_allocator() = default;
 
     /** Names the GPU the future reservation pins to - placement only, no driver call. */
     explicit cuda_virtual_memory_allocator(int device) noexcept : device_(device) {}
 
     /** Copies the placement only, never a live reservation. */
-    cuda_virtual_memory_allocator(cuda_virtual_memory_allocator const& other) noexcept : device_(other.device_) {}
+    cuda_virtual_memory_allocator(cuda_virtual_memory_allocator const& other) noexcept
+        : device_(other.device_), peers_(other.peers_) {}
 
     /** Takes over a live reservation, so a table of them relocates without remapping. */
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator&& other) noexcept
         : base_(std::exchange(other.base_, 0)), virtual_address_bytes_(std::exchange(other.virtual_address_bytes_, 0)),
-          mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), slab_bytes_(other.slab_bytes_), device_(other.device_) {
-    }
+          mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), slab_bytes_(other.slab_bytes_), device_(other.device_),
+          peers_(other.peers_) {}
     template <typename other_>
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator<other_> const& other) noexcept
-        : device_(other.device_) {}
+        : device_(other.device_), peers_(other.peers_) {}
     cuda_virtual_memory_allocator& operator=(cuda_virtual_memory_allocator const&) = delete;
     ~cuda_virtual_memory_allocator() noexcept { release(); }
 
@@ -593,22 +600,69 @@ struct cuda_virtual_memory_allocator {
         return status_t::success_k;
     }
 
-    /** Maps physical slabs until at least @p bytes are usable; never unmaps early. Each handle is
-     *  released right after mapping, since the mapping alone keeps the memory alive. */
+    /** Maps every slab for those of @p devices that can reach the owner too, so their kernels and
+     *  copies read and write it directly; placement only, named before the first @ref commit. */
+    void share_with(std::bitset<gpu_devices_capacity_k> devices) noexcept {
+        peers_.reset();
+        cuda_api_t const& api = cuda_api();
+        int owner = 0;
+        if (!api || api.get_device(&owner, device_) != cuda_success_k) return;
+        for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
+            int peer = 0, reaches = 0;
+            if (!devices[ordinal] || static_cast<int>(ordinal) == device_) continue;
+            peers_[ordinal] = api.get_device(&peer, static_cast<int>(ordinal)) == cuda_success_k &&
+                              api.can_access_peer(&reaches, peer, owner) == cuda_success_k && reaches;
+        }
+    }
+
+    /** Whether kernels and copies on CUDA ordinal @p device reach the mapped slabs. */
+    bool shared_with(int device) const noexcept {
+        return device == device_ || peers_[static_cast<std::size_t>(device)];
+    }
+
+    /** Maps every slab, those committed already included, for @p devices too, as a plural absorbing
+     *  this storage names its own; refuses with @c config_mismatch_k, granting nothing, when one of
+     *  them cannot reach the owner. No slab may be committed meanwhile. */
+    status_t grant(std::bitset<gpu_devices_capacity_k> devices) noexcept {
+        cuda_api_t const& api = cuda_api();
+        int owner = 0;
+        if (!api || api.get_device(&owner, device_) != cuda_success_k) return status_t::device_error_k;
+        std::bitset<gpu_devices_capacity_k> granted = peers_;
+        for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
+            int peer = 0, reaches = 0;
+            if (!devices[ordinal] || static_cast<int>(ordinal) == device_ || granted[ordinal]) continue;
+            if (api.get_device(&peer, static_cast<int>(ordinal)) != cuda_success_k ||
+                api.can_access_peer(&reaches, peer, owner) != cuda_success_k || !reaches)
+                return status_t::config_mismatch_k;
+            granted[ordinal] = true;
+        }
+        if (granted == peers_) return status_t::success_k;
+        cuda_access_descriptor_t access[gpu_devices_capacity_k];
+        std::size_t const readers = access_of_(granted, access);
+        for (std::size_t offset = 0; offset != mapped_bytes_; offset += slab_bytes_)
+            if (api.memory_set_access(base_ + offset, slab_bytes_, access, readers) != cuda_success_k)
+                return status_t::device_error_k;
+        peers_ = granted;
+        return status_t::success_k;
+    }
+
+    /** Maps physical slabs until at least @p bytes are usable, for the owner and every peer; never
+     *  unmaps early. Each handle is released right after mapping, since the mapping alone keeps the
+     *  memory alive. */
     status_t commit(std::size_t bytes) noexcept {
         if (bytes > virtual_address_bytes_) return status_t::overflow_k;
         // A reservation exists only once `reserve_range` found the driver, so the table is complete
         // here.
         cuda_api_t const& api = cuda_api();
         cuda_allocation_properties_t properties = allocation_properties_(device_);
-        cuda_access_descriptor_t access;
-        access.location = properties.location;
-        access.flags = cuda_access_descriptor_t::read_write_k;
+        cuda_access_descriptor_t access[gpu_devices_capacity_k];
+        std::size_t const readers = access_of_(peers_, access);
         while (mapped_bytes_ < bytes) {
             unsigned long long handle = 0;
             if (api.memory_create(&handle, slab_bytes_, &properties, 0) != cuda_success_k) return status_t::bad_alloc_k;
             bool const mapped = api.memory_map(base_ + mapped_bytes_, slab_bytes_, 0, handle, 0) == cuda_success_k &&
-                                api.memory_set_access(base_ + mapped_bytes_, slab_bytes_, &access, 1) == cuda_success_k;
+                                api.memory_set_access(base_ + mapped_bytes_, slab_bytes_, access, readers) ==
+                                    cuda_success_k;
             api.memory_release(handle);
             if (!mapped) return status_t::device_error_k;
             standard_atomic_ref<std::size_t>(mapped_bytes_)
@@ -637,6 +691,19 @@ struct cuda_virtual_memory_allocator {
         properties.location.type = cuda_memory_location_t::device_k;
         properties.location.id = device;
         return properties;
+    }
+
+    /** Writes the owner's read-write access, then each of @p peers', into @p access, and answers
+     *  how many it wrote. */
+    std::size_t access_of_(std::bitset<gpu_devices_capacity_k> peers,
+                           cuda_access_descriptor_t (&access)[gpu_devices_capacity_k]) const noexcept {
+        access[0] = {allocation_properties_(device_).location, cuda_access_descriptor_t::read_write_k};
+        std::size_t readers = 1;
+        for (std::size_t ordinal = 0; ordinal != peers.size(); ++ordinal)
+            if (peers[ordinal])
+                access[readers++] = {{cuda_memory_location_t::device_k, static_cast<int>(ordinal)},
+                                     cuda_access_descriptor_t::read_write_k};
+        return readers;
     }
 };
 

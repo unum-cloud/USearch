@@ -8,10 +8,12 @@ set -u
 build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT
 harness=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) # `genmc.hpp` lives beside this file, wherever it is run from
-# Every verdict runs in its own directory in the background, `VERIFY_JOBS` at a time - four by
-# default, since each pan holds a hash table of its own; `finish` prints them in the order they
-# were queued, so the output reads like a serial run.
-jobs_limit=${VERIFY_JOBS:-4}
+# Every verdict runs in its own directory in the background, `VERIFY_JOBS` at a time - two by
+# default, each pan stopping itself at `VERIFY_MEMORY_MEGABYTES`, so a model grown too large reads
+# as broken instead of exhausting the machine; `finish` prints them in the order they were queued,
+# so the output reads like a serial run.
+jobs_limit=${VERIFY_JOBS:-2}
+memory_megabytes=${VERIFY_MEMORY_MEGABYTES:-4096}
 queued=0
 
 throttle() { while [ "$(jobs -rp | wc -l)" -ge "$jobs_limit" ]; do sleep 0.1; done; }
@@ -33,11 +35,13 @@ verify() {
     (
         local verdict
         if ! (cd "$dir" && spin -a "$@" "$OLDPWD/$model" >pan.out 2>&1 &&
-            cc -O2 -DSAFETY -DCOLLAPSE -DVECTORSZ=4096 -w -o pan pan.c >>pan.out 2>&1); then verdict=broken
+            cc -O2 -DSAFETY -DCOLLAPSE -DVECTORSZ=4096 -DMEMLIM="$memory_megabytes" -w -o pan pan.c >>pan.out 2>&1); then
+            verdict=broken
         else
-            (cd "$dir" && ./pan -m1000000 -w26 >>pan.out 2>&1)
-            # A cut-short search, a knob defined twice, or a write or index past a scenario's shape proves nothing
-            if grep -qE "macro redefined|max search depth too small|invalid array index|violated.*history_full" "$dir/pan.out"; then verdict=broken
+            (cd "$dir" && ./pan -m1000000 -w24 >>pan.out 2>&1)
+            # A cut-short search, a knob defined twice, a write or index past a scenario's shape, or a
+            # search out of memory proves nothing
+            if grep -qE "macro redefined|max search depth too small|invalid array index|violated.*history_full|MEMLIM|out of memory" "$dir/pan.out"; then verdict=broken
             elif grep -q "errors: 0" "$dir/pan.out"; then verdict=pass
             elif grep -q "pan:1: assertion violated" "$dir/pan.out"; then verdict=fail
             elif grep -q "pan:1: invalid end state" "$dir/pan.out"; then verdict=stuck
@@ -48,7 +52,10 @@ verify() {
 }
 
 report() { # report <verdict> <expected> <label> <log>
-    if [ "$1" = "$2" ]; then echo "  ok    $3"
+    # Spin's own tally of the memory a search took, so a model growing toward the budget shows early
+    local megabytes
+    megabytes=$(grep -oE '^[[:space:]]*[0-9.]+[[:space:]]+total actual memory usage' "$4" | awk '{print $1}')
+    if [ "$1" = "$2" ]; then echo "  ok    $3${megabytes:+ (${megabytes} MB)}"
     else echo "  WRONG $3 : expected $2, got $1"; sed -n 1,12p "$4"; touch "$(dirname "$4")/wrong"; fi
 }
 

@@ -22,7 +22,8 @@
 #include <type_traits> // `std::type_identity_t`, `std::conditional_t` - the kit cascades
 #include <utility>     // `std::make_index_sequence` - a round's tail at its static extent
 
-#include "usearch/types.h" // `usearch_status_t`, so the C++ mirror cannot drift from the ABI
+#include "usearch/types.h"                  // `usearch_status_t`, so the C++ mirror cannot drift from the ABI
+#include "usearch/utilities/sanitizers.hpp" // `annotate_lock_shared_started` - the gate's TSan annotations
 
 /* Inferring target OS: Windows, macOS, Linux, FreeBSD, or WASI */
 #if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
@@ -1839,6 +1840,173 @@ struct claim_word_t {
             .compare_exchange_strong(closed, visible, std::memory_order_acq_rel, std::memory_order_relaxed);
     }
 };
+
+#pragma region Gates
+
+/** A reference spelling the verbs the index posts past the standard's - the no-return add,
+ *  subtract and bit clear, and the bounded add - as ForkUnion's do. For the standard's own
+ *  reference, which does not, the functions below spell them; ForkUnion's references carry the
+ *  same names as free functions in their namespace, reached through argument lookup, so a site
+ *  reads the same whichever reference the index was given. */
+template <typename reference_type_, typename value_type_>
+concept extended_atomic_ref = requires(reference_type_ reference, value_type_ value) {
+    reference.add(value, std::memory_order_relaxed);
+    reference.sub(value, std::memory_order_relaxed);
+    reference.clear_bits(value, std::memory_order_relaxed);
+    reference.fetch_add_if_at_most(value, value, std::memory_order_relaxed);
+};
+
+/** A reference spelling only the standard's verbs, such as @c std::atomic_ref, for which the
+ *  functions below spell the rest. */
+template <typename reference_type_, typename value_type_>
+concept plain_atomic_ref = !extended_atomic_ref<reference_type_, value_type_>;
+
+template <typename reference_type_, typename value_type_>
+    requires plain_atomic_ref<reference_type_, value_type_>
+void atomic_add(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    reference.fetch_add(operand, order);
+}
+template <typename reference_type_, typename value_type_>
+    requires plain_atomic_ref<reference_type_, value_type_>
+void atomic_sub(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    reference.fetch_sub(operand, order);
+}
+template <typename reference_type_, typename value_type_>
+    requires plain_atomic_ref<reference_type_, value_type_>
+void atomic_clear_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
+    reference.fetch_and(static_cast<value_type_>(~bits), order);
+}
+
+/** Adds @p operand only if the sum stays at most @p limit; returns the value held before. */
+template <typename reference_type_, typename value_type_>
+    requires plain_atomic_ref<reference_type_, value_type_>
+value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ operand, value_type_ limit,
+                                        std::memory_order order) noexcept {
+    value_type_ observed = reference.load(std::memory_order_relaxed);
+    while (observed <= limit && limit - observed >= operand &&
+           !reference.compare_exchange_weak(observed, observed + operand, order, std::memory_order_relaxed)) {}
+    return observed;
+}
+
+/** Raises the word to @p operand if it is larger; returns the value held before. */
+template <typename reference_type_, typename value_type_>
+    requires plain_atomic_ref<reference_type_, value_type_>
+value_type_ atomic_fetch_max(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    value_type_ observed = reference.load(std::memory_order_relaxed);
+    while (observed < operand &&
+           !reference.compare_exchange_weak(observed, operand, order, std::memory_order_relaxed)) {}
+    return observed;
+}
+template <typename reference_type_, typename value_type_>
+    requires extended_atomic_ref<reference_type_, value_type_>
+value_type_ atomic_fetch_max(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    return reference.fetch_max(operand, order);
+}
+
+/**
+ *  @brief Shared among mutators, try-unique for stop-the-world, wait-free to probe - one
+ *      @c std::atomic word, so every reading is a consistent joint snapshot.
+ *
+ *  The word packs forty-one generation bits on top, a dedicated unique bit, and twenty-two
+ *  holder bits - the OS pid ceiling bounds simultaneous holders well below that. The
+ *  generation steps on every shared @b and unique acquisition: a whole acquisition that
+ *  opens and closes between two probes still moves it, and wrapping it inside one probe
+ *  bracket would need days of saturated acquisitions. With the generation on top its carry
+ *  leaves the word, so the shared side is one blind add of a holder and a step, backed off
+ *  when the unique bit was already set; only the unique side compare-exchanges, from a
+ *  free word.
+ */
+template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = standard_atomic_ref>
+struct shared_mutex {
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
+
+    u64_t word {0};
+
+    /** Bits counting holders: Linux's @c PID_MAX_LIMIT, 2^22, bounds the threads alive at once. */
+    inline static constexpr std::size_t holder_bits_k = 22;
+
+    inline static constexpr u64_t holders_mask_k = (u64_t {1} << holder_bits_k) - 1;
+    inline static constexpr u64_t unique_bit_k = u64_t {1} << holder_bits_k;
+    inline static constexpr u64_t generation_unit_k = unique_bit_k << 1;
+    inline static constexpr u64_t generation_mask_k = ~(generation_unit_k - 1);
+
+    /** One consistent reading: how the gate is held & how often it has been. */
+    struct snapshot_t {
+        u64_t generation = 0;
+        std::size_t holders = 0;
+        bool unique = false;
+
+        bool unlocked() const noexcept { return !holders && !unique; }
+    };
+
+    /** Joins the shared side, waiting out a unique holder through the waiter. */
+    void lock_shared() noexcept {
+        annotate_lock_shared_started(&word);
+        // A masked compare-exchange kept the fields apart while the generation sat under the
+        // unique bit; it retried under contention where this one add does not.
+        while (true) {
+            u64_t const observed = atomic_ref<u64_t>(word).fetch_add(generation_unit_k + 1, std::memory_order_acquire);
+            if (!(observed & unique_bit_k)) break;
+            // Joined behind a unique holder: hand the holder back, then wait for the word to move.
+            u64_t const backed_off = atomic_ref<u64_t>(word).fetch_sub(1, std::memory_order_release) - 1;
+            wait_type_ {}(&word, backed_off, 0u);
+        }
+        // Pairs with the acquire fence before a certified probe's exit snapshot: a row read that
+        // returned a store made under this hold proves the acquisition to that snapshot, which can
+        // then no longer read the word from before it. Arm and POWER need the fence as much as the
+        // C++ model does: an acquire orders the add's read before the row stores, not its write.
+        std::atomic_thread_fence(std::memory_order_release);
+        annotate_lock_shared_acquired(&word);
+    }
+
+    void unlock_shared() noexcept {
+        // The raw release precedes the bracket: inside it TSan ignores the word's own
+        // atomics, and the certified probes' acquire would otherwise pair with nothing.
+        annotate_release(&word);
+        annotate_unlock_shared_started(&word);
+        atomic_sub(atomic_ref<u64_t>(word), u64_t {1}, std::memory_order_release);
+        annotate_unlock_shared_finished(&word);
+    }
+
+    /** Takes the unique side only from a genuinely free word - generation churn
+     *  retries, it is not contention - and never waits: a refusal is the answer. */
+    [[nodiscard]] bool try_lock() noexcept {
+        annotate_try_lock_started(&word);
+        u64_t observed = atomic_ref<u64_t>(word).load(std::memory_order_relaxed);
+        while ((observed & (holders_mask_k | unique_bit_k)) == 0)
+            if (atomic_ref<u64_t>(word).compare_exchange_weak(observed, (observed + generation_unit_k) | unique_bit_k,
+                                                              std::memory_order_acquire, std::memory_order_relaxed)) {
+                annotate_try_lock_acquired(&word);
+                return true;
+            }
+        annotate_try_lock_refused(&word);
+        return false;
+    }
+
+    void unlock() noexcept {
+        annotate_release(&word);
+        annotate_unlock_started(&word);
+        atomic_clear_bits(atomic_ref<u64_t>(word), unique_bit_k, std::memory_order_release);
+        annotate_unlock_finished(&word);
+    }
+
+    /** The wait-free probe the certified readers bracket their walks with. */
+    snapshot_t snapshot() noexcept {
+        u64_t const observed = atomic_ref<u64_t const>(word).load(std::memory_order_acquire);
+        annotate_acquire(&word);
+        return {observed & generation_mask_k, static_cast<std::size_t>(observed & holders_mask_k),
+                (observed & unique_bit_k) != 0};
+    }
+};
+
+#pragma endregion Gates
+
+/** Shards viewed as one, defined in `usearch/utilities/ram_shards.hpp`; declared here, so a shard
+ *  type including nothing past this header can still befriend the set that closes its claims. */
+template <typename index_type_, typename shard_keys_type_, typename key_type_, typename key_hash_type_,
+          template <typename> class atomic_ref_template_, typename wait_type_>
+struct shard_set;
 
 } // namespace unum::usearch::utilities
 

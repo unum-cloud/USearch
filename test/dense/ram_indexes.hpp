@@ -14,9 +14,11 @@
 #pragma once
 
 #include <fmt/format.h>
+
 #include <numkong/numkong.hpp>
 
 #include "usearch/dense/ram_indexes.hpp"
+#include "usearch/dense/ram_compaction.hpp"
 
 #include "dense.cuh"
 
@@ -99,9 +101,14 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
     if (fu::failed(pool.spawn(2))) return failures + expect(false);
     std::size_t refused = 0, unexpected = 0, absorbed_rows = 0;
     for (std::size_t round = 0; round != rounds && !refused; ++round) {
-        if (round)
+        // A consumed donor stays closed and sealed, so every round absorbs a fresh one.
+        if (round) {
+            donor = indexes_type_ {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+            failures += expect(succeeded(place_shards(donor)));
+            failures += expect(succeeded(donor.reserve({part, connectivity_16_k, dimensions}).status));
             failures += expect(succeeded(
                 donor.insert(keys_of(part * (round + 1)), rows_of(part * (round + 1)), drivers[1].executor).status));
+        }
         std::atomic<bool> absorbing {false}, absorbed {false};
         status_t absorb_status = status_t::success_k;
         pool.for_threads([&](std::size_t thread) noexcept {
@@ -264,11 +271,186 @@ static std::size_t test_ram_indexes_generations(u64_t seed) {
     failures += expect_eq(miscounted(restored, rows), 0u);
 
     // The guard every monolith save frames through, reached without four billion rows.
-    typename indexes_type_::shards_t const unplaced {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    typename indexes_type_::shards_t const unplaced {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect_eq(shard_monolith_header(unplaced, indexes_type_::index_t::max_node_count_k + 1,
                                                 save_config_t {}, std::span<safegraphs_custom_field_t const> {})
                               .status,
                           status_t::overflow_k);
+    return failures;
+}
+
+/** Four even shards compact in place under a bound of half the rows into two, the kept ones
+ *  keeping their IDs and the others staying as idle slots, while a looker counts every key once,
+ *  then out of place into a fresh single shard, which empties the source. Every key resolves once
+ *  with its row intact after each, and searches find sampled rows themselves within noise of
+ *  before. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+static std::size_t test_ram_indexes_compact(u64_t seed) {
+    using scalar_t = typename indexes_type_::index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using distance_t = typename indexes_type_::distance_t;
+    constexpr std::size_t samples_k = 64, noise_percent_k = 10;
+    std::size_t failures = 0;
+    std::size_t const rows = dense_growth_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    auto& executor = driver.executor;
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_compact"));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    auto filled_shards = [](indexes_type_ const& indexes) {
+        std::size_t filled = 0;
+        for (std::size_t shard = 0; shard != indexes.shards_count(); ++shard)
+            filled += indexes.shard(shard).size() != 0;
+        return filled;
+    };
+    // Sampled rows whose search returns their own key; a dot graph's hubs make self-search moot.
+    auto self_hits = [&](indexes_type_& indexes) {
+        std::size_t hits = 0;
+        if constexpr (kernel_ != nk_kernel_dot_k) {
+            dense_indexes_row_driver<indexes_type_> walker {indexes, driver};
+            failures += expect(succeeded(walker.status));
+            std::array<key_t, 8> found_keys {};
+            std::array<distance_t, 8> found_distances {};
+            for (std::size_t sample = 0; sample != samples_k; ++sample) {
+                std::size_t const row = sample * (rows / samples_k);
+                auto const [result, status] = indexes.search(vectors.view().row(row).as_vector(), walker.handle(), {},
+                                                             std::span<key_t> {found_keys},
+                                                             std::span {found_distances});
+                failures += expect(succeeded(status));
+                hits += std::find(found_keys.begin(), found_keys.begin() + result.count, keys[row]) !=
+                        found_keys.begin() + result.count;
+            }
+        }
+        return hits;
+    };
+
+    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)) && succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
+    failures += expect(succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), executor).status));
+    failures += expect_eq(filled_shards(indexes), 4u);
+    std::size_t const hits_before = self_hits(indexes);
+
+    // In place: each kept shard takes one other, the only rows that move and re-select. A looker
+    // counts keys throughout, and each moved row's one locator swaps whole, so every key counts
+    // once.
+    std::array<indexes_type_*, 1> const in_place {&indexes};
+    compact_config_t halves;
+    halves.shard_capacity = rows / 2;
+    expected<compact_result_t> compacted {};
+    std::atomic<bool> compacting {true};
+    std::size_t miscounted = 0;
+    fu::flat_pool_t pool;
+    if (fu::failed(pool.spawn(2))) return failures + expect(false);
+    pool.for_threads([&](std::size_t thread) noexcept {
+        if (thread == 0) {
+            compacted = compact(std::span<indexes_type_* const> {in_place}, indexes, executor, halves);
+            compacting.store(false, std::memory_order_release);
+        }
+        else if (thread == 1)
+            for (std::size_t row = 0; compacting.load(std::memory_order_acquire); row = (row + 1) % rows)
+                miscounted += indexes.count(keys[row]) != 1;
+    });
+    failures += expect_eq(miscounted, 0u);
+    auto const [packed, packed_status] = compacted;
+    failures += expect_eq(packed_status, status_t::success_k);
+    failures += expect(packed.source_shards == 4 && packed.target_shards == 2 && packed.moved_rows == rows / 2);
+    failures += expect(packed.graph.visited_nodes >= rows / 2);
+    failures += expect_eq(indexes.shards_count(), 4u);
+    failures += expect_eq(filled_shards(indexes), 2u);
+    failures += dense_indexes_expect_restored(indexes, vectors, keys, dimensions, executor, seed);
+    failures += expect(self_hits(indexes) * 100 + noise_percent_k * samples_k >= hits_before * 100);
+
+    // Out of place into a fresh single shard: every row moves, and the source ends empty.
+    indexes_type_ single {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(single.emplace(no_memory_domain_k)));
+    auto const [moved, moved_status] = compact(std::span<indexes_type_* const> {in_place}, single, executor);
+    failures += expect_eq(moved_status, status_t::success_k);
+    failures += expect(moved.source_shards == 4 && moved.target_shards == 1 && moved.moved_rows == rows);
+    failures += expect_eq(indexes.size(), 0u);
+    failures += dense_indexes_expect_restored(single, vectors, keys, dimensions, executor, seed);
+    failures += expect(self_hits(single) * 100 + noise_percent_k * samples_k >= hits_before * 100);
+    return failures;
+}
+
+/** Every verb is safe beside a clear: searches racing one return their own rows or
+ *  @c contended_k, an insertion plan holding claims refuses a clear and an absorb with
+ *  @c contended_k until it dies, and a cursor opened before a clear answers @c contended_k. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+static std::size_t test_ram_indexes_clear_race(u64_t seed) {
+    using scalar_t = typename indexes_type_::index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using distance_t = typename indexes_type_::distance_t;
+    constexpr std::size_t searchers_k = 4, rounds_k = 4;
+    std::size_t failures = 0;
+    std::size_t const rows = 2 * dense_thread_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_clear_race"));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    std::array<dense_indexes_executor<indexes_type_>, 2> drivers;
+    for (dense_indexes_executor<indexes_type_> const& driver : drivers)
+        if (failed(driver.status)) return failures + expect(false);
+    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
+
+    fu::flat_pool_t pool;
+    if (fu::failed(pool.spawn(searchers_k + 1))) return failures + expect(false);
+    std::atomic<std::size_t> foreign {0}, refused {0};
+    for (std::size_t round = 0; round != rounds_k; ++round) {
+        failures += expect(
+            succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), drivers[0].executor).status));
+        std::atomic<bool> cleared {false};
+        pool.for_threads([&](std::size_t thread) noexcept {
+            if (thread == 0) {
+                while (indexes.clear() == status_t::contended_k) std::this_thread::yield();
+                cleared.store(true, std::memory_order_release);
+                return;
+            }
+            dense_indexes_row_driver<indexes_type_> walker {indexes, drivers[0]};
+            if (failed(walker.status)) return foreign.fetch_add(1), void();
+            std::array<key_t, 8> found_keys {};
+            std::array<distance_t, 8> found_distances {};
+            for (std::size_t row = thread; !cleared.load(std::memory_order_acquire); row = (row + searchers_k) % rows) {
+                auto const [result, status] = indexes.search(vectors.view().row(row).as_vector(), walker.handle(), {},
+                                                             std::span<key_t> {found_keys},
+                                                             std::span {found_distances});
+                if (status == status_t::contended_k) refused.fetch_add(1);
+                else if (failed(status)) foreign.fetch_add(1);
+                else
+                    for (std::size_t found = 0; found != result.count; ++found)
+                        foreign.fetch_add(found_keys[found] < 1 || found_keys[found] > rows);
+            }
+        });
+        failures += expect_eq(indexes.size(), 0u);
+        failures += expect_eq(indexes.count(keys[0]), 0u);
+    }
+    failures += expect_eq(foreign.load(), 0u);
+
+    // Claims a plan holds refuse every close, so neither a clear nor an absorb frees them.
+    failures += expect(
+        succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), drivers[0].executor).status));
+    indexes_type_ donor {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(donor)));
+    {
+        auto [plan, plan_status] = indexes.plan_insert(1, drivers[0].executor);
+        failures += expect(succeeded(plan_status));
+        failures += expect_eq(indexes.clear(), status_t::contended_k);
+        failures += expect_eq(indexes.absorb(donor, drivers[1].executor).status, status_t::contended_k);
+    }
+    failures += expect_eq(indexes.size(), rows);
+
+    // A cursor reads under the epoch it opened in, and a clear since ends it.
+    typename indexes_type_::cursor_t cursor {indexes};
+    std::array<key_t, 4> read_keys {};
+    auto const [before, before_status] = cursor.read(indexes, std::span<key_t> {read_keys}, rows_span_t {});
+    failures += expect(succeeded(before_status) && before == read_keys.size());
+    failures += expect_eq(indexes.clear(), status_t::success_k);
+    auto const [after, after_status] = cursor.read(indexes, std::span<key_t> {read_keys}, rows_span_t {});
+    failures += expect(after_status == status_t::contended_k && after == 0);
     return failures;
 }
 
@@ -409,6 +591,8 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     failures_count += test_ram_indexes_absorb_refusals<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_abandoned_plan<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_generations<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_compact<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_clear_race<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_split<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_growth<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);

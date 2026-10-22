@@ -10,6 +10,9 @@
  */
 #pragma once
 
+#include "usearch/dense/vram_amd_compaction.hpp"    // `plan_compact` of AMD shards into RAM
+#include "usearch/dense/vram_nvidia_compaction.hpp" // `plan_compact` of NVIDIA shards into RAM
+
 #include "dense.cuh"
 #include "nvme_indexes.hpp" // `nvme_reference`, `nvme_checkpoint_t` - the round trip through storage
 #include "vram_index.cuh"   // the vendor's `vram_cell`
@@ -303,6 +306,48 @@ std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed, typename indexes_
     return failures;
 }
 
+/** Two device shards compact into one host shard: every row crosses with its key exactly once, the
+ *  source ends empty, and the walk re-selects the part appended after the resident one. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::executor_t& placement) {
+    using key_t = typename indexes_type_::key_t;
+    using scalar_t = typename indexes_type_::scalar_t;
+    using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k, blocking_files_engine<>>;
+    using ram_t = typename nvme_reference<nvme_t>::ram_t;
+    std::size_t const rows = 2 * dense_thread_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+
+    dense_indexes_executor<indexes_type_> driver {placement};
+    dense_indexes_executor<ram_t> host;
+    if (failed(driver.status) || failed(host.status)) return failures + expect(false);
+    auto const vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_compact"));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+
+    indexes_type_ source {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(source, placement)) && succeeded(place_shards(source, placement)));
+    failures += expect(succeeded(source.reserve({rows, connectivity_16_k, dimensions}).status));
+    failures += expect(
+        succeeded(source.insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), driver.executor).status));
+    ram_t target {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(target.emplace(no_memory_domain_k)));
+
+    indexes_type_* const sources[1] = {&source};
+    auto const [result, status] = compact(std::span<indexes_type_* const> {sources}, target, driver.executor,
+                                          host.executor);
+    failures += expect_eq(status, status_t::success_k);
+    failures += expect(result.source_shards == 2 && result.target_shards == 1 && result.moved_rows == rows);
+    failures += expect(result.graph.visited_nodes > 0);
+    failures += expect_eq(source.size(), 0u);
+    failures += expect_eq(target.size(), rows);
+    failures += expect(target.dimensions() == dimensions && target.connectivity() == connectivity_16_k);
+    std::size_t miscounted = 0;
+    for (key_t const key : keys) miscounted += target.count(key) != 1;
+    failures += expect_eq(miscounted, 0u);
+    return failures;
+}
+
 /** The sharded attention, keys equal to their rows and value rows looked up by key in a device
  *  table the vendor's @c value_table_type_ uploads: every shard walks every node, so each head's
  *  merged output and carry match exact full attention, with one head per token and with four
@@ -478,6 +523,9 @@ std::size_t test_vram_indexes_configuration(char const* name, u64_t seed, execut
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_absorb<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_absorb_many<indexes_t, kernel_>(seed, executor);
+    // Apple's tower has no compaction into RAM.
+    if constexpr (executor_type_::vendor_k != gpu_vendor_t::apple_k)
+        failures_count += test_dense_vram_indexes_compact<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed, executor);
     failures_count += test_dense_vram_indexes_indexer_search<indexes_t, kernel_>(seed, executor);

@@ -2,8 +2,8 @@
  *  @file verification/basic_shared_mutex.cpp
  *  @author Ash Vardanian
  *  @date September 9, 2026
- *  @brief GenMC client for `basic::shared_mutex` from `include/usearch/basic/ram_index.hpp`, the
- *      real header: one mutator takes the shared side and writes a pair of rows inside it, one
+ *  @brief GenMC client for `basic::shared_mutex` from `include/usearch/utilities/ram_device.hpp`,
+ *      the real header: one mutator takes the shared side and writes a pair of rows inside it, one
  *      prober brackets its reads with the wait-free snapshots.
  *
  *  A certified prober must not see the pair torn. The mutant spells `lock_shared`'s acquisition

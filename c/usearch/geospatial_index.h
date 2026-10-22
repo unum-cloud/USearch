@@ -223,7 +223,8 @@ typedef struct usearch_geospatial_terrain_t {
     /** The bytes between consecutive rows of @c heights; zero means packed. */
     size_t heights_stride;
 
-    /** Or a handler filling windows of the grid on demand, called with @c state. */
+    /** Or a handler filling windows of the grid on demand, called with @c state; VRAM handles
+     *  refuse it with @c usearch_status_unsupported_k, as no device calls the host. */
     usearch_geospatial_terrain_callback_t callback;
     void* state;
 

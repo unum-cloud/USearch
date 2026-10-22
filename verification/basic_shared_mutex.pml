@@ -2,7 +2,7 @@
  *  @brief `basic::shared_mutex`: the one-word gate every mutator of the basic index holds shared,
  *      the stop-the-world operations take unique, and the certified searches bracket with two probes.
  *
- *  From `include/usearch/basic/ram_index.hpp`. Two mutators each take the shared side once and
+ *  From `include/usearch/utilities/ram_device.hpp`. Two mutators each take the shared side once and
  *  write their own pair of rows inside it, the way an insert edits neighbor rows below the
  *  watermark. One thread tries the unique side once and reads the rows. One prober snapshots the
  *  gate, reads every row, and snapshots again, certifying the reads when the word rested unlocked

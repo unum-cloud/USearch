@@ -609,7 +609,8 @@ std::size_t test_nvme_indexes_cursor(u64_t seed) {
     std::size_t const row_bytes = dense_rows_bytes(reference.vectors.view(), 1);
     std::size_t exported = 0;
     while (true) {
-        std::size_t const ram_read = ram_cursor.read(reference.built, std::span {ram_keys}, ram_rows.span());
+        auto const [ram_read, ram_status] = ram_cursor.read(reference.built, std::span {ram_keys}, ram_rows.span());
+        failures += expect_eq(ram_status, status_t::success_k);
         auto const [nvme_read, status] = nvme_cursor.read(viewed, std::span {nvme_keys}, nvme_rows.span(),
                                                           driver.executor);
         failures += expect_eq(status, status_t::success_k);

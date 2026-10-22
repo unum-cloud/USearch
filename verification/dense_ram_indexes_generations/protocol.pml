@@ -1,5 +1,5 @@
 /**
- *  The shard set's generations from `include/usearch/dense/sharded_indexes.hpp`: once the open
+ *  The shard set's generations from `include/usearch/utilities/ram_shards.hpp`: once the open
  *  generation's shards reach the bound, `open_generation_` appends one shard per placement, and only
  *  the newest generation takes insertions. One caller opens it: a compare-exchange takes
  *  `shards_count_` from the generation's first shard to the same count with the opening bit set,

@@ -30,15 +30,6 @@ __device__ inline void const* vram_value_row(value_lookup_t const& lookup, us::u
 /** What each shard of a VRAM attend resolves rows through: the C lookup behind the shard's keys. */
 using vram_attend_lookup_t = dense::vram_keyed_lookup<us::utilities::uuid_t, value_lookup_t>;
 
-/** The ceiling an NVIDIA device pass instantiates: its class's, read off the one NumKong target the
- *  class compiles under. */
-inline constexpr nk_capability_t cuda_class_capabilities_k = numkong_capabilities_of(
-    NUMKONG_TARGET_BLACKWELLRTX ? gpu_class_t::nvidia_blackwellrtx_k
-    : NUMKONG_TARGET_BLACKWELL  ? gpu_class_t::nvidia_blackwell_k
-    : NUMKONG_TARGET_HOPPER     ? gpu_class_t::nvidia_hopper_k
-    : NUMKONG_TARGET_ADA        ? gpu_class_t::nvidia_ada_k
-                                : gpu_class_t::nvidia_ampere_k);
-
 /** The ceiling an AMD device pass instantiates: its class's, read off the one NumKong target the
  *  class compiles under. */
 inline constexpr nk_capability_t amd_class_capabilities_k = numkong_capabilities_of(
