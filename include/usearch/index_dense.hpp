@@ -516,13 +516,13 @@ class index_dense_gt {
     };
 
     /// @brief Multi-Map from keys to IDs, and allocated vectors.
-    flat_hash_multi_set_gt<key_and_slot_t, lookup_key_hash_t, lookup_key_same_t> slot_lookup_;
+    flat_hash_multi_set_gt<key_and_slot_t, lookup_key_hash_t, lookup_key_same_t, dynamic_allocator_t> slot_lookup_;
 
     /// @brief Mutex, controlling concurrent access to `slot_lookup_`.
     mutable shared_mutex_t slot_lookup_mutex_;
 
     /// @brief Ring-shaped queue of deleted entries, to be reused on future insertions.
-    ring_gt<compressed_slot_t> free_keys_;
+    ring_gt<compressed_slot_t, aligned_allocator_gt<compressed_slot_t, 64>> free_keys_;
 
     /// @brief Mutex, controlling concurrent access to `free_keys_`.
     mutable std::mutex free_keys_mutex_;
@@ -1336,7 +1336,8 @@ class index_dense_gt {
             available_threads.push(i);
         available_threads_ = std::move(available_threads);
 
-        reindex_keys_();
+        if (!reindex_keys_())
+            return result.failed("Out of memory!");
         return result;
     }
 
@@ -1473,7 +1474,8 @@ class index_dense_gt {
             available_threads.push(i);
         available_threads_ = std::move(available_threads);
 
-        reindex_keys_();
+        if (!reindex_keys_())
+            return result.failed("Out of memory!");
         return result;
     }
 
@@ -1928,7 +1930,8 @@ class index_dense_gt {
         vectors_tape_allocator_ = std::move(new_vectors_allocator);
 
         // Slots were permuted, so the key-to-slot lookup and the free-slot list are stale
-        reindex_keys_();
+        if (!reindex_keys_())
+            return result.failed("Out of memory!");
         return result;
     }
 
@@ -2207,10 +2210,11 @@ class index_dense_gt {
             if (!allocated_vector)
                 return add_result_t{}.failed("Out of memory!");
         }
+        bool key_mapped = true;
         auto on_success = [&](member_ref_t member) {
             if (config_.enable_key_lookups) {
                 unique_lock_t slot_lock(slot_lookup_mutex_);
-                slot_lookup_.try_emplace(key_and_slot_t{key, static_cast<compressed_slot_t>(member.slot)});
+                key_mapped = slot_lookup_.try_emplace(key_and_slot_t{key, static_cast<compressed_slot_t>(member.slot)});
             }
             if (copy_vector) {
                 if (!reuse_node)
@@ -2225,9 +2229,13 @@ class index_dense_gt {
         update_config.expansion = config_.expansion_add;
 
         metric_proxy_t metric{*this};
-        return reuse_node //
-                   ? typed_->update(typed_->iterator_at(free_slot), key, vector_data, metric, update_config, on_success)
-                   : typed_->add(key, vector_data, metric, update_config, on_success);
+        add_result_t result =
+            reuse_node //
+                ? typed_->update(typed_->iterator_at(free_slot), key, vector_data, metric, update_config, on_success)
+                : typed_->add(key, vector_data, metric, update_config, on_success);
+        if (result && !key_mapped)
+            return result.failed("Failed to map the key to its slot");
+        return result;
     }
 
     template <typename scalar_at, typename predicate_at>
@@ -2342,7 +2350,7 @@ class index_dense_gt {
         return result;
     }
 
-    void reindex_keys_() {
+    bool reindex_keys_() {
 
         // Estimate number of entries first
         std::size_t count_total = typed_->size();
@@ -2354,16 +2362,17 @@ class index_dense_gt {
         }
 
         if (!count_removed && !config_.enable_key_lookups)
-            return;
+            return true;
 
         // Pull entries from the underlying `typed_` into either
         // into `slot_lookup_`, or `free_keys_` if they are unused.
         unique_lock_t lock(slot_lookup_mutex_);
         slot_lookup_.clear();
-        if (config_.enable_key_lookups)
-            slot_lookup_.reserve(count_total - count_removed);
+        if (config_.enable_key_lookups && !slot_lookup_.try_reserve(count_total - count_removed))
+            return false;
         free_keys_.clear();
-        free_keys_.reserve(count_removed);
+        if (!free_keys_.reserve(count_removed))
+            return false;
         for (std::size_t i = 0; i != typed_->size(); ++i) {
             auto member_slot = static_cast<compressed_slot_t>(i);
             member_cref_t member = typed_->at(member_slot);
@@ -2372,6 +2381,7 @@ class index_dense_gt {
             else if (config_.enable_key_lookups)
                 slot_lookup_.try_emplace(key_and_slot_t{vector_key_t(member.key), member_slot});
         }
+        return true;
     }
 
     template <typename scalar_at>
