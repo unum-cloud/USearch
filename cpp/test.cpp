@@ -1535,6 +1535,75 @@ void test_view_of_truncated_file() {
 }
 
 /**
+ *  @brief  Feeds `load` and `view` an index file with a corrupted graph header.
+ *
+ *  The entry slot and the top level come from the file itself and seed every search, so an entry
+ *  slot past the node count, or a top level above the entry node's own, sends the first search past
+ *  the stored nodes. Both must be rejected by `load` and `view` rather than crash the first search.
+ */
+void test_corrupted_graph_header() {
+    std::printf("Testing load and view of a corrupted graph header\n");
+
+    using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
+    std::size_t const dimensions = 32;
+    std::size_t const collection = 256;
+    char const* path = "tmp_corrupted_header.usearch";
+
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind<f32_t>());
+    index_t::state_result_t built = index_t::make(metric);
+    expect(built);
+    expect(built.index.try_reserve(collection));
+    std::vector<float> vector(dimensions);
+    for (std::size_t i = 0; i != collection; ++i) {
+        for (std::size_t d = 0; d != dimensions; ++d)
+            vector[d] = static_cast<float>((i * 31 + d) % 997) / 997.f;
+        expect(built.index.add(static_cast<std::int64_t>(i), vector.data()));
+    }
+    expect(built.index.save(path));
+
+    // The graph header follows the 32-bit matrix dimensions, the vectors and the dense head.
+    long const header_offset = static_cast<long>(2 * sizeof(std::uint32_t) + collection * dimensions * sizeof(float) +
+                                                 sizeof(index_dense_head_buffer_t));
+    index_serialized_header_t original;
+    {
+        std::FILE* file = std::fopen(path, "rb");
+        expect(file != nullptr);
+        std::fseek(file, header_offset, SEEK_SET);
+        expect(std::fread(&original, sizeof(original), 1, file) == 1);
+        std::fclose(file);
+    }
+    expect_eq(original.size, static_cast<std::uint64_t>(collection));
+
+    // In a valid file the top level is the entry node's level, so one more is just past it.
+    index_serialized_header_t corrupted[2] = {original, original};
+    corrupted[0].entry_slot = original.size;
+    corrupted[1].max_level = original.max_level + 1;
+    for (index_serialized_header_t const& header : corrupted) {
+        {
+            std::FILE* file = std::fopen(path, "r+b");
+            expect(file != nullptr);
+            std::fseek(file, header_offset, SEEK_SET);
+            expect(std::fwrite(&header, sizeof(header), 1, file) == 1);
+            std::fclose(file);
+        }
+
+        index_t::state_result_t loaded = index_t::make(metric);
+        expect(loaded);
+        serialization_result_t load_result = loaded.index.load(path);
+        expect(!load_result);
+        load_result.error.release();
+
+        index_t::state_result_t viewed = index_t::make(metric);
+        expect(viewed);
+        serialization_result_t view_result = viewed.index.view(path);
+        expect(!view_result);
+        view_result.error.release();
+    }
+
+    std::remove(path);
+}
+
+/**
  *  @brief  Regression test: every thread context must draw node levels of its own. Default-seeded, all
  *          contexts drew the same levels and started over after every `reserve`, so every per-level node
  *          count was a multiple of `contexts * steps`, the upper levels too full and the top ones missing.
@@ -1662,6 +1731,7 @@ int main(int, char**) {
     test_compact();
     test_load_after_metric_make();
     test_view_of_truncated_file();
+    test_corrupted_graph_header();
     test_level_generators();
     return 0;
 }
