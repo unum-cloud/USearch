@@ -1178,6 +1178,56 @@ template <typename key_at, typename slot_at> void test_slot_lookup_churn() {
         expect(copy.contains(key));
 }
 
+static bool rehash_allocation_fails = false;
+
+/// @brief  `std::allocator<char>` that throws `std::bad_alloc` while `rehash_allocation_fails` is set.
+struct failing_char_allocator_t {
+    using value_type = char;
+    char* allocate(std::size_t length) {
+        if (rehash_allocation_fails)
+            throw std::bad_alloc();
+        return std::allocator<char>{}.allocate(length);
+    }
+    void deallocate(char* data, std::size_t length) noexcept { std::allocator<char>{}.deallocate(data, length); }
+};
+
+/**
+ *  @brief  Churns a tightly-reserved hash set while every rehash allocation fails.
+ *
+ *  `try_reserve` must report the failure instead of terminating, and `try_emplace` must
+ *  still place each element in a free or deleted slot, keeping every live entry findable.
+ */
+void test_slot_lookup_rehash_failure() {
+    using set_t = flat_hash_multi_set_gt<std::uint64_t, hash_gt<std::uint64_t>, std::equal_to<std::uint64_t>,
+                                         failing_char_allocator_t>;
+    constexpr std::uint64_t live_count = 128;
+    constexpr std::uint64_t churn_count = live_count * 8;
+
+    set_t set;
+    expect(set.try_reserve(live_count));
+    for (std::uint64_t key = 0; key < live_count; ++key)
+        expect(set.try_emplace(key));
+
+    rehash_allocation_fails = true;
+    expect(!set.try_reserve(set.capacity_slots() * 2));
+
+    for (std::uint64_t idx = 0; idx < churn_count; ++idx) {
+        expect_eq(set.erase(idx), 1);
+        expect(set.try_emplace(live_count + idx));
+    }
+    expect_eq(set.size(), live_count);
+    for (std::uint64_t idx = 0; idx < churn_count; ++idx)
+        expect(!set.contains(idx));
+    for (std::uint64_t key = churn_count; key < churn_count + live_count; ++key)
+        expect(set.contains(key));
+
+    rehash_allocation_fails = false;
+    expect_eq(set.erase(churn_count), 1);
+    expect(set.try_emplace(churn_count + live_count));
+    for (std::uint64_t key = churn_count + 1; key <= churn_count + live_count; ++key)
+        expect(set.contains(key));
+}
+
 /**
  *  @brief  Tests replacing and updating entries in `index_dense_gt`, to ensure consistency
  *          after modifications.
@@ -1656,6 +1706,8 @@ int main(int, char**) {
     std::printf("Testing key lookups under churn\n");
     test_slot_lookup_churn<std::int64_t, std::uint32_t>();
     test_slot_lookup_churn<std::int64_t, uint40_t>();
+    std::printf("Testing key lookups when the rehash cannot allocate\n");
+    test_slot_lookup_rehash_failure();
 
     test_filtered_search();
     test_isolate();
