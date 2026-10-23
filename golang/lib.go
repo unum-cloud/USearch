@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"runtime/cgo"
 	"unsafe"
 )
 
@@ -243,6 +244,17 @@ func DefaultConfig(dimensions uint) IndexConfig {
 type FilteredSearchHandler struct {
 	Callback func(key Key, handler *FilteredSearchHandler) int
 	Data     any
+}
+
+// filterCallbackPayload pins the handler for the duration of a C call and
+// returns a payload C may hold: a pointer to a single uintptr that stores a
+// cgo.Handle. Handing the handler itself to C would pass a Go pointer to
+// memory holding a closure and Data, which cgocheck rejects.
+func filterCallbackPayload(handler *FilteredSearchHandler) (unsafe.Pointer, func()) {
+	handle := cgo.NewHandle(handler)
+	payload := new(uintptr)
+	*payload = uintptr(handle)
+	return unsafe.Pointer(payload), handle.Delete
 }
 
 // Index represents a USearch approximate nearest neighbor index.
@@ -768,13 +780,15 @@ func (index *Index) FilteredSearch(query []float32, limit uint, handler *Filtere
 	keys = make([]Key, limit)
 	distances = make([]float32, limit)
 	var errorMessage *C.char
+	payload, release := filterCallbackPayload(handler)
+	defer release()
 	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_f32_k, (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), payload,
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
 	runtime.KeepAlive(distances)
-	runtime.KeepAlive(handler)
+	runtime.KeepAlive(payload)
 	if errorMessage != nil {
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
@@ -823,8 +837,8 @@ func (index *Index) SearchUnsafe(query unsafe.Pointer, limit uint) (keys []Key, 
 }
 
 //export goFilteredSearchCallback
-func goFilteredSearchCallback(key C.usearch_key_t, ptr unsafe.Pointer) C.int {
-	handler := (*FilteredSearchHandler)(ptr)
+func goFilteredSearchCallback(key C.usearch_key_t, payload unsafe.Pointer) C.int {
+	handler := cgo.Handle(*(*uintptr)(payload)).Value().(*FilteredSearchHandler)
 	return C.int(handler.Callback(Key(key), handler))
 }
 
@@ -855,13 +869,15 @@ func (index *Index) FilteredSearchUnsafe(query unsafe.Pointer, limit uint, handl
 	keys = make([]Key, limit)
 	distances = make([]float32, limit)
 	var errorMessage *C.char
+	payload, release := filterCallbackPayload(handler)
+	defer release()
 	resultCount := uint(C.usearch_filtered_search(index.handle, query, index.config.Quantization.CValue(), (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), payload,
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
 	runtime.KeepAlive(distances)
-	runtime.KeepAlive(handler)
+	runtime.KeepAlive(payload)
 	if errorMessage != nil {
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
@@ -1040,13 +1056,15 @@ func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *Filtered
 	keys = make([]Key, limit)
 	distances = make([]float32, limit)
 	var errorMessage *C.char
+	payload, release := filterCallbackPayload(handler)
+	defer release()
 	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_i8_k, (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), payload,
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
 	runtime.KeepAlive(distances)
-	runtime.KeepAlive(handler)
+	runtime.KeepAlive(payload)
 	if errorMessage != nil {
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
@@ -1133,13 +1151,15 @@ func (index *Index) FilteredSearchU8(query []uint8, limit uint, handler *Filtere
 	keys = make([]Key, limit)
 	distances = make([]float32, limit)
 	var errorMessage *C.char
+	payload, release := filterCallbackPayload(handler)
+	defer release()
 	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_u8_k, (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(handler), //nolint:govet // handler is kept alive by the caller
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), payload,
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
 	runtime.KeepAlive(distances)
-	runtime.KeepAlive(handler)
+	runtime.KeepAlive(payload)
 	if errorMessage != nil {
 		return nil, nil, errors.New(C.GoString(errorMessage))
 	}
