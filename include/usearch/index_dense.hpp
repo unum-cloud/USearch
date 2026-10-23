@@ -2207,10 +2207,11 @@ class index_dense_gt {
             if (!allocated_vector)
                 return add_result_t{}.failed("Out of memory!");
         }
+        bool key_mapped = true;
         auto on_success = [&](member_ref_t member) {
             if (config_.enable_key_lookups) {
                 unique_lock_t slot_lock(slot_lookup_mutex_);
-                slot_lookup_.try_emplace(key_and_slot_t{key, static_cast<compressed_slot_t>(member.slot)});
+                key_mapped = slot_lookup_.try_emplace(key_and_slot_t{key, static_cast<compressed_slot_t>(member.slot)});
             }
             if (copy_vector) {
                 if (!reuse_node)
@@ -2225,9 +2226,13 @@ class index_dense_gt {
         update_config.expansion = config_.expansion_add;
 
         metric_proxy_t metric{*this};
-        return reuse_node //
-                   ? typed_->update(typed_->iterator_at(free_slot), key, vector_data, metric, update_config, on_success)
-                   : typed_->add(key, vector_data, metric, update_config, on_success);
+        add_result_t result =
+            reuse_node //
+                ? typed_->update(typed_->iterator_at(free_slot), key, vector_data, metric, update_config, on_success)
+                : typed_->add(key, vector_data, metric, update_config, on_success);
+        if (result && !key_mapped)
+            return result.failed("Failed to map the key to its slot");
+        return result;
     }
 
     template <typename scalar_at, typename predicate_at>

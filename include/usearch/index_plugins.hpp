@@ -3988,8 +3988,17 @@ class flat_hash_multi_set_gt {
         if (!new_bytes)
             return false;
 
-        // Allocate new memory
-        char* new_data = (char*)allocator_t{}.allocate(new_bytes.value);
+        // Allocate new memory; `std::allocator` throws instead of returning `nullptr`
+        char* new_data = nullptr;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+        try {
+            new_data = (char*)allocator_t{}.allocate(new_bytes.value);
+        } catch (...) {
+            return false;
+        }
+#else
+        new_data = (char*)allocator_t{}.allocate(new_bytes.value);
+#endif
         if (!new_data)
             return false;
 
@@ -4302,8 +4311,9 @@ class flat_hash_multi_set_gt {
         // Both live entries and tombstones consume slots a probe must walk past, so the
         // load factor counts them together. Under churn the live count alone stays flat
         // and would never trigger the rehash that reclaims the tombstones.
+        // If the rehash cannot allocate, a free or deleted slot still takes the element.
         if ((populated_slots_ + deleted_slots_) * 3u >= capacity_slots_ * 2u)
-            if (!try_reserve(populated_slots_ + 1))
+            if (!try_reserve(populated_slots_ + 1) && populated_slots_ >= capacity_slots_)
                 return false;
 
         hash_t hasher;
