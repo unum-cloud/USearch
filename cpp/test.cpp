@@ -1474,14 +1474,16 @@ void test_load_after_metric_make() {
 }
 
 /**
- *  @brief  Feeds `view` a truncated index file.
+ *  @brief  Feeds `load` and `view` corrupted and truncated index files.
  *
+ *  The entry slot and the top level come from the graph header and seed every search, so an
+ *  entry slot past the node count, or a top level above the entry node's own, must be rejected.
  *  The matrix dimensions and the node count come from the file itself, so a short file
  *  describes a matrix and a level array that reach past the mapping. Both must be rejected
  *  rather than walked, and a caller-supplied offset past the end must fail the same way.
  */
-void test_view_of_truncated_file() {
-    std::printf("Testing view of a truncated index file\n");
+void test_view_of_corrupted_file() {
+    std::printf("Testing load and view of corrupted index files\n");
 
     using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
     std::size_t const dimensions = 64;
@@ -1499,6 +1501,45 @@ void test_view_of_truncated_file() {
         expect(built.index.add(static_cast<std::int64_t>(i), vector.data()));
     }
     expect(built.index.save(path));
+
+    // The graph header follows the 32-bit matrix dimensions, the vectors and the dense head.
+    long const header_offset = static_cast<long>(2 * sizeof(std::uint32_t) + collection * dimensions * sizeof(float) +
+                                                 sizeof(index_dense_head_buffer_t));
+    auto write_header = [&](index_serialized_header_t const& header) {
+        std::FILE* file = std::fopen(path, "r+b");
+        expect(file != nullptr);
+        std::fseek(file, header_offset, SEEK_SET);
+        expect(std::fwrite(&header, sizeof(header), 1, file) == 1);
+        std::fclose(file);
+    };
+    index_serialized_header_t original;
+    {
+        std::FILE* file = std::fopen(path, "rb");
+        expect(file != nullptr);
+        std::fseek(file, header_offset, SEEK_SET);
+        expect(std::fread(&original, sizeof(original), 1, file) == 1);
+        std::fclose(file);
+    }
+    expect_eq(original.size, static_cast<std::uint64_t>(collection));
+
+    // In a valid file the top level is the entry node's level, so one more is just past it.
+    index_serialized_header_t corrupted[2] = {original, original};
+    corrupted[0].entry_slot = original.size;
+    corrupted[1].max_level = original.max_level + 1;
+    for (index_serialized_header_t const& header : corrupted) {
+        write_header(header);
+        index_t::state_result_t loaded = index_t::make(metric);
+        expect(loaded);
+        serialization_result_t load_result = loaded.index.load(path);
+        expect(!load_result);
+        load_result.error.release();
+        index_t::state_result_t viewed = index_t::make(metric);
+        expect(viewed);
+        serialization_result_t view_result = viewed.index.view(path);
+        expect(!view_result);
+        view_result.error.release();
+    }
+    write_header(original);
 
     std::vector<char> prefix;
     {
@@ -1661,7 +1702,7 @@ int main(int, char**) {
     test_isolate();
     test_compact();
     test_load_after_metric_make();
-    test_view_of_truncated_file();
+    test_view_of_corrupted_file();
     test_level_generators();
     return 0;
 }

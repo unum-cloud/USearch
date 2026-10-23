@@ -3813,6 +3813,13 @@ class index_gt {
         if (!input(levels, levels_bytes.value))
             return result.failed("Failed to pull nodes levels from the stream");
 
+        // Every search starts at the entry slot and descends from the max level
+        if (header.entry_slot >= header.size)
+            return result.failed("File is corrupted: entry slot exceeds node count");
+        level_t const entry_level = levels[static_cast<std::size_t>(header.entry_slot)];
+        if (entry_level < 0 || header.max_level > static_cast<std::uint64_t>(entry_level))
+            return result.failed("File is corrupted: max level exceeds entry node level");
+
         // Submit metadata
         config_.connectivity = header.connectivity;
         config_.connectivity_base = header.connectivity_base;
@@ -4017,6 +4024,16 @@ class index_gt {
         if (file.size() < first_offset.value) {
             reset();
             return result.failed("File is corrupted and can't fit the node levels");
+        }
+        // Every search starts at the entry slot and descends from the max level
+        if (header.entry_slot >= header.size) {
+            reset();
+            return result.failed("File is corrupted: entry slot exceeds node count");
+        }
+        level_t const entry_level = levels[static_cast<std::size_t>(header.entry_slot)];
+        if (entry_level < 0 || header.max_level > static_cast<std::uint64_t>(entry_level)) {
+            reset();
+            return result.failed("File is corrupted: max level exceeds entry node level");
         }
         offsets[0u] = first_offset.value;
         for (std::size_t i = 1; i < header_size.value; ++i) {
