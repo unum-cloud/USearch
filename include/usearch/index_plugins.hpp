@@ -3896,10 +3896,8 @@ class flat_hash_multi_set_gt {
         if (this == &other)
             return *this;
 
-        // Clear existing data
-        clear();
-        if (data_)
-            allocator_t{}.deallocate(data_, buckets_ * bytes_per_bucket());
+        // Release existing data, so a failed allocation below leaves an empty table
+        reset();
 
         // Allocate new memory
         checked_size_result_t bytes = checked_mul(other.buckets_, bytes_per_bucket());
@@ -4302,8 +4300,9 @@ class flat_hash_multi_set_gt {
         // Both live entries and tombstones consume slots a probe must walk past, so the
         // load factor counts them together. Under churn the live count alone stays flat
         // and would never trigger the rehash that reclaims the tombstones.
+        // If the rehash cannot allocate, a free or deleted slot still takes the element.
         if ((populated_slots_ + deleted_slots_) * 3u >= capacity_slots_ * 2u)
-            if (!try_reserve(populated_slots_ + 1))
+            if (!try_reserve(populated_slots_ + 1) && populated_slots_ >= capacity_slots_)
                 return false;
 
         hash_t hasher;
