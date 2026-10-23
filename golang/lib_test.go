@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"unsafe"
@@ -751,6 +752,130 @@ func TestQuantizationTypes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFilteredSearchCallbackState(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	const (
+		dimensions  = 32
+		vectorCount = 4
+		accepted    = Key(3)
+	)
+
+	// A captured local and a heap-allocated string both make the handler carry
+	// Go pointers, which must never be reachable from the pointer handed to C.
+	label := strings.Repeat("usearch", 8)
+
+	filter := func() *FilteredSearchHandler {
+		return &FilteredSearchHandler{
+			Callback: func(key Key, handler *FilteredSearchHandler) int {
+				if key == accepted && handler.Data == label {
+					return 1
+				}
+				return 0
+			},
+			Data: label,
+		}
+	}
+
+	verify := func(t *testing.T, keys []Key, distances []float32, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("filtered search failed: %v", err)
+		}
+		if len(keys) != 1 || keys[0] != accepted {
+			t.Fatalf("expected only key %d, got %v", accepted, keys)
+		}
+		if len(distances) != len(keys) {
+			t.Fatalf("expected %d distances, got %d", len(keys), len(distances))
+		}
+	}
+
+	t.Run("FilteredSearch", func(t *testing.T) {
+		index := createTestIndex(t, dimensions, F32)
+		defer func() { _ = index.Destroy() }()
+
+		if err := index.Reserve(vectorCount); err != nil {
+			t.Fatalf("Failed to reserve capacity: %v", err)
+		}
+		for key := Key(1); key <= vectorCount; key++ {
+			vector := generateTestVector(dimensions)
+			vector[0] = float32(key)
+			if err := index.Add(key, vector); err != nil {
+				t.Fatalf("Failed to add vector %d: %v", key, err)
+			}
+		}
+
+		query := generateTestVector(dimensions)
+		query[0] = float32(accepted)
+		keys, distances, err := index.FilteredSearch(query, vectorCount, filter())
+		verify(t, keys, distances, err)
+	})
+
+	t.Run("FilteredSearchUnsafe", func(t *testing.T) {
+		index := createTestIndex(t, dimensions, F32)
+		defer func() { _ = index.Destroy() }()
+
+		if err := index.Reserve(vectorCount); err != nil {
+			t.Fatalf("Failed to reserve capacity: %v", err)
+		}
+		for key := Key(1); key <= vectorCount; key++ {
+			vector := generateTestVector(dimensions)
+			vector[0] = float32(key)
+			if err := index.Add(key, vector); err != nil {
+				t.Fatalf("Failed to add vector %d: %v", key, err)
+			}
+		}
+
+		query := generateTestVector(dimensions)
+		query[0] = float32(accepted)
+		keys, distances, err := index.FilteredSearchUnsafe(unsafe.Pointer(&query[0]), vectorCount, filter())
+		verify(t, keys, distances, err)
+	})
+
+	t.Run("FilteredSearchI8", func(t *testing.T) {
+		index := createTestIndex(t, dimensions, I8)
+		defer func() { _ = index.Destroy() }()
+
+		if err := index.Reserve(vectorCount); err != nil {
+			t.Fatalf("Failed to reserve capacity: %v", err)
+		}
+		for key := Key(1); key <= vectorCount; key++ {
+			vector := generateTestVectorI8(dimensions)
+			vector[0] = int8(key)
+			if err := index.AddI8(key, vector); err != nil {
+				t.Fatalf("Failed to add vector %d: %v", key, err)
+			}
+		}
+
+		query := generateTestVectorI8(dimensions)
+		query[0] = int8(accepted)
+		keys, distances, err := index.FilteredSearchI8(query, vectorCount, filter())
+		verify(t, keys, distances, err)
+	})
+
+	t.Run("FilteredSearchU8", func(t *testing.T) {
+		index := createTestIndex(t, dimensions, U8)
+		defer func() { _ = index.Destroy() }()
+
+		if err := index.Reserve(vectorCount); err != nil {
+			t.Fatalf("Failed to reserve capacity: %v", err)
+		}
+		for key := Key(1); key <= vectorCount; key++ {
+			vector := generateTestVectorU8(dimensions)
+			vector[0] = uint8(key)
+			if err := index.AddU8(key, vector); err != nil {
+				t.Fatalf("Failed to add vector %d: %v", key, err)
+			}
+		}
+
+		query := generateTestVectorU8(dimensions)
+		query[0] = uint8(accepted)
+		keys, distances, err := index.FilteredSearchU8(query, vectorCount, filter())
+		verify(t, keys, distances, err)
+	})
 }
 
 func TestUnsafeOperations(t *testing.T) {
