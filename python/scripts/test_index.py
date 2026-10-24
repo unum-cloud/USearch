@@ -198,6 +198,9 @@ def test_index_search(ndim, metric, quantization, dtype, batch_size):
         assert len(matches) == batch_size
         assert np.all(np.sort(index.keys) == np.sort(keys))
 
+    with pytest.raises(ValueError):
+        index.search(vectors, 0)
+
 
 @pytest.mark.parametrize("ndim", [8, 32, 128])
 @pytest.mark.parametrize("metric", hash_metrics)
