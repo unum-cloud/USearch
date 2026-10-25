@@ -46,28 +46,6 @@ namespace unum::usearch::utilities {
 
 #pragma region Configs
 
-/** The two file forms the interchange defines. */
-enum class checkpoint_layout_t : u32_t {
-
-    /** One file or buffer holding one graph: every shard's rows in placement order. */
-    monolith_k,
-
-    /** A manifest beside one monolith per shard: the interchange's partition record. */
-    distributed_k,
-};
-
-/** How a checkpoint's parts land on the placed shards of a multi-index. */
-enum class checkpoint_placement_t : u32_t {
-
-    /** Part @c p lands on shard @c p mod S whole: exact when the counts agree, a union
-     *  of parts past @c S, empty shards below it; never cuts a part. */
-    partitioned_k,
-
-    /** The checkpoint's rows cut into @c S contiguous stripes, one per shard; exact for
-     *  a monolith that @c S rotation-filled shards wrote, well-formed for any other. */
-    split_k,
-};
-
 /** One custom `__metadata__` entry: a producer's own key and its string value. */
 struct safegraphs_custom_field_t {
     std::string_view key;
@@ -82,9 +60,6 @@ inline constexpr std::size_t safegraphs_alignment_default_k = 4096;
 
 /** What a save writes and how. */
 struct save_config_t {
-
-    /** One monolith, or a manifest beside one monolith per shard. */
-    checkpoint_layout_t layout = checkpoint_layout_t::monolith_k;
 
     /** The header's buffer alignment: a power of two, at least the floor. */
     std::size_t alignment = safegraphs_alignment_default_k;
@@ -108,11 +83,8 @@ struct save_config_t {
     }
 };
 
-/** Where a load places parts and how much room it leaves. */
+/** How much room a load leaves; each part lands on a shard of its own. */
 struct load_config_t {
-
-    /** Parts onto shards as written, or the rows cut into stripes. */
-    checkpoint_placement_t placement = checkpoint_placement_t::partitioned_k;
 
     /** Rows to reserve across the shards; zero fits the checkpoint exactly and leaves
      *  the index full. */
@@ -706,7 +678,8 @@ expected<safegraphs_header_t> safegraphs_regular_header(safegraphs_regular_shape
 /** One monolith of a checkpoint: a manifest's file entry, or the lone monolith itself. */
 struct safegraphs_part_t {
 
-    /** The monolith's path, relative to the manifest; empty for a lone monolith. */
+    /** The monolith's path, relative to the manifest; empty for a lone monolith and for a part of
+     *  a buffer manifest. */
     std::string_view path;
 
     /** The monolith's whole size in bytes. */
@@ -714,6 +687,9 @@ struct safegraphs_part_t {
 
     /** Nodes the monolith holds. */
     std::size_t nodes = 0;
+
+    /** Where a buffer manifest's part starts inside the buffer it leads. */
+    std::size_t offset = 0;
 };
 
 /** Holds the longest NumKong kernel spelling, 22 characters, with its NUL. */
@@ -744,6 +720,9 @@ struct safegraphs_metadata_t {
     /** Element type of every part's key column. */
     dtype_t key_dtype = dtype_t::unknown_k;
 
+    /** Element type of every part's neighbor IDs, @c u32 or @c u64. */
+    dtype_t neighbors_dtype = dtype_t::unknown_k;
+
     /** The value column's shape, from the first part's header. */
     column_shape_t value_shape;
 
@@ -767,6 +746,12 @@ inline std::string_view safegraphs_stem(std::string_view path) noexcept {
 /** The last path component - what a manifest entry records. */
 inline std::string_view safegraphs_basename(std::string_view path) noexcept {
     return path.substr(path.find_last_of("/\\") + 1);
+}
+
+/** Whether @p bytes open with the monolith magic; anything else a reader takes for a manifest. */
+inline bool safegraphs_is_monolith(bytes_view_t bytes) noexcept {
+    return bytes.size() >= safegraphs_prefix_t::magic_k.size() &&
+           std::memcmp(bytes.data(), safegraphs_prefix_t::magic_k.data(), safegraphs_prefix_t::magic_k.size()) == 0;
 }
 
 /** Formats @c <stem>-00001-of-00002.safegraphs into @p buffer, measured first; parts
@@ -797,61 +782,10 @@ expected<std::string_view> safegraphs_sibling_path(growing_buffer<char, allocato
     return {to_string_view(buffer), status_t::success_k};
 }
 
-/** Rows @p stripe of @p stripes takes from @p rows: the leading stripes take one more,
- *  which is exactly how rotation fills shards. */
-constexpr iota_view<std::size_t> checkpoint_stripe(std::size_t rows, std::size_t stripes, std::size_t stripe) noexcept {
-    std::size_t const quotient = rows / stripes;
-    std::size_t const remainder = rows % stripes;
-    std::size_t const first = stripe * quotient + min_of(stripe, remainder);
-    return {first, first + quotient + (stripe < remainder ? 1 : 0)};
-}
-
-/** One slice of one part landing on one shard. */
-struct checkpoint_assignment_t {
-
-    /** The shard receiving the rows. */
-    std::size_t shard = 0;
-
-    /** The part the rows come from. */
-    std::size_t part = 0;
-
-    /** The part-local rows taken, in the part's own ID space. */
-    iota_view<std::size_t> rows;
-};
-
-/** Maps a checkpoint's parts onto @p shards under @p placement, firing @p per_assignment
- *  grouped by shard and in part order within one; empty slices never fire. */
-template <typename callback_type_>
-void assign_parts(checkpoint_placement_t placement, std::span<std::size_t const> part_rows, std::size_t shards,
-                  callback_type_&& per_assignment) noexcept {
-    switch (placement) {
-    case checkpoint_placement_t::partitioned_k:
-        for (std::size_t shard = 0; shard != shards; ++shard)
-            for (std::size_t part = shard; part < part_rows.size(); part += shards)
-                if (part_rows[part]) per_assignment(checkpoint_assignment_t {shard, part, {0, part_rows[part]}});
-        return;
-    case checkpoint_placement_t::split_k: break;
-    }
-    std::size_t total = 0;
-    for (std::size_t const rows : part_rows) total += rows;
-    for (std::size_t shard = 0; shard != shards; ++shard) {
-        iota_view<std::size_t> const stripe = checkpoint_stripe(total, shards, shard);
-        if (stripe.empty()) continue;
-        std::size_t part_first = 0;
-        for (std::size_t part = 0; part != part_rows.size(); ++part) {
-            std::size_t const part_bound = part_first + part_rows[part];
-            std::size_t const first = max_of(stripe.first, part_first);
-            std::size_t const bound = min_of(stripe.bound, part_bound);
-            if (first < bound)
-                per_assignment(checkpoint_assignment_t {shard, part, {first - part_first, bound - part_first}});
-            part_first = part_bound;
-        }
-    }
-}
-
-/** Builds a manifest document; null when an allocation failed. It catalogs parts and
- *  nothing else: the schema, the metric and the provenance live in each part's own header,
- *  so a part lifted out of the set still describes itself completely. */
+/** Builds a manifest document; null when an allocation failed. It catalogs parts and nothing else:
+ *  the schema, the metric and the provenance live in each part's own header, so a part lifted out
+ *  of the set still describes itself completely. An entry without a path is a part of a buffer
+ *  manifest, named by its offset inside that buffer. */
 template <typename callback_type_>
 yyjson_mut_doc* safegraphs_manifest_document_(std::size_t parts, callback_type_&& part_at,
                                               std::span<safegraphs_custom_field_t const> custom_fields,
@@ -873,7 +807,9 @@ yyjson_mut_doc* safegraphs_manifest_document_(std::size_t parts, callback_type_&
     for (std::size_t part = 0; part != parts && complete; ++part) {
         safegraphs_part_t const entry = part_at(part);
         yyjson_mut_val* object = yyjson_mut_arr_add_obj(document, files);
-        complete = yyjson_mut_obj_add_strncpy(document, object, "path", entry.path.data(), entry.path.size()) &&
+        complete = (entry.path.empty()
+                        ? yyjson_mut_obj_add_uint(document, object, "offset", entry.offset)
+                        : yyjson_mut_obj_add_strncpy(document, object, "path", entry.path.data(), entry.path.size())) &&
                    yyjson_mut_obj_add_uint(document, object, "bytes", entry.bytes) &&
                    yyjson_mut_obj_add_uint(document, object, "nodes", entry.nodes);
     }
@@ -904,6 +840,7 @@ inline safegraphs_metadata_t safegraphs_metadata_of_(safegraphs_header_t const& 
     metadata.metric = metric;
     metadata.value_dtype = header.value.dtype;
     metadata.key_dtype = header.key.dtype;
+    metadata.neighbors_dtype = header.neighbors.dtype;
     metadata.value_shape = header.value.shape;
     metadata.connectivity = regular_width(header.neighbors.shape).value_or(0);
     metadata.nodes = header.nodes();
@@ -982,7 +919,107 @@ status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, cal
         });
 }
 
-/** The metadata of a monolith held in @p monolith. */
+/** Lays @p parts monoliths, @p part_at answering each one's bytes and nodes, behind the manifest
+ *  that leads one buffer: fills each part's offset into @p offsets, every one on an @p alignment
+ *  boundary past the manifest and the zero byte that ends it, and answers the buffer's whole
+ *  size. */
+template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
+expected<std::size_t> safegraphs_buffer_layout(std::size_t parts, callback_type_&& part_at, std::size_t alignment,
+                                               std::span<std::size_t> offsets,
+                                               allocator_type_ allocator = {}) noexcept {
+    if (!parts || offsets.size() < parts || !std::has_single_bit(alignment)) return {0, status_t::config_mismatch_k};
+    // Wider offsets print longer, so the manifest is measured again until the parts clear it.
+    for (std::size_t lead = 0;;) {
+        std::size_t end = 0;
+        for (std::size_t part = 0, next = round_up_to_multiple(lead + 1, alignment); part != parts; ++part) {
+            offsets[part] = next;
+            end = next + part_at(part).bytes;
+            next = round_up_to_multiple(end, alignment);
+        }
+        auto entry_at = [&](std::size_t part) noexcept {
+            safegraphs_part_t entry = part_at(part);
+            entry.path = {};
+            entry.offset = offsets[part];
+            return entry;
+        };
+        auto const [manifest, status] = safegraphs_manifest_bytes(parts, entry_at, {}, allocator);
+        if (failed(status)) return {0, status};
+        if (manifest <= lead) return {end, status_t::success_k};
+        lead = manifest;
+    }
+}
+
+/** Writes the manifest leading @p buffer over @p parts entries drawn from @p part_at, each naming
+ *  its offset, and zeroes the bytes up to the first part, where a reader finds the manifest's end;
+ *  @c overflow_k when it does not fit before that part. */
+template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
+status_t safegraphs_write_manifest(bytes_span_t buffer, std::size_t parts, callback_type_&& part_at,
+                                   allocator_type_ allocator = {}) noexcept {
+    if (!parts) return status_t::config_mismatch_k;
+    std::size_t const first = part_at(0).offset;
+    if (first > buffer.size()) return status_t::overflow_k;
+    safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
+    yyjson_alc const allocator_abi = trampoline.c_abi();
+    return safegraphs_print_(safegraphs_manifest_document_(parts, part_at, {}, allocator_abi), allocator_abi,
+                             [&](std::string_view json) noexcept {
+                                 if (json.size() >= first) return status_t::overflow_k;
+                                 std::memcpy(buffer.data(), json.data(), json.size());
+                                 std::memset(buffer.data() + json.size(), 0, first - json.size());
+                                 return status_t::success_k;
+                             });
+}
+
+/** Reads the manifest leading @p buffer, which ends at its first zero byte: @p per_part fires once
+ *  per entry in file order with its offset, every part inside the buffer, and the metadata comes
+ *  from the first part's header. */
+template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
+expected<safegraphs_metadata_t> safegraphs_read_manifest(bytes_view_t buffer, allocator_type_ allocator = {},
+                                                         callback_type_&& per_part = {}) noexcept {
+    safegraphs_metadata_t metadata;
+    void const* const ending = std::memchr(buffer.data(), 0, buffer.size());
+    if (!ending) return {metadata, status_t::malformed_k};
+    std::size_t const json_bytes = static_cast<std::size_t>(static_cast<byte_t const*>(ending) - buffer.data());
+    safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
+    auto [document, parse_status] = safegraphs_read_document_(buffer.first(json_bytes), trampoline);
+    if (failed(parse_status)) return {metadata, parse_status};
+
+    yyjson_val* files = yyjson_obj_get(yyjson_doc_get_root(document), "files");
+    metadata.parts = yyjson_arr_size(files);
+    bytes_view_t first;
+    for (std::size_t part = 0; part != metadata.parts; ++part) {
+        yyjson_val* entry = yyjson_arr_get(files, part);
+        safegraphs_part_t found;
+        if (!yyjson_is_uint(yyjson_obj_get(entry, "offset")) ||
+            !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "offset")), found.offset) ||
+            !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "bytes")), found.bytes) ||
+            !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "nodes")), found.nodes) ||
+            found.offset < json_bytes || found.offset > buffer.size() || found.bytes > buffer.size() - found.offset) {
+            yyjson_doc_free(document);
+            return {metadata, status_t::malformed_k};
+        }
+        if (!part) first = buffer.subspan(found.offset, found.bytes);
+        metadata.nodes += found.nodes;
+        per_part(found);
+    }
+    yyjson_doc_free(document);
+    if (first.empty()) return {metadata, status_t::malformed_k};
+
+    // The schema lives in the parts, so the first one's header answers every question about it.
+    safegraphs_name_t metric;
+    auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
+        if (field.key == "metric") metric = safegraphs_name_t {field.value};
+    };
+    auto const [header, header_status] = safegraphs_read_header(first, allocator, per_custom_field);
+    if (failed(header_status)) return {metadata, header_status};
+    std::size_t const parts = metadata.parts, nodes = metadata.nodes;
+    metadata = safegraphs_metadata_of_(header, metric);
+    metadata.parts = parts;
+    metadata.nodes = nodes;
+    return {metadata, status_t::success_k};
+}
+
+/** The metadata of the checkpoint held in @p monolith: a lone monolith, or the manifest leading a
+ *  buffer of parts. */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
                                                          allocator_type_ allocator = {}) noexcept {
@@ -990,6 +1027,7 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") metric = safegraphs_name_t {field.value};
     };
+    if (!safegraphs_is_monolith(monolith)) return safegraphs_read_manifest(monolith, allocator);
     auto const [header, parse_status] = safegraphs_read_header(monolith, allocator, per_custom_field);
     if (failed(parse_status)) return {safegraphs_metadata_t {}, parse_status};
     return {safegraphs_metadata_of_(header, metric), status_t::success_k};
@@ -1003,9 +1041,7 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(std::string_view path,
     auto [mapping, map_status] = mapped_file_t::read(path);
     if (failed(map_status)) return {safegraphs_metadata_t {}, map_status};
     bytes_view_t const monolith = mapping.view();
-    if (monolith.size() >= safegraphs_prefix_t::magic_k.size() &&
-        std::memcmp(monolith.data(), safegraphs_prefix_t::magic_k.data(), safegraphs_prefix_t::magic_k.size()) == 0)
-        return safegraphs_read_metadata(monolith, allocator);
+    if (safegraphs_is_monolith(monolith)) return safegraphs_read_metadata(monolith, allocator);
     return safegraphs_read_manifest(path, allocator);
 }
 
@@ -1078,8 +1114,7 @@ status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t,
     auto [mapping, mapping_status] = mapped_file_t::read(path);
     if (failed(mapping_status)) return mapping_status;
     bytes_view_t const checkpoint = mapping.view();
-    if (checkpoint.size() >= safegraphs_prefix_t::magic_k.size() &&
-        std::memcmp(checkpoint.data(), safegraphs_prefix_t::magic_k.data(), safegraphs_prefix_t::magic_k.size()) == 0) {
+    if (safegraphs_is_monolith(checkpoint)) {
         if (status_t const listed = safegraphs_catalog_monolith(checkpoint, parts, allocator); failed(listed))
             return listed;
         return mappings.push_back(std::move(mapping));
@@ -1111,6 +1146,27 @@ status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t,
         if (status_t const described = safegraphs_describe_part(part, allocator); failed(described)) return described;
         mappings.push_back_reserved(std::move(part_mapping));
     }
+    return status_t::success_k;
+}
+
+/** Lists the parts of the checkpoint held in @p buffer: the magic makes a lone monolith, anything
+ *  else the manifest leading the buffer, whose every part's header is read now. */
+template <typename allocator_type_>
+status_t safegraphs_catalog(bytes_view_t buffer, growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
+                            allocator_type_ allocator) noexcept {
+    if (safegraphs_is_monolith(buffer)) return safegraphs_catalog_monolith(buffer, parts, allocator);
+    status_t kept = status_t::success_k;
+    auto per_part = [&](safegraphs_part_t entry) noexcept {
+        safegraphs_catalog_part_t part;
+        part.monolith = buffer.subspan(entry.offset, entry.bytes);
+        if (failed(parts.push_back(part))) kept = status_t::bad_alloc_k;
+    };
+    auto const [summary, summary_status] = safegraphs_read_manifest(buffer, allocator, per_part);
+    if (failed(summary_status)) return summary_status;
+    if (failed(kept)) return kept;
+    if (parts.empty()) return status_t::malformed_k;
+    for (safegraphs_catalog_part_t& part : parts)
+        if (status_t const described = safegraphs_describe_part(part, allocator); failed(described)) return described;
     return status_t::success_k;
 }
 
@@ -1436,14 +1492,25 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_
     return {metadata, status_t::success_k};
 }
 
-/** The metadata of the monolith at @p path, mapped read-only. */
+/** The metadata of the checkpoint at @p path, mapped read-only: a lone monolith's, or a manifest's
+ *  with the counts summed over its parts and the custom fields read off the first one, which every
+ *  part repeats. */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(std::string_view path,
                                                                      allocator_type_ allocator = {},
                                                                      callback_type_&& per_custom_field = {}) noexcept {
-    auto [mapping, map_status] = mapped_file_t::read(path);
-    if (failed(map_status)) return {safegraphs_index_metadata_t {}, map_status};
-    return safegraphs_read_index_metadata(mapping.view(), allocator, std::forward<callback_type_>(per_custom_field));
+    growing_buffer<mapped_file_t, allocator_type_> mappings {allocator};
+    growing_buffer<safegraphs_catalog_part_t, allocator_type_> parts {allocator};
+    if (status_t const listed = safegraphs_catalog(path, mappings, parts, allocator); failed(listed))
+        return {safegraphs_index_metadata_t {}, listed};
+    auto [metadata, status] = safegraphs_read_index_metadata(parts[0].monolith, allocator,
+                                                             std::forward<callback_type_>(per_custom_field));
+    for (std::size_t part = 1; part != parts.size() && succeeded(status); ++part) {
+        auto const [more, more_status] = safegraphs_read_index_metadata(parts[part].monolith, allocator);
+        metadata.nodes += more.nodes, metadata.neighbors += more.neighbors, metadata.value_bytes += more.value_bytes;
+        status = more_status;
+    }
+    return {metadata, status};
 }
 
 /**
@@ -1484,11 +1551,16 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     constexpr bool fixed_width = safegraphs_value_is_fixed<codec_type_>();
     safegraphs_column_t const& value = header.value;
     safegraphs_column_t const& adjacency = header.neighbors;
-    if (header.key.offsets || header.key.dtype != safegraphs_key_dtype<key_t>() ||
+    constexpr dtype_t wanted_key_dtype = safegraphs_key_dtype<key_t>();
+    if (header.key.offsets || !safegraphs_key_widens(header.key.dtype, wanted_key_dtype) ||
         header.key.shape != column_shape_t {scalar_shape_t {}})
         return status_t::config_mismatch_k;
-    if (header.key.data.size() % sizeof(key_t)) return status_t::malformed_k;
-    std::size_t const nodes = header.key.data.size() / sizeof(key_t);
+    std::size_t const key_bytes = dtype_bytes(header.key.dtype);
+    if (header.key.data.size() % key_bytes) return status_t::malformed_k;
+    std::size_t const nodes = header.key.data.size() / key_bytes;
+    // A narrower key column that miscounts the other columns' rows is another dtype relabelled.
+    if (header.key.dtype != wanted_key_dtype && (header.value.nodes() != nodes || header.neighbors.nodes() != nodes))
+        return status_t::config_mismatch_k;
     std::size_t const sums_bytes = (nodes + 1) * sizeof(u64_t);
     if (value.dtype != codec_type_::value_dtype_k || value.offsets.has_value() == fixed_width || value.shape != shape)
         return status_t::config_mismatch_k;
@@ -1581,12 +1653,20 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
         value_sums = std::span<u64_t const> {staged_value_sums};
     }
 
+    // Keys of the index's own dtype are read in place; narrower ones widen into a staged copy.
+    growing_buffer<key_t, allocator_type_> staged_keys {allocator};
+    std::span<key_t const> keys;
+    if (header.key.dtype == wanted_key_dtype)
+        keys = safegraphs_typed_span_<key_t const>(segment, header.key.data.first, nodes);
+    else {
+        if (failed(staged_keys.resize(nodes))) return status_t::bad_alloc_k;
+        byte_t const* const stored = segment.data() + header.key.data.first;
+        for (std::size_t node = 0; node != nodes; ++node)
+            staged_keys[node] = safegraphs_widened_key<key_t>(stored + node * key_bytes, header.key.dtype);
+        keys = std::span<key_t const> {staged_keys};
+    }
     columns_view_t const columns {
-        safegraphs_typed_span_<key_t const>(segment, header.key.data.first, nodes),
-        neighbor_sums,
-        neighbor_ids,
-        value_sums,
-        segment.subspan(value.data.first, value.data.size()),
+        keys, neighbor_sums, neighbor_ids, value_sums, segment.subspan(value.data.first, value.data.size()),
     };
     auto planned = index.plan_load(columns);
     if (failed(planned.status)) return planned.status;
