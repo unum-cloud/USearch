@@ -17,6 +17,7 @@
 #include <cstddef> // `std::size_t`
 
 #include <bit>              // `std::bit_ceil`, `std::bit_width`, `std::has_single_bit`
+#include <concepts>         // `std::same_as` - the plural takes 32-bit shards
 #include <initializer_list> // the two walks of every wave
 #include <limits>           // `std::numeric_limits` - the node-ID type's sentinel
 #include <memory>           // `std::unique_ptr` - an audit's landing
@@ -36,7 +37,8 @@
 namespace unum::usearch::basic {
 using namespace unum::usearch::utilities;
 
-template <typename, typename, typename, typename, typename>
+template <typename index_type_, typename, typename, typename, typename>
+    requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
 struct vram_nvidia_indexes;
 
 #pragma region Kernel Records
@@ -235,6 +237,9 @@ struct cuda_graph_fatbin_t {
  *  the kits' codec. Plans close the claim word, or claim their rows, for their whole lives.
  *
  *  A modality's face owns one as a member and forwards its verbs, so no modality derives from it.
+ *  It stands alone as the RAM index does, under either node-ID width and any key the caller keeps
+ *  beside it; only the plural the compiled library builds narrows it to 32-bit IDs, whose rows a
+ *  shard table locates in 8 bytes.
  *
  *  @tparam node_id_type_ The node IDs of the neighbors matrix, the walks and the matches, @c u32_t
  *      or @c u64_t; the all-ones ID is the sentinel. The shared kernels cover @c u32_t alone, so
@@ -404,6 +409,18 @@ struct vram_ragged_graph {
         std::size_t tail_compactions = 0;
         std::size_t tail_dropped = 0;
         std::size_t visited_saturations = 0;
+
+        /** Folds another shard's batch in: the spend adds, while @c new_size and @c first_id,
+         *  which name one shard's IDs, stay as they were. */
+        insert_result_t& operator+=(insert_result_t const& other) noexcept {
+            visited_members += other.visited_members;
+            computed_distances += other.computed_distances;
+            restarts += other.restarts;
+            tail_compactions += other.tail_compactions;
+            tail_dropped += other.tail_dropped;
+            visited_saturations += other.visited_saturations;
+            return *this;
+        }
     };
 
     /** The bytes an executor's run must hold before a context carved over it can insert the rows
@@ -511,11 +528,17 @@ struct vram_ragged_graph {
      *  open one stays as it is. */
     void reopen_() noexcept { claims_.reopen(size()); }
 
+    /** Drops the watermark to zero and touches no row, key or claim: what a plural makes of a shard
+     *  it retires with its claims closed for good, so a reader still walking it reads rows nothing
+     *  frees, and every walk below the watermark finds none. */
+    void retire_() noexcept { standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release); }
+
   private:
 
     /** A plural walks its shards below one snapshot of their watermarks, and publishes a batch on
      *  every shard inside one commit. */
-    template <typename, typename, typename, typename, typename>
+    template <typename index_type_, typename, typename, typename, typename>
+        requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
     friend struct vram_nvidia_indexes;
 
     /** Launches and drains the rows @p plan claimed, spending it unless the arguments mismatch, and
@@ -641,6 +664,18 @@ struct vram_ragged_graph {
         std::size_t tail_compactions = 0;
         std::size_t tail_dropped = 0;
         std::size_t visited_saturations = 0;
+
+        /** Folds another batch or shard in, every count adding. */
+        search_result_t& operator+=(search_result_t const& other) noexcept {
+            count += other.count;
+            visited_members += other.visited_members;
+            computed_distances += other.computed_distances;
+            restarts += other.restarts;
+            tail_compactions += other.tail_compactions;
+            tail_dropped += other.tail_dropped;
+            visited_saturations += other.visited_saturations;
+            return *this;
+        }
     };
 
     /** The bytes an executor's run must hold before a context carved over it can search the

@@ -132,17 +132,6 @@ constexpr std::optional<std::size_t> regular_width(column_shape_t shape) noexcep
     return 1;
 }
 
-/** The prefix sums an irregular column addresses its rows through: one element count per
- *  node, ending at the column's own element total. */
-struct prefix_sums_t {
-
-    /** Element type of the sums - @c u32_k or @c u64_k. */
-    dtype_t dtype = dtype_t::u64_k;
-
-    /** The sums themselves, within the data segment. */
-    iota_view<std::size_t> bytes;
-};
-
 /** One header column: an element type, the shape of one row, its rows, and the prefix
  *  sums that address them when their width varies. */
 struct safegraphs_column_t {
@@ -1705,6 +1694,76 @@ status_t safegraphs_read_index(std::string_view path, index_type_& index, codec_
     if (failed(map_status)) return map_status;
     return safegraphs_read_index(mapping.view(), index, codec, executor, config, std::forward<progress_type_>(progress),
                                  allocator);
+}
+
+/**
+ *  @brief The columns of the monolith whose header @p header_bytes holds, as an external-memory
+ *      reader of @p codec_type_ values under @p key_type_ keys and @p node_id_type_ neighbor IDs
+ *      addresses them: every offset from the monolith's own start.
+ *
+ *  Refuses with @c config_mismatch_k what such a reader cannot serve: a key column its keys do not
+ *  widen from, values in another dtype, shape or layout than the codec writes, neighbor IDs of
+ *  another width, and a @c metric token other than @p metric, unless either is empty. A header
+ *  whose columns disagree on their rows answers @c malformed_k.
+ */
+template <typename codec_type_, typename key_type_, typename node_id_type_,
+          typename allocator_type_ = std::allocator<byte_t>>
+    requires interchange_value_codec<codec_type_>
+expected<persisted_columns_t> safegraphs_persisted_columns(bytes_view_t header_bytes, std::string_view metric,
+                                                           allocator_type_ allocator = {}) noexcept {
+    persisted_columns_t persisted;
+    safegraphs_name_t named;
+    auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
+        if (field.key == "metric") named = safegraphs_name_t {field.value};
+    };
+    auto const [header, header_status] = safegraphs_read_header(header_bytes, allocator, per_custom_field);
+    if (failed(header_status)) return {persisted, header_status};
+    if (!metric.empty() && !named.empty() && named.view() != metric) return {persisted, status_t::config_mismatch_k};
+
+    // Keys are regular, values shaped as the codec writes them, neighbors ragged or fixed-degree.
+    constexpr bool fixed_width = safegraphs_value_is_fixed<codec_type_>();
+    safegraphs_column_t const& value = header.value;
+    safegraphs_column_t const& adjacency = header.neighbors;
+    if (header.key.offsets || header.key.shape != column_shape_t {scalar_shape_t {}} ||
+        !safegraphs_key_widens(header.key.dtype, safegraphs_key_dtype<key_type_>()))
+        return {persisted, status_t::config_mismatch_k};
+    if (value.dtype != codec_type_::value_dtype_k || value.shape != safegraphs_value_shape<codec_type_>() ||
+        value.offsets.has_value() == fixed_width)
+        return {persisted, status_t::config_mismatch_k};
+    std::size_t const degree = std::holds_alternative<vector_shape_t>(adjacency.shape) && !adjacency.offsets
+                                   ? std::get<vector_shape_t>(adjacency.shape).columns
+                                   : 0;
+    if (adjacency.dtype != safegraphs_node_id_dtype<node_id_type_>() ||
+        (adjacency.offsets ? adjacency.shape != column_shape_t {scalar_shape_t {}} : !degree))
+        return {persisted, status_t::config_mismatch_k};
+    std::size_t const nodes = header.nodes();
+    if (value.nodes() != nodes || adjacency.nodes() != nodes || !header.key.row_bytes() ||
+        nodes >= (std::numeric_limits<node_id_type_>::max)())
+        return {persisted, status_t::malformed_k};
+    auto const sums_cover = [nodes](std::optional<prefix_sums_t> const& sums) noexcept {
+        return !sums || sums->bytes.size() == (nodes + 1) * dtype_bytes(sums->dtype);
+    };
+    if (!sums_cover(value.offsets) || !sums_cover(adjacency.offsets)) return {persisted, status_t::malformed_k};
+
+    // Byte ranges shift from the data segment's start to the monolith's; rows are fixed-width in
+    // whole elements or located by their prefix sums.
+    auto const persisted_column_of = [&header](safegraphs_column_t const& column) noexcept {
+        std::size_t const element_bytes = dtype_bytes(column.dtype);
+        persisted_column_t persisted_column;
+        persisted_column.dtype = column.dtype;
+        persisted_column.data = {header.data_offset + column.data.first, header.data_offset + column.data.bound};
+        if (column.offsets)
+            persisted_column.offsets = prefix_sums_t {
+                column.offsets->dtype,
+                {header.data_offset + column.offsets->bytes.first, header.data_offset + column.offsets->bytes.bound}};
+        else persisted_column.row_width = element_bytes ? column.row_bytes() / element_bytes : 0;
+        return persisted_column;
+    };
+    persisted.nodes = nodes;
+    persisted.keys = persisted_column_of(header.key);
+    persisted.values = persisted_column_of(value);
+    persisted.neighbors = persisted_column_of(adjacency);
+    return {persisted, status_t::success_k};
 }
 
 #pragma endregion Columned Indexes

@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/dense/vram_shard_fanout.hpp
+ *  @file include/usearch/utilities/vram_shard_fanout.hpp
  *  @author Ash Vardanian
  *  @date September 2, 2026
  *  @brief The fan-out an NVIDIA or AMD tower drives one batched read through: the executor's claim,
@@ -81,7 +81,8 @@ struct vram_shard_fanout {
     template <typename... usage_types_>
     static status_t reserve_traversals(shards_t const& shards, traversals_t& traversals, executor_t& executor,
                                        usage_types_ const&... usage) noexcept {
-        // Counted once, so a generation opening meanwhile gets no context and no scratch here.
+        // Counted once, so a shard generation opening meanwhile gets no context and no scratch
+        // here.
         std::size_t const count = shards.size();
         std::size_t bytes_per_shard = 0, shards_per_stream = 0;
         for (std::size_t shard = 0; shard != count; ++shard)
@@ -120,13 +121,13 @@ struct vram_shard_fanout {
     /** The executor every window queues on, held by the fan-out since @ref begin. */
     executor_t& executor() noexcept { return executor_; }
 
-    /** Shards the snapshot counted, which every window walks; a generation opened since takes no
-     *  part. */
+    /** Shards the snapshot counted, which every window walks; a shard generation opened since takes
+     *  no part. */
     std::size_t shards() const noexcept { return visible_.size(); }
 
     /** Claims the executor, sizes one context per shard for @p window_rows rows under @p config and
-     *  any indexer @p heads, and snapshots the shards' visible rows, sizing again for a generation
-     *  opened meanwhile. */
+     *  any indexer @p heads, and snapshots the shards' visible rows, sizing again for a shard
+     *  generation opened meanwhile. */
     template <typename traversal_config_type_, typename... heads_types_>
     status_t begin(std::size_t window_rows, traversal_config_type_ config, heads_types_ const&... heads) noexcept {
         // The executor serializes, never the index: a second caller with its own executor searches

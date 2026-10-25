@@ -19,6 +19,7 @@
 #include <array>        // `std::array` - a filtered walk's quads
 #include <atomic>       // `std::memory_order`
 #include <bit>          // `std::popcount`, `std::bit_width` - an audit's reached count, a refine's rounds
+#include <concepts>     // `std::same_as` - the plural takes 32-bit shards
 #include <limits>       // `std::numeric_limits` - the ID-space ceiling and the unbounded radius
 #include <memory>       // `std::allocator`, `std::allocator_traits`, `std::make_obj_using_allocator`
 #include <mutex>        // `std::unique_lock` - the try-only unique side's guard
@@ -37,7 +38,8 @@ using namespace unum::usearch::utilities;
 
 /** The plural spanning many basic RAM shards, defined in @c basic/ram_indexes.hpp; it walks and
  *  scans each shard below a watermark it took across all of them. */
-template <typename>
+template <typename index_type_>
+    requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
 struct ram_indexes;
 
 /** One traversal candidate; both halves are the caller's chosen widths. */
@@ -243,6 +245,17 @@ struct traversal_telemetry_t {
                 computed_distances_in_rankings - before.computed_distances_in_rankings,
                 computed_distances_in_selections - before.computed_distances_in_selections};
     }
+
+    /** Folds another walk's or thread's counters in, every one a spend that adds. */
+    traversal_telemetry_t& operator+=(traversal_telemetry_t const& other) noexcept {
+        computed_distances += other.computed_distances;
+        visited_members += other.visited_members;
+        restarts += other.restarts;
+        saturated_walks += other.saturated_walks;
+        computed_distances_in_rankings += other.computed_distances_in_rankings;
+        computed_distances_in_selections += other.computed_distances_in_selections;
+        return *this;
+    }
 };
 
 /** Outcome of one refinement or heal pass, counted as the dense tier counts it, with the walks'
@@ -267,6 +280,18 @@ struct [[nodiscard]] refine_result_t {
 
     /** The re-selection walks' and back-links' spend. */
     traversal_telemetry_t telemetry;
+
+    /** Folds another pass or shard in: every count is a population or a spend and adds, and the
+     *  audits fold as @c health_result_t does. */
+    refine_result_t& operator+=(refine_result_t const& other) noexcept {
+        visited_nodes += other.visited_nodes;
+        changed_nodes += other.changed_nodes;
+        islands_found += other.islands_found;
+        islands_reconnected += other.islands_reconnected;
+        health += other.health;
+        telemetry += other.telemetry;
+        return *this;
+    }
 };
 
 /** One round's scoring epilogue: sizes the distances to the staging fill, drains
@@ -586,6 +611,11 @@ struct ram_cursor;
  *  Node IDs are never recycled before a @c clear and removals are deleted, keeping every
  *  reader's stale ID valid until then.
  *
+ *  One index is complete on its own: it needs no SafeGraphs files, no plural of shards and no
+ *  UUIDs. Keys may be any hashable type, node IDs 32 or 64 bits wide, and every record keeps its
+ *  own key. Only the plurals the compiled library builds on top narrow the choice, to 32-bit
+ *  shards whose rows a shard table locates in 8 bytes.
+ *
  *  @tparam value_type_ any payload satisfying @c basic::value; immovable once published.
  *  @tparam key_type_ trivially-copyable caller-visible identity.
  *  @tparam node_id_type_ graph-local identity, dense from zero; @c u32_t or @c u64_t.
@@ -644,7 +674,8 @@ struct ram_index {
 
     /** The plural walks and scans its shards below one watermark per shard, and measures, closes
      *  and reopens their claims. */
-    template <typename>
+    template <typename index_type_>
+        requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
     friend struct ram_indexes;
 
     /** The plural's shard table measures, closes and reopens the claims. */
@@ -2855,7 +2886,8 @@ struct ram_index {
     }
 
     /** Forgets every record below @p visible, every key and every counter: what @c clear does under
-     *  the unique side, and what a landed donor becomes under its plan's. */
+     *  the unique side, and what a landed donor becomes under its plan's. Open claims restart from
+     *  zero, while closed ones stay closed, reopening there with @ref reopen_. */
     void forget_(node_id_t visible) noexcept {
         for (std::size_t node = 0; node != static_cast<std::size_t>(visible); ++node) {
             node_t& record = nodes_[node];
@@ -2866,10 +2898,17 @@ struct ram_index {
         }
         key_map_.clear();
         atomic_ref<std::size_t>(widest_row_).store(0, std::memory_order_relaxed);
-        atomic_ref<std::size_t>(claimed_count_).store(0, std::memory_order_relaxed);
+        std::size_t open = visible;
+        atomic_ref<std::size_t>(claimed_count_)
+            .compare_exchange_strong(open, 0, std::memory_order_release, std::memory_order_relaxed);
         atomic_ref<node_id_t>(next_dispensed_id_).store(0, std::memory_order_relaxed);
         atomic_ref<node_id_t>(last_visible_id_).store(0, std::memory_order_release);
     }
+
+    /** Drops the watermark to zero and touches no record, key or claim: what a plural makes of a
+     *  shard it retires with its claims closed for good, so a reader still walking it reads values
+     *  nothing frees, and every accessor gated by the watermark refuses its IDs. */
+    void retire_() noexcept { atomic_ref<node_id_t>(last_visible_id_).store(0, std::memory_order_release); }
 
     /** Closes the claims at the watermark: one compare-exchange that succeeds only while every
      *  claimed ID is published, after which every batch refuses until @ref reopen_. */

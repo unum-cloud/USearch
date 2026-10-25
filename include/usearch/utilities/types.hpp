@@ -754,6 +754,50 @@ constexpr std::size_t dtype_bytes(dtype_t dtype) noexcept {
     return bits && bits % 8 == 0 ? bits / 8 : 0;
 }
 
+/** The prefix sums an irregular column addresses its rows through: one element count per
+ *  node, ending at the column's own element total. */
+struct prefix_sums_t {
+
+    /** Element type of the sums - @c u32_k or @c u64_k. */
+    dtype_t dtype = dtype_t::u64_k;
+
+    /** Where the sums lie: in a SafeGraphs data segment, or on the medium of a persisted column. */
+    iota_view<std::size_t> bytes;
+};
+
+/** One column of an index persisted on a medium: its elements, and how a row finds them. */
+struct persisted_column_t {
+
+    /** Type of every element: a key, a value element, or a neighbor ID. */
+    dtype_t dtype = dtype_t::unknown_k;
+
+    /** Where the elements lie on the medium, in bytes. */
+    iota_view<std::size_t> data;
+
+    /** Elements in every row of a fixed-width column; read only without @c offsets. */
+    std::size_t row_width = 0;
+
+    /** The @c nodes + 1 row prefix sums of a ragged column, @c u32 or @c u64 as Arrow's list and
+     *  large-list offsets; absent for a fixed-width column. */
+    std::optional<prefix_sums_t> offsets;
+};
+
+/** The three columns of an index persisted on a medium, whatever format laid them out. */
+struct persisted_columns_t {
+
+    /** Rows every column holds; neighbor IDs at or past it are sentinels. */
+    std::size_t nodes = 0;
+
+    /** One key per row, a @c uuid key a single 16-byte element. */
+    persisted_column_t keys;
+
+    /** The values, fixed-width or ragged in the codec's elements. */
+    persisted_column_t values;
+
+    /** The neighbor IDs, a fixed degree or ragged rows. */
+    persisted_column_t neighbors;
+};
+
 /** Returns 2^ @p exponent as a value of the requested unsigned type. */
 template <typename result_type_>
 constexpr result_type_ power_of_two(u32_t exponent) noexcept {
@@ -1381,6 +1425,17 @@ struct dummy_progress_t {
     template <typename... args_types_>
     constexpr continuation_t operator()(args_types_&&...) const noexcept {
         return continuation_t::continue_k;
+    }
+};
+
+/** The one-thread executor a SafeGraphs read or write fans out over when its index lands regions
+ *  in order: every region runs on the calling thread. */
+struct serial_executor_t {
+    std::size_t size() const noexcept { return 1; }
+    template <typename callback_type_>
+    status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
+        for (std::size_t task = 0; task != tasks; ++task) callback(task, 0, 0);
+        return status_t::success_k;
     }
 };
 

@@ -2,15 +2,18 @@
  *  @file include/usearch/basic/nvme_index.hpp
  *  @author Ash Vardanian
  *  @date October 14, 2026
- *  @brief Similarity Search over pre-constructed read-only basic graphs on block storage: ragged
+ *  @brief Similarity Search over one pre-constructed read-only basic graph on block storage: ragged
  *      values under caller-supplied metrics, walked by the storage walk the dense tier drives.
  *
- *  A view opens the monolith or the manifest a basic RAM index saved and keeps, per part, its
- *  columns' offsets and a directory of every ragged column's row starts: an Elias-Fano sequence of
- *  a few bits per row, so a walk locates any value or neighbors row in RAM and reads it with one
- *  covering read, as the dense tier reads its fixed rows. The directories are built at the view by
- *  streaming each offsets column in chunks, and the widest rows, which size the staging buffers,
- *  come from the same pass. A fixed-degree neighbors column needs no directory.
+ *  An index opens one part on one medium from the @c persisted_columns_t any producer of a format
+ *  fills, and keeps its columns' offsets and a directory of every ragged column's row starts: an
+ *  Elias-Fano sequence of a few bits per row, so a walk locates any value or neighbors row in RAM
+ *  and reads it with one covering read, as the dense tier reads its fixed rows. The directories are
+ *  built at the opening by streaming each prefix sums column in chunks, and the widest rows, which
+ *  size the staging buffers, come from the same pass. A fixed-degree neighbors column needs no
+ *  directory. The walks live in @c nvme_parts_catalog, a component over spans of the media and
+ *  parts its owner holds, so @c nvme_index over one part and @c nvme_indexes over many run the same
+ *  code.
  *
  *  A search keeps one metric per row slot, built by the caller's factory on the slot's arena, since
  *  every walk of a row shares its query, and hands it each landed value as the codec's borrowed
@@ -36,26 +39,24 @@
 #include <smashtable/immutable_elias_fano.hpp> // `st::immutable_elias_fano` - the row directories
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/blocking_files.hpp"    // `seekable_file_t`
 #include "usearch/utilities/nvme_device.hpp"       // `nvme_executor`, `file_medium_t`, `io_request_t`
 #include "usearch/utilities/nvme_walks.hpp"        // `row_walker`, `nvme_begin_call`, `nvme_read_header`
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`, `sorted_buffer`, `arena_allocator`
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator`
 #include "usearch/utilities/ram_sorts.hpp"         // `network_sort`
 #include "usearch/utilities/ram_tables.hpp"        // `growing_hash_set`
-#include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_read_header`, `safegraphs_read_manifest`
+#include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_node_id_dtype`, `safegraphs_widened_key`
 #include "usearch/basic/ram_index.hpp"             // `scored_node`, `metric_staging_t`, `unbounded_radius`
 
 namespace unum::usearch::basic {
 
 /**
- *  @brief Similarity Search over the SafeGraphs parts a basic RAM index saved, on block storage,
- *      read-only.
+ *  @brief The walks, scans and key lookups of basic graphs over parts on block storage, as one
+ *      component over spans of the media and the parts its owner holds: @c nvme_index owns one
+ *      part, @c nvme_indexes many, and each hands its own spans to a catalog for the call.
  *
- *  The class is a catalog of parts: each part's medium, its columns' offsets and the directories of
- *  its ragged columns, and nothing per node beyond those few bits a row. Every call borrows an
- *  executor, attaches the media to its engines for its own duration, and walks every part of a row
- *  on one thread, merging the parts' rankings by key.
+ *  A catalog walks every part of a row on one thread, merging the parts' rankings by key; it owns
+ *  nothing, so it lives no longer than the call its owner builds it for.
  *
  *  @tparam codec_type_ The value codec the parts were saved with, whose @c view borrows a landed
  *      row.
@@ -69,7 +70,7 @@ template <typename codec_type_, typename key_type_ = uuid_t, typename node_id_ty
           typename distance_type_ = f64_t, typename engine_type_ = default_io_engine_t,
           typename row_kit_type_ = st::serial_row_kit_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
-class nvme_index {
+class nvme_parts_catalog {
     template <typename, typename, typename>
     friend class utilities::row_walker;
 
@@ -131,39 +132,8 @@ class nvme_index {
         std::size_t round_trips = 0;
     };
 
-    nvme_index() = delete;
-    explicit nvme_index(forkunion_allocator_t allocator) noexcept
-        : media_(allocator), parts_(allocator), allocator_(allocator) {}
-    nvme_index(nvme_index&&) noexcept = default;
-    nvme_index& operator=(nvme_index&&) noexcept = default;
-    nvme_index(nvme_index const&) = delete;
-    nvme_index& operator=(nvme_index const&) = delete;
-
-    /** The checkpoint's metadata without viewing it, @ref nvme_read_metadata. */
-    static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept { return nvme_read_metadata(path); }
-
-    /**
-     *  @brief Opens a manifest or a monolith, whichever its content names, with every part's
-     *      header, medium and row directories, refusing parts that disagree with this
-     *      instantiation. A failed view leaves the index empty.
-     *
-     *  @param[in] path A monolith, or the manifest whose parts sit beside it.
-     *  @param[in] paths Where to serve each part from instead, one per part: a directory holding
-     *      the part's file, or the file itself; empty serves every part where the manifest points.
-     *  @param[in] metric The token every part must name, or empty to take any.
-     *  @param[inout] executor Builds the parts' directories, one part per thread at a time.
-     */
-    status_t view(std::string_view path, std::span<std::string_view const> paths, std::string_view metric,
-                  executor_t& executor) noexcept {
-        media_.clear();
-        parts_.clear();
-        status_t const viewed = view_(path, paths, metric, executor);
-        if (failed(viewed)) media_.clear(), parts_.clear();
-        return viewed;
-    }
-
-    /** Shards in the view, one per part of the checkpoint, so a monolith views as one shard. */
-    std::size_t shards_count() const noexcept { return parts_.size(); }
+    /** Parts the catalog walks. */
+    std::size_t parts_count() const noexcept { return parts_.size(); }
 
     /** Entries across every shard. */
     std::size_t size() const noexcept {
@@ -171,9 +141,6 @@ class nvme_index {
         for (part_t const& part : parts_) total += part.nodes;
         return total;
     }
-
-    /** Entries the view hosts, which are exactly those its parts hold, since a view never grows. */
-    std::size_t capacity() const noexcept { return size(); }
 
     /** Value elements across every part, in the units the value columns count: bytes of strings,
      *  or three coordinates a point of clouds. */
@@ -190,13 +157,6 @@ class nvme_index {
         std::size_t widest = 0;
         for (part_t const& part : parts_) widest = max_of<std::size_t>(widest, part.connectivity);
         return widest;
-    }
-
-    /** Bytes the index occupies: the catalog and the row directories, a few bits a row. */
-    std::size_t memory_usage() const noexcept {
-        std::size_t bytes = sizeof(nvme_index) + media_.memory_usage() + parts_.memory_usage();
-        for (part_t const& part : parts_) bytes += part.value_starts.size_bytes() + part.neighbor_starts.size_bytes();
-        return bytes;
     }
 
     /** The walk breadth @p config asks for, or twice the widest neighbors row when it asks for
@@ -668,6 +628,8 @@ class nvme_index {
     /** A ragged column's row starts in its own elements, then its end, a few bits a row. */
     using directory_t = st::immutable_elias_fano<u64_t, forkunion_allocator<u64_t>, row_kit_type_>;
 
+  public:
+
     /** Bytes of the key rows one scan read covers, and of the offsets one directory chunk
      *  streams. */
     inline static constexpr std::size_t scan_chunk_bytes_k = std::size_t {1} << 20;
@@ -762,6 +724,8 @@ class nvme_index {
     }
 
 #pragma endregion Parts
+
+  private:
 
 #pragma region Walks
 
@@ -929,7 +893,7 @@ class nvme_index {
         if constexpr (row_type_::admitting_k)
             if (status_t const opened = open_predicate(*inputs.predicate, executor); failed(opened))
                 return {{}, opened};
-        return row_walker<nvme_index, row_type_>::run_walks(media, parts, executor, shape, inputs, counts, {});
+        return row_walker<nvme_parts_catalog, row_type_>::run_walks(media, parts, executor, shape, inputs, counts, {});
     }
 
     /** Opens the round of a primed @p row on its query, which every walk of the row then
@@ -1394,6 +1358,7 @@ class nvme_index {
 
 #pragma endregion Scans
 
+  public:
 #pragma region Opening
 
     /** The USearch status of a SmashTable one, as a directory build answers it. */
@@ -1407,27 +1372,27 @@ class nvme_index {
         }
     }
 
-    /**
-     *  @brief Builds @p directory over the @p rows + 1 prefix sums @p sums of the part @p medium
-     *      holds, streamed through @p chunk, and answers the widest row they delimit in @p widest.
-     *
-     *  @param[in] data_offset Where the part's data segment starts, which @p sums count from.
-     *  @param[in] extent Elements the column's data holds, which no sum may pass.
-     */
+    /** Builds @p directory over the @p rows + 1 prefix sums of the ragged @p column of the part
+     *  @p medium holds, streamed through @p chunk, and answers the widest row they delimit in
+     *  @p widest. No sum may pass the elements the column holds. */
     template <typename chunk_allocator_type_>
-    status_t build_directory_(file_medium_t const& medium, prefix_sums_t const& sums, std::size_t data_offset,
-                              std::size_t rows, u64_t extent, growing_buffer<u64_t, chunk_allocator_type_>& chunk,
-                              directory_t& directory, u64_t& widest) const noexcept {
+    static status_t build_row_directory_(file_medium_t const& medium, persisted_column_t const& column,
+                                         std::size_t rows, growing_buffer<u64_t, chunk_allocator_type_>& chunk,
+                                         forkunion_allocator_t allocator, directory_t& directory,
+                                         u64_t& widest) noexcept {
+        prefix_sums_t const& sums = *column.offsets;
         std::size_t const sum_bytes = dtype_bytes(sums.dtype);
-        if (sums.dtype != dtype_t::u64_k && sums.dtype != dtype_t::u32_k) return status_t::config_mismatch_k;
+        std::size_t const element_bytes = dtype_bytes(column.dtype);
+        if ((sums.dtype != dtype_t::u64_k && sums.dtype != dtype_t::u32_k) || !element_bytes)
+            return status_t::config_mismatch_k;
         if (sums.bytes.size() != (rows + 1) * sum_bytes) return status_t::malformed_k;
+        u64_t const sums_begin = sums.bytes.first;
+        u64_t const extent = column.data.size() / element_bytes;
         // Reads `count` sums from `first` on into the chunk's front, widening narrower ones back to
         // front so no sum is overwritten before it widened.
         auto read_sums = [&](std::size_t first, std::size_t count) noexcept {
             bytes_span_t const target = bytes_of(chunk.data(), count).first(count * sum_bytes);
-            if (status_t const read = medium.read_at(data_offset + sums.bytes.first + first * sum_bytes, target);
-                failed(read))
-                return read;
+            if (status_t const read = medium.read_at(sums_begin + first * sum_bytes, target); failed(read)) return read;
             if (sum_bytes == sizeof(u64_t))
                 for (std::size_t index = 0; index != count; ++index) chunk[index] = little_endian(chunk[index]);
             else
@@ -1452,199 +1417,232 @@ class nvme_index {
             }
             return st::expected<std::span<u64_t const>>(std::span<u64_t const>(chunk.data(), count));
         };
-        auto made = directory_t::make(rows + 1, universe, fill, forkunion_allocator<u64_t>(allocator_));
+        auto made = directory_t::make(rows + 1, universe, fill, forkunion_allocator<u64_t>(allocator));
         if (!made) return status_of_(made.status());
         directory = std::move(*made);
         return status_t::success_k;
     }
 
-    /** Reads the header of the part @p medium holds into @p part, vetted against this instantiation
-     *  and, unless empty, @p metric, with the directories of its ragged columns streamed through
-     *  @p chunk. */
+    /** Opens the part @p file holds as @p columns locate its rows: the directories of its ragged
+     *  columns, built through blocking reads of @p file and streamed through @p chunk, then the
+     *  file as the engines' medium. */
     template <typename chunk_allocator_type_>
-    status_t read_part_(file_medium_t const& medium, std::string_view metric,
-                        growing_buffer<u64_t, chunk_allocator_type_>& chunk, part_t& part) const noexcept {
-        growing_buffer<byte_t, forkunion_allocator_t> header_bytes {allocator_};
-        if (status_t const read = nvme_read_header(medium, header_bytes); failed(read)) return read;
-        safegraphs_name_t named;
-        auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
-            if (field.key == "metric") named = safegraphs_name_t {field.value};
-        };
-        auto const [header, header_status] = safegraphs_read_header(to_span(header_bytes), allocator_,
-                                                                    per_custom_field);
-        if (failed(header_status)) return header_status;
-        if (!metric.empty() && !named.empty() && named.view() != metric) return status_t::config_mismatch_k;
-
-        // Keys are regular, values shaped as the codec writes them, neighbors ragged or
-        // fixed-degree.
-        constexpr bool fixed_width = safegraphs_value_is_fixed<codec_t>();
-        safegraphs_column_t const& value = header.value;
-        safegraphs_column_t const& adjacency = header.neighbors;
-        if (header.key.offsets || header.key.shape != column_shape_t {scalar_shape_t {}} ||
-            !safegraphs_key_widens(header.key.dtype, safegraphs_key_dtype<key_t>()))
-            return status_t::config_mismatch_k;
-        if (value.dtype != codec_t::value_dtype_k || value.shape != safegraphs_value_shape<codec_t>() ||
-            value.offsets.has_value() == fixed_width)
-            return status_t::config_mismatch_k;
-        std::size_t const degree = std::holds_alternative<vector_shape_t>(adjacency.shape) && !adjacency.offsets
-                                       ? std::get<vector_shape_t>(adjacency.shape).columns
-                                       : 0;
-        if (adjacency.dtype != safegraphs_node_id_dtype<node_id_t>() ||
-            (adjacency.offsets ? adjacency.shape != column_shape_t {scalar_shape_t {}} : !degree))
-            return status_t::config_mismatch_k;
-        std::size_t const nodes = header.nodes();
-        if (value.nodes() != nodes || adjacency.nodes() != nodes || !header.key.row_bytes() ||
-            nodes >= (std::numeric_limits<node_id_t>::max)())
-            return status_t::malformed_k;
-
-        part.nodes = static_cast<node_id_t>(nodes);
-        part.key_row_bytes = static_cast<u32_t>(header.key.row_bytes());
-        part.key_dtype = header.key.dtype;
-        part.value_element_bytes = static_cast<u32_t>(dtype_bytes(value.dtype));
-        part.keys_begin = header.data_offset + header.key.data.first;
-        part.values_begin = header.data_offset + value.data.first;
-        part.neighbors_begin = header.data_offset + adjacency.data.first;
-        if (fixed_width) part.value_row_bytes = value.row_bytes();
-        else {
-            u64_t widest = 0;
-            if (status_t const built = build_directory_(medium, *value.offsets, header.data_offset, nodes,
-                                                        value.data.size() / part.value_element_bytes, chunk,
-                                                        part.value_starts, widest);
-                failed(built))
-                return built;
-            part.value_row_bytes = widest * part.value_element_bytes;
-        }
-        if (degree) part.connectivity = static_cast<u32_t>(degree);
-        else {
-            u64_t widest = 0;
-            if (status_t const built = build_directory_(medium, *adjacency.offsets, header.data_offset, nodes,
-                                                        adjacency.data.size() / sizeof(node_id_t), chunk,
-                                                        part.neighbor_starts, widest);
-                failed(built))
-                return built;
-            // A part whose rows hold no neighbors still seeds its walks from one landmark at least.
-            part.connectivity = static_cast<u32_t>(max_of<u64_t>(widest, 1));
-        }
-        return status_t::success_k;
-    }
-
-    /** Opens the part file at @p path: its medium for the engines, then its header and directories
-     *  through blocking reads of that medium. */
-    template <typename chunk_allocator_type_>
-    status_t open_part_(std::string_view path, std::string_view metric,
-                        growing_buffer<u64_t, chunk_allocator_type_>& chunk, medium_t& medium,
-                        part_t& part) const noexcept {
+    static status_t open_part_(file_medium_t&& file, persisted_columns_t const& columns,
+                               growing_buffer<u64_t, chunk_allocator_type_>& chunk, forkunion_allocator_t allocator,
+                               medium_t& medium, part_t& part) noexcept {
         if constexpr (!std::is_constructible_v<medium_t, file_medium_t&&>) return status_t::config_mismatch_k;
         else {
-            auto [file, open_status] = file_medium_t::open(path);
-            if (failed(open_status)) return open_status;
-            if (status_t const read = read_part_(file, metric, chunk, part); failed(read)) return read;
+            persisted_column_t const& keys = columns.keys;
+            persisted_column_t const& values = columns.values;
+            persisted_column_t const& neighbors = columns.neighbors;
+            std::size_t const key_bytes = dtype_bytes(keys.dtype);
+            std::size_t const value_element_bytes = dtype_bytes(values.dtype);
+            if (neighbors.dtype != safegraphs_node_id_dtype<node_id_t>() || !key_bytes || keys.offsets ||
+                keys.row_width != 1 || !value_element_bytes || columns.nodes >= (std::numeric_limits<node_id_t>::max)())
+                return status_t::config_mismatch_k;
+            part.nodes = static_cast<node_id_t>(columns.nodes);
+            part.key_row_bytes = static_cast<u32_t>(key_bytes);
+            part.key_dtype = keys.dtype;
+            part.value_element_bytes = static_cast<u32_t>(value_element_bytes);
+            part.keys_begin = keys.data.first;
+            part.values_begin = values.data.first;
+            part.neighbors_begin = neighbors.data.first;
+            if (!values.offsets) part.value_row_bytes = values.row_width * value_element_bytes;
+            else {
+                u64_t widest = 0;
+                if (status_t const built = build_row_directory_(file, values, columns.nodes, chunk, allocator,
+                                                                part.value_starts, widest);
+                    failed(built))
+                    return built;
+                part.value_row_bytes = widest * value_element_bytes;
+            }
+            if (!neighbors.offsets) part.connectivity = static_cast<u32_t>(neighbors.row_width);
+            else {
+                u64_t widest = 0;
+                if (status_t const built = build_row_directory_(file, neighbors, columns.nodes, chunk, allocator,
+                                                                part.neighbor_starts, widest);
+                    failed(built))
+                    return built;
+                // A part whose rows hold no neighbors still seeds its walks from one landmark at
+                // least.
+                part.connectivity = static_cast<u32_t>(max_of<u64_t>(widest, 1));
+            }
             medium = medium_t {std::move(file)};
             return status_t::success_k;
         }
     }
 
-    /** The body of @ref view, into an empty catalog: every part's path resolves on the calling
-     *  thread, then the parts open on the executor's threads, one at a time per thread. */
-    status_t view_(std::string_view checkpoint, std::span<std::string_view const> paths, std::string_view metric,
-                   executor_t& executor) noexcept {
-        if (checkpoint.empty()) return status_t::invalid_argument_k;
-        if (names_transport_id(checkpoint)) return status_t::unsupported_k;
-        std::array<byte_t, safegraphs_prefix_t::magic_k.size()> magic {};
-        {
-            auto [file, open_status] = seekable_file_t::open(checkpoint, file_mode_t::read_k, allocator_);
-            if (failed(open_status)) return open_status;
-            [[maybe_unused]] status_t const sniffed = file.read_at(0, magic);
-        }
-        // The magic makes a lone monolith, anything else a manifest naming its parts beside it.
-        growing_buffer<char, forkunion_allocator_t> names {allocator_};
-        growing_buffer<iota_view<std::size_t>, forkunion_allocator_t> entries {allocator_};
-        if (std::memcmp(magic.data(), safegraphs_prefix_t::magic_k.data(), magic.size()) == 0) {
-            if (failed(entries.push_back(iota_view<std::size_t> {0, 0}))) return status_t::bad_alloc_k;
-        }
-        else {
-            status_t kept = status_t::success_k;
-            auto per_part = [&](safegraphs_part_t entry) noexcept {
-                std::size_t const first = names.size();
-                for (char const character : entry.path)
-                    if (failed(names.push_back(character))) kept = status_t::bad_alloc_k;
-                if (failed(entries.push_back(iota_view<std::size_t> {first, names.size()})))
-                    kept = status_t::bad_alloc_k;
-            };
-            auto const [summary, summary_status] = safegraphs_read_manifest(checkpoint, allocator_, per_part);
-            if (failed(summary_status)) return summary_status;
-            if (failed(kept)) return kept;
-            if (entries.empty()) return status_t::malformed_k;
-        }
-        if (!paths.empty() && paths.size() != entries.size()) return status_t::config_mismatch_k;
-
-        // Every resolved path lands in one buffer, terminated for the OS, so the threads read them
-        // as they are.
-        std::string_view const checkpoint_name = safegraphs_basename(checkpoint);
-        std::string_view const checkpoint_directory = checkpoint.substr(0, checkpoint.size() - checkpoint_name.size());
-        growing_buffer<char, forkunion_allocator_t> resolved {allocator_};
-        growing_buffer<char, forkunion_allocator_t> resolved_paths {allocator_};
-        growing_buffer<iota_view<std::size_t>, forkunion_allocator_t> resolved_entries {allocator_};
-        if (failed(resolved_entries.reserve_exactly(entries.size()))) return status_t::bad_alloc_k;
-        for (std::size_t part = 0; part != entries.size(); ++part) {
-            std::string_view const relative = entries[part].empty()
-                                                  ? checkpoint_name
-                                                  : std::string_view {names.data() + entries[part].first,
-                                                                      entries[part].size()};
-            status_t joined = status_t::success_k;
-            if (paths.empty())
-                joined = entries[part].empty() ? nvme_join_path_(resolved, {}, checkpoint)
-                                               : nvme_join_path_(resolved, checkpoint_directory, relative);
-            else {
-                // The directory test runs on the terminated copy, which the OS reads.
-                joined = nvme_join_path_(resolved, {}, paths[part]);
-                if (succeeded(joined) && nvme_is_directory_(resolved.data()))
-                    joined = nvme_join_path_(resolved, paths[part], safegraphs_basename(relative));
-            }
-            if (failed(joined)) return joined;
-            std::size_t const first = resolved_paths.size();
-            for (char const character : resolved)
-                if (failed(resolved_paths.push_back(character))) return status_t::bad_alloc_k;
-            resolved_entries.push_back_reserved(iota_view<std::size_t> {first, resolved_paths.size() - 1});
-        }
-
-        if (failed(media_.resize(entries.size())) || failed(parts_.resize(entries.size())))
-            return status_t::bad_alloc_k;
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return claim_status;
-        if (status_t const reserved = executor.reserve(scan_chunk_bytes_k + default_alignment_k, 0, 0);
-            failed(reserved))
-            return reserved;
-        alignas(default_alignment_k) std::size_t cursor = 0;
-        status_t failure = status_t::success_k;
-        auto open_parts = [&](std::size_t thread, std::size_t) noexcept {
-            growing_buffer<u64_t, scratch_allocator_t> chunk {scratch_allocator_t {executor.arena(thread)}};
-            status_t opened = chunk.resize_uninitialized(scan_chunk_bytes_k / sizeof(u64_t));
-            while (succeeded(opened) && succeeded(std::atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) {
-                std::size_t const part = std::atomic_ref<std::size_t>(cursor).fetch_add(1, std::memory_order_relaxed);
-                if (part >= parts_.size()) return;
-                std::string_view const path {resolved_paths.data() + resolved_entries[part].first,
-                                             resolved_entries[part].size()};
-                opened = open_part_(path, metric, chunk, media_[part], parts_[part]);
-            }
-            status_t unset = status_t::success_k;
-            if (failed(opened))
-                std::atomic_ref<status_t>(failure).compare_exchange_strong(unset, opened, std::memory_order_relaxed,
-                                                                           std::memory_order_relaxed);
-        };
-        if (status_t const fanned = executor.for_threads(open_parts); failed(fanned)) return fanned;
-        return failure;
-    }
-
 #pragma endregion Opening
 
-    /** Every part's file, open for the engines, in part order. */
-    growing_buffer<medium_t, forkunion_allocator_t> media_;
+    /** A catalog walking the parts @p parts locates on the media @p media, in part order. */
+    nvme_parts_catalog(std::span<medium_t const> media, std::span<part_t const> parts) noexcept
+        : media_(media), parts_(parts) {}
+
+  private:
+
+    /** The media every verb walks, in part order. */
+    std::span<medium_t const> media_;
 
     /** Where every part keeps its columns and its row directories, parallel to @c media_. */
-    growing_buffer<part_t, forkunion_allocator_t> parts_;
+    std::span<part_t const> parts_;
+};
 
-    /** The host allocator behind the catalog, the directories and the paths a view resolves. */
+/**
+ *  @brief Similarity Search over one part a basic graph was saved as, on block storage, read-only.
+ *
+ *  The class is a frozen directory of one part: its medium, its columns' offsets and the
+ *  directories of its ragged columns, and nothing per node beyond those few bits a row. Every call
+ *  borrows an executor, attaches the medium to its engines for its own duration, and carves its
+ *  walks from the executor's arenas, all through a @c nvme_parts_catalog over its one part.
+ *
+ *  It stands alone as the RAM index does: any key type and either node-ID width the part was saved
+ *  with serve, and only the compiled library narrows the choice, to the 32-bit IDs its plurals
+ *  write.
+ *
+ *  @tparam codec_type_ The value codec the part was saved with, whose @c view borrows a landed row.
+ *  @tparam key_type_ The caller-visible identity, read from the part's key column.
+ *  @tparam node_id_type_ Identity within the part, as wide as the neighbor IDs it was saved with;
+ *      @c u32_t or @c u64_t.
+ *  @tparam distance_type_ The distance the metrics drain and the walks rank by.
+ *  @tparam engine_type_ The I/O engine every executor thread drives.
+ */
+template <typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t,
+          typename distance_type_ = f64_t, typename engine_type_ = default_io_engine_t,
+          typename row_kit_type_ = st::serial_row_kit_t>
+    requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
+class nvme_index {
+  public:
+
+    /** The walks every verb runs over this index's one part. */
+    using catalog_t =
+        nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, engine_type_, row_kit_type_>;
+
+    using codec_t = typename catalog_t::codec_t;
+    using key_t = typename catalog_t::key_t;
+    using distance_t = typename catalog_t::distance_t;
+    using engine_t = typename catalog_t::engine_t;
+    using executor_t = typename catalog_t::executor_t;
+    using medium_t = typename catalog_t::medium_t;
+    using arena_t = typename catalog_t::arena_t;
+    using node_id_t = typename catalog_t::node_id_t;
+    using scored_node_t = typename catalog_t::scored_node_t;
+    using scan_payload_t = typename catalog_t::scan_payload_t;
+    using walk_payload_t = typename catalog_t::walk_payload_t;
+    using search_config_t = typename catalog_t::search_config_t;
+    using search_result_t = typename catalog_t::search_result_t;
+
+    nvme_index() = delete;
+    explicit nvme_index(forkunion_allocator_t allocator) noexcept : allocator_(allocator) {}
+    nvme_index(nvme_index&&) noexcept = default;
+    nvme_index& operator=(nvme_index&&) noexcept = default;
+    nvme_index(nvme_index const&) = delete;
+    nvme_index& operator=(nvme_index const&) = delete;
+
+    /**
+     *  @brief Opens the part file at @p path, a file or a device, as @p columns locate its rows,
+     *      with the directories of its ragged columns built through blocking reads. A failed
+     *      opening leaves the index empty.
+     *
+     *  @param[in] columns The part's columns, as any producer of its format fills them, such as
+     *      @c safegraphs_persisted_columns over a SafeGraphs monolith's header.
+     */
+    status_t open(std::string_view path, persisted_columns_t const& columns) noexcept {
+        medium_ = medium_t {};
+        part_ = part_t {};
+        auto [file, open_status] = file_medium_t::open(path);
+        if (failed(open_status)) return open_status;
+        growing_buffer<u64_t, forkunion_allocator_t> chunk {allocator_};
+        status_t opened = chunk.resize_uninitialized(catalog_t::scan_chunk_bytes_k / sizeof(u64_t));
+        if (succeeded(opened))
+            opened = catalog_t::open_part_(std::move(file), columns, chunk, allocator_, medium_, part_);
+        if (failed(opened)) medium_ = medium_t {}, part_ = part_t {};
+        return opened;
+    }
+
+    /** Parts the index walks: one once opened, none before. */
+    std::size_t shards_count() const noexcept { return catalog_().parts_count(); }
+
+    /** Entries the part holds. */
+    std::size_t size() const noexcept { return catalog_().size(); }
+
+    /** Entries the index hosts, which are exactly those its part holds, since it never grows. */
+    std::size_t capacity() const noexcept { return size(); }
+
+    /** Value elements the part holds, as @ref nvme_parts_catalog::value_elements counts them. */
+    std::size_t value_elements() const noexcept { return catalog_().value_elements(); }
+
+    /** Neighbor IDs of the widest neighbors row. */
+    std::size_t connectivity() const noexcept { return catalog_().connectivity(); }
+
+    /** Bytes the index occupies: the directory and the row directories, a few bits a row. */
+    std::size_t memory_usage() const noexcept {
+        return sizeof(nvme_index) + part_.value_starts.size_bytes() + part_.neighbor_starts.size_bytes();
+    }
+
+    /** The walk breadth @p config asks for, or twice the widest neighbors row when it asks for
+     *  none. */
+    std::size_t non_zero_expansion_factor(search_config_t const& config) const noexcept {
+        return catalog_().non_zero_expansion_factor(config);
+    }
+
+    /** @ref nvme_parts_catalog::search over the part. */
+    template <typename... arguments_type_>
+    expected<search_result_t> search(arguments_type_&&... arguments) noexcept {
+        return catalog_().search(std::forward<arguments_type_>(arguments)...);
+    }
+
+    /** @ref nvme_parts_catalog::scan over the part. */
+    template <typename... arguments_type_>
+    expected<search_result_t> scan(arguments_type_&&... arguments) noexcept {
+        return catalog_().scan(std::forward<arguments_type_>(arguments)...);
+    }
+
+    /** @ref nvme_parts_catalog::scan_within over the part. */
+    template <typename... arguments_type_>
+    expected<search_result_t> scan_within(arguments_type_&&... arguments) noexcept {
+        return catalog_().scan_within(std::forward<arguments_type_>(arguments)...);
+    }
+
+    /** @ref nvme_parts_catalog::count over the part. */
+    status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) const noexcept {
+        return catalog_().count(keys, entries, executor);
+    }
+
+    /** @ref nvme_parts_catalog::contains over the part. */
+    template <typename... arguments_type_>
+    status_t contains(arguments_type_&&... arguments) const noexcept {
+        return catalog_().contains(std::forward<arguments_type_>(arguments)...);
+    }
+
+    /** @ref nvme_parts_catalog::get over the part. */
+    template <typename... arguments_type_>
+    status_t get(arguments_type_&&... arguments) const noexcept {
+        return catalog_().get(std::forward<arguments_type_>(arguments)...);
+    }
+
+    /** @ref nvme_parts_catalog::read_rows over the part. */
+    template <typename... arguments_type_>
+    status_t read_rows(arguments_type_&&... arguments) const noexcept {
+        return catalog_().read_rows(std::forward<arguments_type_>(arguments)...);
+    }
+
+  private:
+    using part_t = typename catalog_t::part_t;
+
+    /** The catalog over this index's part and medium: one once opened, none before. */
+    catalog_t catalog_() const noexcept {
+        std::size_t const opened = part_.connectivity ? 1 : 0;
+        return catalog_t {std::span<medium_t const>(&medium_, opened), std::span<part_t const>(&part_, opened)};
+    }
+
+    /** The part's file, open for the engines. */
+    medium_t medium_ {};
+
+    /** Where the part keeps its columns and its row directories; a zero connectivity until
+     *  opened. */
+    part_t part_ {};
+
+    /** The host allocator behind the row directories. */
     forkunion_allocator_t allocator_;
 };
 
