@@ -1285,8 +1285,8 @@ struct hip_traversal_context {
      *  or a walk's queries; a walk's second word counts the walks running. */
     hip_unique_ptr<u32_t, counter_allocator_t> assigned_rows_;
 
-    /** Raised by the last attend's walks at a node their value lookup had no row for, zeroed when
-     *  it was queued. */
+    /** The value-lookup miss word: raised by the last walk at a node its value lookup had no row
+     *  for, zeroed when it was queued. */
     hip_unique_ptr<u32_t, counter_allocator_t> missed_;
 
     /** Borrowed from the stream's page-locked landings, so the copies @ref record queues into it

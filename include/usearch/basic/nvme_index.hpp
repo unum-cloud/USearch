@@ -1435,7 +1435,7 @@ class nvme_parts_catalog {
             persisted_column_t const& keys = columns.keys;
             persisted_column_t const& values = columns.values;
             persisted_column_t const& neighbors = columns.neighbors;
-            std::size_t const key_bytes = dtype_bytes(keys.dtype);
+            std::size_t const key_bytes = keys.row_bytes;
             std::size_t const value_element_bytes = dtype_bytes(values.dtype);
             if (neighbors.dtype != safegraphs_node_id_dtype<node_id_t>() || !key_bytes || keys.offsets ||
                 keys.row_width != 1 || !value_element_bytes || columns.nodes >= (std::numeric_limits<node_id_t>::max)())
@@ -1447,7 +1447,7 @@ class nvme_parts_catalog {
             part.keys_begin = keys.data.first;
             part.values_begin = values.data.first;
             part.neighbors_begin = neighbors.data.first;
-            if (!values.offsets) part.value_row_bytes = values.row_width * value_element_bytes;
+            if (!values.offsets) part.value_row_bytes = values.row_bytes;
             else {
                 u64_t widest = 0;
                 if (status_t const built = build_row_directory_(file, values, columns.nodes, chunk, allocator,
@@ -1544,7 +1544,7 @@ class nvme_index {
      *      opening leaves the index empty.
      *
      *  @param[in] columns The part's columns, as any producer of its format fills them, such as
-     *      @c safegraphs_persisted_columns over a SafeGraphs monolith's header.
+     *      @c safegraphs_persisted_part over a SafeGraphs monolith's header.
      */
     status_t open(std::string_view path, persisted_columns_t const& columns) noexcept {
         medium_ = medium_t {};

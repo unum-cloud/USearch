@@ -128,6 +128,54 @@ struct vram_refine_t {
     u32_t* gained = nullptr;
 };
 
+/** One shard of a fold bin as the bin's storage reads it on every device of the bin: its vectors
+ *  and norms, its fold rows, and the first row and the rows it takes in the bin's dense ID
+ *  space, which the target shard lands it at. */
+struct vram_bin_shard_t {
+    byte_t* vectors = nullptr;
+    byte_t* norms = nullptr;
+    u32_t* neighbors = nullptr;
+    u32_t first = 0;
+    u32_t rows = 0;
+};
+static_assert(sizeof(vram_bin_shard_t) == 32, "Every vector a fold scores reads its shard's entry");
+
+/** One shard of a fold bin as its fold reads it: its live neighbors, the picks its rows froze for
+ *  the merge, the chain links beside them, @b [rows,connectivity] each, and the heads of the
+ *  chains its picks thread onto every other shard's rows, one run per other shard in bin order. */
+struct vram_fold_shard_t {
+    u32_t const* live = nullptr;
+    u32_t* picks = nullptr;
+    u32_t* links = nullptr;
+    u32_t* heads = nullptr;
+};
+static_assert(sizeof(vram_fold_shard_t) == 32, "Every row a fold re-selects or merges reads its shard's entry");
+
+/** Which phase of a fold a launch runs: the re-selection of each row, or the merge of the picks
+ *  the bin's other shards made of it. */
+enum class vram_fold_phase_t : u32_t { reselect_k, merge_k };
+
+/** One fold launch over the rows of one shard of a bin, mirroring the shared fold view: the
+ *  geometry of the shards' storage, the bin's tables on the launching device, the launching
+ *  shard's place, the bits a bin ID keeps its row in, and the cross results each row holds from
+ *  every other shard. */
+struct vram_fold_t {
+    vram_flat_storage_t storage;
+    vram_bin_shard_t const* bin_shards = nullptr;
+    vram_fold_shard_t const* fold_shards = nullptr;
+    u32_t shards_count = 0;
+    u32_t shard = 0;
+    u32_t row_bits = 0;
+    u32_t cross_count = 0;
+    u32_t scratch_bytes_per_warp = 0;
+    u32_t selection_rows = 0;
+    vram_fold_phase_t phase = vram_fold_phase_t::reselect_k;
+    byte_t* arena = nullptr;
+    gpu_arena_shape_t arena_shape {};
+    vram_telemetry_block_t* telemetry = nullptr;
+    u32_t* assigned_rows = nullptr;
+};
+
 /** A search's landing, mirroring the shared search sink. */
 struct vram_search_sink_t {
     node_id_t* result_ids = nullptr;
@@ -236,6 +284,7 @@ struct vram_arguments_t {
     vram_build_t build;
     vram_search_t search;
     vram_refine_t refine;
+    vram_fold_t fold;
     vram_search_sink_t search_sink;
     vram_multiply_sink_t multiply_sink;
     vram_rescoring_t rescoring;
@@ -812,6 +861,20 @@ struct vram_shard_core {
 
         /** Reverse-refine distance work, folded the same way, so always zero. */
         std::size_t computed_distances_in_reverse_refines = 0;
+
+        /** Folds another shard's or launch's spend in; the IDs and the size stay this batch's. */
+        insert_result_t& operator+=(insert_result_t const& other) noexcept {
+            visited_members += other.visited_members;
+            computed_distances += other.computed_distances;
+            restarts += other.restarts;
+            unlinked_neighbors += other.unlinked_neighbors;
+            tail_compactions += other.tail_compactions;
+            tail_dropped += other.tail_dropped;
+            visited_saturations += other.visited_saturations;
+            computed_distances_in_refines += other.computed_distances_in_refines;
+            computed_distances_in_reverse_refines += other.computed_distances_in_reverse_refines;
+            return *this;
+        }
     };
 
     /** Inserts @p new_rows under the contiguous ID range @b [first_id,first_id+rows) claimed from
@@ -1092,7 +1155,8 @@ struct vram_shard_core {
             case phase_t::percolate_k:
                 // Every row is claimed, and only those with a slot within two hops the last merge
                 // filled percolate.
-                status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config, vram_kernel_t::percolate_k,
+                status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config,
+                                                        vram_dense_kernel_t::percolate_k,
                                                         {0, static_cast<node_id_t>(index_->size())}, {});
                 if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), 0, stream);
                 break;
@@ -1404,9 +1468,6 @@ struct vram_shard_core {
         /** Where the rows land, vetted against the watermark at planning. */
         columns_t columns {};
 
-        /** What an ID under the watermark moves by - the row this shard starts at. */
-        node_id_t id_shift = 0;
-
         /** The stream every device-to-host copy queues on. */
         stream_handle_t stream = nullptr;
 
@@ -1422,17 +1483,16 @@ struct vram_shard_core {
 
         save_plan_t() noexcept = default;
 
-        /** The index snapshotted into @p columns on @p stream under the watermark at @p visible,
-         *  its IDs shifted by @p id_shift; only @ref plan_save calls it, with the index's device
-         *  current, where the events are born, and sizes the bounce afterwards. */
-        save_plan_t(vram_shard_core const& index, columns_t columns, node_id_t id_shift,
-                    typename executor_t::stream_t const& stream, node_id_t visible) noexcept
-            : columns(columns), id_shift(id_shift), stream(stream.handle),
-              bounce(typename vendor_t::pinned_allocator_t {stream}), visible(visible), index_(&index) {}
+        /** The index snapshotted into @p columns on @p stream under the watermark at @p visible;
+         *  only @ref plan_save calls it, with the index's device current, where the events are
+         *  born, and sizes the bounce afterwards. */
+        save_plan_t(vram_shard_core const& index, columns_t columns, typename executor_t::stream_t const& stream,
+                    node_id_t visible) noexcept
+            : columns(columns), stream(stream.handle), bounce(typename vendor_t::pinned_allocator_t {stream}),
+              visible(visible), index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
-            : columns(other.columns), id_shift(other.id_shift), stream(other.stream), bounce(std::move(other.bounce)),
-              visible(other.visible), covered(other.covered),
-              crossed_ {std::move(other.crossed_[0]), std::move(other.crossed_[1])},
+            : columns(other.columns), stream(other.stream), bounce(std::move(other.bounce)), visible(other.visible),
+              covered(other.covered), crossed_ {std::move(other.crossed_[0]), std::move(other.crossed_[1])},
               pending_(std::exchange(other.pending_, {})), pending_half_(other.pending_half_),
               index_(std::exchange(other.index_, nullptr)) {}
         save_plan_t& operator=(save_plan_t&&) = delete;
@@ -1489,10 +1549,10 @@ struct vram_shard_core {
         /**
          *  @brief Copies step @p step 's rows off the device into the plan's own columns.
          *
-         *  The vectors go with the fragment padding stripped, then the neighbors with every ID
-         *  under the watermark shifted by @c id_shift and every other folded to the sentinel, then
-         *  the norms where the columns take them. The step's last half is still copying when it
-         *  returns, and lands with the next step or in @c finish.
+         *  The vectors go with the fragment padding stripped, then the neighbors with every ID past
+         *  the watermark folded to the sentinel, then the norms where the columns take them. The
+         *  step's last half is still copying when it returns, and lands with the next step or in
+         *  @c finish.
          *
          *  @param[in] step The step to copy, as @ref steps hands them out.
          *  @param[inout] scratch Unused here, since the bounce is already host memory; it rides
@@ -1583,8 +1643,7 @@ struct vram_shard_core {
 
             std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors),
                                                rows.size() * connectivity};
-            for (node_id_t& neighbor : landed)
-                neighbor = neighbor < visible ? static_cast<node_id_t>(neighbor + id_shift) : node_id_unknown_k;
+            for (node_id_t& neighbor : landed) neighbor = neighbor < visible ? neighbor : node_id_unknown_k;
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(neighbors_rows, std::as_bytes(landed));
             standard_atomic_ref<std::size_t> {covered}.fetch_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
@@ -1615,11 +1674,9 @@ struct vram_shard_core {
      *  @param[out] columns Where the rows land, sized from @ref saved_shape.
      *  @param[in] synchronization The contract the caller certifies.
      *  @param[in] stream The stream every copy queues on.
-     *  @param[in] id_shift What an ID under the watermark moves by - the row this shard starts at.
      */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
-                                    typename executor_t::stream_t const& stream,
-                                    node_id_t id_shift = 0) const noexcept {
+                                    typename executor_t::stream_t const& stream) const noexcept {
         if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         std::size_t const rows = size();
@@ -1628,7 +1685,7 @@ struct vram_shard_core {
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
             return {{}, status_t::config_mismatch_k};
         if (failed(vendor_t::select(device_.ordinal))) return {{}, status_t::device_error_k};
-        save_plan_t plan {*this, columns, id_shift, stream, static_cast<node_id_t>(rows)};
+        save_plan_t plan {*this, columns, stream, static_cast<node_id_t>(rows)};
         std::size_t const bounce_bytes = 2 * plan.half_rows() *
                                          (packed_row_bytes() + connectivity() * sizeof(node_id_t) + sizeof(norms_t));
         if (bounce_bytes && failed(plan.bounce.resize_uninitialized(bounce_bytes))) return {{}, status_t::bad_alloc_k};
@@ -1865,17 +1922,18 @@ struct vram_shard_core {
             int const device = index_->device_specs().ordinal;
             if (failed(vendor_t::select(device))) return status_t::device_error_k;
             iota_view<node_id_t> const range = step.index_rows;
+            bool const normed = index_->stores_norms() && source.stores_norms();
             if (range.empty() || range.size() != step.source_rows.size() || range.first < base ||
                 range.bound > base + rows || step.source_rows.bound > source.size() ||
                 source.dimensions() != index_->dimensions() || source.connectivity() != index_->connectivity() ||
-                !source.vectors_matrix_.shared_with(device) || !source.neighbors_matrix_.shared_with(device))
+                !source.vectors_matrix_.shared_with(device) || !source.neighbors_matrix_.shared_with(device) ||
+                (normed && !source.norms_column_.shared_with(device)))
                 return status_t::config_mismatch_k;
             node_id_t const shift = range.first - step.source_rows.first + source_range.first;
             if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
             std::size_t const row_bytes = index_->row_bytes();
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(node_id_t);
             std::size_t const count = range.size(), into = range.first, from = step.source_rows.first;
-            bool const normed = index_->stores_norms() && source.stores_norms();
             if (failed(vendor_t::copy(index_->vectors_rows_() + into * row_bytes,
                                       source.vectors_rows_() + from * row_bytes, count * row_bytes, stream)) ||
                 failed(vendor_t::copy(index_->neighbors_matrix_.base() + into * neighbors_row_bytes,
@@ -2507,9 +2565,9 @@ struct vram_shard_core {
         arguments.graph.first_id = static_cast<u32_t>(first_row);
         arguments.graph.rows_count = static_cast<u32_t>(rows);
         return kernels_.launch_(
-            vram_kernel_t::derive_norms_k, 0,
-            device_.multiprocessor_count * kernels_type_::resident_blocks_(vram_kernel_t::derive_norms_k, 0), 0, stream,
-            arguments);
+            vram_dense_kernel_t::derive_norms_k, 0,
+            device_.multiprocessor_count * kernels_type_::resident_blocks_(vram_dense_kernel_t::derive_norms_k, 0), 0,
+            stream, arguments);
     }
 
     /** Rebases rows @p rows of the neighbors matrix from @p source_range onto the IDs from @p shift
@@ -2540,7 +2598,7 @@ struct vram_shard_core {
         arguments.attend.rows = rows;
         arguments.attend.columns = columns;
         arguments.attend.shards = shards;
-        return kernels_.launch_(vram_kernel_t::merge_attention_k, 0,
+        return kernels_.launch_(vram_dense_kernel_t::merge_attention_k, 0,
                                 divide_round_up<u32_t>(rows, vram_warps_per_block_k), 0, stream, arguments);
     }
 
@@ -2557,7 +2615,7 @@ struct vram_shard_core {
         arguments.matches.ranking = ranking;
         arguments.matches.walked = walked;
         arguments.matches.queries_count = queries_count;
-        return kernels_.launch_(vram_kernel_t::resolve_matches_k, 0,
+        return kernels_.launch_(vram_dense_kernel_t::resolve_matches_k, 0,
                                 divide_round_up<u32_t>(queries_count, vram_warps_per_block_k), 0, stream, arguments);
     }
 
@@ -2572,7 +2630,7 @@ struct vram_shard_core {
         arguments.matches.block_bytes = block_bytes;
         arguments.matches.queries_count = queries_count;
         arguments.matches.shards = shards;
-        return kernels_.launch_(vram_kernel_t::merge_matches_k, 0,
+        return kernels_.launch_(vram_dense_kernel_t::merge_matches_k, 0,
                                 divide_round_up<u32_t>(queries_count, vram_warps_per_block_k), 0, stream, arguments);
     }
 
@@ -2591,8 +2649,8 @@ struct vram_shard_core {
         rmscast.y_stride = row_bytes();
         rmscast.epsilon = std::numeric_limits<f32_t>::min();
         u32_t const blocks = static_cast<u32_t>(min_of<std::size_t>(
-            rows, device_.multiprocessor_count * kernels_type_::resident_blocks_(vram_kernel_t::rmscast_k, 0)));
-        return kernels_.launch_(vram_kernel_t::rmscast_k, 0, blocks, 0, stream, arguments);
+            rows, device_.multiprocessor_count * kernels_type_::resident_blocks_(vram_dense_kernel_t::rmscast_k, 0)));
+        return kernels_.launch_(vram_dense_kernel_t::rmscast_k, 0, blocks, 0, stream, arguments);
     }
 
 #pragma endregion Launches

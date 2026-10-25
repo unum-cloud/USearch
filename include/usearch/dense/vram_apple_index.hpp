@@ -124,37 +124,47 @@ char const* metal_source() noexcept {
     return source;
 }
 
-/** One exported kernel: the kernel and its register rung, zero where it keeps no ladder or walks
- *  the arena frontier. */
-struct metal_rung_t {
-    vram_kernel_t kernel;
+/** One exported kernel of @p kernel_enum_type_: the kernel and its register rung, zero where it
+ *  keeps no ladder or walks the arena frontier. */
+template <typename kernel_enum_type_>
+struct metal_rung {
+    kernel_enum_type_ kernel;
     u32_t slots;
 };
 
-/** Every instantiation @c vram_apple_index.metal exports, which the host builds a pipeline for at
- *  the first @c reserve. */
-inline constexpr metal_rung_t metal_rungs[] = {
-    {vram_kernel_t::insert_k, 0},  {vram_kernel_t::insert_k, 2},       {vram_kernel_t::insert_k, 4},
-    {vram_kernel_t::insert_k, 8},  {vram_kernel_t::insert_k, 16},      {vram_kernel_t::back_link_k, 0},
-    {vram_kernel_t::refine_k, 0},  {vram_kernel_t::refine_k, 2},       {vram_kernel_t::refine_k, 4},
-    {vram_kernel_t::refine_k, 8},  {vram_kernel_t::refine_k, 16},      {vram_kernel_t::search_k, 0},
-    {vram_kernel_t::search_k, 2},  {vram_kernel_t::search_k, 4},       {vram_kernel_t::search_k, 8},
-    {vram_kernel_t::search_k, 16}, {vram_kernel_t::derive_norms_k, 0},
+/** Every instantiation of a shared walk @c vram_apple_index.metal exports, which the host builds a
+ *  pipeline for at the first @c reserve. */
+inline constexpr metal_rung<vram_kernel_t> metal_rungs[] = {
+    {vram_kernel_t::insert_k, 0},  {vram_kernel_t::insert_k, 2},  {vram_kernel_t::insert_k, 4},
+    {vram_kernel_t::insert_k, 8},  {vram_kernel_t::insert_k, 16}, {vram_kernel_t::back_link_k, 0},
+    {vram_kernel_t::refine_k, 0},  {vram_kernel_t::refine_k, 2},  {vram_kernel_t::refine_k, 4},
+    {vram_kernel_t::refine_k, 8},  {vram_kernel_t::refine_k, 16}, {vram_kernel_t::search_k, 0},
+    {vram_kernel_t::search_k, 2},  {vram_kernel_t::search_k, 4},  {vram_kernel_t::search_k, 8},
+    {vram_kernel_t::search_k, 16},
+};
+
+/** Every dense-only instantiation @c vram_apple_index.metal exports, built beside the shared
+ *  ones. */
+inline constexpr metal_rung<vram_dense_kernel_t> metal_dense_rungs[] = {
+    {vram_dense_kernel_t::derive_norms_k, 0},
 };
 
 /** Spells the @c host_name @c vram_apple_index.metal exports @p rung under: the kernel's name, then
  *  the candidate slots of a walking kernel's instantiation. */
-inline void metal_kernel_symbol(vram_kernel_symbol_t& symbol, metal_rung_t rung) noexcept {
+inline void metal_kernel_symbol(vram_kernel_symbol_t& symbol, metal_rung<vram_kernel_t> rung) noexcept {
     symbol = {};
     switch (rung.kernel) {
     case vram_kernel_t::insert_k: symbol.append("metal_insert_kernel_"); break;
     case vram_kernel_t::refine_k: symbol.append("metal_refine_kernel_"); break;
     case vram_kernel_t::search_k: symbol.append("metal_search_kernel_"); break;
     case vram_kernel_t::back_link_k: symbol.append("metal_back_link_kernel"); return;
-    case vram_kernel_t::derive_norms_k: symbol.append("metal_derive_norms_kernel"); return;
     default: return;
     }
     symbol.append_value(rung.slots);
+}
+inline void metal_kernel_symbol(vram_kernel_symbol_t& symbol, metal_rung<vram_dense_kernel_t> rung) noexcept {
+    symbol = {};
+    if (rung.kernel == vram_dense_kernel_t::derive_norms_k) symbol.append("metal_derive_norms_kernel");
 }
 
 /** What a search launch lands: ranked distances, or every scored pair of a product. */
@@ -785,15 +795,14 @@ struct vram_apple_index {
      *  the storage. */
     struct [[nodiscard]] save_plan_t {
         columns_t columns {};
-        node_id_t id_shift = 0;
         node_id_t visible = 0;
         std::size_t covered = 0;
 
         save_plan_t() noexcept = default;
-        save_plan_t(vram_apple_index& index, columns_t columns, node_id_t id_shift, node_id_t visible) noexcept
-            : columns(columns), id_shift(id_shift), visible(visible), index_(&index) {}
+        save_plan_t(vram_apple_index& index, columns_t columns, node_id_t visible) noexcept
+            : columns(columns), visible(visible), index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
-            : columns(other.columns), id_shift(other.id_shift), visible(other.visible), covered(other.covered),
+            : columns(other.columns), visible(other.visible), covered(other.covered),
               index_(std::exchange(other.index_, nullptr)) {}
         save_plan_t& operator=(save_plan_t&&) = delete;
         save_plan_t(save_plan_t const&) = delete;
@@ -823,9 +832,8 @@ struct vram_apple_index {
             return min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k));
         }
 
-        /** Copies the step's rows out of the storage: vectors unpadded, neighbors rebased onto
-         *  @c id_shift with every ID past the watermark folded to the sentinel, and norms where the
-         *  columns take them. */
+        /** Copies the step's rows out of the storage: vectors unpadded, neighbors with every ID
+         *  past the watermark folded to the sentinel, and norms where the columns take them. */
         status_t save(step_t const& step, nk::matrix_span<node_id_t>) noexcept {
             if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const rows = step.index_rows;
@@ -849,8 +857,7 @@ struct vram_apple_index {
             node_id_t const* const source = index_->neighbor_rows_() + rows.first * connectivity;
             node_id_t* const landed = reinterpret_cast<node_id_t*>(neighbors_rows.data());
             for (std::size_t slot = 0; slot != rows.size() * connectivity; ++slot)
-                landed[slot] = source[slot] < visible ? static_cast<node_id_t>(source[slot] + id_shift)
-                                                      : node_id_unknown_k;
+                landed[slot] = source[slot] < visible ? source[slot] : node_id_unknown_k;
             standard_atomic_ref<std::size_t> {covered}.fetch_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
@@ -870,8 +877,7 @@ struct vram_apple_index {
 
     /** Opens a save into @p columns; @c concurrent_k refuses, since the storage cannot be probed
      *  for settlement. */
-    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
-                                    node_id_t id_shift = 0) noexcept {
+    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization) noexcept {
         if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
         if (!dimensions_) return {{}, status_t::uninitialized_k};
         std::size_t const rows = size();
@@ -879,7 +885,7 @@ struct vram_apple_index {
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
             return {{}, status_t::config_mismatch_k};
-        return {save_plan_t {*this, columns, id_shift, static_cast<node_id_t>(rows)}, status_t::success_k};
+        return {save_plan_t {*this, columns, static_cast<node_id_t>(rows)}, status_t::success_k};
     }
 
     /** Serializes every row under the watermark into @p columns on the calling thread. */
@@ -1211,7 +1217,8 @@ struct vram_apple_index {
      *  register use bounds, since a threadgroup runs on one core and Metal reports no occupancy;
      *  every grid and the arena behind it are sized by it, as CUDA's launch bounds size its. Zero
      *  before the first @c reserve. */
-    u32_t resident_blocks_(vram_kernel_t kernel, u32_t slots) const noexcept {
+    template <typename kernel_enum_type_>
+    u32_t resident_blocks_(kernel_enum_type_ kernel, u32_t slots) const noexcept {
         u32_t const threads = threadgroup_threads_();
         return threads ? pipeline_(kernel, slots).max_threads / threads : 0;
     }
@@ -1302,6 +1309,9 @@ struct vram_apple_index {
     metal_pipeline_state_t pipeline_(vram_kernel_t kernel, u32_t candidate_slots) const noexcept {
         return pipelines_[static_cast<u32_t>(kernel)][gpu_rung_index(candidate_slots)];
     }
+    metal_pipeline_state_t pipeline_(vram_dense_kernel_t kernel, u32_t candidate_slots) const noexcept {
+        return dense_pipelines_[static_cast<u32_t>(kernel)][gpu_rung_index(candidate_slots)];
+    }
 
     /** Builds every pipeline this dtype's kernels need, once at the first @c reserve, so no launch
      *  waits on the device's registry, the arena frontier's rung included; a pipeline too
@@ -1311,12 +1321,19 @@ struct vram_apple_index {
         if (!context) return status_t::device_error_k;
         char const* const source = metal_source<vector_dtype_, capability_>();
         vram_kernel_symbol_t symbol;
-        for (metal_rung_t const rung : metal_rungs) {
+        for (metal_rung<vram_kernel_t> const rung : metal_rungs) {
             metal_kernel_symbol(symbol, rung);
             auto const [state, status] = context->pipeline(source, symbol.text);
             if (failed(status)) return status;
             if (state.max_threads < metal_simdgroups_k * context->wave_lanes) return status_t::unsupported_k;
             pipelines_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)] = state;
+        }
+        for (metal_rung<vram_dense_kernel_t> const rung : metal_dense_rungs) {
+            metal_kernel_symbol(symbol, rung);
+            auto const [state, status] = context->pipeline(source, symbol.text);
+            if (failed(status)) return status;
+            if (state.max_threads < metal_simdgroups_k * context->wave_lanes) return status_t::unsupported_k;
+            dense_pipelines_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)] = state;
         }
         return status_t::success_k;
     }
@@ -1447,13 +1464,13 @@ struct vram_apple_index {
         metal_context_t* const context = metal_context(device_.ordinal);
         if (!context) return status_t::device_error_k;
         std::shared_lock storage {storage_};
-        metal_launch_t launch {context->queue, pipeline_(vram_kernel_t::derive_norms_k, 0).pipeline};
+        metal_launch_t launch {context->queue, pipeline_(vram_dense_kernel_t::derive_norms_k, 0).pipeline};
         if (!launch) return status_t::device_error_k;
         launch.bind_bytes(&arguments, sizeof(arguments), metal_arguments_buffer_k);
         launch.bind(vectors_matrix_, metal_vectors_buffer_k);
         launch.bind(norms_column_, metal_norms_buffer_k);
         if (status_t const submitted = launch.submit(
-                walk_blocks_(rows, resident_blocks_(vram_kernel_t::derive_norms_k, 0)), threadgroup_threads_());
+                walk_blocks_(rows, resident_blocks_(vram_dense_kernel_t::derive_norms_k, 0)), threadgroup_threads_());
             failed(submitted))
             return submitted;
         return launch.wait();
@@ -2032,8 +2049,11 @@ struct vram_apple_index {
      *  or refine. */
     metal_buffer_t counters_;
 
-    /** Every kernel's pipeline per candidate rung, owned by the device's registry. */
+    /** Every shared and every dense kernel's pipeline per candidate rung, owned by the device's
+     *  registry. */
     metal_pipeline_state_t pipelines_[static_cast<u32_t>(vram_kernel_t::count_k)][gpu_rungs_per_kernel_k] = {};
+    metal_pipeline_state_t dense_pipelines_[static_cast<u32_t>(vram_dense_kernel_t::count_k)][gpu_rungs_per_kernel_k] =
+        {};
 
     /** Shared by every walk while its command buffer runs, taken alone by growth. */
     std::shared_mutex storage_;

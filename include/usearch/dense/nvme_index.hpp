@@ -52,16 +52,48 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/nvme_device.hpp"       // `nvme_executor`, `file_medium_t`, `io_request_t`
-#include "usearch/utilities/nvme_walks.hpp"        // `row_walker`, `nvme_part_t`, `nvme_begin_call`
+#include "usearch/utilities/nvme_walks.hpp"        // `row_walker`, `nvme_begin_call`
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`, `sorted_buffer`, `arena_allocator`
 #include "usearch/utilities/ram_sorts.hpp"         // `network_sort`
 #include "usearch/utilities/ram_tables.hpp"        // `growing_hash_set`
-#include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_read_header`
+#include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_persisted_part`
 #include "usearch/dense/types.hpp"
 #include "usearch/dense/ram_metric.hpp"
 #include "usearch/dense/ram_index.hpp" // `filtering_fold`, `multiply_fold`
 
 namespace unum::usearch::dense {
+
+/** Where one dense part keeps its fixed-width columns, derived once from its persisted columns:
+ *  what a walk needs to address any row, and nothing per node. */
+struct nvme_part_t {
+
+    /** Rows the part holds; neighbor IDs at or past it are sentinels. */
+    u32_t nodes = 0;
+
+    /** Logical dimensions of one value row. */
+    u32_t dimensions = 0;
+
+    /** Neighbor IDs one neighbors row holds. */
+    u32_t connectivity = 0;
+
+    /** Bytes of one key row. */
+    u32_t key_row_bytes = 0;
+
+    /** The key column's dtype, which @ref safegraphs_widened_key reads each row as. */
+    dtype_t key_dtype = dtype_t::unknown_k;
+
+    /** Bytes of one value row. */
+    u32_t value_row_bytes = 0;
+
+    /** Where row zero of the key column starts, in bytes from the part's own start. */
+    u64_t keys_begin = 0;
+
+    /** Where row zero of the value column starts. */
+    u64_t values_begin = 0;
+
+    /** Where row zero of the neighbors column starts. */
+    u64_t neighbors_begin = 0;
+};
 
 #pragma region Index
 
@@ -94,6 +126,8 @@ struct nvme_index {
     friend struct nvme_indexes;
     template <typename, typename, typename>
     friend class utilities::row_walker;
+    template <typename>
+    friend struct nvme_compact_plan;
 
     using scalar_t = typename quads_kit_type_::scalar_t;
     inline static constexpr nk_dtype_t vector_dtype_k = scalar_t::dtype();
@@ -342,39 +376,42 @@ struct nvme_index {
                                allocator_type_ allocator, nvme_part_t& part) noexcept {
         growing_buffer<byte_t, allocator_type_> header_bytes {allocator};
         if (status_t const read = nvme_read_header(source, header_bytes); failed(read)) return read;
-
-        safegraphs_name_t metric;
-        auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
-            if (field.key == "metric") metric = safegraphs_name_t {field.value};
-        };
-        auto const [header, header_status] = safegraphs_read_header(to_span(header_bytes), allocator, per_custom_field);
-        if (failed(header_status)) return header_status;
-        if (header.key.offsets || header.value.offsets || header.neighbors.offsets) return status_t::config_mismatch_k;
-        if (header.value.dtype != dtype_of(scalar_t::dtype()) || header.neighbors.dtype != dtype_t::u32_k ||
-            header.key.shape != column_shape_t {scalar_shape_t {}})
-            return status_t::config_mismatch_k;
-        if (key_dtype != dtype_t::unknown_k && !safegraphs_key_widens(header.key.dtype, key_dtype))
-            return status_t::config_mismatch_k;
+        auto const [persisted, persisted_status] = safegraphs_persisted_part(to_span(header_bytes), allocator);
+        if (failed(persisted_status)) return persisted_status;
+        safegraphs_name_t const& metric = persisted.metric;
         nk_kernel_kind_t const named = metric.empty() ? kernel
                                                       : nk_kernel_named(metric.characters, metric.view().size());
         if (kernel != nk_kernel_unknown_k && named != kernel) return status_t::config_mismatch_k;
-        std::size_t const nodes = header.nodes();
-        std::size_t const dimensions = regular_width(header.value.shape).value_or(0);
-        std::size_t const connectivity = regular_width(header.neighbors.shape).value_or(0);
-        if (header.value.nodes() != nodes || header.neighbors.nodes() != nodes || !dimensions || !connectivity ||
-            !header.key.row_bytes() || nodes >= node_id_unknown_k)
-            return status_t::malformed_k;
-
+        if (status_t const derived = part_of_columns_(persisted.columns, key_dtype, part); failed(derived))
+            return derived;
         kernel = named;
-        part.nodes = static_cast<u32_t>(nodes);
-        part.dimensions = static_cast<u32_t>(dimensions);
-        part.connectivity = static_cast<u32_t>(connectivity);
-        part.key_row_bytes = static_cast<u32_t>(header.key.row_bytes());
-        part.key_dtype = header.key.dtype;
-        part.value_row_bytes = static_cast<u32_t>(header.value.row_bytes());
-        part.keys_begin = header.data_offset + header.key.data.first;
-        part.values_begin = header.data_offset + header.value.data.first;
-        part.neighbors_begin = header.data_offset + header.neighbors.data.first;
+        return status_t::success_k;
+    }
+
+    /** Derives @p part from the persisted @p columns of a dense part: values of this index's scalar
+     *  in fixed rows, @c u32 neighbor IDs of a fixed degree, and one key per row, which must widen
+     *  into @p key_dtype unless it is @c unknown_k. */
+    static status_t part_of_columns_(persisted_columns_t const& columns, dtype_t key_dtype,
+                                     nvme_part_t& part) noexcept {
+        persisted_column_t const& keys = columns.keys;
+        persisted_column_t const& values = columns.values;
+        persisted_column_t const& neighbors = columns.neighbors;
+        if (keys.offsets || values.offsets || neighbors.offsets || keys.row_width != 1 || !keys.row_bytes ||
+            values.dtype != dtype_of(scalar_t::dtype()) || neighbors.dtype != dtype_t::u32_k)
+            return status_t::config_mismatch_k;
+        if (key_dtype != dtype_t::unknown_k && !safegraphs_key_widens(keys.dtype, key_dtype))
+            return status_t::config_mismatch_k;
+        if (!values.row_width || !neighbors.row_width || columns.nodes >= node_id_unknown_k)
+            return status_t::malformed_k;
+        part.nodes = static_cast<u32_t>(columns.nodes);
+        part.dimensions = static_cast<u32_t>(values.row_width);
+        part.connectivity = static_cast<u32_t>(neighbors.row_width);
+        part.key_row_bytes = static_cast<u32_t>(keys.row_bytes);
+        part.key_dtype = keys.dtype;
+        part.value_row_bytes = static_cast<u32_t>(values.row_bytes);
+        part.keys_begin = keys.data.first;
+        part.values_begin = values.data.first;
+        part.neighbors_begin = neighbors.data.first;
         return status_t::success_k;
     }
 

@@ -31,7 +31,7 @@
 #include "usearch/utilities/ram_device.hpp"         // `forkunion_allocator_t` - the host columns' placement
 #include "usearch/utilities/vram_nvidia_device.hpp" // `cuda_executor_t`, `cuda_vendor_t`
 #include "usearch/utilities/ram_shards.hpp"         // `shard_set` - the shard table
-#include "usearch/utilities/vram_shard_fanout.hpp"  // `dense::vram_shard_fanout` - the contexts & pairing
+#include "usearch/utilities/vram_shards.hpp"        // `vram_shard_fanout` - the contexts & pairing
 #include "usearch/basic/vram_nvidia_index.hpp"
 #include "usearch/basic/shard_checkpoints.hpp" // `save_shards`, `load_shards` - the checkpoints
 
@@ -83,7 +83,7 @@ struct vram_nvidia_indexes {
     using executor_t = cuda_executor_t;
 
   private:
-    using fanout_t = dense::vram_shard_fanout<shards_t, cuda_vendor_t>;
+    using fanout_t = utilities::vram_shard_fanout<shards_t, cuda_vendor_t>;
     using traversals_t = typename fanout_t::traversals_t;
     using shard_insert_plan_t = typename index_t::insert_plan_t;
 
@@ -117,7 +117,7 @@ struct vram_nvidia_indexes {
     }
 
     /** Entries across every shard: the watermarks of one consistent snapshot, summed. */
-    std::size_t size() const noexcept { return shards_.rows(); }
+    std::size_t size() const noexcept { return shards_.entries(); }
 
     /** Shards in the index, every shard generation's, in placement order. */
     std::size_t shards_count() const noexcept { return shards_.size(); }
@@ -150,7 +150,7 @@ struct vram_nvidia_indexes {
      */
     status_t clear() noexcept {
         if (status_t const closed = shards_.close(); failed(closed)) return closed;
-        if (shards_.rows()) {
+        if (shards_.entries()) {
             if (status_t const opened = shards_.open_shard_generation_past_seal_(
                     shards_.open_shard_generation(),
                     [this](shard_t const& like) noexcept { return build_shard_(like); });
@@ -330,15 +330,15 @@ struct vram_nvidia_indexes {
         std::size_t const shards = batch_split.shards_spanned();
         if (failed(plan.shard_plans_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            std::size_t const rows_for_shard = batch_split.rows_for_shard(shard);
-            if (!rows_for_shard) {
+            std::size_t const shard_entries = batch_split.entries_for_shard(shard);
+            if (!shard_entries) {
                 plan.shard_plans_.push_back_reserved(shard_insert_plan_t {});
                 continue;
             }
             shard_t& one = shards_[batch_split.open_shard_generation.first + shard];
-            auto [shard_plan, status] = one.index->plan_insert(rows_for_shard);
+            auto [shard_plan, status] = one.index->plan_insert(shard_entries);
             if (failed(status)) return {{}, status};
-            if (status_t const covered = one.keys.cover(shard_plan.first_id + rows_for_shard); failed(covered))
+            if (status_t const covered = one.keys.cover(shard_plan.first_id + shard_entries); failed(covered))
                 return {{}, covered};
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
         }
@@ -414,7 +414,7 @@ struct vram_nvidia_indexes {
 
         /** Claims the locator seats of @p rows keys a load lands. */
         static expected<seats_t> claim_seats(shards_t& shards, std::size_t rows) noexcept {
-            if (status_t const indexed = shards.locators().reserve(shards.rows() + rows); failed(indexed))
+            if (status_t const indexed = shards.locators().reserve(shards.entries() + rows); failed(indexed))
                 return {{}, indexed};
             return shards.locators().claim(rows);
         }
@@ -514,60 +514,17 @@ struct vram_nvidia_indexes {
             return {{}, refused};
         for (std::size_t& count : counts) count = 0;
         if (!queries_count || !keys.extent(1)) return {{}, status_t::success_k};
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {{}, claim_status};
         config.count = static_cast<small_size_t>(keys.extent(1));
 
-        // One snapshot bounds every shard's walk, sized again for a shard generation opened
-        // meanwhile, so the merged rankings see each batch on every shard or on none.
-        traversals_t traversals {shards_.allocator()};
-        growing_buffer<node_id_t, forkunion_allocator_t> watermarks {shards_.allocator()};
-        while (true) {
-            traversals.clear();
-            if (status_t const readied = fanout_t::reserve_traversals(shards_, traversals, executor, queries, config);
-                failed(readied))
-                return {{}, readied};
-            if (failed(watermarks.resize(traversals.size()))) return {{}, status_t::bad_alloc_k};
-            if (shards_.snapshot(to_writable_span(watermarks)).status != status_t::shape_mismatch_k) break;
-        }
-        std::size_t const landing_entries = queries_count * config.count;
-        growing_buffer<node_id_t, forkunion_allocator_t> landed_ids {shards_.allocator()};
-        growing_buffer<distance_t, forkunion_allocator_t> landed_distances {shards_.allocator()};
-        growing_buffer<scored_node_t, forkunion_allocator_t> frame {shards_.allocator()};
-        if (failed(landed_ids.reserve_exactly(landing_entries)) ||
-            failed(landed_distances.reserve_exactly(landing_entries)) || failed(frame.reserve_exactly(config.count)))
-            return {{}, status_t::bad_alloc_k};
-        landed_ids.extend_uninitialized(landing_entries);
-        landed_distances.extend_uninitialized(landing_entries);
-        frame.extend_uninitialized(config.count);
-        nk::matrix_span<node_id_t> const shard_ids {landed_ids.data(), queries_count, config.count};
-        nk::matrix_span<distance_t> const shard_distances {landed_distances.data(), queries_count, config.count};
-
-        // The snapshot counted the shards once, so a shard generation opened since takes no part.
-        search_result_t merged;
-        for (std::size_t shard = 0; shard != traversals.size(); ++shard) {
-            if (!watermarks[shard]) continue;
-            if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return {merged, entered};
-            expected<search_result_t> const found = shards_[shard].index->graph_.search_below_(
-                queries, shard_ids, shard_distances, traversals[shard], config, watermarks[shard]);
-            if (failed(found.status)) return {merged, found.status};
-            merged += found.value;
-            for (std::size_t query = 0; query != queries_count; ++query) {
-                node_id_t const* const ids = landed_ids.data() + query * config.count;
-                distance_t const* const scores = landed_distances.data() + query * config.count;
-                // An absent match ends the row, and must never index a key column.
-                std::size_t live = 0;
-                for (; live != config.count && ids[live] != std::numeric_limits<node_id_t>::max(); ++live)
-                    frame[live] = scored_node_t {ids[live], scores[live]};
-                counts[query] = merge_search_results(std::span<scored_node_t const> {frame.data(), live},
-                                                     shards_[shard].keys, to_span(keys.row(query).as_vector()),
-                                                     to_span(distances.row(query).as_vector()), counts[query]);
-            }
-        }
-        // Each shard counted its own matches, which the merged rows replace.
-        merged.count = 0;
-        for (std::size_t const count : counts) merged.count += count;
-        return {merged, status_t::success_k};
+        // One snapshot bounds every shard's walk, so the merged rankings see each batch on every
+        // shard or on none; a shard generation opened since takes no part.
+        fanout_t fanout {shards_, executor};
+        if (status_t const begun = fanout.begin(queries, config); failed(begun)) return {{}, begun};
+        auto search_shard = [&](std::size_t shard, nk::matrix_span<node_id_t> ids, nk::matrix_span<distance_t> scores,
+                                traversal_context_t& traversal, std::size_t visible) noexcept {
+            return shards_[shard].index->graph_.search_below_(queries, ids, scores, traversal, config, visible).status;
+        };
+        return fanout.search_every_shard(queries_count, config.count, search_shard, keys, distances, counts);
     }
 
     /** Entries under @p key across every shard. */

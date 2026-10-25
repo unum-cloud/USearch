@@ -17,13 +17,14 @@ The RAM residency is the portable default every platform owns; the VRAM and NVMe
 
 The plural follows the sibling idiom - `ram_indexes.hpp` reads as "many `ram_index` viewed as one":
 
-- `sharded_indexes.hpp` - the shard table every plural but the NVMe one owns: same-geometry shards, their key columns and locator map, rotation-balanced routing, and the commit word a reader spanning the shards snapshots by.
+- `utilities/ram_shards.hpp` - the shard table every plural but the NVMe one owns, basic ones included: shards each tower builds, reserves and shape-checks, their key columns and locator map, rotation-balanced routing, and the commit word a reader spanning the shards snapshots by.
 - `shard_checkpoints.hpp` - the SafeGraphs save and load plans those plurals open over their shard set, one monolith or a manifest of parts, with what differs per residency handed in as a policy object.
-- `vram_shard_fanout.hpp` - one batched read over NVIDIA or AMD shards: the executor's claim, one context per shard, one snapshot of the visible rows, and the host-landed merge.
+- `utilities/vram_shards.hpp` - `utilities::vram_shard_fanout`, one batched read over NVIDIA or AMD shards: the executor's claim, one context per shard, one snapshot of the visible rows, and the host-landed merge.
 - `ram_indexes.hpp` - typed multi-shard views with compute-domain routing and merged cross-shard search, one shard per memory domain.
 - `vram_nvidia_indexes.hpp` and `vram_amd_indexes.hpp` - typed multi-shard groups with round-robin ingestion and merged cross-shard search, any number of shards per device.
 - `vram_apple_indexes.hpp` - the Apple twin over its one device, so one shard.
-- `nvme_indexes.hpp` - read-only views of the parts a RAM or VRAM group saved, every row's walks over all parts on one executor thread, and key lookups as bulk scans of the key columns; beside them, the freestanding `merge`, `split`, `refine` and `build` that write new parts from old ones in phases of steps, within a workspace the caller lends.
+- `nvme_indexes.hpp` - read-only views of the parts a RAM or VRAM group saved, every row's walks over all parts on one executor thread, and key lookups as bulk scans of the key columns.
+- `nvme_compaction.hpp` - the freestanding `compact`, `refine` and `build` that write new parts from old ones in phases of steps, within a workspace the caller lends, each target part holding at most a shard capacity of rows.
 
 Capability files split beside the residency pairs as they grow - `icelake.hpp`, `sapphireamx.hpp`, `hopper.cuh`, and their siblings.
 

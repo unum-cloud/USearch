@@ -191,10 +191,11 @@ struct gpu_arena_t {
 
 #pragma region Kernel Symbols
 
-/** Every GPU kernel of every design and vendor, the first template argument of each kernel
- *  template - dense @c cuda_kernel and @c amd_kernel, each modality's @c cuda_kernel - and the
- *  words of Apple's exported names. A vendor exports the kernels its design launches, and sizes
- *  its tables of loaded kernels by @c count_k. */
+/** The GPU kernels basic graphs and every design launch, the first template argument of each
+ *  shared kernel template - dense @c cuda_kernel and @c amd_kernel, each modality's
+ *  @c cuda_kernel - and the words of Apple's exported names. A design's own kernels take its own
+ *  enum, such as @c dense::vram_dense_kernel_t. A vendor sizes its tables of loaded kernels by
+ *  @c count_k. */
 enum class vram_kernel_t : u32_t {
 
     /** Walks the graph for each row of an insertion wave and selects its forward neighbors. */
@@ -208,27 +209,6 @@ enum class vram_kernel_t : u32_t {
 
     /** Walks the graph for each query and ranks its matches. */
     search_k,
-
-    /** A search rescoring its candidates through the indexer heads. */
-    search_indexer_k,
-
-    /** Scores every visible row against each query, without walking the graph. */
-    scan_k,
-
-    /** A walk landing every scored pair, rather than ranked matches. */
-    multiply_k,
-
-    /** A walk folding the values of the rows it attends to, per head. */
-    attend_k,
-
-    /** Folds each walked node's forward picks and the walkers chained onto it into its row. */
-    merge_back_links_k,
-
-    /** Re-selects each row with a fresh slot within two hops from those two hops of the graph. */
-    percolate_k,
-
-    /** Rebuilds the norms column from the stored vectors. */
-    derive_norms_k,
 
     /** Moves rows' neighbor IDs between ID spaces, packing the survivors. */
     rebase_links_k,
@@ -275,31 +255,13 @@ enum class vram_kernel_t : u32_t {
     /** Moves every row's ragged value into its part's receiver. */
     split_tape_k,
 
-    /** Moves every fixed-width row into its part's receiver. */
-    split_rows_k,
-
-    /** Merges the attended rows of several shards' walks by the flash rule. */
-    merge_attention_k,
-
-    /** Ranks a walk's matches into the queries' rankings. */
-    resolve_matches_k,
-
-    /** Merges the rankings of several shards' walks per query. */
-    merge_matches_k,
-
-    /** Casts rows into the stored scalar. */
-    cast_k,
-
-    /** Casts rows into the stored scalar, scaled to unit RMS. */
-    rmscast_k,
-
     /** The number of kernels, sizing the tables of loaded kernels. */
     count_k,
 };
 
 /** The Itanium spelling of @ref vram_kernel_t, a sibling of every kernel's scope, as
  *  @c vram_kernel_symbol documents. */
-constexpr char const* itanium_name(vram_kernel_t) noexcept { return "NS0_9utilities13vram_kernel_tE"; }
+constexpr char const* kernel_enum_mangling(vram_kernel_t) noexcept { return "NS0_9utilities13vram_kernel_tE"; }
 
 /** Bytes of the longest symbol any kernel's spelling reaches, its terminator included. */
 inline constexpr std::size_t vram_kernel_symbol_capacity_k = 256;
@@ -347,9 +309,10 @@ constexpr char itanium_builtin() noexcept {
     }
 }
 
-/** Appends one template argument: a type, an integer, @c nk_dtype_t, or an enum spelled by its own
- *  @c itanium_name overload - through @c unum::usearch, @c S0_, for @ref vram_kernel_t, or whole
- *  for a C enum. */
+/** Appends one template argument: a type, an integer, @c nk_dtype_t, or an enum spelled by the
+ *  @c kernel_enum_mangling overload beside it, found by its namespace - through @c unum::usearch,
+ *  @c S0_, for @ref vram_kernel_t, through the kernel's scope, @c S1_, for a design's own enum, or
+ *  whole for a C enum. */
 template <typename argument_type_>
 void append_itanium_argument(vram_kernel_symbol_t& symbol, argument_type_ argument) noexcept {
     if constexpr (std::is_same_v<argument_type_, nk_dtype_t>) {
@@ -360,7 +323,7 @@ void append_itanium_argument(vram_kernel_symbol_t& symbol, argument_type_ argume
     }
     else if constexpr (std::is_enum_v<argument_type_>) {
         symbol.append("L");
-        symbol.append(itanium_name(argument));
+        symbol.append(kernel_enum_mangling(argument));
         symbol.append_value(
             static_cast<unsigned long long>(static_cast<std::underlying_type_t<argument_type_>>(argument)));
         symbol.append("E");

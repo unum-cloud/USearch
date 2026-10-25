@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/utilities/vram_shard_fanout.hpp
+ *  @file include/usearch/utilities/vram_shards.hpp
  *  @author Ash Vardanian
  *  @date September 2, 2026
  *  @brief The fan-out an NVIDIA or AMD tower drives one batched read through: the executor's claim,
@@ -18,9 +18,10 @@
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the batch's contexts & landings
 #include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator` - the landings' placement
-#include "usearch/dense/types.hpp"
+#include "usearch/utilities/ram_shards.hpp"  // `host_keys` - a shard's host key column
+#include "usearch/utilities/ram_sorts.hpp"   // `rankings_refusal` - the batch's output layout
 
-namespace unum::usearch::dense {
+namespace unum::usearch::utilities {
 
 /**
  *  @brief One batched read over every shard of a device tower: the executor's claim, a context per
@@ -125,11 +126,11 @@ struct vram_shard_fanout {
      *  no part. */
     std::size_t shards() const noexcept { return visible_.size(); }
 
-    /** Claims the executor, sizes one context per shard for @p window_rows rows under @p config and
-     *  any indexer @p heads, and snapshots the shards' visible rows, sizing again for a shard
+    /** Claims the executor, snapshots the shards' visible nodes and reserves every shard's traversals
+     *  for @p usage, the arguments of a shard's @c traversal_memory_usage, sizing again for a shard
      *  generation opened meanwhile. */
-    template <typename traversal_config_type_, typename... heads_types_>
-    status_t begin(std::size_t window_rows, traversal_config_type_ config, heads_types_ const&... heads) noexcept {
+    template <typename... usage_types_>
+    status_t begin(usage_types_ const&... usage) noexcept {
         // The executor serializes, never the index: a second caller with its own executor searches
         // concurrently.
         auto [claim, claim_status] = executor_.claim();
@@ -137,9 +138,7 @@ struct vram_shard_fanout {
         claim_ = std::move(claim);
         while (true) {
             traversals_.clear();
-            if (status_t const readied = reserve_traversals(shards_, traversals_, executor_, window_rows, config,
-                                                            heads...);
-                failed(readied))
+            if (status_t const readied = reserve_traversals(shards_, traversals_, executor_, usage...); failed(readied))
                 return readied;
             std::size_t const shards = traversals_.size();
             if (failed(visible_.resize(shards)) || failed(pending_.reserve_exactly(shards)))
@@ -213,54 +212,53 @@ struct vram_shard_fanout {
     }
 
     /**
-     *  @brief Ranks one window of @p queries through the host: every shard walks into its own
-     *      columns of one wide landing, and each one's matches merge query by query through its
-     *      key column as it lands. Passes any indexer @p heads to every shard as is.
+     *  @brief Runs @p search_shard on every live shard's own stream, each landing up to @p wanted
+     *      node IDs and scores for each of @p queries_count queries, then merges them by score into
+     *      @p keys, @p scores and @p counts, resolving node IDs through each shard's host keys.
      *
-     *  @p config counts as many matches as @p keys is wide. The landing is never zeroed, since only
-     *  columns a landed shard wrote are ever read, and grows to the widest window, which every
-     *  later one reuses.
+     *  @p search_shard is called as `search_shard(shard, ids, scores, traversal, visible) → status_t`
+     *  with that shard's columns of one wide landing, a sentinel ID ending a row early. A shard with
+     *  no visible node walks nothing and merges nothing. The landing is never zeroed and grows to
+     *  the widest window, which every later one reuses.
      */
-    template <typename score_type_, typename... heads_types_>
-    expected<search_result_t> search_landed(rows_view_t queries, search_config_t config, nk::matrix_span<key_t> keys,
-                                            nk::matrix_span<score_type_> distances, std::span<std::size_t> counts,
-                                            heads_types_ const&... heads) noexcept {
-        std::size_t const queries_count = queries.rows, shards = this->shards();
-        std::size_t const landing_entries = queries_count * shards * config.count;
+    template <typename search_shard_type_, typename score_type_>
+    expected<search_result_t> search_every_shard(std::size_t queries_count, std::size_t wanted,
+                                                 search_shard_type_&& search_shard, nk::matrix_span<key_t> keys,
+                                                 nk::matrix_span<score_type_> scores,
+                                                 std::span<std::size_t> counts) noexcept {
+        std::size_t const shards = this->shards();
+        std::size_t const landing_entries = queries_count * shards * wanted;
         frame_.clear();
         if (failed(landed_ids_.reserve_exactly(landing_entries)) ||
-            failed(landed_distances_.reserve_exactly(landing_entries)) || failed(frame_.reserve_exactly(config.count)))
+            failed(landed_distances_.reserve_exactly(landing_entries)) || failed(frame_.reserve_exactly(wanted)))
             return {{}, status_t::bad_alloc_k};
-        frame_.extend_uninitialized(config.count);
-        nk::matrix_span<node_id_t> const ids_wide {landed_ids_.data(), queries_count, shards * config.count};
-        nk::matrix_span<distance_t> const distances_wide {landed_distances_.data(), queries_count,
-                                                          shards * config.count};
+        frame_.extend_uninitialized(wanted);
+        nk::matrix_span<node_id_t> const ids_wide {landed_ids_.data(), queries_count, shards * wanted};
+        nk::matrix_span<distance_t> const distances_wide {landed_distances_.data(), queries_count, shards * wanted};
 
         auto shard_columns = [&](std::size_t shard) noexcept {
-            return nk::range(shard * config.count, (shard + 1) * config.count);
+            return nk::range(shard * wanted, (shard + 1) * wanted);
         };
-        auto search_shard = [&](std::size_t shard, traversal_context_t& traversal, std::size_t visible) noexcept {
-            return shards_[shard]
-                .index
-                ->submit_search_(queries, ids_wide(nk::all, shard_columns(shard), nk::slice),
-                                 distances_wide(nk::all, shard_columns(shard), nk::slice), traversal, config, visible,
-                                 heads...)
-                .status;
+        auto submit_shard = [&](std::size_t shard, traversal_context_t& traversal, std::size_t visible) noexcept {
+            if (!visible) return status_t::success_k;
+            return search_shard(shard, ids_wide(nk::all, shard_columns(shard), nk::slice),
+                                distances_wide(nk::all, shard_columns(shard), nk::slice), traversal, visible);
         };
         auto merge_shard = [&](std::size_t shard, traversal_context_t const&) noexcept {
+            if (!visible_[shard]) return;
             nk::matrix_span<node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
             nk::matrix_span<distance_t> const shard_distances = distances_wide(nk::all, shard_columns(shard),
                                                                                nk::slice);
             for (std::size_t query = 0; query != queries_count; ++query) {
                 std::size_t const live = repack_landed_matches_(
                     shard_ids.row(query).as_vector(), shard_distances.row(query).as_vector(), to_writable_span(frame_));
-                counts[query] = merge_search_results(std::span<scored_node_t const> {frame_.data(), live},
-                                                     shards_[shard].keys.host, to_span(keys.row(query).as_vector()),
-                                                     to_span(distances.row(query).as_vector()), counts[query]);
+                counts[query] = merge_search_results(
+                    std::span<scored_node_t const> {frame_.data(), live}, host_keys(shards_[shard].keys),
+                    to_span(keys.row(query).as_vector()), to_span(scores.row(query).as_vector()), counts[query]);
             }
         };
         for (std::size_t& count : counts) count = 0;
-        return for_each_shard(search_shard, merge_shard, counts);
+        return for_each_shard(submit_shard, merge_shard, counts);
     }
 
 #pragma endregion Batches
@@ -304,4 +302,4 @@ struct vram_shard_fanout {
     growing_buffer<scored_node_t, forkunion_allocator_t> frame_;
 };
 
-} // namespace unum::usearch::dense
+} // namespace unum::usearch::utilities

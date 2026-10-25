@@ -136,7 +136,7 @@ struct vram_apple_indexes {
     }
 
     /** Bounds every shard at @p rows, clamped to the ID space; zero means the ID space. Past it, an
-     *  insertion opens another generation of shards on the same placements. Ignored once storage
+     *  insertion opens another shard generation on the same placements. Ignored once storage
      *  exists. */
     void bound_shards(std::size_t rows) noexcept { shards_.bound_shards(rows); }
 
@@ -192,14 +192,14 @@ struct vram_apple_indexes {
     index_t const& shard(std::size_t shard) const noexcept { return *shards_[shard].index; }
 
     /** The frozen geometry, taken from the first shard - @ref emplace refused any that differ. */
-    std::size_t dimensions() const noexcept { return shards_.dimensions(); }
+    std::size_t dimensions() const noexcept { return shards_.empty() ? 0 : shards_[0].index->dimensions(); }
 
     /** Connections per node, frozen with the geometry. */
-    std::size_t connectivity() const noexcept { return shards_.connectivity(); }
+    std::size_t connectivity() const noexcept { return shards_.empty() ? 0 : shards_[0].index->connectivity(); }
 
     /** Entries across every shard: the watermarks of one consistent snapshot, summed, so a batch
      *  counts whole or not at all. */
-    std::size_t size() const noexcept { return shards_.rows(); }
+    std::size_t size() const noexcept { return shards_.entries(); }
 
     /** Rows the shards host without growing again; they grow past it on demand. */
     std::size_t capacity() const noexcept { return shards_.capacity(); }
@@ -280,7 +280,7 @@ struct vram_apple_indexes {
                 std::size_t const taking = min_of(window_rows, count - first);
                 std::size_t const rotation = (rotation_ + first_row + first) % shards;
                 for (std::size_t shard = 0; shard != shards && succeeded(status_); ++shard)
-                    status_ = launch_(shard, shards_t::first_row_of_shard(shard, shards, rotation),
+                    status_ = launch_(shard, shards_t::first_entry_of_shard(shard, shards, rotation),
                                       keys[nk::range(first, first + taking)], rows.slice(first, taking));
             }
             return status_;
@@ -344,7 +344,7 @@ struct vram_apple_indexes {
          *  the shard count, then launches those rows there. */
         status_t launch_(std::size_t shard, std::size_t first, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
             std::size_t const shards = shares_.size(), count = rows.rows;
-            std::size_t const taking = shards_t::rows_from(count, first, shards);
+            std::size_t const taking = shards_t::entries_from(count, first, shards);
             share_t& share = shares_[shard];
             if (!taking) return status_t::success_k;
             // Overlapping steps would write keys past the cover the plan grew.
@@ -460,8 +460,8 @@ struct vram_apple_indexes {
         plan.rotation_ = shards_.route(rows) % shards;
         if (failed(plan.shares_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            std::size_t const taking = shards_t::rows_from(
-                rows, shards_t::first_row_of_shard(shard, shards, plan.rotation_), shards);
+            std::size_t const taking = shards_t::entries_from(
+                rows, shards_t::first_entry_of_shard(shard, shards, plan.rotation_), shards);
             node_id_t first_id = 0;
             if (taking) {
                 auto const [claimed_id, shard_claim_status] = shards_[shard].index->claim_(taking);
@@ -490,7 +490,7 @@ struct vram_apple_indexes {
     }
 
     /**
-     *  @brief Inserts a batch under @p keys, dealing rows round-robin across the shards from a
+     *  @brief Inserts a batch under @p keys, splitting rows across the shards round-robin from a
      *      rotating start, so they fill evenly and each sees the whole distribution:
      *      @ref plan_insert, one step over every row, and its @c finish.
      *
@@ -793,7 +793,8 @@ struct vram_apple_indexes {
      *  @retval contended_k A call, batch, load or save in flight on this index or a donor, a
      *      repeated donor, or another refine or absorb holding either.
      *  @retval unsupported_k A donor shard past @ref shard_capacity, which would have to be cut.
-     *  @retval overflow_k A donor shard no shard has room for, since no generation opens here.
+     *  @retval overflow_k A donor shard no shard has room for, since no shard generation opens
+     *      here.
      */
     expected<refine_plan_t> plan_absorb(std::span<vram_apple_indexes*> donors, executor_t& executor,
                                         refine_config_t config = {}) noexcept {
@@ -838,7 +839,7 @@ struct vram_apple_indexes {
             auto device_of = [](shard_t const& shard) noexcept { return shard.index->device_specs().ordinal; };
             auto open = []() noexcept { return status_t::overflow_k; };
             if (status_t const packed = shards_.pack(to_writable_span(plan.landings_), 0, shards_.shard_capacity(),
-                                                     source_shard, device_of, rank_fewest_rows, open);
+                                                     source_shard, device_of, rank_fewest_entries, open);
                 failed(packed))
                 return {{}, packed};
             if (status_t const sized = shards_t::size_parts(to_span(plan.landings_), shards, plan.part_offsets_,
@@ -1247,11 +1248,15 @@ struct vram_apple_indexes {
         /** Closes every shard of the loading index under its unique side. */
         status_t close(shards_t&) noexcept { return owner->close_gated_(); }
 
+        /** Part @p part lands on a placed shard; this residency builds none past them. */
+        static status_t open_shard_for_part(shards_t& shards, std::size_t part) noexcept {
+            return shards.retired_shards() + part < shards.size() ? status_t::success_k : status_t::overflow_k;
+        }
+
         static expected<typename index_t::save_plan_t> open_shard_save(shards_t& shards, std::size_t shard,
                                                                        typename index_t::columns_t const& columns,
-                                                                       synchronization_t synchronization,
-                                                                       std::size_t first_row) noexcept {
-            return shards[shard].index->plan_save(columns, synchronization, static_cast<node_id_t>(first_row));
+                                                                       synchronization_t synchronization) noexcept {
+            return shards[shard].index->plan_save(columns, synchronization);
         }
         static expected<typename index_t::load_plan_t> open_shard_load(shards_t& shards, std::size_t shard,
                                                                        std::size_t rows) noexcept {
@@ -1272,24 +1277,24 @@ struct vram_apple_indexes {
      *  steps their rows arrive in - one per part's share of one batch. */
     using load_plan_t = shard_load_plan<shards_t, checkpoint_residency_t>;
 
-    /** Bytes a @ref save under @p config writes: one monolith, or every part file and the manifest
-     *  measured over a placeholder stem; zero for an invalid config or an unplaced index. The row
-     *  count is read now, so a buffer sized here fits a save no row lands before. */
+    /** Bytes a buffer @ref save under @p config writes: a lone live shard's monolith, or the
+     *  manifest and every live shard's part it lists; zero for an invalid config or an unplaced
+     *  index. The row counts are read now, so a buffer sized here fits a save no row lands
+     *  before. */
     expected<std::size_t> storage_requirements(save_config_t const& config) const noexcept {
         return shard_storage_requirements(shards_, config);
     }
 
     /**
-     *  @brief Opens a save under @p path in the layout @p config names: one monolith of every
-     *      shard's rows in placement order with IDs rebased, so it reads as one graph, or one
-     *      monolith per shard beside a manifest.
+     *  @brief Opens a save under @p path: a lone live shard's monolith at the path itself, or one
+     *      monolith per live shard beside the manifest the path names.
      *
      *  Every part is framed, sized and mapped here, and every header lands in @c finish, so a
      *  failed or cancelled save reads as absent.
      *
      *  @param[in] path The monolith's path, or the manifest's - its parts land beside it as
      *      @c <stem>-00001-of-0000S.safegraphs.
-     *  @param[in] config The layout, alignment, certified contract and provenance; the device
+     *  @param[in] config The alignment, certified contract and provenance; the device
      *      storage cannot be settlement-probed, so @c concurrent_k refuses.
      *  @param[inout] executor The streams the exports ride, held until the plan dies.
      */
@@ -1299,25 +1304,25 @@ struct vram_apple_indexes {
         return save_plan_t::open(shards_, std::move(residency), path, config);
     }
 
-    /** Opens a save into @p monolith as one graph - the in-memory sibling of the path form; a
-     *  manifest has nowhere to resolve its parts, so @c distributed_k refuses. Size the bytes by
+    /** Opens a save into @p buffer - the in-memory sibling of the path form: a lone live shard's
+     *  monolith, or the manifest leading the buffer and the parts it lists. Size the bytes by
      *  @ref storage_requirements; fewer answer @c overflow_k. */
-    expected<save_plan_t> plan_save(bytes_span_t monolith, save_config_t const& config, executor_t& executor) noexcept {
+    expected<save_plan_t> plan_save(bytes_span_t buffer, save_config_t const& config, executor_t& executor) noexcept {
         auto [residency, status] = gate_save_(config, executor);
         if (failed(status)) return {{}, status};
-        return save_plan_t::open(shards_, std::move(residency), monolith, config);
+        return save_plan_t::open(shards_, std::move(residency), buffer, config);
     }
 
     /**
      *  @brief Opens a load of the checkpoint at @p path: the content says monolith or manifest,
      *      and every part's header is vetted before a byte lands.
      *
-     *  The reservation comes from @p config, and the parts land per its placement - as written,
-     *  part @c p on shard @c p mod S, or cut into one stripe per shard. The index must be empty;
+     *  The reservation comes from @p config, and part @c p lands on live shard @c p, opened past
+     *  the placed ones where the parts outnumber them. The index must be empty;
      *  the plan reports the rows it will land through @c rows().
      *
      *  @param[in] path A monolith, or the manifest whose parts sit beside it.
-     *  @param[in] config The placement and the rows to reserve; zero fits the checkpoint.
+     *  @param[in] config The rows to reserve; zero fits the checkpoint.
      *  @param[inout] executor The streams the imports ride, held until the plan dies.
      */
     expected<load_plan_t> plan_load(std::string_view path, load_config_t const& config, executor_t& executor) noexcept {
@@ -1326,12 +1331,12 @@ struct vram_apple_indexes {
         return load_plan_t::open(shards_, std::move(residency), path, config);
     }
 
-    /** Opens a load of one monolith held in @p monolith - the implementation the path form maps
-     *  for. */
-    expected<load_plan_t> plan_load(bytes_view_t monolith, load_config_t const& config, executor_t& executor) noexcept {
+    /** Opens a load of the checkpoint held in @p buffer: a lone monolith, or the manifest leading
+     *  the buffer and the parts it lists. */
+    expected<load_plan_t> plan_load(bytes_view_t buffer, load_config_t const& config, executor_t& executor) noexcept {
         auto [residency, status] = gate_load_(executor);
         if (failed(status)) return {{}, status};
-        return load_plan_t::open(shards_, std::move(residency), monolith, config);
+        return load_plan_t::open(shards_, std::move(residency), buffer, config);
     }
 
     /**
@@ -1339,7 +1344,7 @@ struct vram_apple_indexes {
      *      walked from this one host thread.
      *
      *  @param[in] path The monolith's path, or the manifest's.
-     *  @param[in] config The layout, alignment, synchronization contract and provenance.
+     *  @param[in] config The alignment, synchronization contract and provenance.
      *  @param[inout] executor The streams the shard writes ride.
      *  @param[in] on_saved Fires per finished shard with its index; answering @c cancel_k stops
      *      the remaining shards and reports @c cancelled_k.
@@ -1353,12 +1358,12 @@ struct vram_apple_indexes {
         return plan.finish(on_saved);
     }
 
-    /** Serializes the index into @p monolith as one graph - the one-shot over the bytes form of
+    /** Serializes the index into @p buffer - the one-shot over the bytes form of
      *  @ref plan_save. */
     template <typename progress_type_ = dummy_progress_t>
-    status_t save(bytes_span_t monolith, save_config_t const& config, executor_t& executor,
+    status_t save(bytes_span_t buffer, save_config_t const& config, executor_t& executor,
                   progress_type_&& on_saved = {}) noexcept {
-        auto [plan, status] = plan_save(monolith, config, executor);
+        auto [plan, status] = plan_save(buffer, config, executor);
         if (failed(status)) return status;
         if (status_t const landed = drain_steps_(plan); failed(landed)) return landed;
         return plan.finish(on_saved);
@@ -1389,14 +1394,14 @@ struct vram_apple_indexes {
         return settled;
     }
 
-    /** Restores one monolith held in @p monolith - the one-shot over the bytes form of
+    /** Restores the checkpoint held in @p buffer - the one-shot over the bytes form of
      *  @ref plan_load. */
     template <typename progress_type_ = dummy_progress_t>
-    status_t load(bytes_view_t monolith, load_config_t const& config, executor_t& executor,
+    status_t load(bytes_view_t buffer, load_config_t const& config, executor_t& executor,
                   progress_type_&& on_loaded = {}) noexcept {
         status_t settled = status_t::success_k;
         {
-            auto [plan, status] = plan_load(monolith, config, executor);
+            auto [plan, status] = plan_load(buffer, config, executor);
             if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
             settled = drain_steps_(plan);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
@@ -1708,7 +1713,7 @@ struct vram_apple_indexes {
      *  */
     void clear_() noexcept {
         for (shard_t& one : shards_) one.index->forget_();
-        shards_.forget_rows();
+        shards_.forget_entries();
     }
 
     /** Closes every shard under the unique side, refusing a call in flight, a claim outstanding or

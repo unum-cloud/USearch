@@ -1698,7 +1698,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_tiles( //
     // A pass keeps four pieces in flight per lane, one per tile, the window the scalar batch keeps.
     constexpr u32_t passes_k = lanes_per_row_ / 4, rows_per_pass_k = 4 * rows_per_load_k;
     u32_t const piece = lane % lanes_per_row_, slot = lane / lanes_per_row_;
-    u32_t const row_pieces = storage.row_fragments / 2;
+    u32_t const row_pieces = storage.geometry.row_fragments / 2;
     bool const odd_column = slot & 1;
     bool const live = lane < gathered_count;
     typename kit_::norms_t const target_state = live ? storage.norm_for(gathered.ids[lane]) : typename kit_::norms_t {};
@@ -1775,7 +1775,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_tiles( //
     if (!live) return vram_scored_node<node_id_t>::sentinel();
     gathered.dots[lane] = dot;
     vram_scored_node<node_id_t> const scored = vram_scored_node<node_id_t>::make(
-        kit_::distance(storage.kernel, dot, query_state, target_state), gathered.ids[lane]);
+        kit_::distance(storage.geometry.kernel, dot, query_state, target_state), gathered.ids[lane]);
     gathered.scored[lane] = scored;
     return scored;
 }
@@ -1804,8 +1804,8 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_score_batch( //
     typename kit_::norms_t query_state, vram_gathered<kit_, cuda_warp_t>& gathered, u32_t gathered_count,
     u32_t lane) noexcept {
     if constexpr (!std::is_same_v<typename kit_::scalar_t, nk::u1x8_t>)
-        if (storage.row_fragments % 2 == 0)
-            return storage.row_fragments >= 16
+        if (storage.geometry.row_fragments % 2 == 0)
+            return storage.geometry.row_fragments >= 16
                        ? cuda_score_tiles<kit_, 8>(storage, query_span, query_state, gathered, gathered_count, lane)
                        : cuda_score_tiles<kit_, 4>(storage, query_span, query_state, gathered, gathered_count, lane);
     return vram_score_batch<kit_, cuda_warp_t, resident_blocks_, fragments_per_load_>( //
@@ -1824,14 +1824,14 @@ inline constexpr u32_t cuda_tile_rows_k = 16;
  *  dimensions, and a fragment past the row reads as zeros. Every tile-capable kit's step spans 32
  *  bytes of depth, so one permutation serves them all.
  */
-template <vram_quads_kit kit_>
+template <vram_quads_kit kit_, typename storage_>
 __device__ __forceinline__ std::array<std::array<typename kit_::dot_t, 4>, 2> cuda_block_tiles( //
-    vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache, u32_t top, u32_t bottom,
+    storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache, u32_t top, u32_t bottom,
     u32_t const (&columns)[2], u32_t lane) noexcept {
 
     using fragment_t = typename kit_::fragment_t;
     using tile_t = std::array<typename kit_::dot_t, 4>;
-    u32_t const quarter = lane % 4, spans = divide_round_up(storage.row_fragments, 4u);
+    u32_t const quarter = lane % 4, spans = divide_round_up(storage.geometry.row_fragments, 4u);
     fragment_t const* const top_row = cache.staged_row(storage, top);
     fragment_t const* const bottom_row = cache.staged_row(storage, bottom);
     fragment_t const* const column_rows[2] = {cache.staged_row(storage, columns[0]),
@@ -1840,7 +1840,7 @@ __device__ __forceinline__ std::array<std::array<typename kit_::dot_t, 4>, 2> cu
 #pragma unroll 1
     for (u32_t span = 0; span != spans; ++span) {
         u32_t const fragment = span * 4 + quarter;
-        bool const in_row = fragment < storage.row_fragments;
+        bool const in_row = fragment < storage.geometry.row_fragments;
         fragment_t const upper = in_row ? top_row[fragment] : fragment_t {};
         fragment_t const lower = in_row ? bottom_row[fragment] : fragment_t {};
         fragment_t const first {upper.x, lower.x, upper.y, lower.y}, second {upper.z, lower.z, upper.w, lower.w};
@@ -1864,12 +1864,12 @@ __device__ __forceinline__ std::array<std::array<typename kit_::dot_t, 4>, 2> cu
  *  zero rule and the stop at a full row cut where it would: the verdicts are the serial greedy's
  *  for the distances the tiles give.
  */
-template <vram_quads_kit kit_, typename schedule_>
+template <vram_quads_kit kit_, typename schedule_, typename storage_>
     requires requires(typename kit_::fragment_t a, uint2 b, std::array<typename kit_::dot_t, 4> tile) {
         kit_::accumulate_tile(a, b, tile);
     }
-__device__ __forceinline__ u32_t cuda_keep_diverse( //
-    vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
+__device__ __forceinline__ u32_t cuda_keep_diverse_tiles( //
+    storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
     vram_sorted_buffer<cuda_warp_t, node_id_t> const& sorted_candidates, u32_t position_mask, u32_t candidates_count,
     vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
     vram_telemetry_t& telemetry, u32_t lane) noexcept {
@@ -1914,9 +1914,10 @@ __device__ __forceinline__ u32_t cuda_keep_diverse( //
                     u32_t const kept = first_column + tile * half_k + quarter * 2 + column;
                     if (kept >= kept_before) continue;
                     norms_t const kept_norms = candidate_norms[selected_ids[kept]];
-                    f32_t const from_top = kit_::distance(storage.kernel, tiles[tile][column], top_norms, kept_norms);
-                    f32_t const from_bottom = kit_::distance(storage.kernel, tiles[tile][2 + column], bottom_norms,
-                                                             kept_norms);
+                    f32_t const from_top = kit_::distance(storage.geometry.kernel, tiles[tile][column], top_norms,
+                                                          kept_norms);
+                    f32_t const from_bottom = kit_::distance(storage.geometry.kernel, tiles[tile][2 + column],
+                                                             bottom_norms, kept_norms);
                     top_rejected |= !(from_top >= to_query[top]);
                     bottom_rejected |= !(from_bottom >= to_query[bottom]);
                 }
@@ -1938,8 +1939,9 @@ __device__ __forceinline__ u32_t cuda_keep_diverse( //
         for (u32_t entry = 0; entry != 4; ++entry) {
             u32_t const column = (entry >> 1) * half_k + quarter * 2 + (entry & 1u);
             norms_t const column_norms = candidate_norms[cuda_warp_t::shuffle(position, column)];
-            between[0][entry] = kit_::distance(storage.kernel, own[entry >> 1][entry & 1u], top_norms, column_norms);
-            between[1][entry] = kit_::distance(storage.kernel, own[entry >> 1][2 + (entry & 1u)], bottom_norms,
+            between[0][entry] = kit_::distance(storage.geometry.kernel, own[entry >> 1][entry & 1u], top_norms,
+                                               column_norms);
+            between[1][entry] = kit_::distance(storage.geometry.kernel, own[entry >> 1][2 + (entry & 1u)], bottom_norms,
                                                column_norms);
         }
         u32_t kept_rows = 0;
@@ -1970,15 +1972,22 @@ __device__ __forceinline__ u32_t cuda_keep_diverse( //
     return selected_count;
 }
 
-/** The greedy diversity prefix under a kit without a tensor-core step: the serial greedy. */
-template <vram_quads_kit kit_, typename schedule_>
+/** The greedy diversity prefix: on the kit's tensor-core tiles where it has a step, the serial
+ *  greedy otherwise. No argument deduces the kit, so a branch picks the body, not an overload. */
+template <vram_quads_kit kit_, typename schedule_, typename storage_>
 __device__ __forceinline__ u32_t cuda_keep_diverse( //
-    vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
+    storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
     vram_sorted_buffer<cuda_warp_t, node_id_t> const& sorted_candidates, u32_t position_mask, u32_t candidates_count,
     vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
     vram_telemetry_t& telemetry, u32_t lane) noexcept {
-    return vram_keep_diverse<kit_>(storage, cache, schedule, sorted_candidates, position_mask, candidates_count,
-                                   selection, candidate_norms, kept_zero, telemetry, lane);
+    if constexpr (requires(typename kit_::fragment_t a, uint2 b, std::array<typename kit_::dot_t, 4> tile) {
+                      kit_::accumulate_tile(a, b, tile);
+                  })
+        return cuda_keep_diverse_tiles<kit_>(storage, cache, schedule, sorted_candidates, position_mask,
+                                             candidates_count, selection, candidate_norms, kept_zero, telemetry, lane);
+    else
+        return vram_keep_diverse<kit_>(storage, cache, schedule, sorted_candidates, position_mask, candidates_count,
+                                       selection, candidate_norms, kept_zero, telemetry, lane);
 }
 
 /**
@@ -2014,9 +2023,9 @@ struct ampere_cp_async_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_>
+    template <vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
-        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
         vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
         vram_telemetry_t& telemetry, u32_t lane) noexcept {
@@ -2034,10 +2043,11 @@ struct ampere_cp_async_schedule_t {
         }
         // Every stage commits, empty or not, so the groups a stage waits behind are a constant.
         for (u32_t stage = 0; stage != stages_k; ++stage) {
-            u32_t const end_word = min_of((stage + 1) * rows_per_stage_, rows) * storage.row_fragments;
-            for (u32_t word = min_of(stage * rows_per_stage_, rows) * storage.row_fragments + lane; word < end_word;
-                 word += cuda_warp_t::width_k) {
-                u32_t const row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, row);
+            u32_t const end_word = min_of((stage + 1) * rows_per_stage_, rows) * storage.geometry.row_fragments;
+            for (u32_t word = min_of(stage * rows_per_stage_, rows) * storage.geometry.row_fragments + lane;
+                 word < end_word; word += cuda_warp_t::width_k) {
+                u32_t const row = storage.geometry.row_of_word(word),
+                            fragment = storage.geometry.fragment_of_word(word, row);
                 __pipeline_memcpy_async(&cache.at(row, fragment), storage.vector_span_for(ids[row]) + fragment,
                                         sizeof(typename storage_::fragment_t));
             }
@@ -2089,7 +2099,7 @@ __device__ __forceinline__ void cuda_tma_initialize_barriers(u64_t* barriers, u3
 template <typename storage_, typename cache_>
 __device__ __forceinline__ void cuda_tma_copy_rows(u64_t* barriers, u32_t rows_per_stage, storage_ const& storage,
                                                    cache_ cache, u32_t const* ids, u32_t rows, u32_t lane) noexcept {
-    u32_t const row_bytes = storage.row_fragments * sizeof(typename storage_::fragment_t);
+    u32_t const row_bytes = storage.geometry.row_fragments * sizeof(typename storage_::fragment_t);
     // The cache rows' earlier generic reads must precede the copies' asynchronous writes.
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     if (lane == 0)
@@ -2202,7 +2212,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_tma_gather_quads( //
     constexpr u32_t width_k = cuda_warp_t::width_k;
     u32_t const window_bytes = gather.window_bytes;
     u32_t const window_fragments = window_bytes / sizeof(fragment_t);
-    u32_t const windows = divide_round_up(storage.row_fragments, window_fragments);
+    u32_t const windows = divide_round_up(storage.geometry.row_fragments, window_fragments);
     // Every copy lands on a 128-byte boundary, as tensor copies require.
     u32_t const quad_bytes = round_up_to_multiple(4 * window_bytes, 128u);
     u32_t const lanes_per_quad = min_of(1u << (32 - __clz(window_fragments - 1)), width_k);
@@ -2232,7 +2242,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_tma_gather_quads( //
         }
         for (u32_t fragment = column; scoring && fragment < window_fragments; fragment += lanes_per_quad) {
             u32_t const row_fragment = window * window_fragments + fragment;
-            if (row_fragment >= storage.row_fragments) break;
+            if (row_fragment >= storage.geometry.row_fragments) break;
             fragment_t const query_value = query_span[row_fragment];
             byte_t const* const columns = gather.stages[stage] + unit_quad * quad_bytes + fragment * sizeof(fragment_t);
 #pragma unroll
@@ -2256,7 +2266,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_tma_gather_quads( //
     cuda_warp_t::sync();
     if (!live) return vram_scored_node<node_id_t>::sentinel();
     vram_scored_node<node_id_t> const scored = vram_scored_node<node_id_t>::make(
-        kit_::distance(storage.kernel, gathered.dots[lane], query_state, target_state), gathered.ids[lane]);
+        kit_::distance(storage.geometry.kernel, gathered.dots[lane], query_state, target_state), gathered.ids[lane]);
     gathered.scored[lane] = scored;
     return scored;
 }
@@ -2301,9 +2311,9 @@ struct hopper_tma_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_>
+    template <vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
-        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
         vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
         vram_telemetry_t& telemetry, u32_t lane) noexcept {
@@ -2422,9 +2432,9 @@ struct blackwell_tma_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_>
+    template <vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
-        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
         vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
         vram_telemetry_t& telemetry, u32_t lane) noexcept {
@@ -2500,9 +2510,9 @@ struct blackwellrtx_tma_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref cuda_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_>
+    template <vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
-        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
         vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
         vram_telemetry_t& telemetry, u32_t lane) noexcept {

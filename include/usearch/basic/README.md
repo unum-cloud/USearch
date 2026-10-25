@@ -125,7 +125,7 @@ Payloads are arbitrary objects, so `save` and `load` take a codec that encodes e
 Basic indexes serialize to any format, not only SafeGraphs.
 RAM indexes save and load through the five caller-placed `columns`, whatever file or buffer the caller places them in.
 NVMe indexes read any `persisted_columns_t`: keys, values and neighbors, each a `persisted_column_t` of elements and, when its rows are ragged, their `prefix_sums_t`, located by byte ranges on one medium.
-SafeGraphs is the format the compiled library ships, and `safegraphs_persisted_columns` in `utilities/safegraphs_format.hpp` is the producer bundled for it.
+SafeGraphs is the format the compiled library ships, and `safegraphs_persisted_part` in `utilities/safegraphs_format.hpp` is the producer bundled for it.
 The one requirement for NVMe is that the columns are uncompressed and addressable by row.
 Arrow IPC files and raw-drive slots qualify.
 Compressed row-group formats like Parquet do not, since every hop of a walk reads a few hundred bytes at an exact offset.
@@ -156,7 +156,7 @@ persisted.nodes = extents.nodes;
 persisted.neighbors = {.dtype = dtype_t::u64_k,
                        .data = {neighbor_ids_at, neighbor_ids_at + neighbor_ids.size() * 8},
                        .offsets = prefix_sums_t {dtype_t::u32_k, {neighbor_sums_at, neighbor_sums_at + sums_bytes}}};
-persisted.keys = {.dtype = dtype_t::u64_k, .data = {keys_at, keys_at + keys.size() * 8}, .row_width = 1};
+persisted.keys = {.dtype = dtype_t::u64_k, .data = {keys_at, keys_at + keys.size() * 8}, .row_width = 1, .row_bytes = 8};
 persisted.values = {.dtype = dtype_t::u8_k,
                     .data = {values_at, values_at + values.size()},
                     .offsets = prefix_sums_t {dtype_t::u32_k, {value_sums_at, value_sums_at + sums_bytes}}};

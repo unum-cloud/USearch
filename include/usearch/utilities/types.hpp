@@ -309,7 +309,7 @@ enum class [[nodiscard]] status_t : int {
     /** The underlying allocator failed to provide memory; retrying a smaller batch may succeed. */
     bad_alloc_k = usearch_status_out_of_memory_k,
 
-    /** Dimensionality, row counts, or output capacity disagree. */
+    /** Shapes, entry counts, or output capacity disagree. */
     shape_mismatch_k = usearch_status_shape_mismatch_k,
 
     /** A stride or packing no traversal can walk. */
@@ -426,7 +426,7 @@ constexpr char const* status_to_string(status_t status) noexcept {
     switch (status) {
     case status_t::success_k: return "success";
     case status_t::bad_alloc_k: return "an allocation failed";
-    case status_t::shape_mismatch_k: return "dimensions, row counts, or output capacity disagree";
+    case status_t::shape_mismatch_k: return "shapes, entry counts, or output capacity disagree";
     case status_t::unsupported_layout_k: return "a stride or packing no traversal can walk";
     case status_t::unknown_kind_k: return "a scalar, metric, or residency tag this build does not know";
     case status_t::read_only_k: return "a mutating verb on a structure opened in place";
@@ -768,14 +768,17 @@ struct prefix_sums_t {
 /** One column of an index persisted on a medium: its elements, and how a row finds them. */
 struct persisted_column_t {
 
-    /** Type of every element: a key, a value element, or a neighbor ID. */
+    /** Type of every element: a key, a value element, or a neighbor ID; packed families such as
+     *  @c u1x8 count their logical elements. */
     dtype_t dtype = dtype_t::unknown_k;
 
     /** Where the elements lie on the medium, in bytes. */
     iota_view<std::size_t> data;
 
-    /** Elements in every row of a fixed-width column; read only without @c offsets. */
+    /** Logical elements in every row of a fixed-width column, and the bytes one such row spans,
+     *  rounded up to whole bytes for packed families; both read only without @c offsets. */
     std::size_t row_width = 0;
+    std::size_t row_bytes = 0;
 
     /** The @c nodes + 1 row prefix sums of a ragged column, @c u32 or @c u64 as Arrow's list and
      *  large-list offsets; absent for a fixed-width column. */
@@ -1024,11 +1027,11 @@ concept index_plan = std::move_constructible<plan_type_> && !std::copy_construct
                          { plan.finish() } noexcept -> std::same_as<status_t>;
                      };
 
-/** @brief Rows taken against a ceiling: move-only, released by its own death unless consumed. */
+/** Entries taken against a ceiling: move-only, released by its own death unless consumed. */
 template <typename claim_type_>
 concept index_claim = std::move_constructible<claim_type_> && !std::copy_constructible<claim_type_> &&
                       requires(claim_type_ claim) {
-                          { claim.rows() } noexcept -> std::same_as<std::size_t>;
+                          { claim.entries() } noexcept -> std::same_as<std::size_t>;
                           { claim.consume() } noexcept;
                       };
 
@@ -1250,8 +1253,8 @@ struct dummy_predicate_t {
     }
 };
 
-/** Lanes in a quad, what a predicate hears per call: the candidates one NumKong finalize scores
- *  together, reducing four accumulators into one 128-bit vector. */
+/** Lanes in a quad, what a predicate hears per call: the candidates one scoring round ranks
+ *  together. */
 inline constexpr std::size_t quad_lanes_k = 4;
 
 /** The lanes one quad carries, one @p value_type_ each. */
@@ -1614,15 +1617,6 @@ inline constexpr io_capability_t operator|(io_capability_t first, io_capability_
     return static_cast<io_capability_t>(static_cast<u32_t>(first) | static_cast<u32_t>(second));
 }
 
-/** Per-vector header carrying L2 norm and row-sum (used by DPBUSD compensation).
- *  Both fields share width @c dot_result_type_ - the lane width every downstream finalize
- *  and through-from-dot helper consumes. */
-template <typename dot_result_type_>
-struct vector_norms {
-    dot_result_type_ sum;
-    dot_result_type_ sumsq;
-};
-
 /**
  *  @brief Picks the first of @p kits_ this build compiled and @p caps_ runs, else @p floor_ - a
  *      ladder's one closing @c >::type, with no nested @c std::conditional_t pile.
@@ -1786,9 +1780,9 @@ struct scored_node_t {
  *  multiprocessor on every modern GPU, one lane group each. */
 inline constexpr u32_t vram_warps_per_block_k = 4;
 
-/** Ceiling on concurrently in-flight candidate-vector gathers per lane - the memory-parallelism
- *  window over the @b candidate axis; the NVIDIA index also caps the lanes sharing one row at it,
- *  so a wide row takes more steps rather than more reductions. */
+/** Ceiling on concurrently in-flight candidate gathers per lane - the memory-parallelism window
+ *  over the @b candidate axis; the NVIDIA index also caps the lanes sharing one row at it, so a
+ *  wide row takes more steps rather than more reductions. */
 inline constexpr u32_t vram_max_gathers_in_flight_k = 8;
 
 /** IDs the first insert wave over an empty shard admits at once, a measured width: every GPU design

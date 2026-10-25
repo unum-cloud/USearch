@@ -87,7 +87,7 @@ struct shard_columns {
                 failed(landed))
                 return landed;
             if (status_t const finished = rows.finish(); failed(finished)) return finished;
-            shards.reset_routing(shards.rows());
+            shards.reset_routing(shards.entries());
             return status_t::success_k;
         }
     };
@@ -178,10 +178,12 @@ status_t load_shards(shards_type_& shards, residency_type_ residency, std::strin
                      executor_type_& executor, load_config_t const& config, progress_type_&& progress = {}) noexcept {
     using view_t = shard_columns<shards_type_, residency_type_>;
     if (shards.empty()) return status_t::uninitialized_k;
-    if (shards.rows()) return status_t::config_mismatch_k;
+    if (shards.entries()) return status_t::config_mismatch_k;
     growing_buffer<mapped_file_t, forkunion_allocator_t> mappings {shards.allocator()};
     growing_buffer<safegraphs_catalog_part_t, forkunion_allocator_t> parts {shards.allocator()};
-    if (status_t const listed = safegraphs_catalog(path, mappings, parts, shards.allocator()); failed(listed))
+    growing_buffer<safegraphs_named_column_t, forkunion_allocator_t> extra_columns {shards.allocator()};
+    if (status_t const listed = safegraphs_catalog(path, mappings, parts, extra_columns, shards.allocator());
+        failed(listed))
         return listed;
     std::size_t const retired = shards.retired_shards();
     for (std::size_t part = 0; part != parts.size(); ++part) {

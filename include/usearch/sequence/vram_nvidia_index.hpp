@@ -28,7 +28,7 @@
 
 /** The C enum's spelling in a kernel's symbol, whole, as it sits in the global namespace, where
  *  @c vram_kernel_symbol finds it beside the enum. */
-constexpr char const* itanium_name(usearch_sequence_metric_t) noexcept { return "25usearch_sequence_metric_t"; }
+constexpr char const* kernel_enum_mangling(usearch_sequence_metric_t) noexcept { return "25usearch_sequence_metric_t"; }
 
 namespace unum::usearch::sequence {
 using namespace unum::usearch::utilities;
@@ -271,12 +271,14 @@ struct vram_nvidia_index {
     friend struct utilities::shard_set;
 
     /** A plural walks the graph below its snapshot and publishes its batches inside one commit. */
-    template <typename, typename, typename, typename, typename>
+    template <typename index_type_, typename, typename, typename, typename>
+        requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
     friend struct basic::vram_nvidia_indexes;
 
     std::size_t claimed_() const noexcept { return graph_.claimed_(); }
     status_t close_() noexcept { return graph_.close_(); }
     void reopen_() noexcept { graph_.reopen_(); }
+    void retire_() noexcept { graph_.retire_(); }
 
     graph_t graph_;
 };

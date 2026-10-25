@@ -42,9 +42,9 @@ constexpr unsigned int walk_width(unsigned int concurrent_walks, unsigned int li
 }
 
 /** The counter words a launch binds: the batch's assigned rows, the walks still running, the
- *  published rows, the changed nodes and the word an attend raises when a node has no value row,
- *  then the walks' telemetry, each tally a low and a high word, so a batch's totals outgrow 32 bits
- *  as on CUDA and HIP. */
+ *  published rows, the changed nodes and the value-lookup miss word a walk raises at a node with no
+ *  value row, then the walks' telemetry, each tally a low and a high word, so a batch's totals
+ *  outgrow 32 bits as on CUDA and HIP. */
 enum metal_counter_t : unsigned int {
     metal_assigned_k = 0,
     metal_live_k = 1,

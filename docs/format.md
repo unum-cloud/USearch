@@ -10,8 +10,20 @@ A dense index writes three regular columns.
 The `key` column holds one identity per node, `u32`, `u64` or `uuid` by the key's width.
 The `value` column holds one fixed-width vector per node, its dtype the stored scalar's own token, `u1x8`, `i4x2` and `u4x2` naming the packed ones, and its shape the logical width.
 The `neighbors` column holds one fixed-degree row of node indices per node, where any index at or past the node count is a sentinel.
-A `norms` column follows where the index keeps norms: a sum and a sum of squares per node, in the dot product's dtype.
+Producer columns may follow, such as the dense `norms` column.
 The header carries `alignment`, the `metric` token, and any provenance the caller adds.
+
+## Producer Columns
+
+Beside `key`, `value` and `neighbors`, a header may carry producer columns, each an object of the same form under its own name.
+Each one starts on the `alignment` boundary past the columns before it, and the file's length counts it.
+A reader takes the names it knows, after checking their dtype, shape and row count, and skips the rest.
+
+| Name    | Writer      | Dtype                   | Shape | Row                                   |
+| ------- | ----------- | ----------------------- | ----- | ------------------------------------- |
+| `norms` | dense index | the dot product's dtype | 2     | a node's sum, then its sum of squares |
+
+A dense index writes `norms` where it keeps norms, and a dense load that finds none, or one it does not take, derives them from the vectors.
 
 ## Shard Layout
 

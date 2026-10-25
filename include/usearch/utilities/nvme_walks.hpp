@@ -51,38 +51,6 @@ namespace unum::usearch::utilities {
 
 #pragma region Parts
 
-/** Where one SafeGraphs part keeps its columns, read once from its header: what a walk needs to
- *  address any row, and nothing per node. */
-struct nvme_part_t {
-
-    /** Rows the part holds; neighbor IDs at or past it are sentinels. */
-    u32_t nodes = 0;
-
-    /** Logical dimensions of one value row. */
-    u32_t dimensions = 0;
-
-    /** Neighbor IDs one neighbors row holds. */
-    u32_t connectivity = 0;
-
-    /** Bytes of one key row. */
-    u32_t key_row_bytes = 0;
-
-    /** The key column's dtype, which @ref safegraphs_widened_key reads each row as. */
-    dtype_t key_dtype = dtype_t::unknown_k;
-
-    /** Bytes of one value row. */
-    u32_t value_row_bytes = 0;
-
-    /** Where row zero of the key column starts, in bytes from the part's own start. */
-    u64_t keys_begin = 0;
-
-    /** Where row zero of the value column starts. */
-    u64_t values_begin = 0;
-
-    /** Where row zero of the neighbors column starts. */
-    u64_t neighbors_begin = 0;
-};
-
 /** Where one entry lives among the shards a call reads: what a walk ranks by until keys resolve. */
 template <typename node_id_type_>
 struct nvme_locator {

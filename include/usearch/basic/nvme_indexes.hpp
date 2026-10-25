@@ -26,7 +26,7 @@
 #include "usearch/utilities/blocking_files.hpp"    // `seekable_file_t` - the magic a view sniffs
 #include "usearch/utilities/nvme_walks.hpp"        // `nvme_read_header`, `nvme_read_metadata`
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`
-#include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_persisted_columns`, `safegraphs_read_manifest`
+#include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_persisted_part`, `safegraphs_read_manifest`
 #include "usearch/basic/nvme_index.hpp"
 
 namespace unum::usearch::basic {
@@ -175,7 +175,8 @@ class nvme_indexes {
     catalog_t catalog_() const noexcept { return catalog_t {to_span(media_), to_span(parts_)}; }
 
     /** Opens the SafeGraphs part at @p path once: its header, read through a blocking read of the
-     *  file, turned into the columns its producer fills, then the part over the same file. */
+     *  file, turned into the columns its producer fills and checked against this instantiation's
+     *  codec, keys, node IDs and @p metric, unless empty, then the part over the same file. */
     template <typename chunk_allocator_type_>
     status_t open_safegraphs_part_(std::string_view path, std::string_view metric,
                                    growing_buffer<u64_t, chunk_allocator_type_>& chunk, medium_t& medium,
@@ -184,9 +185,17 @@ class nvme_indexes {
         if (failed(open_status)) return open_status;
         growing_buffer<byte_t, forkunion_allocator_t> header_bytes {allocator_};
         if (status_t const read = nvme_read_header(file, header_bytes); failed(read)) return read;
-        auto const [columns, columns_status] = safegraphs_persisted_columns<codec_t, key_t, node_id_t>(
-            to_span(header_bytes), metric, allocator_);
-        if (failed(columns_status)) return columns_status;
+        auto const [persisted, persisted_status] = safegraphs_persisted_part(to_span(header_bytes), allocator_);
+        if (failed(persisted_status)) return persisted_status;
+        persisted_columns_t const& columns = persisted.columns;
+        bool const values_fixed = !columns.values.offsets;
+        if (columns.values.dtype != codec_t::value_dtype_k ||
+            persisted.value_shape != safegraphs_value_shape<codec_t>() ||
+            values_fixed != safegraphs_value_is_fixed<codec_t>() ||
+            !safegraphs_key_widens(columns.keys.dtype, safegraphs_key_dtype<key_t>()) ||
+            columns.neighbors.dtype != safegraphs_node_id_dtype<node_id_t>() ||
+            (!metric.empty() && !persisted.metric.empty() && persisted.metric.view() != metric))
+            return status_t::config_mismatch_k;
         return catalog_t::open_part_(std::move(file), columns, chunk, allocator_, medium, part);
     }
 

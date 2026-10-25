@@ -1390,8 +1390,8 @@ struct ram_index {
             std::swap(base_, other.base_);
         }
 
-        /** Rows this claim still holds; zero once an insertion has taken it. */
-        std::size_t rows() const noexcept { return rows_; }
+        /** Entries this claim still holds; zero once an insertion has taken it. */
+        std::size_t entries() const noexcept { return rows_; }
 
         /** The first granted row - where a load plan appends. */
         node_id_t base() const noexcept { return base_; }
@@ -1463,7 +1463,7 @@ struct ram_index {
     status_t insert(capacity_claim_t&& claim, vectors_view_t new_vectors, node_ids_span_t assigned_ids,
                     traversal_context_t& context, insert_config_t config = {},
                     callback_type_&& on_assigned = {}) noexcept {
-        assert(claim.rows() == new_vectors.extent(0) && "A claim holds exactly its batch's rows");
+        assert(claim.entries() == new_vectors.extent(0) && "A claim holds exactly its batch's rows");
         // An empty range takes no turn: its first ID opens the next range too, which may publish first.
         if (!claim) return status_t::success_k;
         bool const report_assigned_ids = assigned_ids.size() != 0;
@@ -2659,9 +2659,6 @@ struct ram_index {
         /** Where the rows land, vetted against the watermark at planning. */
         columns_t columns {};
 
-        /** What an ID under the watermark moves by - the row this shard starts at. */
-        node_id_t id_shift = 0;
-
         /** The contract the caller certified. */
         synchronization_t synchronization = synchronization_t::concurrent_k;
 
@@ -2676,14 +2673,13 @@ struct ram_index {
 
         save_plan_t() noexcept = default;
 
-        /** The index being snapshotted into @p columns under @p synchronization, its IDs shifted
-         *  by @p id_shift; only @ref plan_save calls it. */
-        save_plan_t(ram_index& index, columns_t columns, synchronization_t synchronization, node_id_t id_shift) noexcept
-            : columns(columns), id_shift(id_shift), synchronization(synchronization), index_(&index) {}
+        /** The index being snapshotted into @p columns under @p synchronization; only
+         *  @ref plan_save calls it. */
+        save_plan_t(ram_index& index, columns_t columns, synchronization_t synchronization) noexcept
+            : columns(columns), synchronization(synchronization), index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
-            : columns(other.columns), id_shift(other.id_shift), synchronization(other.synchronization),
-              visible(other.visible), allocated(other.allocated), covered(other.covered),
-              index_(std::exchange(other.index_, nullptr)) {}
+            : columns(other.columns), synchronization(other.synchronization), visible(other.visible),
+              allocated(other.allocated), covered(other.covered), index_(std::exchange(other.index_, nullptr)) {}
         save_plan_t& operator=(save_plan_t&&) = delete;
         // The tally is this plan's own: a copy would tally into a twin `finish` never reads.
         save_plan_t(save_plan_t const&) = delete;
@@ -2730,12 +2726,12 @@ struct ram_index {
         /**
          *  @brief Copies step @p step 's rows into the plan's own columns: the vectors and their
          *      norms straight from chunk memory, since neither changes once published, and the
-         *      neighbors rebased through @p scratch.
+         *      neighbors folded through @p scratch.
          *
-         *  Every ID under the watermark is shifted by @c id_shift, every other folded to the sentinel.
+         *  Every ID past the watermark folds to the sentinel.
          *
          *  @param[in] step The step to copy, as @ref steps hands them out.
-         *  @param[inout] scratch One step of IDs the caller reserved, where the rebase happens.
+         *  @param[inout] scratch One step of IDs the caller reserved, where the fold happens.
          */
         status_t save(step_t const& step, nk::matrix_span<node_id_t> scratch) noexcept {
             if (!index_) return status_t::uninitialized_k;
@@ -2778,8 +2774,7 @@ struct ram_index {
                 }
             else std::memcpy(staged, source, step_slots * sizeof(node_id_t));
             for (std::size_t word = 0; word != step_slots; ++word)
-                staged[word] = staged[word] < visible ? static_cast<node_id_t>(staged[word] + id_shift)
-                                                      : node_id_unknown_k;
+                staged[word] = staged[word] < visible ? staged[word] : node_id_unknown_k;
             std::memcpy(neighbors_rows.data(), staged, neighbors_rows.size());
             atomic_ref<std::size_t>(covered).add(rows.size(), std::memory_order_release);
             return status_t::success_k;
@@ -2828,13 +2823,11 @@ struct ram_index {
      *
      *  @param[out] columns Where the rows land, sized from @ref saved_shape.
      *  @param[in] synchronization The contract the caller certifies.
-     *  @param[in] id_shift What an ID under the watermark moves by - the row this shard starts at.
      */
-    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
-                                    node_id_t id_shift = 0) noexcept {
+    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization) noexcept {
         geometry_t const frozen = geometry();
         if (!frozen) return {{}, status_t::config_mismatch_k};
-        save_plan_t plan {*this, columns, synchronization, id_shift};
+        save_plan_t plan {*this, columns, synchronization};
         plan.visible = atomic_ref<node_id_t const>(last_visible_id_).load(std::memory_order_acquire);
         node_id_t const dispensed = atomic_ref<node_id_t const>(next_dispensed_id_).load(std::memory_order_acquire);
         plan.allocated = atomic_ref<node_id_t const>(last_allocated_id_).load(std::memory_order_acquire);
@@ -2887,7 +2880,7 @@ struct ram_index {
         /** The index appended to at @p base and the claim its rows ride in - empty for a plan of no
          *  rows; only @ref plan_load calls it. */
         load_plan_t(ram_index& index, node_id_t base, capacity_claim_t&& claim) noexcept
-            : base(base), rows(claim.rows()), index_(&index), claim_(std::move(claim)) {}
+            : base(base), rows(claim.entries()), index_(&index), claim_(std::move(claim)) {}
         load_plan_t(load_plan_t&& other) noexcept
             : base(other.base), rows(std::exchange(other.rows, 0)), covered(other.covered),
               index_(std::exchange(other.index_, nullptr)), claim_(std::move(other.claim_)) {}
@@ -3385,7 +3378,9 @@ struct ram_index {
             // Accepting `old == 0` is load-bearing - capacity may rest at exactly zero, and
             // `old > 0` would elect nobody; only this thread's release lifts a negative counter.
             if (old_remaining_capacity >= 0 && new_remaining_capacity < 0) {
-                auto [added_capacity, chunk_status] = create_next_chunk(count);
+                // Only the deficit grows, so a claim the ceiling's truncated chunk fits lands.
+                auto [added_capacity,
+                      chunk_status] = create_next_chunk(static_cast<std::size_t>(-new_remaining_capacity));
                 if (chunk_status != status_t::success_k) {
                     // Revert the claim, releasing any partially added chunks along the way.
                     atomic_ref<std::ptrdiff_t>(remaining_capacity_)
@@ -3674,7 +3669,7 @@ struct ram_index {
      *  published, so nothing after it may fail. A closed dispenser answers @c contended_k and
      *  leaves the claim whole. */
     expected<iota_view<node_id_t>> dispense_(capacity_claim_t&& claim) noexcept {
-        node_id_t const rows = static_cast<node_id_t>(claim.rows());
+        node_id_t const rows = static_cast<node_id_t>(claim.entries());
         // The `acq_rel` order chains the hosting chunks' growth through the all-RMW dispenser to this thread.
         // Claimed capacity keeps an open dispenser under the sentinel; only a closed one refuses.
         atomic_ref<node_id_t> const dispenser {next_dispensed_id_};

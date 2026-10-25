@@ -147,7 +147,7 @@ struct ram_indexes {
 
     /** Entries across every shard: the watermarks of one consistent snapshot, summed, so a batch
      *  counts whole or not at all. */
-    std::size_t size() const noexcept { return shards_.rows(); }
+    std::size_t size() const noexcept { return shards_.entries(); }
 
     /** Shards in the index, every shard generation's and the retired ones, in placement order: the
      *  positions a snapshot fills. */
@@ -194,7 +194,7 @@ struct ram_indexes {
         unique_lock_t const held {gate_, std::try_to_lock};
         if (!held) return status_t::contended_k;
         if (status_t const closed = shards_.close(); failed(closed)) return closed;
-        if (shards_.rows()) {
+        if (shards_.entries()) {
             if (status_t const opened = shards_.open_shard_generation_past_seal_(
                     shards_.open_shard_generation(),
                     [this](shard_t const& like) noexcept { return build_shard_(like); });
@@ -328,15 +328,15 @@ struct ram_indexes {
                     traversal_context_over<context_allocator_type_>& context, selector_type_ selector = {},
                     insert_config_t config = {}) noexcept {
             std::size_t const count = values.size();
-            if (!owner_ || keys.size() != count || first > batch_split_.batch_rows ||
-                count > batch_split_.batch_rows - first)
+            if (!owner_ || keys.size() != count || first > batch_split_.batch_entries ||
+                count > batch_split_.batch_entries - first)
                 return;
             shared_lock_t const held {owner_->gate_};
             for (std::size_t position = 0; position != count; ++position) {
-                row_in_shard_t const landing = batch_split_.shard_and_position_of_row(first + position);
+                entry_in_shard_t const landing = batch_split_.shard_and_offset_of_entry(first + position);
                 shard_plans_[landing.shard].template insert<synchronization_>(
-                    landing.position_in_shard, values.subspan(position, 1), keys.subspan(position, 1), metric, context,
-                    selector, config);
+                    landing.offset, values.subspan(position, 1), keys.subspan(position, 1), metric, context, selector,
+                    config);
             }
         }
 
@@ -430,13 +430,13 @@ struct ram_indexes {
         if (failed(claims.reserve_exactly(shards)) || failed(plan.shard_plans_.reserve_exactly(shards)))
             return {{}, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            std::size_t const rows_for_shard = batch_split.rows_for_shard(shard);
-            if (!rows_for_shard) {
+            std::size_t const shard_entries = batch_split.entries_for_shard(shard);
+            if (!shard_entries) {
                 claims.push_back_reserved(shard_capacity_claim_t {});
                 continue;
             }
             auto [claim,
-                  status] = shards_[batch_split.open_shard_generation.first + shard].index->claim_(rows_for_shard);
+                  status] = shards_[batch_split.open_shard_generation.first + shard].index->claim_(shard_entries);
             if (failed(status)) return {{}, status};
             claims.push_back_reserved(std::move(claim));
         }
@@ -888,7 +888,7 @@ struct ram_indexes {
                 shards_.open_shard_generation(), [this](shard_t const& like) noexcept { return build_shard_(like); });
         };
         if (status_t const packed = shards_.pack(to_writable_span(landings), 0, shards_.shard_capacity(), source_shard,
-                                                 placement_of, rank_fewest_rows, open);
+                                                 placement_of, rank_fewest_entries, open);
             failed(packed))
             return {{}, packed};
 

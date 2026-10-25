@@ -913,7 +913,7 @@ concept vram_frontier = requires(frontier_& frontier, frontier_ const& held, typ
 };
 
 /** One walking warp's state: the candidates, the random stream, the running telemetry, and the
- *  shared scratch past its query span, where a rescoring hands its fold what the fold keeps. */
+ *  shared scratch past its walk span, where a rescoring hands its fold what the fold keeps. */
 template <vram_frontier frontier_>
 struct vram_warp_context {
     frontier_ frontier;
@@ -1039,44 +1039,6 @@ __device__ __forceinline__ walk_demand_t vram_expand_round( //
     return walk_demand_t::continue_k;
 }
 
-/** Runtime-strided view over the warp's vector cache - rows of @c row_fragments_ fragments each,
- *  aliasing the scratch slice, in shared memory or the warp's arena slice. In the arena the cache
- *  is by reference: a staged row is the storage row its ID names, read in place, not a copy. */
-template <typename fragment_type_>
-struct vram_vector_cache {
-    fragment_type_* data_;
-    u32_t row_fragments_;
-
-    /** The staged IDs a by-reference cache resolves its rows through, or null when it copies them. */
-    u32_t* ids_ = nullptr;
-
-    __device__ __forceinline__ fragment_type_* row(u32_t row_index) const noexcept {
-        return data_ + row_index * row_fragments_;
-    }
-    __device__ __forceinline__ fragment_type_& at(u32_t row_index, u32_t fragment_index) const noexcept {
-        return row(row_index)[fragment_index];
-    }
-
-    /** Row @p row_index as a staging or @ref place_row left it. */
-    template <typename storage_>
-    __device__ __forceinline__ fragment_type_ const* staged_row(storage_ const& storage,
-                                                                u32_t row_index) const noexcept {
-        return ids_ ? storage.vector_span_for(ids_[row_index]) : row(row_index);
-    }
-
-    /** Puts the storage row of @p node_id at @p row_index for one warp, which syncs before reading it. */
-    template <typename warp_, typename storage_>
-    __device__ __forceinline__ void place_row(storage_ const& storage, u32_t row_index, u32_t node_id,
-                                              u32_t lane) const noexcept {
-        if (ids_) {
-            if (lane == 0) ids_[row_index] = node_id;
-            return;
-        }
-        for (u32_t fragment = lane; fragment < row_fragments_; fragment += warp_::width_k)
-            at(row_index, fragment) = storage.vector_for(node_id, fragment);
-    }
-};
-
 /** Warp-cooperative ascending buffer of scored nodes over a shared-memory span: chunks arrive
  *  pre-sorted from the lane-wide bitonic network and merge in place by the whole word, so a key in
  *  the ID bits orders distance ties, and entries past @c capacity_ drop. */
@@ -1115,7 +1077,7 @@ struct vram_sorted_buffer {
     }
 };
 
-/** Spans backing one warp's neighbor re-selection, carved after the vector cache: the selected
+/** Spans backing one warp's neighbor re-selection, carved past a design's row cache: the selected
  *  target IDs, the ascending per-candidate scores, the kept cache positions, and the cached
  *  candidates' IDs and distances. */
 template <typename node_id_type_>
@@ -1125,20 +1087,13 @@ struct vram_selection_scratch {
     scored_node_t* scored_entries;
     u32_t* kept_positions;
 
-    /** Each cached candidate's distance to the query, by cache row, staged once so the selection
-     *  loop reads memory, not register candidates it would unroll to index. */
+    /** Each cached candidate's distance to the walk's row, by cache row, staged once so the
+     *  selection loop reads memory, not register candidates it would unroll to index. */
     f32_t* candidate_distances;
 
     /** The node ID each cache row holds, by cache row, which a by-reference cache resolves its rows
      *  through. */
     node_id_type_* candidate_ids = nullptr;
-
-    /** Carves the five spans of @p rows entries each past the last of @p cache's @p rows rows. */
-    template <typename fragment_type_>
-    static __device__ __forceinline__ vram_selection_scratch carve(vram_vector_cache<fragment_type_> cache,
-                                                                   u32_t rows) noexcept {
-        return carve(reinterpret_cast<byte_t*>(cache.row(rows)), rows);
-    }
 
     /** Carves the five spans of @p rows entries each from @p first on, 16-byte aligned, widest
      *  alignment first: the ascending candidate scores, the two node-ID spans, then the kept
@@ -1166,7 +1121,7 @@ struct vram_arena_shape_t {
     u32_t visited_hash_shift;
     u32_t tail_entries;
 
-    /** Bytes of a builder's scratch - query span, candidate cache and re-selection spans - kept
+    /** Bytes of a builder's scratch - walk span, candidate cache and re-selection spans - kept
      *  here instead of dynamic shared memory, or zero when shared memory fits it. */
     u32_t scratch_bytes;
 

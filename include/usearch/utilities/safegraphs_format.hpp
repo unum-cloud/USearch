@@ -169,10 +169,29 @@ struct safegraphs_column_t {
     }
 };
 
-/** The norms column's row: a node's sum, then its sum of squares, both in the dot product's dtype. */
-inline constexpr column_shape_t safegraphs_norms_shape_k = vector_shape_t {2};
+/** Holds the longest NumKong kernel spelling, 22 characters, with its NUL. */
+inline constexpr std::size_t safegraphs_name_capacity_k = 32;
 
-/** A parsed monolith header: the metadata, the three graph columns and the optional norms, and
+/** A NUL-terminated metadata name; longer input truncates, so a foreign name fails a
+ *  comparison instead of overrunning. */
+struct safegraphs_name_t {
+    char characters[safegraphs_name_capacity_k] = {};
+
+    safegraphs_name_t() = default;
+    explicit safegraphs_name_t(std::string_view text) noexcept {
+        if (!text.empty()) std::memcpy(characters, text.data(), min_of(text.size(), safegraphs_name_capacity_k - 1));
+    }
+    std::string_view view() const noexcept { return characters; }
+    bool empty() const noexcept { return !characters[0]; }
+};
+
+/** A column a producer adds beside the graph's three, named in the header. */
+struct safegraphs_named_column_t {
+    safegraphs_name_t name;
+    safegraphs_column_t column;
+};
+
+/** A parsed monolith header: the metadata, the three graph columns and any producer columns, and
  *  where the data segment begins. */
 struct safegraphs_header_t {
 
@@ -191,9 +210,15 @@ struct safegraphs_header_t {
     /** Adjacency column of node indices; out-of-range IDs are positional sentinels. */
     safegraphs_column_t neighbors;
 
-    /** The producer column of pre-computed norms, its dtype @c unknown_k when the part carries none; graph
-     *  readers ignore it. */
-    safegraphs_column_t norms;
+    /** Producer columns by name, in header order; a reader takes the ones it knows. */
+    std::span<safegraphs_named_column_t const> extra_columns;
+
+    /** The producer column named @p name, or none. */
+    safegraphs_column_t const* extra_column(std::string_view name) const noexcept {
+        for (safegraphs_named_column_t const& extra : extra_columns)
+            if (extra.name.view() == name) return &extra.column;
+        return nullptr;
+    }
 
     /** The @p length bytes of @p monolith at @p offset, empty when they do not fit -
      *  @c subspan asserts its precondition, so every range is checked before it is taken. */
@@ -212,7 +237,9 @@ struct safegraphs_header_t {
         auto const end_of = [](safegraphs_column_t const& column) noexcept {
             return max_of(column.data.bound, column.offsets ? column.offsets->bytes.bound : 0);
         };
-        return data_offset + max_of(max_of(end_of(key), end_of(value)), max_of(end_of(neighbors), end_of(norms)));
+        std::size_t furthest = max_of(max_of(end_of(key), end_of(value)), end_of(neighbors));
+        for (safegraphs_named_column_t const& extra : extra_columns) furthest = max_of(furthest, end_of(extra.column));
+        return data_offset + furthest;
     }
 
     /** The bytes of @p rows rows of a regular @p column, starting at row @p first_row -
@@ -239,17 +266,6 @@ struct safegraphs_header_t {
     bytes_type_ offsets_of(bytes_type_ monolith, safegraphs_column_t const& column) const noexcept {
         if (!column.offsets) return {};
         return slice_of(monolith, data_offset + column.offsets->bytes.first, column.offsets->bytes.size());
-    }
-
-    /** The norms column's bytes when they are the ones a reader keeping @p dtype norms takes: a sum
-     *  and a sum of squares for every node; empty otherwise, and always for an @c unknown_k
-     *  @p dtype, which keeps none. */
-    template <typename bytes_type_>
-    bytes_type_ norms_of(bytes_type_ monolith, dtype_t dtype) const noexcept {
-        if (dtype == dtype_t::unknown_k || norms.dtype != dtype || norms.offsets ||
-            norms.shape != safegraphs_norms_shape_k || norms.nodes() != nodes())
-            return {};
-        return data_of(monolith, norms);
     }
 };
 
@@ -383,10 +399,13 @@ inline expected<safegraphs_column_t> safegraphs_parse_column_(yyjson_val* object
  *  @param[in] allocator Backs the JSON text and the yyjson document.
  *  @param[in] per_custom_field Fires once per string-valued `__metadata__` entry; its views
  *      die with this call.
+ *  @param[out] extra_columns Takes the producer columns, appended, which the header's
+ *      @c extra_columns then views until the buffer grows; without it the header lists none.
  */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
-expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allocator_type_ allocator = {},
-                                                     callback_type_&& per_custom_field = {}) noexcept {
+expected<safegraphs_header_t> safegraphs_read_header(
+    bytes_view_t monolith, allocator_type_ allocator = {}, callback_type_&& per_custom_field = {},
+    growing_buffer<safegraphs_named_column_t, allocator_type_>* extra_columns = nullptr) noexcept {
     safegraphs_header_t header;
     if (monolith.size() < sizeof(safegraphs_prefix_t)) return {header, status_t::malformed_k};
     std::array<std::byte, sizeof(safegraphs_prefix_t)> prefix_bytes {};
@@ -420,13 +439,30 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
     auto const [key, key_status] = safegraphs_parse_column_(yyjson_obj_get(root, "key"));
     auto const [value, value_status] = safegraphs_parse_column_(yyjson_obj_get(root, "value"));
     auto const [neighbors, neighbors_status] = safegraphs_parse_column_(yyjson_obj_get(root, "neighbors"));
-    yyjson_val* const norms_object = yyjson_obj_get(root, "norms");
-    auto const [norms, norms_status] = norms_object ? safegraphs_parse_column_(norms_object)
-                                                    : expected<safegraphs_column_t> {{}, status_t::success_k};
+    // Every other column object is a producer's, kept in header order when the caller takes them.
+    auto take_extra_columns = [&]() noexcept {
+        if (!extra_columns) return status_t::success_k;
+        yyjson_obj_iter entries = yyjson_obj_iter_with(root);
+        while (yyjson_val* name = yyjson_obj_iter_next(&entries)) {
+            std::string_view const label = safegraphs_string_(name);
+            yyjson_val* const object = yyjson_obj_iter_get_val(name);
+            if (!yyjson_is_obj(object) || label == "__metadata__" || label == "key" || label == "value" ||
+                label == "neighbors")
+                continue;
+            auto const [extra, extra_status] = safegraphs_parse_column_(object);
+            if (failed(extra_status) || label.size() >= safegraphs_name_capacity_k) return status_t::malformed_k;
+            if (failed(extra_columns->push_back(safegraphs_named_column_t {safegraphs_name_t {label}, extra})))
+                return status_t::bad_alloc_k;
+        }
+        return status_t::success_k;
+    };
+    std::size_t const extras_first = extra_columns ? extra_columns->size() : 0;
+    status_t const extras_status = take_extra_columns();
     yyjson_doc_free(document);
-    if (failed(key_status) || failed(value_status) || failed(neighbors_status) || failed(norms_status))
-        return {header, status_t::malformed_k};
-    header.key = key, header.value = value, header.neighbors = neighbors, header.norms = norms;
+    if (failed(key_status) || failed(value_status) || failed(neighbors_status)) return {header, status_t::malformed_k};
+    if (failed(extras_status)) return {header, extras_status};
+    header.key = key, header.value = value, header.neighbors = neighbors;
+    if (extra_columns) header.extra_columns = to_span(*extra_columns).subspan(extras_first);
 
     // The data segment starts on the declared alignment boundary at or past the JSON's end.
     header.data_offset = round_up_to_multiple<std::size_t>(sizeof(prefix) + header_length, header.alignment);
@@ -435,11 +471,13 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
 
 /** Maps @p path read-only and parses its header. */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
-expected<safegraphs_header_t> safegraphs_read_header(std::string_view path, allocator_type_ allocator = {},
-                                                     callback_type_&& per_custom_field = {}) noexcept {
+expected<safegraphs_header_t> safegraphs_read_header(
+    std::string_view path, allocator_type_ allocator = {}, callback_type_&& per_custom_field = {},
+    growing_buffer<safegraphs_named_column_t, allocator_type_>* extra_columns = nullptr) noexcept {
     auto [mapping, map_status] = mapped_file_t::read(path);
     if (failed(map_status)) return {safegraphs_header_t {}, map_status};
-    return safegraphs_read_header(mapping.view(), allocator, std::forward<callback_type_>(per_custom_field));
+    return safegraphs_read_header(mapping.view(), allocator, std::forward<callback_type_>(per_custom_field),
+                                  extra_columns);
 }
 
 /** Builds the header's JSON document; null when an allocation failed. A regular column
@@ -473,9 +511,11 @@ inline yyjson_mut_doc* safegraphs_header_document_(safegraphs_header_t const& he
             return bool(yyjson_mut_obj_add_uint(document, object, "shape", vector->columns));
         return true;
     };
-    auto add_column = [&](char const* label, safegraphs_column_t const& column) noexcept {
-        yyjson_mut_val* object = yyjson_mut_obj_add_obj(document, root, label);
-        bool added = yyjson_mut_obj_add_str(document, object, "dtype", dtype_name(column.dtype)) &&
+    auto add_column = [&](std::string_view label, safegraphs_column_t const& column) noexcept {
+        yyjson_mut_val* const name = yyjson_mut_strncpy(document, label.data(), label.size());
+        yyjson_mut_val* const object = yyjson_mut_obj(document);
+        bool added = name && object && yyjson_mut_obj_add(root, name, object) &&
+                     yyjson_mut_obj_add_str(document, object, "dtype", dtype_name(column.dtype)) &&
                      add_shape(object, column.shape);
         if (column.offsets)
             added = added &&
@@ -485,7 +525,8 @@ inline yyjson_mut_doc* safegraphs_header_document_(safegraphs_header_t const& he
     };
     complete = complete && add_column("key", header.key) && add_column("value", header.value) &&
                add_column("neighbors", header.neighbors);
-    if (header.norms.dtype != dtype_t::unknown_k) complete = complete && add_column("norms", header.norms);
+    for (safegraphs_named_column_t const& extra : header.extra_columns)
+        complete = complete && add_column(extra.name.view(), extra.column);
     if (complete) return document;
     yyjson_mut_doc_free(document);
     return nullptr;
@@ -604,62 +645,6 @@ constexpr dtype_t safegraphs_node_id_dtype() noexcept {
     else return dtype_t::unknown_k;
 }
 
-/** What the regular columns need to be laid out: the node count, each column's element
- *  type, and the two row widths. */
-struct safegraphs_regular_shape_t {
-
-    /** Nodes every column describes. */
-    std::size_t nodes = 0;
-
-    /** Element type of the key column. */
-    dtype_t key_dtype = dtype_t::unknown_k;
-
-    /** Element type of the value column. */
-    dtype_t value_dtype = dtype_t::unknown_k;
-
-    /** Elements per value row - the logical dimensions, the packed families included. */
-    std::size_t value_columns = 0;
-
-    /** Element type of the neighbors column. */
-    dtype_t neighbors_dtype = dtype_t::unknown_k;
-
-    /** Neighbor IDs per node's list. */
-    std::size_t connectivity = 0;
-
-    /** Element type of the norms column; @c unknown_k lays out none. */
-    dtype_t norms_dtype = dtype_t::unknown_k;
-};
-
-/** A header of three regular columns at aligned starts - keys, fixed-width values, and
- *  fixed-degree neighbors - then the norms where @p shape names their dtype, with the data
- *  offset they follow. */
-template <typename allocator_type_ = std::allocator<byte_t>>
-expected<safegraphs_header_t> safegraphs_regular_header(safegraphs_regular_shape_t const& shape, std::size_t alignment,
-                                                        std::span<safegraphs_custom_field_t const> custom_fields = {},
-                                                        allocator_type_ allocator = {}) noexcept {
-    safegraphs_header_t header;
-    header.alignment = alignment;
-    header.key.dtype = shape.key_dtype;
-    header.key.data = {0, shape.nodes * dtype_bytes(shape.key_dtype)};
-    header.value.dtype = shape.value_dtype;
-    header.value.shape = vector_shape_t {shape.value_columns};
-    header.value.data.first = round_up_to_multiple(header.key.data.bound, alignment);
-    header.value.data.bound = header.value.data.first + shape.nodes * header.value.row_bytes();
-    header.neighbors.dtype = shape.neighbors_dtype;
-    header.neighbors.shape = vector_shape_t {shape.connectivity};
-    header.neighbors.data.first = round_up_to_multiple(header.value.data.bound, alignment);
-    header.neighbors.data.bound = header.neighbors.data.first + shape.nodes * header.neighbors.row_bytes();
-    if (shape.norms_dtype != dtype_t::unknown_k) {
-        header.norms.dtype = shape.norms_dtype;
-        header.norms.shape = safegraphs_norms_shape_k;
-        header.norms.data.first = round_up_to_multiple(header.neighbors.data.bound, alignment);
-        header.norms.data.bound = header.norms.data.first + shape.nodes * header.norms.row_bytes();
-    }
-    auto const [data_offset, status] = safegraphs_data_offset(header, custom_fields, allocator);
-    header.data_offset = data_offset;
-    return {header, status};
-}
-
 #pragma endregion Columns
 
 #pragma region Parts
@@ -679,22 +664,6 @@ struct safegraphs_part_t {
 
     /** Where a buffer manifest's part starts inside the buffer it leads. */
     std::size_t offset = 0;
-};
-
-/** Holds the longest NumKong kernel spelling, 22 characters, with its NUL. */
-inline constexpr std::size_t safegraphs_name_capacity_k = 32;
-
-/** A NUL-terminated metadata name; longer input truncates, so a foreign name fails a
- *  comparison instead of overrunning. */
-struct safegraphs_name_t {
-    char characters[safegraphs_name_capacity_k] = {};
-
-    safegraphs_name_t() = default;
-    explicit safegraphs_name_t(std::string_view text) noexcept {
-        if (!text.empty()) std::memcpy(characters, text.data(), min_of(text.size(), safegraphs_name_capacity_k - 1));
-    }
-    std::string_view view() const noexcept { return characters; }
-    bool empty() const noexcept { return !characters[0]; }
 };
 
 /** What a manifest or a lone monolith says about itself without opening a column. */
@@ -1064,13 +1033,15 @@ status_t safegraphs_keep_path(growing_buffer<char, allocator_type_>& buffer, std
 }
 
 /** Reads @p part 's header and metric token out of the bytes it carries, parsing on
- *  @p allocator. */
+ *  @p allocator, its producer columns appended to @p extra_columns. */
 template <typename allocator_type_>
-status_t safegraphs_describe_part(safegraphs_catalog_part_t& part, allocator_type_ allocator) noexcept {
+status_t safegraphs_describe_part(safegraphs_catalog_part_t& part,
+                                  growing_buffer<safegraphs_named_column_t, allocator_type_>& extra_columns,
+                                  allocator_type_ allocator) noexcept {
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") part.metric = safegraphs_name_t {field.value};
     };
-    auto const [header, status] = safegraphs_read_header(part.monolith, allocator, per_custom_field);
+    auto const [header, status] = safegraphs_read_header(part.monolith, allocator, per_custom_field, &extra_columns);
     if (failed(status)) return status;
     if (header.monolith_bytes() > part.monolith.size()) return status_t::malformed_k;
     part.header = header;
@@ -1082,11 +1053,27 @@ status_t safegraphs_describe_part(safegraphs_catalog_part_t& part, allocator_typ
 template <typename allocator_type_>
 status_t safegraphs_catalog_monolith(bytes_view_t monolith,
                                      growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
+                                     growing_buffer<safegraphs_named_column_t, allocator_type_>& extra_columns,
                                      allocator_type_ allocator) noexcept {
     safegraphs_catalog_part_t part;
     part.monolith = monolith;
-    if (status_t const described = safegraphs_describe_part(part, allocator); failed(described)) return described;
+    if (status_t const described = safegraphs_describe_part(part, extra_columns, allocator); failed(described))
+        return described;
     return parts.push_back(part);
+}
+
+/** Points every part's header at its own run of @p extra_columns, once the buffer stopped growing:
+ *  the parts' runs follow one another in part order. */
+template <typename allocator_type_>
+void safegraphs_bind_extra_columns(
+    growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
+    growing_buffer<safegraphs_named_column_t, allocator_type_> const& extra_columns) noexcept {
+    std::size_t first = 0;
+    for (safegraphs_catalog_part_t& part : parts) {
+        std::size_t const count = part.header.extra_columns.size();
+        part.header.extra_columns = to_span(extra_columns).subspan(first, count);
+        first += count;
+    }
 }
 
 /**
@@ -1094,17 +1081,20 @@ status_t safegraphs_catalog_monolith(bytes_view_t monolith,
  *      else a manifest whose every part is mapped and its header read now, so no entry is taken on
  *      trust.
  *
- *  The mappings land in @p mappings, which must outlive every read of the parts.
+ *  The mappings land in @p mappings, which must outlive every read of the parts, and the producer
+ *  columns in @p extra_columns, which every part's header views.
  */
 template <typename allocator_type_>
 status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t, allocator_type_>& mappings,
                             growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
+                            growing_buffer<safegraphs_named_column_t, allocator_type_>& extra_columns,
                             allocator_type_ allocator) noexcept {
     auto [mapping, mapping_status] = mapped_file_t::read(path);
     if (failed(mapping_status)) return mapping_status;
     bytes_view_t const checkpoint = mapping.view();
     if (safegraphs_is_monolith(checkpoint)) {
-        if (status_t const listed = safegraphs_catalog_monolith(checkpoint, parts, allocator); failed(listed))
+        if (status_t const listed = safegraphs_catalog_monolith(checkpoint, parts, extra_columns, allocator);
+            failed(listed))
             return listed;
         return mappings.push_back(std::move(mapping));
     }
@@ -1132,18 +1122,22 @@ status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t,
         auto [part_mapping, part_mapping_status] = mapped_file_t::read(sibling);
         if (failed(part_mapping_status)) return part_mapping_status;
         part.monolith = part_mapping.view();
-        if (status_t const described = safegraphs_describe_part(part, allocator); failed(described)) return described;
+        if (status_t const described = safegraphs_describe_part(part, extra_columns, allocator); failed(described))
+            return described;
         mappings.push_back_reserved(std::move(part_mapping));
     }
+    safegraphs_bind_extra_columns(parts, extra_columns);
     return status_t::success_k;
 }
 
 /** Lists the parts of the checkpoint held in @p buffer: the magic makes a lone monolith, anything
- *  else the manifest leading the buffer, whose every part's header is read now. */
+ *  else the manifest leading the buffer, whose every part's header is read now, its producer
+ *  columns into @p extra_columns. */
 template <typename allocator_type_>
 status_t safegraphs_catalog(bytes_view_t buffer, growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
+                            growing_buffer<safegraphs_named_column_t, allocator_type_>& extra_columns,
                             allocator_type_ allocator) noexcept {
-    if (safegraphs_is_monolith(buffer)) return safegraphs_catalog_monolith(buffer, parts, allocator);
+    if (safegraphs_is_monolith(buffer)) return safegraphs_catalog_monolith(buffer, parts, extra_columns, allocator);
     status_t kept = status_t::success_k;
     auto per_part = [&](safegraphs_part_t entry) noexcept {
         safegraphs_catalog_part_t part;
@@ -1155,7 +1149,9 @@ status_t safegraphs_catalog(bytes_view_t buffer, growing_buffer<safegraphs_catal
     if (failed(kept)) return kept;
     if (parts.empty()) return status_t::malformed_k;
     for (safegraphs_catalog_part_t& part : parts)
-        if (status_t const described = safegraphs_describe_part(part, allocator); failed(described)) return described;
+        if (status_t const described = safegraphs_describe_part(part, extra_columns, allocator); failed(described))
+            return described;
+    safegraphs_bind_extra_columns(parts, extra_columns);
     return status_t::success_k;
 }
 
@@ -1490,7 +1486,8 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(std::string
                                                                      callback_type_&& per_custom_field = {}) noexcept {
     growing_buffer<mapped_file_t, allocator_type_> mappings {allocator};
     growing_buffer<safegraphs_catalog_part_t, allocator_type_> parts {allocator};
-    if (status_t const listed = safegraphs_catalog(path, mappings, parts, allocator); failed(listed))
+    growing_buffer<safegraphs_named_column_t, allocator_type_> extra_columns {allocator};
+    if (status_t const listed = safegraphs_catalog(path, mappings, parts, extra_columns, allocator); failed(listed))
         return {safegraphs_index_metadata_t {}, listed};
     auto [metadata, status] = safegraphs_read_index_metadata(parts[0].monolith, allocator,
                                                              std::forward<callback_type_>(per_custom_field));
@@ -1696,59 +1693,25 @@ status_t safegraphs_read_index(std::string_view path, index_type_& index, codec_
                                  allocator);
 }
 
-/**
- *  @brief The columns of the monolith whose header @p header_bytes holds, as an external-memory
- *      reader of @p codec_type_ values under @p key_type_ keys and @p node_id_type_ neighbor IDs
- *      addresses them: every offset from the monolith's own start.
- *
- *  Refuses with @c config_mismatch_k what such a reader cannot serve: a key column its keys do not
- *  widen from, values in another dtype, shape or layout than the codec writes, neighbor IDs of
- *  another width, and a @c metric token other than @p metric, unless either is empty. A header
- *  whose columns disagree on their rows answers @c malformed_k.
- */
-template <typename codec_type_, typename key_type_, typename node_id_type_,
-          typename allocator_type_ = std::allocator<byte_t>>
-    requires interchange_value_codec<codec_type_>
-expected<persisted_columns_t> safegraphs_persisted_columns(bytes_view_t header_bytes, std::string_view metric,
-                                                           allocator_type_ allocator = {}) noexcept {
-    persisted_columns_t persisted;
-    safegraphs_name_t named;
-    auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
-        if (field.key == "metric") named = safegraphs_name_t {field.value};
-    };
-    auto const [header, header_status] = safegraphs_read_header(header_bytes, allocator, per_custom_field);
-    if (failed(header_status)) return {persisted, header_status};
-    if (!metric.empty() && !named.empty() && named.view() != metric) return {persisted, status_t::config_mismatch_k};
+/** The columns of a monolith as an external-memory reader addresses them, beside what its header
+ *  says of them that only the reading family can check. */
+struct safegraphs_persisted_part_t {
 
-    // Keys are regular, values shaped as the codec writes them, neighbors ragged or fixed-degree.
-    constexpr bool fixed_width = safegraphs_value_is_fixed<codec_type_>();
-    safegraphs_column_t const& value = header.value;
-    safegraphs_column_t const& adjacency = header.neighbors;
-    if (header.key.offsets || header.key.shape != column_shape_t {scalar_shape_t {}} ||
-        !safegraphs_key_widens(header.key.dtype, safegraphs_key_dtype<key_type_>()))
-        return {persisted, status_t::config_mismatch_k};
-    if (value.dtype != codec_type_::value_dtype_k || value.shape != safegraphs_value_shape<codec_type_>() ||
-        value.offsets.has_value() == fixed_width)
-        return {persisted, status_t::config_mismatch_k};
-    std::size_t const degree = std::holds_alternative<vector_shape_t>(adjacency.shape) && !adjacency.offsets
-                                   ? std::get<vector_shape_t>(adjacency.shape).columns
-                                   : 0;
-    if (adjacency.dtype != safegraphs_node_id_dtype<node_id_type_>() ||
-        (adjacency.offsets ? adjacency.shape != column_shape_t {scalar_shape_t {}} : !degree))
-        return {persisted, status_t::config_mismatch_k};
-    std::size_t const nodes = header.nodes();
-    if (value.nodes() != nodes || adjacency.nodes() != nodes || !header.key.row_bytes() ||
-        nodes >= (std::numeric_limits<node_id_type_>::max)())
-        return {persisted, status_t::malformed_k};
-    auto const sums_cover = [nodes](std::optional<prefix_sums_t> const& sums) noexcept {
-        return !sums || sums->bytes.size() == (nodes + 1) * dtype_bytes(sums->dtype);
-    };
-    if (!sums_cover(value.offsets) || !sums_cover(adjacency.offsets)) return {persisted, status_t::malformed_k};
+    /** The key, value and neighbors columns, every offset from the monolith's own start. */
+    persisted_columns_t columns;
 
-    // Byte ranges shift from the data segment's start to the monolith's; rows are fixed-width in
-    // whole elements or located by their prefix sums.
+    /** The header's metric token, whatever it names; empty when the header names none. */
+    safegraphs_name_t metric;
+
+    /** What one value row holds, for the family to check against its own. */
+    column_shape_t value_shape;
+};
+
+/** The columns @p header lays out, their byte ranges moved from the data segment's start to the
+ *  monolith's; a fixed-width column counts its logical elements per row, packed families
+ *  included. */
+inline persisted_columns_t safegraphs_header_columns(safegraphs_header_t const& header) noexcept {
     auto const persisted_column_of = [&header](safegraphs_column_t const& column) noexcept {
-        std::size_t const element_bytes = dtype_bytes(column.dtype);
         persisted_column_t persisted_column;
         persisted_column.dtype = column.dtype;
         persisted_column.data = {header.data_offset + column.data.first, header.data_offset + column.data.bound};
@@ -1756,14 +1719,54 @@ expected<persisted_columns_t> safegraphs_persisted_columns(bytes_view_t header_b
             persisted_column.offsets = prefix_sums_t {
                 column.offsets->dtype,
                 {header.data_offset + column.offsets->bytes.first, header.data_offset + column.offsets->bytes.bound}};
-        else persisted_column.row_width = element_bytes ? column.row_bytes() / element_bytes : 0;
+        else {
+            persisted_column.row_width = regular_width(column.shape).value_or(0);
+            persisted_column.row_bytes = column.row_bytes();
+        }
         return persisted_column;
     };
-    persisted.nodes = nodes;
+    persisted_columns_t persisted;
+    persisted.nodes = header.nodes();
     persisted.keys = persisted_column_of(header.key);
-    persisted.values = persisted_column_of(value);
-    persisted.neighbors = persisted_column_of(adjacency);
-    return {persisted, status_t::success_k};
+    persisted.values = persisted_column_of(header.value);
+    persisted.neighbors = persisted_column_of(header.neighbors);
+    return persisted;
+}
+
+/**
+ *  @brief The part whose monolith header @p header_bytes holds, as @ref safegraphs_header_columns
+ *      lays it out, with its metric token and value shape.
+ *
+ *  Refuses with @c config_mismatch_k a graph no reader walks: keys other than one fixed element
+ *  per row, and neighbors other than ragged single IDs or a fixed degree. A header whose columns
+ *  disagree on their rows, or whose prefix sums cover other than them, answers @c malformed_k. The
+ *  value dtype and shape, the key and node-ID widths, and the metric are the caller's to check.
+ */
+template <typename allocator_type_ = std::allocator<byte_t>>
+expected<safegraphs_persisted_part_t> safegraphs_persisted_part(bytes_view_t header_bytes,
+                                                                allocator_type_ allocator = {}) noexcept {
+    safegraphs_persisted_part_t part;
+    auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
+        if (field.key == "metric") part.metric = safegraphs_name_t {field.value};
+    };
+    auto const [header, header_status] = safegraphs_read_header(header_bytes, allocator, per_custom_field);
+    if (failed(header_status)) return {part, header_status};
+    safegraphs_column_t const& adjacency = header.neighbors;
+    bool const degree_fixed = std::holds_alternative<vector_shape_t>(adjacency.shape) && !adjacency.offsets &&
+                              std::get<vector_shape_t>(adjacency.shape).columns;
+    if (header.key.offsets || header.key.shape != column_shape_t {scalar_shape_t {}} ||
+        (adjacency.offsets ? adjacency.shape != column_shape_t {scalar_shape_t {}} : !degree_fixed))
+        return {part, status_t::config_mismatch_k};
+    std::size_t const nodes = header.nodes();
+    if (header.value.nodes() != nodes || adjacency.nodes() != nodes || !header.key.row_bytes())
+        return {part, status_t::malformed_k};
+    auto const sums_cover = [nodes](std::optional<prefix_sums_t> const& sums) noexcept {
+        return !sums || sums->bytes.size() == (nodes + 1) * dtype_bytes(sums->dtype);
+    };
+    if (!sums_cover(header.value.offsets) || !sums_cover(adjacency.offsets)) return {part, status_t::malformed_k};
+    part.columns = safegraphs_header_columns(header);
+    part.value_shape = header.value.shape;
+    return {part, status_t::success_k};
 }
 
 #pragma endregion Columned Indexes

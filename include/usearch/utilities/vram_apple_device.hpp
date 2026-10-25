@@ -814,8 +814,8 @@ struct metal_traversal_context {
         return block;
     }
 
-    /** Whether the last attend met a node its value lookup had no row for, which refuses it; read
-     *  once it landed. */
+    /** Whether the last walk met a value-lookup miss, a node its value lookup had no row for, which
+     *  refuses it; read once it landed. */
     bool missed() const noexcept {
         u32_t const* const words = metal_words(counters_);
         return words[metal_missed_k] != 0;

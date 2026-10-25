@@ -27,6 +27,60 @@ using namespace unum::usearch::utilities;
 template <nk::numeric_dtype scalar_, nk_capability_t caps_>
 struct quads_ladder;
 
+/** The GPU kernels only dense indexes launch, the first template argument of each vendor's dense
+ *  kernel template - @c cuda_dense_kernel and @c amd_dense_kernel - and the words of Apple's dense
+ *  exported names; the walks basic graphs share stay in @c utilities::vram_kernel_t. A vendor
+ *  sizes its table of loaded dense kernels by @c count_k. */
+enum class vram_dense_kernel_t : u32_t {
+
+    /** A search rescoring its candidates through the indexer heads. */
+    search_indexer_k,
+
+    /** Scores every visible row against each query, without walking the graph. */
+    scan_k,
+
+    /** A walk landing every scored pair, rather than ranked matches. */
+    multiply_k,
+
+    /** A walk folding the values of the rows it attends to, per head. */
+    attend_k,
+
+    /** Folds each walked node's forward picks and the walkers chained onto it into its row. */
+    merge_back_links_k,
+
+    /** Re-selects each row with a fresh slot within two hops from those two hops of the graph. */
+    percolate_k,
+
+    /** Re-selects each row of a fold bin's shard from its members and its cross results, or merges
+     *  the picks other shards of the bin made of it into its row. */
+    fold_k,
+
+    /** Rebuilds the norms column from the stored vectors. */
+    derive_norms_k,
+
+    /** Merges the attended rows of several shards' walks by the flash rule. */
+    merge_attention_k,
+
+    /** Ranks a walk's matches into the queries' rankings. */
+    resolve_matches_k,
+
+    /** Merges the rankings of several shards' walks per query. */
+    merge_matches_k,
+
+    /** Casts rows into the stored scalar. */
+    cast_k,
+
+    /** Casts rows into the stored scalar, scaled to unit RMS. */
+    rmscast_k,
+
+    /** The number of kernels, sizing the tables of loaded kernels. */
+    count_k,
+};
+
+/** The Itanium spelling of @ref vram_dense_kernel_t inside a dense kernel's own scope, @c S1_, as
+ *  @c vram_kernel_symbol documents. */
+constexpr char const* kernel_enum_mangling(vram_dense_kernel_t) noexcept { return "NS1_19vram_dense_kernel_tE"; }
+
 /** The breadth a GPU insert walks, @p expansion_factor or, when it asks for none, a measured 128:
  *  on SIFT-10M u8 at connectivity 32, inserting at the 64 of @ref default_expansion_factor instead
  *  dropped recall@10 at search breadths 64, 128 and 1024 from 0.9302, 0.9717 and 0.9989 to 0.9158,
@@ -254,22 +308,18 @@ struct indexer_heads {
     }
 };
 
+/** A stored vector's sum and sum of squares in the dot product's dtype, which the compensated
+ *  finalizes subtract and the norms column persists. */
+template <typename dot_result_type_>
+struct vector_norms {
+    dot_result_type_ sum;
+    dot_result_type_ sumsq;
+};
+
 /** The walks' default: no heads, so every node scores as the kit scored it. */
 struct dummy_heads_t {
     dummy_heads_t row(std::size_t) const noexcept { return {}; }
 };
-
-/** Why @p keys and @p scores cannot hold @p rows rankings side by side with contiguous rows, or
- *  success. */
-template <typename key_type_, typename score_type_>
-status_t rankings_refusal(std::size_t rows, nk::matrix_span<key_type_> keys,
-                          nk::matrix_span<score_type_> scores) noexcept {
-    if (keys.extent(0) != rows || scores.extent(0) != rows || scores.extent(1) != keys.extent(1))
-        return status_t::config_mismatch_k;
-    if (keys.stride_bytes(1) != sizeof(key_type_) || scores.stride_bytes(1) != sizeof(score_type_))
-        return status_t::unsupported_layout_k;
-    return status_t::success_k;
-}
 
 /** Runs @p window over every @p window_rows rows of a batch of @p rows in order, as
  *  `window(first, taking)`, summing what each reports; each window writes its own rows' counts,

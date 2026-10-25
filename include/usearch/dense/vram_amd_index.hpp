@@ -7,10 +7,11 @@
  *  The host face of the AMD family, compiled by any C++ compiler: it fills the plain argument
  *  records of @c vram_index.hpp and launches the kernels of @c vram_amd_index.hip by name through
  *  the HIP runtime it opens at first use, so it never sees a kit, a shared view or HIP beyond its
- *  runtime's declarations. Every kernel is one instantiation of a single template over five
- *  arguments - the kernel, the capability ceiling, the dtype, the register rung and the attend
- *  value lookup - so @c vram_kernel_symbol spells its symbol here from those arguments alone, and
- *  one code object per class, which the face's kernels type names, carries every dtype.
+ *  runtime's declarations. Every kernel is one instantiation of @c amd_kernel, for the walks basic
+ *  graphs share, or of @c amd_dense_kernel, for the rest, both over five arguments - the kernel,
+ *  the capability ceiling, the dtype, the register rung and the attend value lookup - so
+ *  @c vram_kernel_symbol spells its symbol here from those arguments alone, and one code object per
+ *  class, which the face's kernels type names, carries every dtype.
  */
 #pragma once
 
@@ -29,6 +30,7 @@
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_amd_device.hpp"
 #include "usearch/utilities/vram_device.hpp" // `vram_kernel_symbol` - a kernel's symbol
+#include "usearch/utilities/vram_shards.hpp" // `vram_shard_fanout` - befriended to read the shards
 #include "usearch/dense/types.hpp"           // `vram_telemetry_block_t` & the launch geometry constants
 #include "usearch/dense/vram_index.hpp"
 
@@ -47,20 +49,28 @@ constexpr u32_t hip_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept 
     switch (kernel) {
     case vram_kernel_t::insert_k:
     case vram_kernel_t::back_link_k:
-    case vram_kernel_t::refine_k:
-    case vram_kernel_t::percolate_k:
-    case vram_kernel_t::merge_back_links_k: return 3;
-    case vram_kernel_t::search_k:
-    case vram_kernel_t::search_indexer_k:
-    case vram_kernel_t::multiply_k: return slots <= 8 ? 4 : 3;
-    // The attend fold carries per-head state, which spills at 8 slots under four blocks' budget.
-    case vram_kernel_t::attend_k: return slots <= 4 ? 4 : 3;
-    case vram_kernel_t::derive_norms_k:
+    case vram_kernel_t::refine_k: return 3;
+    case vram_kernel_t::search_k: return slots <= 8 ? 4 : 3;
     case vram_kernel_t::rebase_links_k:
     case vram_kernel_t::reachability_sweep_k:
-    case vram_kernel_t::reached_in_links_k:
-    case vram_kernel_t::cast_k:
-    case vram_kernel_t::rmscast_k: return 8;
+    case vram_kernel_t::reached_in_links_k: return 8;
+    default: return 1;
+    }
+}
+
+template <nk_capability_t capability_, nk_dtype_t dtype_>
+constexpr u32_t hip_resident_blocks(vram_dense_kernel_t kernel, u32_t slots) noexcept {
+    switch (kernel) {
+    case vram_dense_kernel_t::percolate_k:
+    case vram_dense_kernel_t::fold_k:
+    case vram_dense_kernel_t::merge_back_links_k: return 3;
+    case vram_dense_kernel_t::search_indexer_k:
+    case vram_dense_kernel_t::multiply_k: return slots <= 8 ? 4 : 3;
+    // The attend fold carries per-head state, which spills at 8 slots under four blocks' budget.
+    case vram_dense_kernel_t::attend_k: return slots <= 4 ? 4 : 3;
+    case vram_dense_kernel_t::derive_norms_k:
+    case vram_dense_kernel_t::cast_k:
+    case vram_dense_kernel_t::rmscast_k: return 8;
     default: return 1;
     }
 }
@@ -72,16 +82,17 @@ constexpr u32_t hip_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept 
  *  query's reach. */
 constexpr u32_t hip_waves_per_simd(u32_t blocks) noexcept { return blocks * vram_warps_per_block_k / 4; }
 
-/** One instantiated kernel: the kernel and its register rung, zero where it keeps no ladder or
- *  walks the arena frontier. */
-struct amd_rung_t {
-    vram_kernel_t kernel;
+/** One instantiated kernel of @p kernel_enum_type_: the kernel and its register rung, zero where it
+ *  keeps no ladder or walks the arena frontier. */
+template <typename kernel_enum_type_>
+struct amd_rung {
+    kernel_enum_type_ kernel;
     u32_t slots;
 };
 
-/** Every instantiation one dtype's code exports bar the attends, which the device pass instantiates
- *  and the host looks up as it loads the code object. */
-inline constexpr amd_rung_t amd_rungs[] = {
+/** Every instantiation of the shared @c amd_kernel one dtype exports, which the device pass
+ *  instantiates and the host looks up as it loads the code object. */
+inline constexpr amd_rung<vram_kernel_t> amd_rungs[] = {
     {vram_kernel_t::insert_k, 0},
     {vram_kernel_t::insert_k, 2},
     {vram_kernel_t::insert_k, 4},
@@ -93,39 +104,45 @@ inline constexpr amd_rung_t amd_rungs[] = {
     {vram_kernel_t::refine_k, 4},
     {vram_kernel_t::refine_k, 8},
     {vram_kernel_t::refine_k, 16},
-    {vram_kernel_t::percolate_k, 0},
-    {vram_kernel_t::percolate_k, 2},
-    {vram_kernel_t::percolate_k, 4},
-    {vram_kernel_t::percolate_k, 8},
-    {vram_kernel_t::percolate_k, 16},
     {vram_kernel_t::search_k, 0},
     {vram_kernel_t::search_k, 2},
     {vram_kernel_t::search_k, 4},
     {vram_kernel_t::search_k, 8},
     {vram_kernel_t::search_k, 16},
-    {vram_kernel_t::search_indexer_k, 0},
-    {vram_kernel_t::search_indexer_k, 2},
-    {vram_kernel_t::search_indexer_k, 4},
-    {vram_kernel_t::search_indexer_k, 8},
-    {vram_kernel_t::search_indexer_k, 16},
-    {vram_kernel_t::multiply_k, 0},
-    {vram_kernel_t::multiply_k, 2},
-    {vram_kernel_t::multiply_k, 4},
-    {vram_kernel_t::multiply_k, 8},
-    {vram_kernel_t::multiply_k, 16},
-    {vram_kernel_t::merge_back_links_k, 0},
-    {vram_kernel_t::derive_norms_k, 0},
     {vram_kernel_t::rebase_links_k, 0},
     {vram_kernel_t::mark_landmarks_k, 0},
     {vram_kernel_t::reachability_sweep_k, 0},
     {vram_kernel_t::reachability_islands_k, 0},
     {vram_kernel_t::reached_in_links_k, 0},
     {vram_kernel_t::reconnect_island_k, 0},
-    {vram_kernel_t::merge_attention_k, 0},
-    {vram_kernel_t::resolve_matches_k, 0},
-    {vram_kernel_t::merge_matches_k, 0},
-    {vram_kernel_t::cast_k, 0},
-    {vram_kernel_t::rmscast_k, 0},
+};
+
+/** Every instantiation of @c amd_dense_kernel one dtype exports bar the attends, which the device
+ *  pass instantiates and the host looks up as it loads the code object. */
+inline constexpr amd_rung<vram_dense_kernel_t> amd_dense_rungs[] = {
+    {vram_dense_kernel_t::percolate_k, 0},
+    {vram_dense_kernel_t::percolate_k, 2},
+    {vram_dense_kernel_t::percolate_k, 4},
+    {vram_dense_kernel_t::percolate_k, 8},
+    {vram_dense_kernel_t::percolate_k, 16},
+    {vram_dense_kernel_t::search_indexer_k, 0},
+    {vram_dense_kernel_t::search_indexer_k, 2},
+    {vram_dense_kernel_t::search_indexer_k, 4},
+    {vram_dense_kernel_t::search_indexer_k, 8},
+    {vram_dense_kernel_t::search_indexer_k, 16},
+    {vram_dense_kernel_t::multiply_k, 0},
+    {vram_dense_kernel_t::multiply_k, 2},
+    {vram_dense_kernel_t::multiply_k, 4},
+    {vram_dense_kernel_t::multiply_k, 8},
+    {vram_dense_kernel_t::multiply_k, 16},
+    {vram_dense_kernel_t::merge_back_links_k, 0},
+    {vram_dense_kernel_t::fold_k, 0},
+    {vram_dense_kernel_t::derive_norms_k, 0},
+    {vram_dense_kernel_t::merge_attention_k, 0},
+    {vram_dense_kernel_t::resolve_matches_k, 0},
+    {vram_dense_kernel_t::merge_matches_k, 0},
+    {vram_dense_kernel_t::cast_k, 0},
+    {vram_dense_kernel_t::rmscast_k, 0},
 };
 
 /** The rungs every walk family, attends included, is instantiated over. */
@@ -267,8 +284,9 @@ struct vram_amd_kernels {
         gpu_arena_shape_t const arena_shape = core.arena_shape_for(
             core.walk_selection_rows_(expansion, candidate_slots), frontier);
         // A search, an indexed search and a multiply keep as many blocks resident on one rung.
-        u32_t const resident_blocks = resident_blocks_(attend_k ? vram_kernel_t::attend_k : vram_kernel_t::search_k,
-                                                       frontier == frontier_kind_t::wide_arena_k ? 0 : candidate_slots);
+        u32_t const rung_slots = frontier == frontier_kind_t::wide_arena_k ? 0 : candidate_slots;
+        u32_t const resident_blocks = attend_k ? resident_blocks_(vram_dense_kernel_t::attend_k, rung_slots)
+                                               : resident_blocks_(vram_kernel_t::search_k, rung_slots);
         u32_t const concurrent_walks = core.device_.multiprocessor_count * resident_blocks * vram_warps_per_block_k;
         u32_t const filling = filling_rows<u32_t>(expansion, static_cast<u32_t>(core.connectivity()));
         std::size_t const arena_warps = std::size_t {core.walk_blocks_(queries_count, resident_blocks)} *
@@ -482,8 +500,9 @@ struct vram_amd_kernels {
      *  given; the merge folds the re-selected rows' forward picks and the rows chained onto every
      *  picked row into the live rows, and leaves every other row as it was. Nothing waits: the
      *  landing queued after it checks its claims. */
+    template <typename kernel_enum_type_>
     status_t refine_pass_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
-                          refine_config_t config, vram_kernel_t kernel, iota_view<node_id_t> nodes,
+                          refine_config_t config, kernel_enum_type_ kernel, iota_view<node_id_t> nodes,
                           std::span<u32_t const> node_ids, u32_t parts = 0, u32_t round = 0) noexcept {
         if (status_t const kept = core.status(); failed(kept)) return kept;
         std::size_t const nodes_count = core.size();
@@ -658,6 +677,9 @@ struct vram_amd_kernels {
     static constexpr u32_t resident_blocks_(vram_kernel_t kernel, u32_t slots) noexcept {
         return hip_resident_blocks<capability_k, vector_dtype_>(kernel, slots);
     }
+    static constexpr u32_t resident_blocks_(vram_dense_kernel_t kernel, u32_t slots) noexcept {
+        return hip_resident_blocks<capability_k, vector_dtype_>(kernel, slots);
+    }
 
     /** Loads the code object of @p kernels_type_ onto the device and finds every kernel this dtype
      *  exports bar the attends, by the symbol @ref vram_kernel_symbol spells. */
@@ -666,10 +688,17 @@ struct vram_amd_kernels {
         if (failed(status)) return status;
         module_ = std::move(module);
         vram_kernel_symbol_t symbol;
-        for (amd_rung_t const rung : amd_rungs) {
+        for (amd_rung<vram_kernel_t> const rung : amd_rungs) {
             vram_kernel_symbol(symbol, "dense", "amd_kernel", "vram_arguments_t", rung.kernel, capability_k,
                                vector_dtype_, rung.slots, itanium_type<void> {});
             hip_function_handle_t& function = kernels_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)];
+            if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
+        }
+        for (amd_rung<vram_dense_kernel_t> const rung : amd_dense_rungs) {
+            vram_kernel_symbol(symbol, "dense", "amd_dense_kernel", "vram_arguments_t", rung.kernel, capability_k,
+                               vector_dtype_, rung.slots, itanium_type<void> {});
+            hip_function_handle_t& function =
+                dense_kernels_[static_cast<u32_t>(rung.kernel)][gpu_rung_index(rung.slots)];
             if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
         }
         return status_t::success_k;
@@ -679,6 +708,11 @@ struct vram_amd_kernels {
     status_t launch_(vram_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes, hip_stream_handle_t stream,
                      vram_arguments_t const& arguments) const noexcept {
         return hip_launch(kernels_[static_cast<u32_t>(kernel)][gpu_rung_index(slots)], blocks, block_threads(),
+                          shared_bytes, stream, arguments);
+    }
+    status_t launch_(vram_dense_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes,
+                     hip_stream_handle_t stream, vram_arguments_t const& arguments) const noexcept {
+        return hip_launch(dense_kernels_[static_cast<u32_t>(kernel)][gpu_rung_index(slots)], blocks, block_threads(),
                           shared_bytes, stream, arguments);
     }
 
@@ -730,7 +764,8 @@ struct vram_amd_kernels {
         }
         return status_t::success_k;
     }
-    status_t launch_refine_(core_t& core, vram_kernel_t kernel, vram_refine_t const& view, u32_t candidate_slots,
+    template <typename kernel_enum_type_>
+    status_t launch_refine_(core_t& core, kernel_enum_type_ kernel, vram_refine_t const& view, u32_t candidate_slots,
                             hip_stream_handle_t stream) noexcept {
         vram_arguments_t arguments {};
         arguments.refine = view;
@@ -745,7 +780,7 @@ struct vram_amd_kernels {
         // The merge sweeps the whole ID space and skips the rows the pass neither walked nor
         // picked, carving its slices from the arena sized for the refine's grid, which its count
         // matches.
-        static_assert(resident_blocks_(vram_kernel_t::merge_back_links_k, 0) ==
+        static_assert(resident_blocks_(vram_dense_kernel_t::merge_back_links_k, 0) ==
                       resident_blocks_(vram_kernel_t::refine_k, 0));
         vram_arguments_t arguments {};
         arguments.refine = view;
@@ -758,9 +793,36 @@ struct vram_amd_kernels {
         arguments.refine.node_ids = nullptr;
         arguments.refine.first_id = 0;
         arguments.refine.end_id = view.sampling_bound;
-        return launch_(vram_kernel_t::merge_back_links_k, 0,
-                       core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::merge_back_links_k, 0),
+        return launch_(vram_dense_kernel_t::merge_back_links_k, 0,
+                       core.device_.multiprocessor_count * resident_blocks_(vram_dense_kernel_t::merge_back_links_k, 0),
                        vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, stream, arguments);
+    }
+
+    /** Queues one phase of @p fold over the rows of its launching shard on @p context 's stream,
+     *  each warp's re-selection scratch in shared memory when it fits there and in the context's
+     *  arena otherwise; the caller fills everything but the scratch, the counters and the
+     *  telemetry, which zero ahead of the launch. */
+    status_t launch_fold_(core_t const& core, vram_fold_t fold, traversal_context_t& context) const noexcept {
+        static_assert(resident_blocks_(vram_dense_kernel_t::fold_k, 0) <= resident_blocks_(vram_kernel_t::refine_k, 0),
+                      "A fold keeps no more blocks resident than the builders its scratch is checked against");
+        u32_t const scratch_bytes = core.build_scratch_bytes_per_warp(fold.selection_rows);
+        bool const shared = build_scratch_fits(core, scratch_bytes);
+        u32_t const blocks = core.device_.multiprocessor_count * resident_blocks_(vram_dense_kernel_t::fold_k, 0);
+        fold.arena_shape = gpu_arena_shape(0, 0, shared ? 0u : scratch_bytes);
+        fold.scratch_bytes_per_warp = shared ? scratch_bytes : 0u;
+        fold.arena = context.ensure_arena(std::size_t {blocks} * vram_warps_per_block_k *
+                                          fold.arena_shape.slice_bytes<node_id_t>());
+        if (!fold.arena && fold.arena_shape.scratch_bytes) return status_t::bad_alloc_k;
+        fold.telemetry = context.telemetry_.get();
+        fold.assigned_rows = context.assigned_rows_.get();
+        if (hip_api().fill_async(fold.telemetry, 0, sizeof(vram_telemetry_block_t), context.stream()) !=
+                hip_success_k ||
+            hip_api().fill_async(fold.assigned_rows, 0, sizeof(u32_t), context.stream()) != hip_success_k)
+            return status_t::device_error_k;
+        vram_arguments_t arguments {};
+        arguments.fold = fold;
+        return launch_(vram_dense_kernel_t::fold_k, 0, blocks, vram_warps_per_block_k * fold.scratch_bytes_per_warp,
+                       context.stream(), arguments);
     }
 
     /** Casts @p count values at @p from in @p from_dtype into @p to in @p to_dtype on @p stream,
@@ -776,8 +838,8 @@ struct vram_amd_kernels {
             return status_t::unsupported_k;
         u32_t const blocks = static_cast<u32_t>(
             min_of<std::size_t>(divide_round_up<std::size_t>(arguments.cast.plan.units, block_threads()),
-                                core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::cast_k, 0)));
-        return launch_(vram_kernel_t::cast_k, 0, blocks, 0, stream, arguments);
+                                core.device_.multiprocessor_count * resident_blocks_(vram_dense_kernel_t::cast_k, 0)));
+        return launch_(vram_dense_kernel_t::cast_k, 0, blocks, 0, stream, arguments);
     }
 
     /** Launches one walk per query of @p launch, each written out through @p sink: the search,
@@ -787,19 +849,21 @@ struct vram_amd_kernels {
         vram_arguments_t arguments {};
         arguments.search = launch.view;
         arguments.rescoring = launch.rescoring;
-        vram_kernel_t kernel = vram_kernel_t::search_k;
+        u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.candidate_slots;
+        auto launch_kernel = [&](auto kernel) noexcept {
+            u32_t const blocks = core.walk_blocks_(launch.view.queries_count, resident_blocks_(kernel, slots));
+            return launch_(kernel, slots, blocks, vram_warps_per_block_k * launch.view.scratch_bytes_per_warp, stream,
+                           arguments);
+        };
         if constexpr (std::is_same_v<sink_, vram_multiply_sink_t>) {
             arguments.multiply_sink = sink;
-            kernel = vram_kernel_t::multiply_k;
+            return launch_kernel(vram_dense_kernel_t::multiply_k);
         }
         else {
             arguments.search_sink = sink;
-            if (launch.rescoring.heads) kernel = vram_kernel_t::search_indexer_k;
+            if (launch.rescoring.heads) return launch_kernel(vram_dense_kernel_t::search_indexer_k);
+            return launch_kernel(vram_kernel_t::search_k);
         }
-        u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.candidate_slots;
-        u32_t const blocks = core.walk_blocks_(launch.view.queries_count, resident_blocks_(kernel, slots));
-        return launch_(kernel, slots, blocks, vram_warps_per_block_k * launch.view.scratch_bytes_per_warp, stream,
-                       arguments);
     }
 
     /** Walks every token of @p launch under its staged heads, folding the value rows
@@ -827,11 +891,11 @@ struct vram_amd_kernels {
         std::memcpy(attend.value_lookup, &value_lookup, sizeof(value_lookup));
         u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.candidate_slots;
         vram_kernel_symbol_t symbol;
-        vram_kernel_symbol(symbol, "dense", "amd_kernel", "vram_arguments_t", vram_kernel_t::attend_k, capability_k,
-                           vector_dtype_, slots, itanium_type<value_lookup_type_> {});
+        vram_kernel_symbol(symbol, "dense", "amd_dense_kernel", "vram_arguments_t", vram_dense_kernel_t::attend_k,
+                           capability_k, vector_dtype_, slots, itanium_type<value_lookup_type_> {});
         return hip_launch(
             module_.function(symbol.text),
-            core.walk_blocks_(launch.view.queries_count, resident_blocks_(vram_kernel_t::attend_k, slots)),
+            core.walk_blocks_(launch.view.queries_count, resident_blocks_(vram_dense_kernel_t::attend_k, slots)),
             block_threads(), vram_warps_per_block_k * launch.view.scratch_bytes_per_warp, context.stream(), arguments);
     }
 
@@ -839,10 +903,11 @@ struct vram_amd_kernels {
 
   private:
 
-    /** This class's code object on this device, and its kernels in @ref vram_kernel_t order, the
-     *  attends left to their launches. */
+    /** This class's code object on this device, its shared kernels in @ref vram_kernel_t order and
+     *  its dense ones in @ref vram_dense_kernel_t order, the attends left to their launches. */
     hip_module_t module_;
     hip_function_handle_t kernels_[static_cast<u32_t>(vram_kernel_t::count_k)][gpu_rungs_per_kernel_k] = {};
+    hip_function_handle_t dense_kernels_[static_cast<u32_t>(vram_dense_kernel_t::count_k)][gpu_rungs_per_kernel_k] = {};
 };
 
 /**
@@ -1035,9 +1100,8 @@ struct vram_amd_index {
     expected<health_result_t> health(traversal_context_t& context) noexcept { return core_.health(context); }
 
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
-                                    typename executor_t::stream_t const& stream,
-                                    node_id_t id_shift = 0) const noexcept {
-        return core_.plan_save(columns, synchronization, stream, id_shift);
+                                    typename executor_t::stream_t const& stream) const noexcept {
+        return core_.plan_save(columns, synchronization, stream);
     }
 
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
@@ -1060,13 +1124,16 @@ struct vram_amd_index {
   private:
 
     /** The sharded index walks its shards under one snapshot of their watermarks, merges their
-     *  attends on its first device, and publishes or fails their batches together. */
+     *  attends on its first device, and publishes or fails their batches together; a compaction
+     *  maps every shard of a fold bin for the bin's other devices. */
     template <typename, nk_dtype_t, typename, typename, typename, typename>
     friend struct vram_amd_indexes;
     template <typename, typename, typename, typename, template <typename> class, typename>
     friend struct utilities::shard_set;
     template <typename, typename>
-    friend struct vram_shard_fanout;
+    friend struct utilities::vram_shard_fanout;
+    template <typename, typename>
+    friend struct vram_amd_compact_plan;
 
     expected<node_id_t> claim_(std::size_t rows) noexcept { return core_.claim_(rows); }
     std::size_t claimed_() const noexcept { return core_.claimed_(); }

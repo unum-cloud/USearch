@@ -47,6 +47,7 @@
 #include "usearch/dense/types.hpp"         // `compact_config_t`, `compact_result_t`
 #include "usearch/dense/ram_index.hpp"     // `ram_index`, the RAM index a block build fills
 #include "usearch/dense/nvme_indexes.hpp"
+#include "usearch/dense/shard_checkpoints.hpp" // `monolith_layout_t`, `monolith_header` - the target parts' headers
 
 namespace unum::usearch::dense {
 
@@ -346,6 +347,9 @@ struct [[nodiscard]] nvme_compact_plan {
         safegraphs_header_t header;
         indexes_t view;
 
+        /** The norms column, which the header's producer columns view. */
+        safegraphs_named_column_t norms;
+
         /** The rows the re-select phase re-selects, all of them unless the plan narrows them. */
         iota_view<std::size_t> selected;
 
@@ -622,19 +626,20 @@ struct [[nodiscard]] nvme_compact_plan {
         if (failed(targets_.reserve_exactly(rows.size()))) return status_t::bad_alloc_k;
         for (std::size_t part = 0; part != rows.size(); ++part) {
             if (!rows[part] || rows[part] >= node_id_unknown_k) return status_t::overflow_k;
-            safegraphs_regular_shape_t const shape {
-                rows[part],
-                safegraphs_key_dtype<key_t>(),
-                dtype_of(scalar_t::dtype()),
-                dimensions_(),
-                dtype_t::u32_k,
-                connectivity_(),
-                norms_bytes_() ? dtype_of(dot_result_t::dtype()) : dtype_t::unknown_k};
-            auto const [header, frame_status] = safegraphs_regular_header(shape, save_.alignment, to_span(fields_));
-            if (failed(frame_status)) return frame_status;
+            monolith_layout_t const layout {rows[part],
+                                            safegraphs_key_dtype<key_t>(),
+                                            dtype_of(scalar_t::dtype()),
+                                            dimensions_(),
+                                            dtype_t::u32_k,
+                                            connectivity_(),
+                                            norms_bytes_() ? dtype_of(dot_result_t::dtype()) : dtype_t::unknown_k};
             targets_.push_back_reserved(
-                target_t {paths_t {allocator_}, seekable_file_t {}, header, indexes_t {allocator_}});
+                target_t {paths_t {allocator_}, seekable_file_t {}, safegraphs_header_t {}, indexes_t {allocator_}});
             target_t& target = targets_.back();
+            auto const [header, frame_status] = monolith_header(layout, save_.alignment, to_span(fields_),
+                                                                target.norms);
+            if (failed(frame_status)) return frame_status;
+            target.header = header;
             target.selected = {0, rows[part]};
             target.view.kernel_ = kernel_();
             paths_t name {allocator_};
@@ -649,15 +654,10 @@ struct [[nodiscard]] nvme_compact_plan {
             auto [file_medium, medium_status] = file_medium_t::open(target.path.data());
             if (failed(medium_status)) return medium_status;
             nvme_part_t viewed;
-            viewed.nodes = static_cast<u32_t>(rows[part]);
-            viewed.dimensions = static_cast<u32_t>(dimensions_());
-            viewed.connectivity = static_cast<u32_t>(connectivity_());
-            viewed.key_row_bytes = static_cast<u32_t>(header.key.row_bytes());
-            viewed.key_dtype = header.key.dtype;
-            viewed.value_row_bytes = static_cast<u32_t>(header.value.row_bytes());
-            viewed.keys_begin = header.data_offset + header.key.data.first;
-            viewed.values_begin = header.data_offset + header.value.data.first;
-            viewed.neighbors_begin = header.data_offset + header.neighbors.data.first;
+            if (status_t const derived = indexes_t::index_t::part_of_columns_(safegraphs_header_columns(header),
+                                                                              dtype_t::unknown_k, viewed);
+                failed(derived))
+                return derived;
             if (failed(target.view.media_.push_back(medium_t {std::move(file_medium)})) ||
                 failed(target.view.parts_.push_back(viewed)))
                 return status_t::bad_alloc_k;
@@ -1057,7 +1057,7 @@ struct [[nodiscard]] nvme_compact_plan {
 
     /** Where the norms column of target part @p target starts. */
     static u64_t norms_begin_(target_t const& target) noexcept {
-        return target.header.data_offset + target.header.norms.data.first;
+        return target.header.data_offset + target.norms.column.data.first;
     }
 
     /** The one part of target part @p target. */

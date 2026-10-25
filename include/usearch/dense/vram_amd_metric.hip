@@ -1588,8 +1588,8 @@ struct u1x8_rocm_quads_kit_t {
 template <typename storage_, typename cache_>
 __device__ __forceinline__ void hip_copy_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                               u32_t lane, u32_t lanes) noexcept {
-    for (u32_t word = lane; word < rows * storage.row_fragments; word += lanes) {
-        u32_t const row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, row);
+    for (u32_t word = lane; word < rows * storage.geometry.row_fragments; word += lanes) {
+        u32_t const row = storage.geometry.row_of_word(word), fragment = storage.geometry.fragment_of_word(word, row);
         cache.at(row, fragment) = storage.vector_for(ids[row], fragment);
     }
 }
@@ -1618,9 +1618,9 @@ struct rocm_registers_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_>
+    template <vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
-        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
         vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
         vram_telemetry_t& telemetry, u32_t lane) noexcept {
@@ -1663,9 +1663,9 @@ struct cdna5_registers_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_>
+    template <vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
-        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
         vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
         vram_telemetry_t& telemetry, u32_t lane) noexcept {
@@ -1724,9 +1724,9 @@ struct cdna3_lds_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_>
+    template <vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
-        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
         vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
         vram_telemetry_t& telemetry, u32_t lane) noexcept {
@@ -1740,17 +1740,17 @@ struct cdna3_lds_schedule_t {
         if (cache.ids_) return;
         constexpr u32_t lane_bytes_k = sizeof(u32_t);
         constexpr u32_t units_per_fragment_k = sizeof(typename storage_::fragment_t) / lane_bytes_k;
-        u32_t const row_units = storage.row_fragments * units_per_fragment_k, units = rows * row_units;
+        u32_t const row_units = storage.geometry.row_fragments * units_per_fragment_k, units = rows * row_units;
         byte_t* const cache_bytes = reinterpret_cast<byte_t*>(cache.row(0));
         for (u32_t base = 0; base < units; base += warp_t::width_k) {
             u32_t const unit = base + lane;
             if (unit >= units) break;
-            u32_t const row = storage.row_of_word(unit / units_per_fragment_k);
+            u32_t const row = storage.geometry.row_of_word(unit / units_per_fragment_k);
             byte_t* const source = reinterpret_cast<byte_t*>(storage.vector_span_for(ids[row])) +
                                    (unit - row * row_units) * lane_bytes_k;
             __builtin_amdgcn_global_load_lds(hip_global_pointer(source),
                                              hip_shared_pointer(cache_bytes + base * lane_bytes_k),
-                                             static_cast<decltype(storage.row_fragments)>(lane_bytes_k), 0, 0);
+                                             static_cast<u32_t>(lane_bytes_k), 0, 0);
         }
     }
 
@@ -1780,9 +1780,9 @@ struct cdna4_lds_schedule_t {
     }
 
     /** The greedy diversity prefix as @ref vram_keep_diverse runs it, on this schedule. */
-    template <vram_quads_kit kit_>
+    template <vram_quads_kit kit_, typename storage_>
     __device__ __forceinline__ u32_t keep_diverse( //
-        vram_flat_view<kit_> const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
+        storage_ const& storage, vram_vector_cache<typename kit_::fragment_t> cache,
         vram_sorted_buffer<warp_t, node_id_t> const& sorted, u32_t position_mask, u32_t candidates_count,
         vram_selection_scratch<node_id_t> selection, typename kit_::norms_t const* candidate_norms, bool& kept_zero,
         vram_telemetry_t& telemetry, u32_t lane) noexcept {
@@ -1796,17 +1796,17 @@ struct cdna4_lds_schedule_t {
         if (cache.ids_) return;
         constexpr u32_t lane_bytes_k = sizeof(uint4);
         constexpr u32_t units_per_fragment_k = sizeof(typename storage_::fragment_t) / lane_bytes_k;
-        u32_t const row_units = storage.row_fragments * units_per_fragment_k, units = rows * row_units;
+        u32_t const row_units = storage.geometry.row_fragments * units_per_fragment_k, units = rows * row_units;
         byte_t* const cache_bytes = reinterpret_cast<byte_t*>(cache.row(0));
         for (u32_t base = 0; base < units; base += warp_t::width_k) {
             u32_t const unit = base + lane;
             if (unit >= units) break;
-            u32_t const row = storage.row_of_word(unit / units_per_fragment_k);
+            u32_t const row = storage.geometry.row_of_word(unit / units_per_fragment_k);
             byte_t* const source = reinterpret_cast<byte_t*>(storage.vector_span_for(ids[row])) +
                                    (unit - row * row_units) * lane_bytes_k;
             __builtin_amdgcn_global_load_lds(hip_global_pointer(source),
                                              hip_shared_pointer(cache_bytes + base * lane_bytes_k),
-                                             static_cast<decltype(storage.row_fragments)>(lane_bytes_k), 0, 0);
+                                             static_cast<u32_t>(lane_bytes_k), 0, 0);
         }
     }
 
