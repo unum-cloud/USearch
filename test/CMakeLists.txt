@@ -5,48 +5,9 @@ add_executable(
                              basic/bioinformatics.cpp basic/meshes.cpp
 )
 usearch_setup_target(usearch_test_header_only HOST)
-target_include_directories(usearch_test_header_only PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(usearch_test_header_only PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
 target_link_libraries(usearch_test_header_only PRIVATE fmt::fmt yyjson forkunion::header numkong::header)
 add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
-
-# The engine suite lists the dense per-family test units, sharded per dtype so the instantiation grids build in
-# parallel, and keeps the shards of the dtypes `USEARCH_DENSE_DTYPES` compiles; the sequence and shapes engines add one
-# unit each. Optimization level comes from the configuration: measured on these shards, -O1 costs as much as -O3 and
-# only slows the suite down.
-add_executable(
-    usearch_test
-    main.cpp
-    dense.cpp
-    utilities/safegraphs_format.cpp
-    dense/ram_metric_f64.cpp
-    dense/ram_metric_f32.cpp
-    dense/ram_indexes.cpp
-    dense/ram_index_f32.cpp
-    dense/nvme_indexes.cpp
-    sequence/ram_index.cpp
-    shapes/ram_index.cpp
-    geospatial/ram_index.cpp
-)
-usearch_dense_dtype_sources(
-    usearch_test
-    BF16 dense/ram_metric_bf16.cpp dense/ram_index_bf16.cpp
-    F16 dense/ram_metric_f16.cpp dense/ram_index_f16.cpp
-    E5M2 dense/ram_metric_e5m2.cpp dense/ram_index_e5m2.cpp
-    E4M3 dense/ram_metric_e4m3.cpp
-    E3M2 dense/ram_metric_e3m2.cpp
-    E2M3 dense/ram_metric_e2m3.cpp
-    I8 dense/ram_metric_i8.cpp dense/ram_index_i8.cpp
-    I4 dense/ram_metric_i4.cpp dense/ram_index_i4.cpp
-    U8 dense/ram_metric_u8.cpp dense/ram_index_u8.cpp
-    U4 dense/ram_metric_u4.cpp
-    U1 dense/ram_metric_u1.cpp dense/ram_index_u1.cpp
-)
-usearch_setup_target(usearch_test HOST)
-# The capability names come from the C interface's own probes, compiled in rather than linking the whole library.
-target_sources(usearch_test PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
-target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header)
-add_test(NAME usearch_test COMMAND usearch_test)
 
 # The header-only tier's witness: everything under `utilities/`, `basic/` & `geospatial/` compiles & runs from headers
 # alone - its own and the header-only siblings', with no compiled library or yyjson behind it.
@@ -55,38 +16,20 @@ usearch_setup_target(usearch_test_header_only_witness HOST)
 target_link_libraries(usearch_test_header_only_witness PRIVATE forkunion::header numkong::header)
 add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_witness)
 
-# The VRAM test shards compile once per vendor, so each unit sees the SDK facts of the one vendor it composes over: the
-# per-dtype shards, the sharded suite and, for the vendors that have them, the modalities' units after `SOURCES`, each
-# instantiated for the executor of @p vendor_ alone, whose `USEARCH_ARCH_<VENDOR>_` is @p architecture_macro_ and the
-# others' are zero, with the `DEFINITIONS` the vendor's kits read. The vendor's `ENTRY` registers with the runner, which
-# names none of them. NVIDIA and AMD shards compile host-only through Clang's CUDA or HIP mode, as the vendor's entry
-# does, so the vendor's headers define the index members and NumKong keeps the vendor's `NUMKONG_TARGET_*`; the entry,
-# or its `DEVICE` entry, compiles once more device-only into the suite's own bundle of the `CODES`, holding the shards'
-# kernels and the attends over its device value lookups. A vendor naming its `DTYPES`, in ladder order, compiles each of
-# the first `USEARCH_DENSE_DTYPES` from `dense/vram_<vendor>_<dtype>.cu` into a bundle of its own instead. Apple's
-# kernels compile from embedded source at first use, so its entry is a plain C++ unit.
+# The VRAM cells compile once per vendor, so each unit sees the SDK facts of the one vendor it composes over: the dense
+# rung cells and, for the vendors that have them, the modalities' units after `SOURCES`, each instantiated for the
+# executor of @p vendor_ alone, whose `USEARCH_ARCH_<VENDOR>_` is @p architecture_macro_ and the others' are zero, with
+# the `DEFINITIONS` the vendor's kits read. The vendor's `ENTRY` registers with the runner, which names none of them.
+# NVIDIA and AMD units compile host-only through Clang's CUDA or HIP mode, as the vendor's entry does. NVIDIA's cells
+# run the library's class fatbins; AMD's `DEVICE` entry compiles once more device-only into the suite's own code object
+# of the `CODES`. Apple's kernels compile from embedded source at first use, so its entry is a plain C++ unit.
 function (usearch_test_vram_shards vendor_ architecture_macro_)
-    cmake_parse_arguments(PARSE_ARGV 2 arg "" "ENTRY;DEVICE" "SOURCES;DEFINITIONS;CODES;DTYPES")
+    cmake_parse_arguments(PARSE_ARGV 2 arg "" "ENTRY;DEVICE" "SOURCES;DEFINITIONS;CODES")
     set(target_ usearch_test_vram_shards_${vendor_})
     set(entry_ ${CMAKE_CURRENT_SOURCE_DIR}/${arg_ENTRY})
-    add_library(${target_} OBJECT dense/vram_indexes.cpp)
-    usearch_dense_dtype_sources(
-        ${target_}
-        BF16 dense/vram_index_bf16.cpp
-        F16 dense/vram_index_f16.cpp
-        E5M2 dense/vram_index_e5m2.cpp
-        E4M3 dense/vram_index_e4m3.cpp
-        E3M2 dense/vram_index_e3m2.cpp
-        E2M3 dense/vram_index_e2m3.cpp
-        I8 dense/vram_index_i8.cpp
-        I4 dense/vram_index_i4.cpp
-        U8 dense/vram_index_u8.cpp
-        U4 dense/vram_index_u4.cpp
-        U1 dense/vram_index_u1.cpp
-    )
-    target_sources(${target_} PRIVATE ${arg_SOURCES} ${entry_})
+    add_library(${target_} OBJECT dense/vram_indexes.cpp ${arg_SOURCES} ${entry_})
     usearch_setup_target(${target_} HOST)
-    target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
     foreach (macro_ IN ITEMS USEARCH_ARCH_CUDA_ USEARCH_ARCH_ROCM_ USEARCH_ARCH_METAL_)
         if (macro_ STREQUAL architecture_macro_)
             target_compile_definitions(${target_} PRIVATE ${macro_}=1)
@@ -96,24 +39,7 @@ function (usearch_test_vram_shards vendor_ architecture_macro_)
     endforeach ()
     target_compile_definitions(${target_} PRIVATE ${arg_DEFINITIONS})
     target_link_libraries(${target_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header)
-    if (arg_DTYPES)
-        set(position_ 0)
-        foreach (dtype_ IN LISTS arg_DTYPES)
-            if (position_ LESS USEARCH_DENSE_DTYPES)
-                usearch_gpu_bundle(
-                    ${target_}
-                    ${vendor_}
-                    test_vram_${vendor_}_${dtype_}
-                    ${entry_}
-                    ${arg_CODES}
-                    DEVICE
-                    ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_${vendor_}_${dtype_}.cu
-                )
-            endif ()
-            math(EXPR position_ "${position_} + 1")
-        endforeach ()
-        usearch_gpu_host_only(${target_} ${entry_})
-    elseif (vendor_ STREQUAL "nvidia" OR vendor_ STREQUAL "amd")
+    if (vendor_ STREQUAL "nvidia" OR vendor_ STREQUAL "amd")
         set(device_)
         if (arg_DEVICE)
             set(device_ DEVICE ${CMAKE_CURRENT_SOURCE_DIR}/${arg_DEVICE})
@@ -127,30 +53,16 @@ function (usearch_test_vram_shards vendor_ architecture_macro_)
     )
 endfunction ()
 
-# One row per vendor: NVIDIA tests a generation's kits only when every listed architecture runs them, and AMD compiles
-# for the listed processors of the CDNA3 class, which CDNA3 and CDNA4 run.
+# One row per vendor: NVIDIA's cells run the class of the newest generation the listed architectures name, and AMD
+# compiles for the listed processors of the CDNA3 class, which CDNA3 and CDNA4 run.
 set(usearch_test_vram_shards_)
 if (USEARCH_BUILD_CUDA)
     usearch_cuda_capabilities(usearch_test_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
-    usearch_cuda_codes(usearch_test_cuda_codes_ "${USEARCH_CUDA_ARCHITECTURES}")
     usearch_test_vram_shards(
         nvidia USEARCH_ARCH_CUDA_
         ENTRY dense/vram_nvidia.cpp
         SOURCES sequence/vram_index.cpp shapes/vram_index.cpp geospatial/vram_index.cpp
         DEFINITIONS ${usearch_test_cuda_capabilities_}
-        CODES ${usearch_test_cuda_codes_}
-              DTYPES
-              bf16
-              u1
-              i8
-              e4m3
-              f16
-              u8
-              e5m2
-              i4
-              u4
-              e3m2
-              e2m3
     )
 endif ()
 if (USEARCH_BUILD_ROCM)
@@ -167,11 +79,53 @@ if (USEARCH_BUILD_METAL)
     usearch_test_vram_shards(apple USEARCH_ARCH_METAL_ ENTRY dense/vram_apple.cpp)
 endif ()
 
-# The one VRAM runner links the library too, so it reaches every class variant it compiled through the C interface.
-add_executable(usearch_test_vram dense_vram.cpp)
-usearch_setup_target(usearch_test_vram HOST)
-target_link_libraries(
-    usearch_test_vram PRIVATE ${usearch_test_vram_shards_} fmt::fmt yyjson forkunion::static
-                              ${USEARCH_PUNNED_LIBRARIES} ${CMAKE_DL_LIBS}
+# The engine suite: the dense behavior cells, one per mechanism, with each storage dtype's cells in a unit of its own
+# that compiles only when `USEARCH_DENSE_DTYPES` keeps the dtype and registers itself with the runner; the sequence,
+# shapes and geospatial engines; the suites over the C interface; and every vendor's VRAM cells the build carries. It
+# links the library, which the suites over the C interface call and the device listing names its classes through.
+# Optimization level comes from the configuration: measured on these units, -O1 costs as much as -O3 and only slows the
+# suite down.
+add_executable(
+    usearch_test
+    main.cpp
+    dense.cpp
+    utilities/safegraphs_format.cpp
+    dense/ram_metric.cpp
+    dense/nvme_indexes.cpp
+    sequence/ram_index.cpp
+    shapes/ram_index.cpp
+    geospatial/ram_index.cpp
+    abi/dense.cpp
+    abi/sequence.cpp
+    abi/shapes.cpp
+    abi/geospatial.cpp
 )
-add_test(NAME usearch_test_vram COMMAND usearch_test_vram)
+usearch_dense_dtype_sources(
+    usearch_test
+    BF16 dense/ram_bf16.cpp
+    U1 dense/ram_u1.cpp
+    I8 dense/ram_i8.cpp
+    E4M3 dense/ram_e4m3.cpp
+    F16 dense/ram_f16.cpp
+    U8 dense/ram_u8.cpp
+    E5M2 dense/ram_e5m2.cpp
+    I4 dense/ram_i4.cpp
+    U4 dense/ram_u4.cpp
+    E3M2 dense/ram_e3m2.cpp
+    E2M3 dense/ram_e2m3.cpp
+)
+usearch_setup_target(usearch_test HOST)
+target_include_directories(
+    usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(
+    usearch_test
+    PRIVATE ${usearch_test_vram_shards_}
+            fmt::fmt
+            yyjson
+            forkunion::static
+            stringzilla::header
+            ${USEARCH_PUNNED_LIBRARIES}
+            ${CMAKE_DL_LIBS}
+)
+add_test(NAME usearch_test COMMAND usearch_test)

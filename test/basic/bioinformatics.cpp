@@ -127,11 +127,10 @@ struct bioinformatics_handmade_t {
     std::array<std::array<u64_t, 3>, 3> distances;
 };
 
-template <typename wait_type_ = fu::standard_yield_t,
-          template <typename> class atomic_ref_template_ = standard_atomic_ref>
+template <typename wait_type_ = fu::standard_yield_t>
 struct bioinformatics_fixture {
     using index_t =
-        ram_index<dna_t, us::utilities::uuid_t, u64_t, u64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
+        ram_index<dna_t, us::utilities::uuid_t, u64_t, u64_t, wait_type_, standard_atomic_ref, counting_allocator_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
@@ -252,8 +251,6 @@ std::size_t test::basic::check_bioinformatics(settings_t const& settings) {
     std::size_t failures = 0;
     failures += test_basic_scenarios<bioinformatics_fixture_t>(settings.seed);
     failures += test_basic_scenarios<bioinformatics_fixture<flaky_waiter_t>>(settings.seed);
-    failures += test_basic_scenarios<bioinformatics_fixture<fu::standard_yield_t, fu::preferred_atomic_ref>>(
-        settings.seed);
     failures += check_bioinformatics_codec();
     failures += check_bioinformatics_independent_oracle(settings.seed);
     // The uuid key column.

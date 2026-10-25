@@ -21,25 +21,23 @@
 #include "usearch/dense/ram_compaction.hpp"
 
 #include "dense.cuh"
+#include "dense_specializations.cuh" // `quads_kit_of` & kin - the kits a CPU class runs a dtype on
 
 namespace unum::usearch::test::dense {
 
-/** The sharded RAM index over the kits the ladders pick for @p dtype_ under @p caps_, as @c src/
- *  spells them for a CPU class. */
-template <nk_dtype_t dtype_, nk_capability_t caps_, typename waiter_type_ = fu::standard_yield_t,
+/** A behavior cell: the kits of @p cpu_class_ under a waiter or atomic it would not pick. */
+template <nk_dtype_t dtype_, cpu_class_t cpu_class_, typename waiter_type_ = fu::standard_yield_t,
           template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-using ram_indexes_for = ram_indexes<u32_t, typename quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
-                                    typename tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
-                                    typename elementwise_ladder<caps_>::kit_t,
-                                    typename rmscast_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
-                                    typename visits_hash_set_ladder<caps_>::kit_t, waiter_type_, atomic_ref_>;
+using ram_indexes_for = ram_indexes<uuid_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
+                                    elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>,
+                                    visits_kit_of<cpu_class_>, waiter_type_, atomic_ref_>;
 
 /** No-op sibling picked when the cell cannot be compiled on this target: its serial
  *  kernels are not adapted yet, or the requested kit is absent from the build. */
-template <                                        //
-    nk_dtype_t dtype_, nk_kernel_kind_t kernel_,  //
-    typename waiter_type_ = fu::standard_yield_t, //
-    nk_capability_t caps_ = nk_cap_serial_k,      //
+template <                                          //
+    nk_dtype_t dtype_, nk_kernel_kind_t kernel_,    //
+    typename waiter_type_ = fu::standard_yield_t,   //
+    cpu_class_t cpu_class_ = cpu_class_t::serial_k, //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
 static std::size_t test_ram_indexes_configuration(char const* name, u64_t) {
     if constexpr (!quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
@@ -66,7 +64,7 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
     auto vectors = make_vectors<scalar_t>(part * (rounds + 1), dimensions, stream_key(seed, "indexes_absorb_refusals"));
     auto rows_of = [&](std::size_t first) { return vectors(nk::range(first, first + part), nk::slice); };
     std::vector<key_t> keys(part * (rounds + 1));
-    for (std::size_t row = 0; row != keys.size(); ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != keys.size(); ++row) keys[row] = dense_key<key_t>(1 + row);
     auto keys_of = [&](std::size_t first) { return std::span<key_t const> {keys.data() + first, part}; };
 
     std::array<dense_indexes_executor<indexes_type_>, 2> drivers;
@@ -82,7 +80,8 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
 
     // Racing rows take keys past every part's, so each resolves to the one row it landed.
     std::vector<key_t> landed_keys;
-    key_t next_key = static_cast<key_t>(keys.size() + 1);
+    u64_t next_number = keys.size() + 1;
+    key_t next_key = dense_key<key_t>(next_number);
     {
         auto [plan, plan_status] = recipient.plan_insert(1, drivers[0].executor);
         failures += expect(succeeded(plan_status));
@@ -92,7 +91,8 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
         failures += expect_eq(recipient.absorb(donor, drivers[1].executor).status, status_t::contended_k);
         failures += expect_eq(donor.size(), part);
         failures += expect(succeeded(plan.finish().status));
-        landed_keys.push_back(next_key++);
+        landed_keys.push_back(next_key);
+        next_key = dense_key<key_t>(++next_number);
     }
 
     dense_indexes_row_driver<indexes_type_> rows_driver {recipient, drivers[0]};
@@ -123,7 +123,10 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
                 for (std::size_t row = 0; !absorbed.load(std::memory_order_acquire); row = (row + 1) % part) {
                     status_t const status =
                         recipient.insert(next_key, vectors.view().row(row).as_vector(), rows_driver.handle()).status;
-                    if (status == status_t::success_k) landed_keys.push_back(next_key++);
+                    if (status == status_t::success_k) {
+                        landed_keys.push_back(next_key);
+                        next_key = dense_key<key_t>(++next_number);
+                    }
                     else if (status == status_t::contended_k) ++refused;
                     else ++unexpected;
                     std::this_thread::yield();
@@ -158,7 +161,7 @@ static std::size_t test_ram_indexes_abandoned_plan(u64_t seed) {
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({dense_thread_nodes_k, connectivity_16_k, dimensions}).status));
 
-    // A whole number of rows per shard, so every rotation deals each shard the same share.
+    // A whole number of entries per shard, so every batch split gives each shard the same share.
     std::size_t const rows = indexes.capacity() / indexes.shards_count() * indexes.shards_count();
     std::size_t const capacity = indexes.capacity();
     for (std::size_t attempt = 0; attempt != 2; ++attempt) {
@@ -169,17 +172,17 @@ static std::size_t test_ram_indexes_abandoned_plan(u64_t seed) {
 
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_abandoned_plan"));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
     failures += expect(succeeded(indexes.insert(keys, vectors.view(), driver.executor).status));
     failures += expect_eq(indexes.size(), rows);
     failures += expect_eq(indexes.capacity(), capacity);
     return failures;
 }
 
-/** Past @c shard_capacity, rows open generations of shards on the same placements: one batch fills
- *  as many as it needs, a batch crossing the bound tops the open generation up and lands whole, one
- *  row past a full generation opens the next, and a load striping a checkpoint over the bound opens
- *  as many as its rows need. A monolith past the 32-bit IDs refuses to frame. */
+/** Past @c shard_capacity, entries open generations of shards on the same placements: one batch
+ *  fills as many as it needs, a batch crossing the bound tops the open generation up and lands
+ *  whole, one entry past a full generation opens the next, and a load of the filled index lands
+ *  each part on a shard of its own, as many generations as it saved. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static std::size_t test_ram_indexes_generations(u64_t seed) {
     using scalar_t = typename indexes_type_::index_t::scalar_t;
@@ -191,7 +194,7 @@ static std::size_t test_ram_indexes_generations(u64_t seed) {
     if (failed(driver.status)) return failures + expect(false);
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_generations"));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
     auto rows_of = [&](std::size_t first, std::size_t count) {
         return vectors(nk::range(first, first + count), nk::slice);
     };
@@ -254,28 +257,46 @@ static std::size_t test_ram_indexes_generations(u64_t seed) {
     failures += expect_eq(crossed.size(), 4001u);
     failures += expect_eq(miscounted(crossed, 4001), 0u);
 
-    // A monolith of the filled index striped back over two bounded shards opens three generations.
-    save_config_t const monolith = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k);
-    auto const [bytes, measure_status] = filled.storage_requirements(monolith);
+    // Batches of 3500 over two shards bounded at 2500 rows: the second tops up the first
+    // generation, fills a second and starts a third, and the third grows a fresh shard holding 250
+    // rows by 1750, more than the chunk the bound truncates adds, though only its deficit is
+    // missing.
+    {
+        constexpr std::size_t straddled_bound = 2500, batch = 3500, straddled_rows = 4 * batch;
+        auto straddled_vectors = make_vectors<scalar_t>(straddled_rows, dimensions, stream_key(seed, "straddled"));
+        std::vector<key_t> straddled_keys(straddled_rows);
+        for (std::size_t row = 0; row != straddled_rows; ++row) straddled_keys[row] = dense_key<key_t>(1 + row);
+        indexes_type_ straddled {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+        straddled.bound_shards(straddled_bound);
+        failures += expect(succeeded(place_shards(straddled)));
+        failures += expect(succeeded(straddled.reserve({straddled_bound, connectivity_16_k, dimensions}).status));
+        for (std::size_t const first : {std::size_t {0}, batch, 3 * batch}) {
+            std::size_t const count = first == batch ? 2 * batch : batch;
+            failures += expect(
+                succeeded(straddled
+                              .insert(std::span<key_t const> {straddled_keys.data() + first, count},
+                                      straddled_vectors(nk::range(first, first + count), nk::slice), driver.executor)
+                              .status));
+        }
+        failures += expect((shard_sizes(straddled) == std::vector<std::size_t> {2500, 2500, 2500, 2500, 2000, 2000}));
+        std::size_t wrong = 0;
+        for (key_t const& key : straddled_keys) wrong += straddled.count(key) != 1;
+        failures += expect_eq(wrong, 0u);
+    }
+
+    // The filled index restores into a bounded one part by part, each generation a shard again.
+    save_config_t const config = dense_indexes_save_config<indexes_type_>();
+    auto const [bytes, measure_status] = filled.storage_requirements(config);
     failures += expect(succeeded(measure_status));
     std::vector<std::byte> buffer(bytes);
-    failures += expect(succeeded(filled.save(bytes_span_t {buffer}, monolith, driver.executor)));
+    failures += expect(succeeded(filled.save(bytes_span_t {buffer}, config, driver.executor)));
     indexes_type_ restored {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     restored.bound_shards(bound);
     failures += expect(succeeded(place_shards(restored)));
-    load_config_t striped;
-    striped.placement = checkpoint_placement_t::split_k;
-    failures += expect(succeeded(restored.load(bytes_view_t {buffer}, striped, driver.executor)));
+    failures += expect(succeeded(restored.load(bytes_view_t {buffer}, load_config_t {}, driver.executor)));
     failures += expect_eq(restored.size(), rows);
-    failures += expect((shard_sizes(restored) == std::vector<std::size_t> {834, 834, 833, 833, 833, 833}));
+    failures += expect(shard_sizes(restored) == shard_sizes(filled));
     failures += expect_eq(miscounted(restored, rows), 0u);
-
-    // The guard every monolith save frames through, reached without four billion rows.
-    typename indexes_type_::shards_t const unplaced {forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect_eq(shard_monolith_header(unplaced, indexes_type_::index_t::max_node_count_k + 1,
-                                                save_config_t {}, std::span<safegraphs_custom_field_t const> {})
-                              .status,
-                          status_t::overflow_k);
     return failures;
 }
 
@@ -298,7 +319,7 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
     auto& executor = driver.executor;
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_compact"));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
     auto filled_shards = [](indexes_type_ const& indexes) {
         std::size_t filled = 0;
         for (std::size_t shard = 0; shard != indexes.shards_count(); ++shard)
@@ -363,6 +384,17 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
     failures += dense_indexes_expect_restored(indexes, vectors, keys, dimensions, executor, seed);
     failures += expect(self_hits(indexes) * 100 + noise_percent_k * samples_k >= hits_before * 100);
 
+    // Geometry is checked once every source is closed, so a mismatch refuses only then, and the
+    // dying plan reopens the target and every source it closed.
+    indexes_type_ mismatched {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(mismatched)));
+    failures += expect(succeeded(mismatched.reserve({rows, connectivity_32_k, dimensions}).status));
+    std::array<indexes_type_*, 2> const mixed {&indexes, &mismatched};
+    failures += expect_eq(compact(std::span<indexes_type_* const> {mixed}, indexes, executor, halves).status,
+                          status_t::config_mismatch_k);
+    failures += expect(succeeded(indexes.plan_insert(1, executor).status));
+    failures += expect(succeeded(mismatched.plan_insert(1, executor).status));
+
     // Out of place into a fresh single shard: every row moves, and the source ends empty.
     indexes_type_ single {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(single.emplace(no_memory_domain_k)));
@@ -389,7 +421,7 @@ static std::size_t test_ram_indexes_clear_race(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_clear_race"));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
     std::array<dense_indexes_executor<indexes_type_>, 2> drivers;
     for (dense_indexes_executor<indexes_type_> const& driver : drivers)
         if (failed(driver.status)) return failures + expect(false);
@@ -422,7 +454,8 @@ static std::size_t test_ram_indexes_clear_race(u64_t seed) {
                 else if (failed(status)) foreign.fetch_add(1);
                 else
                     for (std::size_t found = 0; found != result.count; ++found)
-                        foreign.fetch_add(found_keys[found] < 1 || found_keys[found] > rows);
+                        foreign.fetch_add(dense_key_number(found_keys[found]) < 1 ||
+                                          dense_key_number(found_keys[found]) > rows);
             }
         });
         failures += expect_eq(indexes.size(), 0u);
@@ -478,7 +511,7 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
         failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
         auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "filtered_algebra"));
         std::array<key_t, rows_count> keys;
-        for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(row / tokens_per_document);
+        for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(row / tokens_per_document);
         failures += expect(
             succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
         auto const admit_even = quad_predicate(
@@ -560,16 +593,17 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
     }
 }
 
-template <                                        //
-    nk_dtype_t dtype_, nk_kernel_kind_t kernel_,  //
-    typename waiter_type_ = fu::standard_yield_t, //
-    nk_capability_t caps_ = nk_cap_serial_k,      //
+template <                                          //
+    nk_dtype_t dtype_, nk_kernel_kind_t kernel_,    //
+    typename waiter_type_ = fu::standard_yield_t,   //
+    cpu_class_t cpu_class_ = cpu_class_t::serial_k, //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-    requires dense_cell_testable<dtype_, kernel_, caps_>
+    requires dense_cell_testable<dtype_, kernel_, numkong_capabilities_of(cpu_class_)>
 static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) {
 
-    using indexes_t = ram_indexes_for<dtype_, caps_, waiter_type_, atomic_ref_>;
-    if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
+    using indexes_t = ram_indexes_for<dtype_, cpu_class_, waiter_type_, atomic_ref_>;
+    if (!dense_cell_admitted<numkong_capabilities_of(cpu_class_), atomic_ref_>())
+        return report(name, "capabilities missing at runtime");
 
     // The suite is composed here, not reflected: every call below is a capability claim
     // this sharded, executor-driven category makes about itself.
@@ -577,7 +611,7 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     failures_count += test_dense_indexes_guards<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_duplicate_keys<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_save_load<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_split_load<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_part_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_pooled_save<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_buffer_roundtrip<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>(seed);
@@ -603,20 +637,19 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     return report(name, failures_count);
 }
 
-/** The exact scan and MaxSim alone over shards a matrix engine streams under @p caps_, skipped
+/** The exact scan and MaxSim alone over shards the matrix engine of @p cpu_class_ streams, skipped
  *  where the build lacks the kit or the host its capabilities; only dot kernels offer MaxSim. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, nk_capability_t caps_>
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
 std::size_t test_ram_scan_configuration(char const* name, u64_t seed) {
-    if constexpr (!dense_cell_testable<dtype_, kernel_, caps_>) return report(name, "kit not compiled for this target");
-    else if (!dense_cell_admitted<caps_, fu::standard_atomic_ref>())
+    constexpr nk_capability_t caps_k = numkong_capabilities_of(cpu_class_);
+    using indexes_t = ram_indexes_for<dtype_, cpu_class_>;
+    if constexpr (!dense_cell_testable<dtype_, kernel_, caps_k>)
+        return report(name, "kit not compiled for this target");
+    else if (!dense_cell_admitted<caps_k, fu::standard_atomic_ref>())
         return report(name, "capabilities missing at runtime");
     else
-        return report(name, test_dense_indexes_scan<ram_indexes_for<dtype_, caps_>, kernel_>(seed) +
-                                test_dense_indexes_maxsim<ram_indexes_for<dtype_, caps_>, kernel_>(seed));
+        return report(name, test_dense_indexes_scan<indexes_t, kernel_>(seed) +
+                                test_dense_indexes_maxsim<indexes_t, kernel_>(seed));
 }
-
-/** The sharded-index suite entry its translation unit defines and @c dense.cpp
- *  composes explicitly; returns the suite's failure count. */
-std::size_t check_ram_indexes(settings_t const& settings);
 
 } // namespace unum::usearch::test::dense

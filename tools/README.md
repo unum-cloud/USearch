@@ -24,7 +24,7 @@ The verbs are named after the C interface they call:
 - `usearch dense absorb <base> <donors>... --save <address>` loads the base, then loads and absorbs its donors one at a time, keeping their graphs rather than re-inserting their vectors, and saves the merged index.
   Each donor reports its rows and absorb time, the rows the closing refinement changed and how many rows a search reaches.
 - `usearch dense refine <address> --save <address>` re-selects every row's neighbors against the finished graph, pass after pass until one changes nothing or `--max-refines` passes ran.
-- `usearch dense split <address> --parts N --save <manifest>` cuts one checkpoint into `N` graph-local parts and commits them as a `.safegraphs.json` manifest.
+- `usearch dense split <address> --parts N --save <manifest>` cuts one checkpoint into `N` graph-local parts and commits them as a manifest at `<manifest>`, the parts beside it.
   The library refuses every split today with `unsupported`, and the verb reports that status and exits.
 - `usearch dense health <address>` views a checkpoint from storage and audits how many of its rows a search reaches.
 - `usearch metadata <address>` prints a monolith's or a manifest's nodes, parts, metric and keys, then reads its modality's metadata, picked by the metric its header names.
@@ -107,7 +107,7 @@ Under `usearch-mpi`, `dense insert` is a distributed build, and every other verb
 Every rank takes one GPU or one memory domain and indexes a contiguous share of the `--first-vector` and `--rows` slice of a single dataset file that all of them can read.
 The shares follow from the world size alone, so the ranks never exchange vectors: rank `r` of `R` takes rows `⌊N·r/R⌋` up to `⌊N·(r+1)/R⌋` of the slice's `N`, and each row is keyed by the same row of `--keys`, or by its dataset row number without one.
 Each rank saves its shard as one SafeGraphs monolith, named the way a sharded save names its parts, `<stem>-00001-of-00064.safegraphs` and onward, beside the manifest `--save` names.
-Once every rank reports its part complete, rank 0 writes `<stem>.safegraphs.json` beside them.
+Once every rank reports its part complete, rank 0 writes the manifest at the `--save` address beside them.
 That manifest is the commit record: a run that fails anywhere leaves parts and no checkpoint, and a reader sees it as absent.
 
 The result is indistinguishable from what `usearch_dense_save` writes for a sharded index, so `usearch_dense_load_ram`, `usearch_dense_load_vram` and `usearch_dense_view_nvme` all open it.
@@ -122,7 +122,7 @@ On one machine, `mpirun` is enough:
 
 ```sh
 mpirun -np 2 usearch-mpi dense insert data/sift-10m/base.10M.u8bin --metric euclidean \
-    --save /scratch/sift/sift.safegraphs.json
+    --save /scratch/sift/sift.safegraphs
 ```
 
 On a Slurm cluster, `srun` starts one rank per GPU and hands their ranks to MPI through PMIx, while every node mounts the same parallel filesystem:
@@ -130,7 +130,7 @@ On a Slurm cluster, `srun` starts one rank per GPU and hands their ranks to MPI 
 ```sh
 srun --nodes 16 --ntasks-per-node 8 --gpus-per-task 1 --mpi pmix \
     usearch-mpi dense insert /lustre/datasets/deep-1b/base.1B.fbin \
-    --save /lustre/indexes/deep-1b/deep.safegraphs.json --stored-dtype bf16 --metric euclidean --max-refines 1
+    --save /lustre/indexes/deep-1b/deep.safegraphs --stored-dtype bf16 --metric euclidean --max-refines 1
 ```
 
 On Kubernetes, the Kubeflow MPI Operator starts the same image as a launcher and its workers, with the dataset and output on a shared volume:
@@ -150,7 +150,7 @@ spec:
           containers:
             - name: launcher
               image: usearch-tools
-              command: [mpirun, -np, "16", usearch-mpi, dense, insert, /data/base.1B.u8bin, --save, /data/index/base.safegraphs.json]
+              command: [mpirun, -np, "16", usearch-mpi, dense, insert, /data/base.1B.u8bin, --save, /data/index/base.safegraphs]
     Worker:
       replicas: 2
       template:
@@ -176,7 +176,7 @@ Object storage joins at the edges: parts are written on a filesystem that admits
 
 `dense insert` takes the vectors, a RetriEval file of `.fbin`, `.bf16bin`, `.f16bin`, `.i8bin`, `.u8bin` or `.u1x8bin` that every rank can read, and these flags:
 
-- `--save` is required: the address to save to, or across ranks the `.safegraphs.json` manifest to commit, its parts written beside it.
+- `--save` is required: the address to save to, or across ranks the manifest to commit, its parts written beside it.
 - `--first-vector` defaults to `0`: the first row of the slice.
 - `--rows` defaults to every row past `--first-vector`: rows in the slice.
 - `--keys` defaults to row numbers: a `.u64bin` or `.u128bin` of one little-endian integer per vector row, so a UUID's 128-bit integer form keys its row whole.
@@ -192,7 +192,7 @@ Object storage joins at the edges: parts are written on a filesystem that admits
 The other verbs take only what they move:
 
 - `dense absorb` and `dense refine` take `--save`, `--expansion-refine` and `--threads`, and `dense refine` also `--max-refines`, defaulting to `1`.
-- `dense split` takes `--parts` of at least `2` and `--save` ending in `.safegraphs.json`, plus `--expansion-refine` and `--threads`.
+- `dense split` takes `--parts` of at least `2` and `--save` naming the manifest, plus `--expansion-refine` and `--threads`.
 - `dense health` takes `--threads`, defaulting to what the devices' queues allow.
 - `metadata`, `slots` and `copy` take no flags.
 

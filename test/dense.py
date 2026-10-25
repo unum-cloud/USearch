@@ -43,6 +43,7 @@ from usearch import (
     CapacityOverflowError,
     ConfigMismatchError,
     ContendedError,
+    CPUClass,
     Deferred,
     DeferredOn,
     DenseIndex,
@@ -85,13 +86,23 @@ def test_construction_reports_its_geometry(dimensions: int, metric: DenseMetric)
     assert index.dimensions == dimensions
     assert index.connectivity == 16
     assert len(index) == 0
-    assert isinstance(index.capabilities, str)
+    assert isinstance(index.cpu_class, CPUClass) and index.gpu_class is None
     assert repr(index) == f"DenseIndex(dimensions={dimensions}, size=0)"
     description = index.describe()
     assert isinstance(description, DenseIndexDescription)
     assert description.metadata == (dimensions, metric, Scalar.BF16, 16)
     assert description.metadata.metric is metric
     assert description.size == 0
+    assert description.shards_count == index.shards_count >= 1
+    assert description.cpu_class is index.cpu_class and description.gpu_class is None
+
+
+def test_construction_takes_a_pinned_class():
+    """A serial pin runs on every CPU, and the index it opens reports the pinned class and its rows."""
+    index = DenseIndex.init_ram(dimensions=8, cpu_class=CPUClass.SERIAL)
+    index.reserve(2)
+    index.insert([1, 2], np.ones((2, 8), dtype=np.float32))
+    assert len(index) == 2 and index.cpu_class is CPUClass.SERIAL
 
 
 @pytest.mark.parametrize(

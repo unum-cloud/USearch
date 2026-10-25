@@ -348,7 +348,7 @@ if (USEARCH_INSTALL)
 endif ()
 
 # Host tuning for the tests & benches only - never the distributable libraries - and only where the host is the target
-# and the compiler has a spelling for it; elsewhere the suite runs on its serial floor and the SIMD cells report
+# and the compiler has a spelling for it; elsewhere the suite runs on its serial floor and the SIMD variants report
 # themselves skipped. Apple Clang's `-march=native` advertises only a subset of the host's features - no FP16 arithmetic
 # & FML, no SME - leaving NumKong's f16 kits serial; `-mcpu=native` is the complete AArch64 knob.
 if (MSVC OR CMAKE_CROSSCOMPILING)

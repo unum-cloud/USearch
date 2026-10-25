@@ -20,7 +20,7 @@
 
 #include <fmt/format.h>
 
-#include "arguments.hpp" // `bench::flag_t`
+#include "abi.hpp" // `flag_t`
 
 namespace unum::usearch::tools {
 
@@ -66,7 +66,7 @@ inline bool runs_alone(world_t const& world) {
  *  exit with when the verb ends here: after the usage on @c --help, or after rank 0 names what
  *  failed. */
 std::optional<int> parse_verb(world_t const& world, int argc, char const* const* argv, std::string_view synopsis,
-                              std::span<bench::flag_t const> flags, std::span<std::string_view> positionals,
+                              std::span<flag_t const> flags, std::span<std::string_view> positionals,
                               std::size_t& given);
 
 /** Each verb takes the world, then the arguments after its name with the name where a program name

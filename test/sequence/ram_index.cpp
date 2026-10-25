@@ -16,16 +16,20 @@
  */
 #include <cstring> // `std::memcmp` - the folded nucleotide costs
 
-#include <algorithm>   // `std::min`, `std::max`
+#include <algorithm>   // `std::min`, `std::max`, `std::find` - a found key among the batch's
 #include <array>       // `std::array` - the window widths, the handmade triples, a round's distances
+#include <atomic>      // `std::atomic` - the searchers racing a clear
+#include <limits>      // `std::numeric_limits` - the oracle's open best
 #include <memory>      // `std::unique_ptr`
 #include <new>         // `std::nothrow`
 #include <span>        // `std::span` - a batch of queries
 #include <string>      // `std::string` - a generated string before it is stored
 #include <string_view> // `std::string_view` - the symbols and the oracles' operands
+#include <thread>      // `std::this_thread::yield` - a clear retried past a racing call
 #include <vector>      // `std::vector` - generated values, templates, the oracle's rows
 
 #include "usearch/sequence/ram_index.hpp"
+#include "usearch/basic/ram_indexes.hpp"
 
 #include "basic.hpp"
 
@@ -509,8 +513,8 @@ std::size_t check_needleman_wunsch_kit(u64_t seed) {
 std::size_t check_sequence_nvme(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = levenshtein_metric<levenshtein_ladder<sz_levenshtein_bytes_k, sz_cap_any_k>::kit_t, scratch_t>;
-    using nvme_index_t =
-        us::basic::nvme_index<codec_t, us::utilities::uuid_t, u32_t, sz_size_t, blocking_files_engine<>>;
+    using nvme_indexes_t =
+        us::basic::nvme_indexes<codec_t, us::utilities::uuid_t, u32_t, sz_size_t, blocking_files_engine<>>;
     std::vector<std::string> texts;
     {
         allocation_ledger_t ledger;
@@ -534,8 +538,8 @@ std::size_t check_sequence_nvme(u64_t seed) {
         return expected<std::string_view> {texts[row], status_t::success_k};
     };
     auto matches = [&](std::size_t entry, std::string_view view) noexcept { return view == texts[entry]; };
-    return test_basic_nvme_view<levenshtein_bytes_fixture_t, nvme_index_t>(seed, texts.size(), "levenshtein", make_text,
-                                                                           make_metric, query_of, matches);
+    return test_basic_nvme_view<levenshtein_bytes_fixture_t, nvme_indexes_t>(seed, texts.size(), "levenshtein",
+                                                                             make_text, make_metric, query_of, matches);
 }
 
 /** The byte Levenshtein fixture over 64-bit node IDs, which a saved neighbors column records. */
@@ -553,10 +557,10 @@ struct levenshtein_wide_fixture_t : levenshtein_bytes_fixture_t {
 std::size_t check_sequence_nvme_node_ids(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = levenshtein_metric<levenshtein_ladder<sz_levenshtein_bytes_k, sz_cap_any_k>::kit_t, scratch_t>;
-    using nvme_index_t =
-        us::basic::nvme_index<codec_t, us::utilities::uuid_t, u64_t, sz_size_t, blocking_files_engine<>>;
-    using mismatched_nvme_index_t =
-        us::basic::nvme_index<codec_t, us::utilities::uuid_t, u32_t, sz_size_t, blocking_files_engine<>>;
+    using nvme_indexes_t =
+        us::basic::nvme_indexes<codec_t, us::utilities::uuid_t, u64_t, sz_size_t, blocking_files_engine<>>;
+    using mismatched_nvme_indexes_t =
+        us::basic::nvme_indexes<codec_t, us::utilities::uuid_t, u32_t, sz_size_t, blocking_files_engine<>>;
     std::vector<std::string> texts;
     {
         allocation_ledger_t ledger;
@@ -577,8 +581,246 @@ std::size_t check_sequence_nvme_node_ids(u64_t seed) {
     auto query_of = [&](std::size_t row, scratch_t const&) noexcept {
         return expected<std::string_view> {texts[row], status_t::success_k};
     };
-    return test_basic_nvme_node_ids<levenshtein_wide_fixture_t, nvme_index_t, mismatched_nvme_index_t>(
+    return test_basic_nvme_node_ids<levenshtein_wide_fixture_t, nvme_indexes_t, mismatched_nvme_indexes_t>(
         seed, texts.size(), "levenshtein", make_text, make_metric, query_of);
+}
+
+/** Two shards bounded at 1000 rows take 5000 strings in one plan, which opens two more generations
+ *  of two: every key counts once across the six shards, and the merged searches find the true best
+ *  as often as one unbounded index does, the merged scans always. A donor's rows absorbed then
+ *  count once too, and a clear empties every shard. */
+std::size_t check_sequence_plural(u64_t seed) {
+    using index_t = sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
+                                        forkunion_allocator_t>;
+    using indexes_t = us::basic::ram_indexes<index_t>;
+    using value_t = index_t::value_t;
+    using distance_t = index_t::distance_t;
+    constexpr std::size_t rows_k = 5000, shard_capacity_k = 1000, wanted_k = 10;
+    std::size_t failures = 0;
+    std::vector<std::string> texts;
+    {
+        allocation_ledger_t ledger;
+        for (sequence_value_t const& value :
+             generate_values(rows_k + basic_recall_samples_k, stream_key(seed, "plural"), levenshtein_alphabet_k,
+                             levenshtein_symbols_k, counting_allocator_t {ledger}))
+            texts.emplace_back(std::string_view {value});
+    }
+    forkunion_allocator_t const allocator {no_memory_domain_k};
+    auto make_values = [&] {
+        std::vector<value_t> values;
+        values.reserve(rows_k);
+        for (std::size_t row = 0; row != rows_k; ++row) [[maybe_unused]]
+            sz::status_t const assigned = values.emplace_back(allocator).assign(texts[row]);
+        return values;
+    };
+    std::vector<us::utilities::uuid_t> keys(rows_k);
+    for (std::size_t row = 0; row != rows_k; ++row) keys[row] = uuid_of(0x91A7A100ull + row);
+    levenshtein_bytes_fixture_t::metric_t metric = levenshtein_bytes_fixture_t::make_metric();
+    keep_diverse_t const selector {basic_connectivity_k};
+    index_t::traversal_context_t context {stream_key(seed, "plural"), allocator};
+    failures += expect_eq(index_t::reserve_traversal(context, basic_connectivity_k, {}), status_t::success_k);
+
+    indexes_t indexes {allocator};
+    indexes.bound_shards(shard_capacity_k);
+    failures += expect_eq(indexes.emplace(no_memory_domain_k), status_t::success_k);
+    failures += expect_eq(indexes.emplace(no_memory_domain_k), status_t::success_k);
+    failures += expect(bool(indexes.reserve(rows_k)));
+    std::vector<value_t> values = make_values();
+    auto [plan, plan_status] = indexes.plan_insert(rows_k);
+    failures += expect_eq(plan_status, status_t::success_k);
+    if (failed(plan_status)) return failures;
+    for (std::size_t row = 0; row != rows_k; ++row)
+        plan.insert(row, std::span<value_t>(values).subspan(row, 1),
+                    std::span<us::utilities::uuid_t const>(keys).subspan(row, 1), metric, context, selector);
+    failures += expect_eq(plan.finish(), status_t::success_k);
+    failures += expect_eq(indexes.shards_count(), std::size_t {6});
+    failures += expect_eq(indexes.size(), rows_k);
+    std::size_t miscounted = 0;
+    for (us::utilities::uuid_t const& key : keys) miscounted += indexes.count(key) != 1;
+    failures += expect_eq(miscounted, std::size_t {0});
+
+    index_t single {allocator};
+    std::vector<value_t> single_values = make_values();
+    failures += expect(
+        bool(single.insert(std::span<value_t>(single_values), std::span<us::utilities::uuid_t const>(keys), metric, {},
+                           context, selector)));
+
+    std::vector<u32_t> watermarks(indexes.shards_count());
+    failures += expect_eq(indexes.snapshot(watermarks).status, status_t::success_k);
+    std::array<us::utilities::uuid_t, wanted_k> found_keys;
+    std::array<distance_t, wanted_k> found_distances;
+    dummy_predicate_t unfiltered;
+    std::size_t plural_best = 0, single_best = 0;
+    for (std::size_t sample = 0; sample != basic_recall_samples_k; ++sample) {
+        std::string_view const query = texts[rows_k + sample];
+        sz_size_t best = std::numeric_limits<sz_size_t>::max();
+        for (std::size_t row = 0; row != rows_k; ++row)
+            best = std::min(best, levenshtein_oracle(query, texts[row], sz_levenshtein_bytes_k));
+        auto const [found, status] = indexes.search_if(query, metric, unfiltered, context, {}, watermarks, found_keys,
+                                                       found_distances);
+        failures += expect_eq(status, status_t::success_k);
+        plural_best += found && found_distances[0] == best;
+        failures += expect_eq(single.search(query, metric, context).status, status_t::success_k);
+        single_best += !context.results.empty() && context.results[0].distance == best;
+    }
+    failures += expect(plural_best * 100 >= basic_minimal_recall_percent_k * basic_recall_samples_k);
+    failures += expect(plural_best + basic_recall_samples_k / 10 >= single_best);
+    for (std::size_t sample = 0; sample != 4; ++sample) {
+        std::string_view const query = texts[rows_k + sample];
+        sz_size_t best = std::numeric_limits<sz_size_t>::max();
+        for (std::size_t row = 0; row != rows_k; ++row)
+            best = std::min(best, levenshtein_oracle(query, texts[row], sz_levenshtein_bytes_k));
+        auto const [found, status] = indexes.scan(query, metric, unfiltered, context, watermarks, found_keys,
+                                                  found_distances);
+        failures += expect_eq(status, status_t::success_k);
+        failures += expect(found == wanted_k && found_distances[0] == best);
+    }
+
+    // The donor's rows are the single index's strings under keys of their own.
+    constexpr std::size_t donor_rows_k = 300;
+    indexes_t donor {allocator};
+    failures += expect_eq(donor.emplace(no_memory_domain_k), status_t::success_k);
+    std::vector<us::utilities::uuid_t> donor_keys(donor_rows_k);
+    for (std::size_t row = 0; row != donor_rows_k; ++row) donor_keys[row] = uuid_of(0xD0A0A100ull + row);
+    std::vector<value_t> donor_values = make_values();
+    auto [donor_plan, donor_status] = donor.plan_insert(donor_rows_k);
+    failures += expect_eq(donor_status, status_t::success_k);
+    if (failed(donor_status)) return failures;
+    donor_plan.insert(0, std::span<value_t>(donor_values).first(donor_rows_k),
+                      std::span<us::utilities::uuid_t const>(donor_keys), metric, context, selector);
+    failures += expect_eq(donor_plan.finish(), status_t::success_k);
+    std::array<indexes_t*, 1> donors {&donor};
+    {
+        auto [absorbing, absorb_status] = indexes.plan_absorb(donors, context, selector);
+        failures += expect_eq(absorb_status, status_t::success_k);
+        if (failed(absorb_status)) return failures;
+        do
+            for (indexes_t::refine_plan_t::step_t const step : absorbing.steps())
+                failures += expect_eq(absorbing.run(step, metric, context, selector), status_t::success_k);
+        while (absorbing.advance());
+        failures += expect_eq(absorbing.finish().status, status_t::success_k);
+    }
+    failures += expect_eq(indexes.size(), rows_k + donor_rows_k);
+    failures += expect_eq(donor.size(), std::size_t {0});
+    // A consumed donor stays closed and sealed: its landed shard keeps its claims closed, so even a
+    // clear refuses.
+    failures += expect_eq(donor.plan_insert(0).status, status_t::contended_k);
+    failures += expect_eq(donor.clear(), status_t::contended_k);
+    miscounted = 0;
+    for (us::utilities::uuid_t const& key : donor_keys) miscounted += indexes.count(key) != 1;
+    failures += expect_eq(miscounted, std::size_t {0});
+
+    failures += expect_eq(indexes.clear(), status_t::success_k);
+    failures += expect_eq(indexes.size(), std::size_t {0});
+    failures += expect_eq(indexes.count(keys[0]), std::size_t {0});
+    return failures;
+}
+
+/** Searches racing a clear of one shard read only retired rows nothing frees: each answers rows of
+ *  the batch or @c contended_k, never a foreign key, while the clear retires the shard and a fresh
+ *  one takes the next batch, which the only shard then names. A cursor opened before a clear
+ *  answers @c contended_k after it. Under a sanitizer, a value freed under a search would trap. */
+std::size_t check_sequence_plural_clear_race(u64_t seed) {
+    using index_t = sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
+                                        forkunion_allocator_t>;
+    using indexes_t = us::basic::ram_indexes<index_t>;
+    using value_t = index_t::value_t;
+    using distance_t = index_t::distance_t;
+    using metric_t = levenshtein_bytes_fixture_t::metric_t;
+    constexpr std::size_t rows_k = 400, searchers_k = 4, rounds_k = 4, wanted_k = 8;
+    std::size_t failures = 0;
+    std::vector<std::string> texts;
+    {
+        allocation_ledger_t ledger;
+        for (sequence_value_t const& value :
+             generate_values(rows_k, stream_key(seed, "plural_clear_race"), levenshtein_alphabet_k,
+                             levenshtein_symbols_k, counting_allocator_t {ledger}))
+            texts.emplace_back(std::string_view {value});
+    }
+    forkunion_allocator_t const allocator {no_memory_domain_k};
+    std::vector<us::utilities::uuid_t> keys(rows_k);
+    for (std::size_t row = 0; row != rows_k; ++row) keys[row] = uuid_of(0xC1EA0000ull + row);
+    keep_diverse_t const selector {basic_connectivity_k};
+    std::vector<index_t::traversal_context_t> contexts;
+    std::vector<metric_t> metrics;
+    contexts.reserve(searchers_k + 1);
+    metrics.reserve(searchers_k + 1);
+    for (std::size_t thread = 0; thread != searchers_k + 1; ++thread) {
+        contexts.emplace_back(stream_key(seed, "plural_clear_race") + thread, allocator);
+        failures += expect_eq(index_t::reserve_traversal(contexts.back(), basic_connectivity_k, {}),
+                              status_t::success_k);
+        metrics.push_back(levenshtein_bytes_fixture_t::make_metric());
+    }
+
+    indexes_t indexes {allocator};
+    failures += expect_eq(indexes.emplace(no_memory_domain_k), status_t::success_k);
+    auto insert_batch = [&] {
+        std::vector<value_t> values;
+        values.reserve(rows_k);
+        for (std::size_t row = 0; row != rows_k; ++row) [[maybe_unused]]
+            sz::status_t const assigned = values.emplace_back(allocator).assign(texts[row]);
+        auto [plan, plan_status] = indexes.plan_insert(rows_k);
+        failures += expect_eq(plan_status, status_t::success_k);
+        if (failed(plan_status)) return;
+        plan.insert(0, std::span<value_t>(values), std::span<us::utilities::uuid_t const>(keys), metrics[0],
+                    contexts[0], selector);
+        failures += expect_eq(plan.finish(), status_t::success_k);
+    };
+
+    fu::flat_pool_t pool;
+    if (fu::failed(pool.spawn(searchers_k + 1))) return failures + expect(false);
+    std::atomic<std::size_t> foreign {0};
+    for (std::size_t round = 0; round != rounds_k; ++round) {
+        insert_batch();
+        failures += expect_eq(indexes.size(), rows_k);
+        indexes_t::cursor_t cursor {indexes};
+        std::atomic<bool> cleared {false};
+        std::atomic<std::size_t> searched {0};
+        pool.for_threads([&](std::size_t thread) noexcept {
+            if (thread == 0) {
+                // Every searcher walks the rows once first, so the clear lands under live walks.
+                while (searched.load(std::memory_order_acquire) < searchers_k) std::this_thread::yield();
+                while (indexes.clear() == status_t::contended_k) std::this_thread::yield();
+                cleared.store(true, std::memory_order_release);
+                return;
+            }
+            std::vector<u32_t> watermarks;
+            std::array<us::utilities::uuid_t, wanted_k> found_keys;
+            std::array<distance_t, wanted_k> found_distances;
+            dummy_predicate_t unfiltered;
+            for (std::size_t row = thread; !cleared.load(std::memory_order_acquire);
+                 row = (row + searchers_k) % rows_k) {
+                watermarks.resize(indexes.shards_count());
+                if (indexes.snapshot(watermarks).status == status_t::shape_mismatch_k) continue;
+                auto const [found, status] = indexes.search_if(std::string_view {texts[row]}, metrics[thread],
+                                                               unfiltered, contexts[thread], {}, watermarks, found_keys,
+                                                               found_distances);
+                if (row == thread) searched.fetch_add(1, std::memory_order_release);
+                if (status == status_t::contended_k) continue;
+                if (failed(status)) foreign.fetch_add(1);
+                else
+                    for (std::size_t match = 0; match != found; ++match)
+                        foreign.fetch_add(std::find(keys.begin(), keys.end(), found_keys[match]) == keys.end());
+            }
+        });
+        failures += expect_eq(indexes.size(), std::size_t {0});
+        failures += expect_eq(indexes.count(keys[0]), std::size_t {0});
+        failures += expect_eq(indexes.shards_count(), round + 2);
+        auto const live = indexes.live_shards();
+        failures += expect_eq(live.bound - live.first, std::size_t {1});
+        std::array<us::utilities::uuid_t, 4> read_keys;
+        failures += expect_eq(cursor.read(indexes, read_keys).status, status_t::contended_k);
+    }
+    failures += expect_eq(foreign.load(), std::size_t {0});
+
+    // The fresh shard takes a batch whole, and a clear of an empty index retires nothing.
+    insert_batch();
+    failures += expect_eq(indexes.size(), rows_k);
+    failures += expect_eq(indexes.count(keys[rows_k - 1]), std::size_t {1});
+    failures += expect_eq(indexes.clear(), status_t::success_k);
+    failures += expect_eq(indexes.clear(), status_t::success_k);
+    failures += expect_eq(indexes.shards_count(), rounds_k + 2);
+    return failures;
 }
 
 std::size_t check_sequence(settings_t const& settings) {
@@ -603,6 +845,8 @@ std::size_t check_sequence(settings_t const& settings) {
     failures += check_needleman_wunsch_kit<sz_cap_any_k>(settings.seed);
     failures += check_sequence_nvme(settings.seed);
     failures += check_sequence_nvme_node_ids(settings.seed);
+    failures += check_sequence_plural(settings.seed);
+    failures += check_sequence_plural_clear_race(settings.seed);
     return report("sequence", failures);
 }
 

@@ -21,32 +21,31 @@
 namespace unum::usearch::tools {
 
 std::optional<int> parse_verb(world_t const& world, int argc, char const* const* argv, std::string_view synopsis,
-                              std::span<bench::flag_t const> flags, std::span<std::string_view> positionals,
+                              std::span<flag_t const> flags, std::span<std::string_view> positionals,
                               std::size_t& given) {
     // Every rank parses the same arguments, so they agree on failing, and only rank 0 says why.
     bool const speaks = world.rank == 0;
-    for (bench::flag_t const& flag : flags) {
-        std::string const variable = bench::retrieval_variable(flag);
+    for (flag_t const& flag : flags) {
+        std::string const variable = retrieval_variable(flag);
         char const* const value = std::getenv(variable.c_str());
-        if (!value || !*value || bench::assign_variable_(flag, value) == bench::argument_status_t::parsed_k) continue;
-        if (speaks)
-            fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", variable, value, bench::grammar(flag));
+        if (!value || !*value || assign_variable_(flag, value) == argument_status_t::parsed_k) continue;
+        if (speaks) fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", variable, value, grammar(flag));
         return EXIT_FAILURE;
     }
-    bench::arguments_t const parsed = bench::parse_arguments(argc, argv, flags, positionals);
+    arguments_t const parsed = parse_arguments(argc, argv, flags, positionals);
     given = parsed.positionals_count;
-    if (parsed.status == bench::argument_status_t::parsed_k) return std::nullopt;
-    if (parsed.status == bench::argument_status_t::help_k) {
-        if (speaks) bench::print_usage(synopsis, flags);
+    if (parsed.status == argument_status_t::parsed_k) return std::nullopt;
+    if (parsed.status == argument_status_t::help_k) {
+        if (speaks) print_usage(synopsis, flags);
         return EXIT_SUCCESS;
     }
     if (!speaks) return EXIT_FAILURE;
-    if (parsed.status == bench::argument_status_t::too_many_items_k)
+    if (parsed.status == argument_status_t::too_many_items_k)
         fmt::println(stderr, "{} is one argument too many, see --help", parsed.argument);
     else if (!parsed.flag) fmt::println(stderr, "{} is not a flag, see --help", parsed.argument);
     else
         fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", parsed.flag->name, parsed.value,
-                     bench::grammar(*parsed.flag));
+                     grammar(*parsed.flag));
     return EXIT_FAILURE;
 }
 

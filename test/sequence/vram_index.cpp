@@ -19,12 +19,16 @@
 #include <algorithm> // `std::min`, `std::nth_element`
 #include <array>     // `std::array` - the templates
 #include <limits>    // `std::numeric_limits` - the node-ID type's sentinel
+#include <memory>    // `std::unique_ptr` - a plural's shards
+#include <new>       // `std::nothrow` - a plural's shards
 #include <string>    // `std::string` - the tape and the generated strings
 #include <vector>    // `std::vector` - strings, offsets, matches
 
+#include "usearch/sequence_index.h"
 #include "usearch/sequence/ram_index.hpp"
 #if USEARCH_ARCH_CUDA_
 #include "usearch/sequence/vram_nvidia_index.hpp"
+#include "usearch/basic/vram_nvidia_indexes.hpp"
 #endif
 
 #include "harness.hpp"
@@ -277,12 +281,108 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     return failures;
 }
 
+/** Builds the byte Levenshtein shards of a plural, unreserved, on the device it names. */
+struct sequence_vram_shards_t {
+    using index_t = vram_nvidia_index<usearch_sequence_metric_levenshtein_bytes_k, u32_t, sz_cap_cuda_k,
+                                      sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
+
+    std::unique_ptr<index_t> operator()(int device) const noexcept {
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t {cuda_virtual_memory_allocator<byte_t> {device}});
+    }
+};
+
+/** Two shards on one device bounded at 1000 rows take 5000 strings in one batch, which opens two
+ *  more generations of two: every key counts once across the six shards, and the merged recall at
+ *  ten reaches one unbounded shard's, give or take a twentieth. */
+static std::size_t check_sequence_vram_plural(u64_t seed, cuda_executor_t& executor) {
+    using index_t = sequence_vram_shards_t::index_t;
+    using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid_t, sequence_vram_shards_t>;
+    constexpr std::size_t rows_k = 5000, shard_capacity_k = 1000, queries_k = 64, wanted_k = 10, expansion_k = 64;
+    std::size_t failures = 0;
+
+    std::vector<std::string> const strings = generate_nucleotides(rows_k + queries_k, 100, seed);
+    std::string tape;
+    std::vector<std::size_t> offsets {0};
+    for (std::string const& symbols : strings) tape += symbols, offsets.push_back(tape.size());
+    byte_t const* const tape_bytes = reinterpret_cast<byte_t const*>(tape.data());
+    tape_view<byte_t const> const rows {tape_bytes, {offsets.data(), rows_k + 1}};
+    tape_view<byte_t const> const queries {tape_bytes, {offsets.data() + rows_k, queries_k + 1}};
+    std::vector<std::vector<sz_size_t>> exact(queries_k, std::vector<sz_size_t>(rows_k));
+    auto serial_metric = make_sequence_metric<usearch_sequence_metric_levenshtein_bytes_k, sz_cap_serial_k>(rows_k,
+                                                                                                            failures);
+    for (std::size_t query = 0; query != queries_k; ++query) {
+        serial_metric.reset(std::string_view {strings[rows_k + query]});
+        for (std::size_t row = 0; row != rows_k; ++row) serial_metric.push(std::string_view {strings[row]});
+        serial_metric.drain(exact[query], us::basic::unbounded_radius<sz_size_t>());
+    }
+    std::vector<us::utilities::uuid_t> keys(rows_k);
+    for (std::size_t row = 0; row != rows_k; ++row) keys[row] = uuid_of(row);
+
+    indexes_t indexes {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
+    indexes.bound_shards(shard_capacity_k);
+    failures += expect_eq(indexes.emplace(executor.stream(0).device), status_t::success_k);
+    failures += expect_eq(indexes.emplace(executor.stream(0).device), status_t::success_k);
+    failures += expect_eq(indexes.reserve({rows_k, connectivity_32_k, offsets[rows_k]}).status, status_t::success_k);
+    auto const [inserted, insert_status] = indexes.insert(keys, rows, executor, {expansion_k});
+    failures += expect_eq(insert_status, status_t::success_k);
+    failures += expect(inserted.computed_distances > 0);
+    failures += expect_eq(indexes.shards_count(), std::size_t {6});
+    failures += expect_eq(indexes.size(), rows_k);
+    std::size_t miscounted = 0;
+    for (us::utilities::uuid_t const& key : keys) miscounted += indexes.count(key) != 1;
+    failures += expect_eq(miscounted, std::size_t {0});
+
+    std::vector<us::utilities::uuid_t> found_keys(queries_k * wanted_k);
+    std::vector<f32_t> found_distances(queries_k * wanted_k);
+    std::vector<std::size_t> counts(queries_k);
+    typename index_t::search_config_t const search_config {expansion_k, wanted_k};
+    failures += expect_eq(indexes
+                              .search(queries, executor, search_config, {found_keys.data(), {queries_k, wanted_k}},
+                                      {found_distances.data(), {queries_k, wanted_k}}, counts)
+                              .status,
+                          status_t::success_k);
+    std::size_t plural_matched = 0;
+    for (std::size_t query = 0; query != queries_k; ++query) {
+        std::vector<sz_size_t> found;
+        for (std::size_t rank = 0; rank != counts[query]; ++rank)
+            found.push_back(static_cast<sz_size_t>(found_distances[query * wanted_k + rank]));
+        plural_matched += matched_count(found, exact[query], wanted_k);
+    }
+
+    index_t single {cuda_virtual_memory_allocator<byte_t> {executor.device(0)}};
+    failures += expect_eq(single.reserve({rows_k, connectivity_32_k, offsets[rows_k]}).status, status_t::success_k);
+    typename index_t::insert_config_t const insert_config {expansion_k};
+    failures += expect_eq(executor.reserve(max_of(single.traversal_memory_usage(rows, insert_config),
+                                                  single.traversal_memory_usage(queries, search_config))),
+                          status_t::success_k);
+    typename index_t::traversal_context_t context {
+        cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
+    failures += expect_eq(single.insert(rows, context, insert_config).status, status_t::success_k);
+    std::vector<u32_t> ids(queries_k * wanted_k);
+    failures += expect_eq(single
+                              .search(queries, {ids.data(), {queries_k, wanted_k}},
+                                      {found_distances.data(), {queries_k, wanted_k}}, context, search_config)
+                              .status,
+                          status_t::success_k);
+    std::size_t single_matched = 0;
+    for (std::size_t query = 0; query != queries_k; ++query) {
+        std::vector<sz_size_t> found;
+        for (std::size_t rank = 0;
+             rank != wanted_k && ids[query * wanted_k + rank] != std::numeric_limits<u32_t>::max(); ++rank)
+            found.push_back(static_cast<sz_size_t>(found_distances[query * wanted_k + rank]));
+        single_matched += matched_count(found, exact[query], wanted_k);
+    }
+    failures += expect(plural_matched * 20 + queries_k * wanted_k >= single_matched * 20);
+    return failures;
+}
+
 std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& device) {
-    if (device.vendor != gpu_vendor_t::nvidia_k || !settings.selects("sequence_vram")) return 0;
+    if (device.vendor != gpu_vendor_t::nvidia_k) return 0;
+    std::size_t failures = 0;
+    if (!settings.filter.selects("sequence_vram")) return failures;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
     auto [executor, spawn_status] = cuda_executor_t::spawn(std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println(stderr, "- CUDA: device #{} opens no stream", ordinal), 1;
-    std::size_t failures = 0;
     constexpr usearch_sequence_metric_t bytes_k = usearch_sequence_metric_levenshtein_bytes_k;
     constexpr usearch_sequence_metric_t runes_k = usearch_sequence_metric_levenshtein_utf8_k;
     constexpr usearch_sequence_metric_t overlap_k = usearch_sequence_metric_overlap_k;
@@ -304,6 +404,8 @@ std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& 
     failures += report("sequence_vram 1100 nt needleman-wunsch",
                        check_sequence_vram_collection<aligned_k>(stream_key(settings.seed, "aligned_stripes"), executor,
                                                                  256, 1100, 32));
+    failures += report("sequence_vram plural",
+                       check_sequence_vram_plural(stream_key(settings.seed, "plural"), executor));
     return failures;
 }
 

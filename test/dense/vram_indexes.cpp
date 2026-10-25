@@ -2,8 +2,8 @@
  *  @file test/dense/vram_indexes.cpp
  *  @author Ash Vardanian
  *  @date September 1, 2026
- *  @brief Concurrency & misuse tests for the GPU-resident sharded index over the cells the
- *      single-index suite already wires.
+ *  @brief The two VRAM rung cells over bf16: the sharded suite, whose walks keep to the register
+ *      ladder and shared memory, and the ledgered index's builds that spill into the warp's arena.
  */
 #include "vram_indexes.cuh"
 
@@ -12,15 +12,12 @@ using namespace unum::usearch::utilities;
 
 template <typename executor_type_>
 std::size_t test::dense::check_vram_indexes(settings_t const& settings, executor_type_& executor) {
+    if (!settings.filter.selects("vram_indexes")) return 0;
     std::size_t failures_count = 0;
-    failures_count += test_vram_indexes_configuration<nk_bf16_k, nk_kernel_dot_k>("sharded bf16+dot", settings.seed,
-                                                                                  executor);
     failures_count += test_vram_indexes_configuration<nk_bf16_k, nk_kernel_angular_k>("sharded bf16+angular",
                                                                                       settings.seed, executor);
-#if USEARCH_DENSE_DTYPES >= 3
-    failures_count += test_vram_indexes_configuration<nk_i8_k, nk_kernel_euclidean_k>("sharded i8+euclidean",
-                                                                                      settings.seed, executor);
-#endif
+    failures_count += test_vram_arena_configuration<nk_bf16_k, nk_kernel_angular_k>("bf16+angular+arena", settings.seed,
+                                                                                    executor);
     return failures_count;
 }
 

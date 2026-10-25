@@ -19,7 +19,7 @@
  */
 #include <cstdint> // `std::uint64_t`, `std::int32_t`
 #include <cstdio>  // `std::fopen`, `std::fwrite`
-#include <cstdlib> // `EXIT_SUCCESS`, `EXIT_FAILURE`, `std::getenv`
+#include <cstdlib> // `EXIT_SUCCESS`, `EXIT_FAILURE`
 
 #include <fcntl.h>    // `open`, `O_RDONLY`
 #include <sys/stat.h> // `fstat`, `stat`, `S_ISREG`
@@ -40,17 +40,22 @@
 
 #include "usearch/dense_index.h"
 
-#include "arguments.hpp" // `bench::count_t`, `bench::parse_counts`
-#include "world.hpp"     // `world_t`, `parse_verb`
+#include "abi.hpp"   // `count_t`, `keys_of_rows`, `devices_from_environment`
+#include "world.hpp" // `world_t`, `parse_verb`
 
 namespace unum::usearch::tools {
 
-using bench::count_t;
 using dense_clock_t = std::chrono::steady_clock;
 
 /** Two little-endian `u32` counters, rows then columns, open every RetriEval file. */
 static constexpr std::size_t dense_header_bytes_k = 8;
-static constexpr std::string_view dense_manifest_suffix_k = ".safegraphs.json";
+
+/** @p path without its @c .safegraphs suffix: the stem the parts beside a manifest are named
+ *  after. */
+static std::string_view dense_stem(std::string_view path) noexcept {
+    constexpr std::string_view suffix_k = ".safegraphs";
+    return path.ends_with(suffix_k) ? path.substr(0, path.size() - suffix_k.size()) : path;
+}
 
 /** Every setting the command line takes, each spelled as its flag with dashes. */
 struct dense_settings_t {
@@ -126,34 +131,8 @@ struct dense_part_t {
     std::uint64_t nodes = 0;
 };
 
-static usearch_bytes_view_t dense_bytes(std::string_view text) noexcept {
-    return {reinterpret_cast<usearch_byte_t const*>(text.data()), text.size()};
-}
-
 static double dense_seconds_since(dense_clock_t::time_point started) noexcept {
     return std::chrono::duration<double>(dense_clock_t::now() - started).count();
-}
-
-/** The scalar a RetriEval extension names, or @c usearch_scalar_unknown_k. */
-static usearch_scalar_t dense_scalar_of_extension(std::string_view path) noexcept {
-    if (path.ends_with(".fbin")) return usearch_scalar_f32_k;
-    if (path.ends_with(".bf16bin")) return usearch_scalar_bf16_k;
-    if (path.ends_with(".f16bin")) return usearch_scalar_f16_k;
-    if (path.ends_with(".i8bin")) return usearch_scalar_i8_k;
-    if (path.ends_with(".u8bin")) return usearch_scalar_u8_k;
-    if (path.ends_with(".u1x8bin")) return usearch_scalar_u1x8_k;
-    return usearch_scalar_unknown_k;
-}
-
-/** Bytes one row of @p columns logical values takes in a RetriEval file of @p scalar. */
-static std::size_t dense_row_bytes(usearch_scalar_t scalar, std::size_t columns) noexcept {
-    switch (scalar) {
-    case usearch_scalar_f32_k: return columns * 4;
-    case usearch_scalar_bf16_k:
-    case usearch_scalar_f16_k: return columns * 2;
-    case usearch_scalar_u1x8_k: return (columns + 7) / 8;
-    default: return columns;
-    }
 }
 
 /** Reads exactly @p length bytes at @p offset, retrying short reads; false on an error or at the
@@ -166,14 +145,6 @@ static bool dense_read_at(int descriptor, void* buffer, std::size_t length, std:
         cursor += read_bytes, length -= static_cast<std::size_t>(read_bytes), offset += read_bytes;
     }
     return true;
-}
-
-/** The 128-bit key of dataset row @p row: the integer in the low bytes, the rest zeroed. */
-static usearch_key_t dense_key_of(std::uint64_t row) noexcept {
-    usearch_key_t key {};
-    for (unsigned byte_index = 0; byte_index != 8; ++byte_index)
-        key.bytes[15 - byte_index] = static_cast<usearch_byte_t>(row >> (byte_index * 8));
-    return key;
 }
 
 /** Prints a failed call's status and message under the rank that saw it; true when it failed. */
@@ -198,7 +169,7 @@ static std::string dense_part_path(std::string_view stem, std::size_t part, std:
 
 /** Opens @p path and checks its counters against its size. */
 static bool dense_open_vectors(world_t const& world, std::string_view path, dense_source_t& source) {
-    source.scalar = dense_scalar_of_extension(path);
+    source.scalar = scalar_of_extension(path);
     if (source.scalar == usearch_scalar_unknown_k) {
         fmt::println(stderr, "{}{} is none of .fbin, .bf16bin, .f16bin, .i8bin, .u8bin or .u1x8bin", rank_label(world),
                      path);
@@ -214,7 +185,7 @@ static bool dense_open_vectors(world_t const& world, std::string_view path, dens
         return false;
     }
     source.rows = counters[0], source.columns = counters[1];
-    source.row_bytes = dense_row_bytes(source.scalar, source.columns);
+    source.row_bytes = row_bytes_of(source.scalar, source.columns);
     if (!source.rows || !source.columns ||
         static_cast<std::uint64_t>(file_stat.st_size) <
             dense_header_bytes_k + static_cast<std::uint64_t>(source.rows) * source.row_bytes) {
@@ -256,19 +227,16 @@ static bool dense_open_keys(world_t const& world, std::string_view path, dense_s
 /** The device this rank builds on: the entry of `USEARCH_DEVICES` at the node-local rank, wrapping
  *  around, or that position among every listed device when it is unset. */
 static bool dense_device_of(world_t const& world, std::size_t devices_count, std::int32_t& device) {
-    char const* const listed = std::getenv("USEARCH_DEVICES");
-    if (!listed || !*listed) {
+    std::vector<std::int32_t> const listed = devices_from_environment();
+    if (listed.empty()) {
         device = static_cast<std::int32_t>(world.local_rank % devices_count);
         return true;
     }
-    bench::counts_t ordinals {.minimum = 0, .maximum = devices_count - 1};
-    if (bench::parse_counts(listed, ordinals) != bench::argument_status_t::parsed_k) {
-        fmt::println(stderr, "{}USEARCH_DEVICES=\"{}\" names no device among the {} listed", rank_label(world), listed,
-                     devices_count);
-        return false;
-    }
-    device = static_cast<std::int32_t>(ordinals.values[world.local_rank % ordinals.size]);
-    return true;
+    device = listed[world.local_rank % listed.size()];
+    if (static_cast<std::size_t>(device) < devices_count) return true;
+    fmt::println(stderr, "{}USEARCH_DEVICES names device {}, past the {} listed", rank_label(world), device,
+                 devices_count);
+    return false;
 }
 
 /** Creates a CPU executor over the memory domain at the node-local rank's position, wrapping
@@ -306,7 +274,7 @@ static bool dense_load(world_t const& world, dense_engine_t const& engine, std::
     usearch_dense_load_ram_t load {.index = &index,
                                    .executor = engine.executor,
                                    .outcome = &outcome,
-                                   .path = dense_bytes(address),
+                                   .path = bytes_view(address),
                                    .ram = {&engine.placement, 1}};
     usearch_dense_load_ram(&load);
     if (dense_failed(world, outcome, fmt::format("loading {}", address))) return false;
@@ -333,7 +301,7 @@ static bool dense_save(world_t const& world, dense_engine_t const& engine, usear
     usearch_dense_save_t save {.index = index,
                                .executor = engine.executor,
                                .outcome = &outcome,
-                               .path = dense_bytes(address)};
+                               .path = bytes_view(address)};
     usearch_dense_save(&save);
     if (dense_failed(world, outcome, fmt::format("saving {}", address))) return false;
     double const seconds = dense_seconds_since(started);
@@ -404,10 +372,7 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
                     key.bytes[15 - byte_index] = staging.key_integers[position * source.key_bytes + byte_index];
             }
         }
-        else {
-            for (std::size_t position = 0; position != count; ++position)
-                staging.keys[position] = dense_key_of(row + position);
-        }
+        else keys_of_rows(row, std::span {staging.keys}.first(count));
         usearch_dense_insert_t insert {
             .index = engine.indexes[0],
             .executor = engine.executor,
@@ -454,7 +419,7 @@ static bool dense_insert_setup(world_t const& world, dense_settings_t const& set
 
     usearch_scalar_t quantization = source.scalar;
     if (!settings.stored_dtype.empty()) {
-        quantization = usearch_scalar_from_name(dense_bytes(settings.stored_dtype));
+        quantization = usearch_scalar_from_name(bytes_view(settings.stored_dtype));
         if (quantization == usearch_scalar_unknown_k) {
             fmt::println(stderr, "{}--stored-dtype=\"{}\" names no scalar", rank, settings.stored_dtype);
             return false;
@@ -468,7 +433,7 @@ static bool dense_insert_setup(world_t const& world, dense_settings_t const& set
     if (dense_failed(world, outcome, "listing GPUs")) return false;
 
     engine.residency = !settings.residency.empty()
-                           ? usearch_residency_from_name(dense_bytes(settings.residency))
+                           ? usearch_residency_from_name(bytes_view(settings.residency))
                            : (devices_count ? usearch_residency_vram_k : usearch_residency_ram_k);
     // Unknown spellings read back as ram, so only a round trip proves the name.
     bool const named = settings.residency.empty() || usearch_residency_name(engine.residency) == settings.residency;
@@ -547,7 +512,7 @@ static void dense_append_json_string(std::string& json, std::string_view text) {
 
 /** Commits the checkpoint: the manifest naming every part, its bytes and nodes. */
 static bool dense_write_manifest(std::string_view manifest_path, std::span<dense_part_t const> parts) {
-    std::string_view const stem = manifest_path.substr(0, manifest_path.size() - dense_manifest_suffix_k.size());
+    std::string_view const stem = dense_stem(manifest_path);
     std::size_t const slash = stem.rfind('/');
     std::string_view const part_stem = slash == std::string_view::npos ? stem : stem.substr(slash + 1);
     std::string json = "{\"files\":[";
@@ -566,8 +531,9 @@ static bool dense_write_manifest(std::string_view manifest_path, std::span<dense
 
 int dense_insert(world_t& world, int argc, char const* const* argv) {
     dense_settings_t settings;
-    std::array<bench::flag_t, 13> const flags {{
-        {"--save", "address", "required: where the index is saved; several ranks save a .safegraphs.json manifest",
+    std::array<flag_t, 13> const flags {{
+        {"--save", "address",
+         "required: where the index is saved; several ranks save a manifest there, a part each beside it",
          &settings.save},
         {"--first-vector", "row", "defaults to 0: the first row of the slice to index", &settings.first_vector},
         {"--rows", "count", "defaults to every row past --first-vector: rows in the slice", &settings.rows},
@@ -594,13 +560,11 @@ int dense_insert(world_t& world, int argc, char const* const* argv) {
         return *exit;
     bool const parted = world.size > 1;
     bool const speaks = world.rank == 0;
-    if (given != 1 || settings.save.empty() || (parted && !settings.save.ends_with(dense_manifest_suffix_k))) {
-        if (speaks)
-            fmt::println(stderr, "the vectors and --save are required, and across ranks --save ends in {}",
-                         dense_manifest_suffix_k);
+    if (given != 1 || settings.save.empty()) {
+        if (speaks) fmt::println(stderr, "the vectors and --save are required");
         return EXIT_FAILURE;
     }
-    usearch_dense_metric_t const metric = usearch_dense_metric_from_name(dense_bytes(settings.metric));
+    usearch_dense_metric_t const metric = usearch_dense_metric_from_name(bytes_view(settings.metric));
     if (metric == usearch_dense_metric_unknown_k) {
         if (speaks) fmt::println(stderr, "--metric=\"{}\" names no metric", settings.metric);
         return EXIT_FAILURE;
@@ -614,8 +578,8 @@ int dense_insert(world_t& world, int argc, char const* const* argv) {
     if (world.barrier(!dense_insert_setup(world, settings, positionals[0], metric, source, engine)))
         return EXIT_FAILURE;
 
-    std::string_view const stem = settings.save.substr(0, settings.save.size() - dense_manifest_suffix_k.size());
-    std::string const address = parted ? dense_part_path(stem, world.rank, world.size) : std::string(settings.save);
+    std::string const address = parted ? dense_part_path(dense_stem(settings.save), world.rank, world.size)
+                                       : std::string(settings.save);
     bool const built = dense_construct(world, settings, source, engine, address, started);
     if (world.barrier(!built)) return EXIT_FAILURE;
     if (!parted) return EXIT_SUCCESS;
@@ -639,7 +603,7 @@ int dense_insert(world_t& world, int argc, char const* const* argv) {
 
 int dense_absorb(world_t& world, int argc, char const* const* argv) {
     dense_settings_t settings;
-    std::array<bench::flag_t, 3> const flags {{
+    std::array<flag_t, 3> const flags {{
         {"--save", "address", "required: where the merged index is saved", &settings.save},
         {"--expansion-refine", "count", "defaults to the library's derivation: candidate pool while refining",
          &settings.expansion_refine},
@@ -694,7 +658,7 @@ int dense_absorb(world_t& world, int argc, char const* const* argv) {
 int dense_refine(world_t& world, int argc, char const* const* argv) {
     dense_settings_t settings;
     settings.max_refines = {.value = 1};
-    std::array<bench::flag_t, 4> const flags {{
+    std::array<flag_t, 4> const flags {{
         {"--save", "address", "required: where the refined index is saved", &settings.save},
         {"--max-refines", "count", "defaults to 1: refinement passes, stopping early once settled",
          &settings.max_refines},
@@ -726,10 +690,9 @@ int dense_refine(world_t& world, int argc, char const* const* argv) {
 
 int dense_split(world_t& world, int argc, char const* const* argv) {
     dense_settings_t settings;
-    std::array<bench::flag_t, 4> const flags {{
+    std::array<flag_t, 4> const flags {{
         {"--parts", "count", "required: receivers to split into, at least 2", &settings.parts},
-        {"--save", "path", "required: the .safegraphs.json manifest to commit, its parts written beside it",
-         &settings.save},
+        {"--save", "path", "required: the manifest to commit, its parts written beside it", &settings.save},
         {"--expansion-refine", "count", "defaults to the library's derivation: candidate pool while refining",
          &settings.expansion_refine},
         {"--threads", "count", "defaults to 7/8 of the domain's cores: executor threads", &settings.threads},
@@ -737,12 +700,12 @@ int dense_split(world_t& world, int argc, char const* const* argv) {
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
     if (std::optional<int> const exit = parse_verb(
-            world, argc, argv, "usearch dense split <address> --parts <count> --save <path>.safegraphs.json [flags]",
-            flags, positionals, given))
+            world, argc, argv, "usearch dense split <address> --parts <count> --save <path> [flags]", flags,
+            positionals, given))
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
-    if (given != 1 || !settings.parts.value || !settings.save.ends_with(dense_manifest_suffix_k)) {
-        fmt::println(stderr, "a checkpoint, --parts and --save ending in {} are required", dense_manifest_suffix_k);
+    if (given != 1 || !settings.parts.value || settings.save.empty()) {
+        fmt::println(stderr, "a checkpoint, --parts and --save are required");
         return EXIT_FAILURE;
     }
 
@@ -788,7 +751,7 @@ int dense_split(world_t& world, int argc, char const* const* argv) {
     fmt::println("split into {} parts in {:.1f} s, {} changed, {} of {} reachable", parts_count,
                  dense_seconds_since(started), changed, reachability.reachable, reachability.audited);
 
-    std::string_view const stem = settings.save.substr(0, settings.save.size() - dense_manifest_suffix_k.size());
+    std::string_view const stem = dense_stem(settings.save);
     std::vector<dense_part_t> parts(parts_count);
     for (std::size_t part = 0; part != parts_count; ++part) {
         std::string const part_path = dense_part_path(stem, part, parts_count);
@@ -806,7 +769,7 @@ int dense_split(world_t& world, int argc, char const* const* argv) {
 
 int dense_health(world_t& world, int argc, char const* const* argv) {
     dense_settings_t settings;
-    std::array<bench::flag_t, 1> const flags {{
+    std::array<flag_t, 1> const flags {{
         {"--threads", "count", "defaults to the devices' queue capabilities: executor threads", &settings.threads},
     }};
     std::array<std::string_view, 1> positionals;
@@ -832,7 +795,7 @@ int dense_health(world_t& world, int argc, char const* const* argv) {
     usearch_dense_view_nvme_t view {.index = &engine.indexes[0],
                                     .executor = engine.executor,
                                     .outcome = &outcome,
-                                    .path = dense_bytes(positionals[0])};
+                                    .path = bytes_view(positionals[0])};
     usearch_dense_view_nvme(&view);
     if (dense_failed(world, outcome, fmt::format("viewing {}", positionals[0]))) return EXIT_FAILURE;
 

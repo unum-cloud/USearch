@@ -49,9 +49,24 @@
 #include "usearch/utilities/sanitizers.hpp"        // `assert_no_locks_held` - the racing threads' tail check
 #include "usearch/utilities/safegraphs_format.hpp" // `save_config_t`, `safegraphs_read_header` - the checkpoints' surface
 #include "usearch/dense/ram_metric.hpp"            // `dense::distance`, `dense::norms` - the oracle's kernels
+#include "usearch/dense/shard_checkpoints.hpp" // `dense::norms_column_of`, `dense::norms_column_name_k` - the norms column
 
 namespace unum::usearch::test {
 using namespace unum::usearch::dense;
+
+/** The key numbered @p number: the number itself, or the @c uuid_t the bindings render it as. */
+template <typename key_type_>
+constexpr key_type_ dense_key(u64_t number) noexcept {
+    if constexpr (std::is_same_v<key_type_, uuid_t>) return uuid_of(number);
+    else return static_cast<key_type_>(number);
+}
+
+/** The number @ref dense_key made @p key from, or zero for a key it never makes. */
+template <typename key_type_>
+constexpr u64_t dense_key_number(key_type_ const& key) noexcept {
+    if constexpr (std::is_same_v<key_type_, uuid_t>) return identity_of(key).value_or(0);
+    else return static_cast<u64_t>(key);
+}
 
 #pragma region Constants
 
@@ -248,9 +263,7 @@ namespace dense {
  *      executor the vendor's entry opened.
  *
  *  A cell is the factory the shared scenarios take: called on a ledger it builds the index on the
- *  stream's device, and its @c context builds a traversal context on the stream. A cell whose
- *  vendor runs device attention names @c attends_k and covers it in its own unit; every other
- *  cell's index must refuse attention with @c unsupported_k.
+ *  stream's device, and its @c context builds a traversal context on the stream.
  */
 template <gpu_vendor_t vendor_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell;
@@ -298,6 +311,7 @@ struct counting_device_allocator {
     int device() const noexcept { return virtual_memory_.device(); }
     void share_with(std::bitset<gpu_devices_capacity_k> devices) noexcept { virtual_memory_.share_with(devices); }
     bool shared_with(int device) const noexcept { return virtual_memory_.shared_with(device); }
+    status_t grant(std::bitset<gpu_devices_capacity_k> devices) noexcept { return virtual_memory_.grant(devices); }
     void release() noexcept {
         if (ledger_ && tallied_bytes_) ledger_->live_bytes.fetch_sub(static_cast<std::ptrdiff_t>(tallied_bytes_));
         tallied_bytes_ = 0;
@@ -1015,7 +1029,7 @@ std::size_t dense_expect_indexer_matches(dense_indexer_inputs<scalar_type_> cons
 
     std::vector<bool> seen(rows_count);
     for (std::size_t rank = 0; rank != rows.size(); ++rank) {
-        std::size_t const row = static_cast<std::size_t>(rows[rank]);
+        std::size_t const row = dense_key_number(rows[rank]);
         failures += expect(row < rows_count && !seen[row]);
         if (row >= rows_count || seen[row]) continue;
         seen[row] = true;
@@ -1093,7 +1107,7 @@ std::size_t test_dense_indexes_indexer_search(u64_t seed) {
         failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
         auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_indexer"));
         std::array<key_t, rows_count> keys;
-        for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(row);
+        for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(row);
         failures += expect(
             succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
 
@@ -1150,7 +1164,7 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
     auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_scan"));
     std::vector<key_t> keys(rows_count);
-    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(1 + row);
     failures += expect(
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
 
@@ -1173,7 +1187,7 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
     auto wide_distances = nk::matrix<distance_t>::zeros({wide_queries_count, rows_count}).value;
     std::vector<std::size_t> counts(queries_count);
     auto all = [](key_t) noexcept { return true; };
-    auto even = [](key_t key) noexcept { return static_cast<std::size_t>(key) % 2 == 0; };
+    auto even = [](key_t key) noexcept { return dense_key_number(key) % 2 == 0; };
     auto admit_even = quad_predicate(
         [&](key_t key) noexcept { return even(key) ? admission_t::admit_k : admission_t::reject_k; });
     // One query's found ranking against the oracle's, sorted over the keys `admits` lets through.
@@ -1189,7 +1203,7 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
             distance_t const distance = ranked_distances(query, rank);
             ranking_failures += expect(admits(key));
             ranking_failures += expect_near(distance, admitted[rank]);
-            ranking_failures += expect_near(distance, oracle(query, static_cast<std::size_t>(key) - 1));
+            ranking_failures += expect_near(distance, oracle(query, dense_key_number(key) - 1));
         }
         return ranking_failures;
     };
@@ -2458,7 +2472,7 @@ std::size_t dense_expect_indexes_products(u64_t seed, placement_types_&... place
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
     auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_products"));
     std::array<key_t, rows_count> keys;
-    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(1 + row);
     failures += expect(
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
 
@@ -2486,7 +2500,7 @@ std::size_t dense_expect_indexes_products(u64_t seed, placement_types_&... place
             failures += dense_expect_product_row<rows_count>(
                 left.row(row).as_vector(), vectors.view(), kept_keys(row, kept, nk::slice).as_vector(),
                 kept_products(row, kept, nk::slice).as_vector(),
-                [](key_t key) noexcept { return static_cast<std::size_t>(key) - 1; });
+                [](key_t key) noexcept { return dense_key_number(key) - 1; });
         }
     }
 
@@ -2526,7 +2540,7 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
     auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_maxsim"));
     std::array<key_t, rows_count> keys;
-    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row / tokens_per_document);
+    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(1 + row / tokens_per_document);
     failures += expect(
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
 
@@ -2578,7 +2592,7 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
         return maxsim_cut(rows, std::span<std::size_t const> {uniform_offsets}, config);
     };
     auto document_of = [&](std::size_t query, std::size_t rank) noexcept {
-        return static_cast<std::size_t>(found_keys(query, rank)) - 1;
+        return dense_key_number(found_keys(query, rank)) - 1;
     };
 
     // Every landed query scores every document and ranks the best of `expected_scores` at their
@@ -2686,14 +2700,14 @@ std::size_t test_dense_indexes_attend(u64_t seed) {
         auto values = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_attend", 1));
         auto queries = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_attend", 2));
         std::vector<key_t> keys(nodes_count);
-        for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = static_cast<key_t>(row);
+        for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = dense_key<key_t>(row);
         failures += expect(succeeded(
             indexes.insert(std::span<key_t const> {keys.data(), nodes_count}, vectors.view(), driver.executor).status));
 
         auto value_of = [&](std::size_t row) noexcept { return values.view().row(row).as_vector(); };
         auto lookup = [&](std::span<key_t const> batch, std::span<vector_view_t> rows) noexcept {
             for (std::size_t lane = 0; lane != batch.size(); ++lane)
-                rows[lane] = value_of(static_cast<std::size_t>(batch[lane]));
+                rows[lane] = value_of(dense_key_number(batch[lane]));
         };
         f32_t const score_scale = dense_attend_scale(
             dense_oracle_dots(dense_widened_rows(queries.view(), index_t::vector_dtype_k),
@@ -2719,7 +2733,7 @@ std::size_t test_dense_indexes_attend(u64_t seed) {
         auto const row_less = [&](std::span<key_t const> batch, std::span<vector_view_t> rows) noexcept {
             lookup(batch, rows);
             for (std::size_t lane = 0; lane != batch.size(); ++lane)
-                if (static_cast<std::size_t>(batch[lane]) + 1 == nodes_count) rows[lane] = vector_view_t {};
+                if (dense_key_number(batch[lane]) + 1 == nodes_count) rows[lane] = vector_view_t {};
         };
         failures += expect(drive_attend(indexes, queries.view(), 1, row_less, score_scale, outputs.span(),
                                         std::span {carry}, driver, exhaustive)
@@ -2917,7 +2931,7 @@ std::size_t test_dense_indexes_guards(u64_t seed, placement_types_&... placement
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "guards"));
     auto oversized = make_vectors<scalar_t>(rows + 1, dimensions, stream_key(seed, "guards", 1));
     std::vector<key_t> keys(rows + 1);
-    for (std::size_t row = 0; row != rows + 1; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows + 1; ++row) keys[row] = dense_key<key_t>(1 + row);
 
     // Verbs before any shard exists refuse rather than write.
     indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
@@ -2994,7 +3008,7 @@ std::size_t test_dense_indexes_growth(u64_t seed) {
 
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_growth"));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
     dense_indexes_row_driver<indexes_type_> rows_driver {indexes, driver};
     if (failed(rows_driver.status)) return failures + expect(false);
     for (std::size_t row = 0; row != singles; ++row)
@@ -3038,7 +3052,7 @@ std::size_t test_dense_indexes_refine(u64_t seed, placement_types_&... placement
 
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_refine"));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
     typename index_t::insert_config_t const narrow {4};
     failures += expect(
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), executor, narrow).status));
@@ -3062,7 +3076,7 @@ std::size_t test_dense_indexes_refine(u64_t seed, placement_types_&... placement
     failures += expect(health.sweeps >= 1);
 
     // A plan dropped after a cancelled run heals nothing, but reopens the index it held closed.
-    key_t const late_key = static_cast<key_t>(rows + 1);
+    key_t const late_key = dense_key<key_t>(rows + 1);
     auto insert_late = [&] {
         return indexes.insert(std::span<key_t const> {&late_key, 1}, vectors(nk::range(0, 1), nk::slice), executor)
             .status;
@@ -3105,7 +3119,7 @@ std::size_t test_dense_indexes_arena_growth(u64_t seed) {
 
     auto vectors = make_vectors<scalar_t>(rows + queries, dimensions, stream_key(seed, "upstream"));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
     auto const [insert_result, insert_status] = indexes.insert(std::span<key_t const> {keys},
                                                                vectors(nk::range(0, rows), nk::slice), //
                                                                executor);
@@ -3116,8 +3130,9 @@ std::size_t test_dense_indexes_arena_growth(u64_t seed) {
     // shard, so all eight surface - narrower candidates could promise only that what surfaces is
     // admitted and ranked.
     typename index_t::search_config_t const exhaustive {static_cast<typename index_t::small_size_t>(rows)};
-    auto sparse = quad_predicate(
-        [](key_t key) noexcept { return key % 128 == 0 ? admission_t::admit_k : admission_t::reject_k; });
+    auto sparse = quad_predicate([](key_t key) noexcept {
+        return dense_key_number(key) % 128 == 0 ? admission_t::admit_k : admission_t::reject_k;
+    });
     auto found_keys = nk::matrix<key_t>::zeros({queries, wanted}).value;
     auto found_distances = nk::matrix<typename indexes_type_::distance_t>::zeros({queries, wanted}).value;
     std::vector<std::size_t> counts(queries);
@@ -3154,27 +3169,27 @@ std::size_t test_dense_indexes_duplicate_keys(u64_t seed, placement_types_&... p
     if (failed(rows_driver.status)) return failures + expect(false);
 
     // Every second row lands under one shared key; the rest keep distinct ones.
-    key_t const shared = static_cast<key_t>(1000);
+    key_t const shared = dense_key<key_t>(1000);
     for (std::size_t row = 0; row != rows; ++row) {
-        key_t const key = row % 2 ? shared : static_cast<key_t>(1 + row);
+        key_t const key = row % 2 ? shared : dense_key<key_t>(1 + row);
         failures += expect(
             succeeded(indexes.insert(key, vectors.view().row(row).as_vector(), rows_driver.handle()).status));
     }
     failures += expect_eq(indexes.size(), rows);
     failures += expect_eq(indexes.count(shared), rows / 2);
-    failures += expect_eq(indexes.count(static_cast<key_t>(1)), 1u);
+    failures += expect_eq(indexes.count(dense_key<key_t>(1)), 1u);
     failures += expect(indexes.contains(shared));
-    failures += expect(!indexes.contains(static_cast<key_t>(2)));
+    failures += expect(!indexes.contains(dense_key<key_t>(2)));
 
     // The probe-then-fetch contract of `get`: the true total returns even when the copy
     // truncates, and an absent key answers zero without touching the output.
     auto fetched = make_vectors<scalar_t>(2, dimensions, stream_key(seed, "guards", 3));
     failures += expect_eq(indexes.get(shared, fetched.span(), 2, driver.executor), rows / 2);
-    failures += expect_eq(indexes.get(static_cast<key_t>(2), fetched.span(), 2, driver.executor), 0u);
+    failures += expect_eq(indexes.get(dense_key<key_t>(2), fetched.span(), 2, driver.executor), 0u);
 
     // The batched verbs answer what the single-key ones do, repeats and absent keys included, and
     // every key's rows land in its own band of the batch, in the single-key order.
-    std::array<key_t, 4> const probes {shared, static_cast<key_t>(1), static_cast<key_t>(2), shared};
+    std::array<key_t, 4> const probes {shared, dense_key<key_t>(1), dense_key<key_t>(2), shared};
     std::span<key_t const> const probed {probes};
     std::array<std::size_t, 4> counted {}, contained {}, gotten {};
     auto batch = make_vectors<scalar_t>(probes.size() * 2, dimensions, stream_key(seed, "guards", 4));
@@ -3198,34 +3213,35 @@ std::size_t test_dense_indexes_duplicate_keys(u64_t seed, placement_types_&... p
 /** A save config the sharded scenarios pass: the device residency certifies quiescence, since
  *  its flat matrices cannot be settlement-probed; the RAM residency lets the probe run. */
 template <typename indexes_type_>
-save_config_t dense_indexes_save_config(checkpoint_layout_t layout) noexcept {
+save_config_t dense_indexes_save_config() noexcept {
     save_config_t config;
-    config.layout = layout;
     if constexpr (dense_device_resident<typename indexes_type_::index_t>)
         config.synchronization = synchronization_t::immutable_k;
     return config;
 }
 
-/** The paths one sharded checkpoint scenario writes: distinct per process, so parallel
- *  suite runs never clobber each other; the part files follow the interchange's naming. */
-struct dense_checkpoint_paths_t {
-    char manifest[64] = {};
-    char monolith[64] = {};
+/** The path one sharded checkpoint scenario writes, distinct per process so parallel suite runs
+ *  never clobber each other: a lone shard's monolith, or a manifest with its parts beside it under
+ *  the interchange's naming. */
+struct dense_checkpoint_path_t {
+    char path[64] = {};
 
-    explicit dense_checkpoint_paths_t(std::uintptr_t salt) noexcept {
-        std::snprintf(manifest, sizeof(manifest), "/tmp/usearch-%08x.safegraphs.json", static_cast<unsigned>(salt));
-        std::snprintf(monolith, sizeof(monolith), "/tmp/usearch-%08x.safegraphs", static_cast<unsigned>(salt));
+    explicit dense_checkpoint_path_t(std::uintptr_t salt) noexcept {
+        std::snprintf(path, sizeof(path), "/tmp/usearch-%08x.safegraphs", static_cast<unsigned>(salt));
     }
 
-    /** Removes the manifest, its @p parts part files, and the monolith. */
-    void remove(std::size_t parts) const noexcept {
-        std::remove(manifest);
-        std::remove(monolith);
+    /** The file of part @p part among @p parts: the path itself for a lone part. */
+    std::string part(std::size_t part, std::size_t parts) const {
+        if (parts == 1) return path;
         growing_buffer<char> part_path {global_allocator};
-        for (std::size_t part = 0; part != parts; ++part) {
-            auto const [path, status] = safegraphs_part_path(part_path, safegraphs_stem(manifest), part, parts);
-            if (succeeded(status)) std::remove(path.data());
-        }
+        auto const [named, status] = safegraphs_part_path(part_path, safegraphs_stem(path), part, parts);
+        return succeeded(status) ? std::string {named} : std::string {};
+    }
+
+    /** Removes the checkpoint and its @p parts part files. */
+    void remove(std::size_t parts) const noexcept {
+        std::remove(path);
+        for (std::size_t part = 0; part != parts; ++part) std::remove(this->part(part, parts).c_str());
     }
 };
 
@@ -3292,7 +3308,7 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
     auto& executor = driver.executor;
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_absorb"));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
 
     indexes_type_ recipient {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     indexes_type_ donor {kernel_, forkunion_allocator_t {no_memory_domain_k}};
@@ -3378,7 +3394,7 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
     auto& executor = driver.executor;
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_absorb_many"));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
 
     auto build_quarters = [&](std::array<std::unique_ptr<indexes_type_>, 4>& quarters,
                               std::array<indexes_type_*, 4>& donors) {
@@ -3437,17 +3453,17 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
         failures += expect(reported.load() > 0 && reported.load() < baseline_visited);
 
         // The plan holds the index closed between its calls, never the executor.
-        key_t const late_key = static_cast<key_t>(rows + 1);
+        key_t const late_key = dense_key<key_t>(rows + 1);
         failures += expect_eq(
             recipient.insert(std::span<key_t const> {&late_key, 1}, vectors(nk::range(0, 1), nk::slice), executor)
                 .status,
             status_t::contended_k);
         if constexpr (!ram_collection<indexes_type_>) {
-            save_config_t const monolith = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k);
-            auto const [bytes, measure_status] = recipient.storage_requirements(monolith);
+            save_config_t const config = dense_indexes_save_config<indexes_type_>();
+            auto const [bytes, measure_status] = recipient.storage_requirements(config);
             failures += expect(succeeded(measure_status));
             std::vector<std::byte> buffer(bytes);
-            failures += expect_eq(recipient.save(bytes_span_t {buffer}, monolith, executor), status_t::contended_k);
+            failures += expect_eq(recipient.save(bytes_span_t {buffer}, config, executor), status_t::contended_k);
         }
 
         failures += expect_eq(drive_run(plan, driver, proceed), status_t::success_k);
@@ -3500,7 +3516,7 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
     auto const vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_split"));
     auto const queries = make_vectors<scalar_t>(samples_k, dimensions, stream_key(seed, "indexes_split", 1));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
     auto oracle = nk::matrix<distance_t>::zeros({samples_k, rows}).value;
     for (std::size_t query = 0; query != samples_k; ++query) {
         auto const query_vector = queries.view().row(query).as_vector();
@@ -3649,11 +3665,11 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
     return failures;
 }
 
-/** The sharded checkpoint's whole life, in both layouts: batched rows in, a manifest
- *  plus one monolith per shard out and one consolidated monolith out, summaries read from
- *  either, a fresh index restored into the same placement, and byte-identical vectors
- *  fetched back by key - with a cancelled save leaving no manifest and no header, so the
- *  failed checkpoint reads as absent. */
+/** The sharded checkpoint's whole life: batched rows in, a lone shard's monolith or a manifest plus
+ *  one monolith per shard out, summaries read from it, a fresh index restored into the same
+ *  placement one shard per part, and byte-identical vectors fetched back by key - with a cancelled
+ *  save leaving no manifest and no header, so the failed checkpoint reads as absent, an illegal
+ *  alignment refused, and the provenance riding in every part's header. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_save_load(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
@@ -3668,37 +3684,64 @@ std::size_t test_dense_indexes_save_load(u64_t seed, placement_types_&... placem
     auto& executor = driver.executor;
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "roundtrip", 1));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
 
     indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += dense_indexes_build(indexes, executor, vectors, keys, dimensions, placement...);
-    dense_checkpoint_paths_t const paths {reinterpret_cast<std::uintptr_t>(&indexes)};
-    save_config_t const distributed = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::distributed_k);
-    save_config_t monolith = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k);
+    std::size_t const shards = indexes.shards_count();
+    dense_checkpoint_path_t const checkpoint {reinterpret_cast<std::uintptr_t>(&indexes)};
+    save_config_t config = dense_indexes_save_config<indexes_type_>();
 
-    // A cancelled save writes parts but never the manifest - the checkpoint reads as absent.
-    failures += expect_eq(indexes.save(paths.manifest, distributed, executor,
-                                       [](std::size_t) noexcept { return continuation_t::cancel_k; }),
-                          status_t::cancelled_k);
-    failures += expect(failed(indexes_type_::metadata(paths.manifest).status));
+    // A cancelled save writes parts but no manifest or header, so the checkpoint reads as absent.
+    failures += expect_eq(
+        indexes.save(checkpoint.path, config, executor, [](std::size_t) noexcept { return continuation_t::cancel_k; }),
+        status_t::cancelled_k);
+    failures += expect(failed(indexes_type_::metadata(checkpoint.path).status));
+    save_config_t misaligned = config;
+    misaligned.alignment = 32;
+    failures += expect_eq(indexes.save(checkpoint.path, misaligned, executor), status_t::config_mismatch_k);
+    if constexpr (dense_device_resident<index_t>) {
+        save_config_t probing = config;
+        probing.synchronization = synchronization_t::concurrent_k;
+        failures += expect_eq(indexes.save(checkpoint.path, probing, executor), status_t::config_mismatch_k);
+    }
 
-    failures += expect(succeeded(indexes.save(paths.manifest, distributed, executor)));
-    failures += expect(indexes.storage_requirements(distributed).value > 0);
+    std::array<safegraphs_custom_field_t, 1> const provenance {{{"embedding_model", "test"}}};
+    config.provenance = provenance;
+    failures += expect(succeeded(indexes.save(checkpoint.path, config, executor)));
+    failures += expect(indexes.storage_requirements(config).value > 0);
+    if (shards == 1) {
+        auto [mapping, status] = mapped_file_t::read(checkpoint.path);
+        failures += expect(succeeded(status));
+        failures += expect_eq(indexes.storage_requirements(config).value, mapping.size());
+    }
 
-    // The summary answers from the manifest and the first part's header, metric included.
-    auto [manifest_summary, manifest_status] = indexes_type_::metadata(paths.manifest);
-    failures += expect(succeeded(manifest_status));
-    failures += expect_eq(manifest_summary.nodes, rows);
-    failures += expect_eq(manifest_summary.parts, indexes.shards_count());
-    failures += expect_eq(regular_width(manifest_summary.value_shape).value_or(0), dimensions);
-    failures += expect(nk_kernel_named(manifest_summary.metric.characters, manifest_summary.metric.view().size()) ==
-                       kernel_);
+    // The summary answers from the manifest or the lone monolith, metric included.
+    auto [summary, summary_status] = indexes_type_::metadata(checkpoint.path);
+    failures += expect(succeeded(summary_status));
+    failures += expect_eq(summary.nodes, rows);
+    failures += expect_eq(summary.parts, shards);
+    failures += expect_eq(regular_width(summary.value_shape).value_or(0), dimensions);
+    failures += expect(nk_kernel_named(summary.metric.characters, summary.metric.view().size()) == kernel_);
+    for (std::size_t part = 0; part != shards; ++part) {
+        std::size_t provenance_seen = 0;
+        auto const [header, header_status] = safegraphs_read_header(
+            checkpoint.part(part, shards), {}, [&](safegraphs_custom_field_t field) {
+                provenance_seen += field.key == "embedding_model" && field.value == "test";
+            });
+        failures += expect(succeeded(header_status));
+        failures += expect_eq(provenance_seen, 1u);
+        failures += expect_eq(header.nodes(), indexes.shard(part).size());
+    }
 
-    // A fresh index in the same placement restores it whole, keys and all.
+    // A fresh index in the same placement restores it whole, one shard per part, keys and all.
     indexes_type_ restored {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(restored, placement...)));
-    failures += expect(succeeded(restored.load(paths.manifest, load_config_t {}, executor)));
+    failures += expect(succeeded(restored.load(checkpoint.path, load_config_t {}, executor)));
     failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions, executor, seed);
+    failures += expect_eq(restored.shards_count(), shards);
+    for (std::size_t shard = 0; shard != std::min(shards, restored.shards_count()); ++shard)
+        failures += expect_eq(restored.shard(shard).size(), indexes.shard(shard).size());
 
     if constexpr (kernel_ != nk_kernel_dot_k) {
         dense_indexes_row_driver<indexes_type_> rows_driver {restored, driver};
@@ -3711,59 +3754,14 @@ std::size_t test_dense_indexes_save_load(u64_t seed, placement_types_&... placem
         failures += expect(search_status == status_t::success_k && search_result.count > 0);
     }
 
-    // One consolidated monolith: a cancelled save leaves no header, an illegal alignment is
-    // refused, and the provenance rides in the header the file's own reader parses back.
-    std::array<safegraphs_custom_field_t, 1> const provenance {{{"embedding_model", "test"}}};
-    monolith.provenance = provenance;
-    failures += expect_eq(
-        indexes.save(paths.monolith, monolith, executor, [](std::size_t) noexcept { return continuation_t::cancel_k; }),
-        status_t::cancelled_k);
-    failures += expect(failed(indexes_type_::metadata(paths.monolith).status));
-    save_config_t misaligned = monolith;
-    misaligned.alignment = 32;
-    failures += expect_eq(indexes.save(paths.monolith, misaligned, executor), status_t::config_mismatch_k);
-    failures += expect(succeeded(indexes.save(paths.monolith, monolith, executor)));
-    if constexpr (dense_device_resident<index_t>) {
-        save_config_t probing = monolith;
-        probing.synchronization = synchronization_t::concurrent_k;
-        failures += expect_eq(indexes.save(paths.monolith, probing, executor), status_t::config_mismatch_k);
-        failures += expect(succeeded(indexes.save(paths.monolith, monolith, executor)));
-    }
-    {
-        auto [mapping, status] = mapped_file_t::read(paths.monolith);
-        failures += expect(succeeded(status));
-        failures += expect_eq(indexes.storage_requirements(monolith).value, mapping.size());
-    }
-    auto [monolith_summary, monolith_status] = indexes_type_::metadata(paths.monolith);
-    failures += expect(succeeded(monolith_status));
-    failures += expect_eq(monolith_summary.nodes, rows);
-    failures += expect_eq(monolith_summary.parts, 1u);
-    std::size_t provenance_seen = 0;
-    auto const [header, header_status] = safegraphs_read_header(
-        paths.monolith, {}, [&](safegraphs_custom_field_t field) {
-            provenance_seen += field.key == "embedding_model" && field.value == "test";
-        });
-    failures += expect(succeeded(header_status));
-    failures += expect_eq(provenance_seen, 1u);
-    failures += expect_eq(header.nodes(), rows);
-
-    // The monolith restores whole into shard zero under the default placement.
-    indexes_type_ whole {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(whole, placement...)));
-    failures += expect(succeeded(whole.load(paths.monolith, load_config_t {}, executor)));
-    failures += dense_indexes_expect_restored(whole, vectors, keys, dimensions, executor, seed);
-    failures += expect_eq(whole.shard(0).size(), rows);
-
-    paths.remove(indexes.shards_count());
+    checkpoint.remove(shards);
     return failures;
 }
 
-/** Splitting and partitioning: a monolith written by @c S rotation-filled shards splits
- *  back into the very same per-shard fills, lands whole on shard zero when partitioned, and
- *  a manifest splits the same way; a reservation too small for the widest shard refuses, as
- *  does a second load into a populated index. */
+/** A load lands each part on a shard of its own: a reservation smaller than the parts still fits
+ *  them, since a shard rounds up to whole chunks, and a populated index refuses a second load. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
-std::size_t test_dense_indexes_split_load(u64_t seed, placement_types_&... placement) {
+std::size_t test_dense_indexes_part_load(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -3776,59 +3774,30 @@ std::size_t test_dense_indexes_split_load(u64_t seed, placement_types_&... place
     auto& executor = driver.executor;
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "roundtrip", 3));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
 
     indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += dense_indexes_build(indexes, executor, vectors, keys, dimensions, placement...);
     std::size_t const shards = indexes.shards_count();
-    dense_checkpoint_paths_t const paths {reinterpret_cast<std::uintptr_t>(&indexes)};
-    failures += expect(succeeded(indexes.save(
-        paths.monolith, dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k), executor)));
-    failures += expect(succeeded(indexes.save(
-        paths.manifest, dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::distributed_k), executor)));
-    load_config_t split;
-    split.placement = checkpoint_placement_t::split_k;
+    dense_checkpoint_path_t const checkpoint {reinterpret_cast<std::uintptr_t>(&indexes)};
+    failures += expect(succeeded(indexes.save(checkpoint.path, dense_indexes_save_config<indexes_type_>(), executor)));
 
-    // The stripes are the rotation's own fills, so every shard restores to its original size.
-    indexes_type_ striped {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(striped, placement...)));
-    failures += expect(succeeded(striped.load(paths.monolith, split, executor)));
-    failures += dense_indexes_expect_restored(striped, vectors, keys, dimensions, executor, seed);
-    for (std::size_t shard = 0; shard != shards; ++shard)
-        failures += expect_eq(striped.shard(shard).size(), indexes.shard(shard).size());
-
-    // Partitioned, the one part lands whole on shard zero.
-    indexes_type_ whole {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(whole, placement...)));
-    failures += expect(succeeded(whole.load(paths.monolith, load_config_t {}, executor)));
-    failures += dense_indexes_expect_restored(whole, vectors, keys, dimensions, executor, seed);
-    failures += expect_eq(whole.shard(0).size(), rows);
-    for (std::size_t shard = 1; shard < shards; ++shard) failures += expect_eq(whole.shard(shard).size(), 0u);
-
-    // A manifest's parts concatenate in order, so its stripes are the same fills.
-    indexes_type_ restriped {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(restriped, placement...)));
-    failures += expect(succeeded(restriped.load(paths.manifest, split, executor)));
-    failures += dense_indexes_expect_restored(restriped, vectors, keys, dimensions, executor, seed);
-    for (std::size_t shard = 0; shard != shards; ++shard)
-        failures += expect_eq(restriped.shard(shard).size(), indexes.shard(shard).size());
-
-    // A reservation smaller than the parts still fits them, since a shard rounds up to whole
-    // chunks; a populated index refuses a second load.
     indexes_type_ cramped {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(cramped, placement...)));
     failures += expect(succeeded(cramped.reserve({shards, connectivity_16_k, dimensions}).status));
-    failures += expect(succeeded(cramped.load(paths.monolith, split, executor)));
+    failures += expect(succeeded(cramped.load(checkpoint.path, load_config_t {}, executor)));
     failures += dense_indexes_expect_restored(cramped, vectors, keys, dimensions, executor, seed);
-    failures += expect_eq(striped.load(paths.monolith, split, executor), status_t::config_mismatch_k);
-    failures += expect_eq(striped.size(), rows);
+    for (std::size_t shard = 0; shard != std::min(shards, cramped.shards_count()); ++shard)
+        failures += expect_eq(cramped.shard(shard).size(), indexes.shard(shard).size());
+    failures += expect_eq(cramped.load(checkpoint.path, load_config_t {}, executor), status_t::config_mismatch_k);
+    failures += expect_eq(cramped.size(), rows);
 
-    paths.remove(shards);
+    checkpoint.remove(shards);
     return failures;
 }
 
 /** Any number of lanes may take steps from one sharded plan: a shared cursor hands them
- *  out regardless of which shard they read, the plan finishes once, and the monolith they
+ *  out regardless of which shard they read, the plan finishes once, and the buffer they
  *  wrote restores into the same graph the one-shot save writes. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_indexes_pooled_save(u64_t seed) {
@@ -3845,16 +3814,16 @@ std::size_t test_dense_indexes_pooled_save(u64_t seed) {
     auto& executor = driver.executor;
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "roundtrip", 5));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
 
     indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += dense_indexes_build(indexes, executor, vectors, keys, dimensions);
-    save_config_t const monolith = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k);
-    auto const [bytes, measure_status] = indexes.storage_requirements(monolith);
+    save_config_t const config = dense_indexes_save_config<indexes_type_>();
+    auto const [bytes, measure_status] = indexes.storage_requirements(config);
     failures += expect(succeeded(measure_status));
 
     std::vector<std::byte> buffer(bytes);
-    auto [plan, plan_status] = indexes.plan_save(bytes_span_t {buffer}, monolith);
+    auto [plan, plan_status] = indexes.plan_save(bytes_span_t {buffer}, config);
     failures += expect(succeeded(plan_status));
     auto const steps = plan.steps();
     failures += expect(steps.size() >= indexes.shards_count());
@@ -3879,10 +3848,23 @@ std::size_t test_dense_indexes_pooled_save(u64_t seed) {
     return failures;
 }
 
-/** The norms column of @p monolith, which a sharded index saved over @p rows rows: present where
+/** The first part of a saved @p buffer: the buffer itself for a lone monolith, else the first part
+ *  the manifest leading it lists. */
+inline bytes_view_t dense_first_part(bytes_view_t buffer) noexcept {
+    if (safegraphs_is_monolith(buffer)) return buffer;
+    bytes_view_t first;
+    auto const per_part = [&](safegraphs_part_t part) {
+        if (first.empty()) first = buffer.subspan(part.offset, part.bytes);
+    };
+    if (failed(safegraphs_read_manifest(buffer, std::allocator<byte_t> {}, per_part).status)) return {};
+    return first;
+}
+
+/** The norms column of @p monolith, one part of @p rows rows a sharded index saved: present where
  *  the shards keep norms, taken as written by a restore, and derived again for a part without the
- *  column or with a dtype the shards never keep. Every restore saves again, and the norms that save
- *  writes are the ones it holds; every restore is placed over @p placement. */
+ *  column or with a dtype the shards never keep. Every restore is placed over @p placement, lands
+ *  the part on its first shard and saves again, and the norms that save writes are the ones it
+ *  holds. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename executor_type_, typename... placement_types_>
 std::size_t dense_indexes_expect_norms(std::vector<std::byte> const& monolith, executor_type_& executor,
                                        std::size_t rows, placement_types_&... placement) {
@@ -3890,15 +3872,20 @@ std::size_t dense_indexes_expect_norms(std::vector<std::byte> const& monolith, e
     using dot_result_t = typename indexes_type_::dot_result_t;
     using norms_t = vector_norms<dot_result_t>;
     constexpr bool keeps_norms_k = kernel_ != nk_kernel_dot_k || dense_dot_keeps_norms<index_t>();
+    dtype_t const norms_dtype = dtype_of(dot_result_t::dtype());
     std::size_t failures = 0;
-    auto const [header, header_status] = safegraphs_read_header(bytes_view_t {monolith});
+    growing_buffer<safegraphs_named_column_t, std::allocator<byte_t>> extra_columns {std::allocator<byte_t> {}};
+    auto const [header, header_status] = safegraphs_read_header(bytes_view_t {monolith}, std::allocator<byte_t> {},
+                                                                dummy_callback_t {}, &extra_columns);
     failures += expect(succeeded(header_status));
-    if (!keeps_norms_k) return failures + expect(header.norms.dtype == dtype_t::unknown_k);
-    failures += expect(header.norms.dtype == dtype_of(dot_result_t::dtype()) &&
-                       header.norms.shape == safegraphs_norms_shape_k && header.norms.nodes() == rows);
+    safegraphs_column_t const* const written = header.extra_column(norms_column_name_k);
+    if (!keeps_norms_k) return failures + expect(!written);
+    failures += expect(written && written->dtype == norms_dtype && written->shape == norms_column_shape_k &&
+                       written->nodes() == rows);
     if (failures) return failures;
+    safegraphs_column_t const norms_column = *written;
 
-    save_config_t const config = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k);
+    save_config_t const config = dense_indexes_save_config<indexes_type_>();
     auto resaved_norms = [&](std::vector<std::byte> const& source) {
         std::vector<norms_t> norms(rows);
         indexes_type_ restored {kernel_, forkunion_allocator_t {no_memory_domain_k}};
@@ -3906,32 +3893,39 @@ std::size_t dense_indexes_expect_norms(std::vector<std::byte> const& monolith, e
         failures += expect(succeeded(restored.load(bytes_view_t {source}, load_config_t {}, executor)));
         std::vector<std::byte> resaved(restored.storage_requirements(config).value);
         failures += expect(succeeded(restored.save(bytes_span_t {resaved}, config, executor)));
-        auto const [resaved_header, resaved_status] = safegraphs_read_header(bytes_view_t {resaved});
-        bytes_view_t const column = resaved_header.data_of(bytes_view_t {resaved}, resaved_header.norms);
+        bytes_view_t const part = dense_first_part(bytes_view_t {resaved});
+        growing_buffer<safegraphs_named_column_t, std::allocator<byte_t>> resaved_columns {std::allocator<byte_t> {}};
+        auto const [resaved_header, resaved_status] = safegraphs_read_header(part, std::allocator<byte_t> {},
+                                                                             dummy_callback_t {}, &resaved_columns);
+        bytes_view_t const column = norms_column_of(resaved_header, part, norms_dtype);
         failures += expect(succeeded(resaved_status) && column.size() == rows * sizeof(norms_t));
         if (column.size() == rows * sizeof(norms_t)) std::memcpy(norms.data(), column.data(), column.size());
         return norms;
     };
-    // Every copy rotates the stored rows by one, so a restore that took them would show it.
+    // Every copy rotates the stored rows by one, so a restore that took them would show it; an
+    // unknown dtype leaves the column out of the copy's header.
     auto doctored = [&](safegraphs_column_t norms) {
         std::vector<std::byte> copy = monolith;
-        bytes_span_t const column = header.data_of(bytes_span_t {copy}, header.norms);
+        bytes_span_t const column = header.data_of(bytes_span_t {copy}, norms_column);
         std::rotate(column.begin(), column.begin() + sizeof(norms_t), column.end());
+        safegraphs_named_column_t const named {safegraphs_name_t {norms_column_name_k}, norms};
         safegraphs_header_t patched = header;
-        patched.norms = norms;
+        patched.extra_columns = norms.dtype == dtype_t::unknown_k
+                                    ? std::span<safegraphs_named_column_t const> {}
+                                    : std::span<safegraphs_named_column_t const> {&named, 1};
         std::array<safegraphs_custom_field_t, 1> const fields {{{"metric", nk_kernel_name(kernel_)}}};
         failures += expect(succeeded(safegraphs_write_header(bytes_span_t {copy}, patched, fields)));
         return copy;
     };
 
     std::vector<norms_t> original(rows);
-    std::memcpy(original.data(), header.data_of(bytes_view_t {monolith}, header.norms).data(), rows * sizeof(norms_t));
-    std::vector<std::byte> const rotated = doctored(header.norms);
+    std::memcpy(original.data(), header.data_of(bytes_view_t {monolith}, norms_column).data(), rows * sizeof(norms_t));
+    std::vector<std::byte> const rotated = doctored(norms_column);
     std::vector<norms_t> const taken = resaved_norms(rotated);
-    failures += expect(std::memcmp(taken.data(), header.data_of(bytes_view_t {rotated}, header.norms).data(),
+    failures += expect(std::memcmp(taken.data(), header.data_of(bytes_view_t {rotated}, norms_column).data(),
                                    rows * sizeof(norms_t)) == 0);
 
-    safegraphs_column_t mistyped = header.norms;
+    safegraphs_column_t mistyped = norms_column;
     mistyped.dtype = sizeof(dot_result_t) == 8 ? dtype_t::b64_k : dtype_t::b32_k;
     std::vector<norms_t> const without_column = resaved_norms(doctored({}));
     std::vector<norms_t> const under_mistype = resaved_norms(doctored(mistyped));
@@ -3946,9 +3940,10 @@ std::size_t dense_indexes_expect_norms(std::vector<std::byte> const& monolith, e
     return failures;
 }
 
-/** Buffers hold one consolidated monolith: @c storage_requirements sizes it, the summary reads from
- *  it, a fresh index restores from it, its norms as written or derived again, and a short buffer, a
- *  distributed layout, or a cancelled save leave nothing a reader accepts. */
+/** Buffers hold a lone shard's monolith or a manifest leading one part per shard:
+ *  @c storage_requirements sizes them, the summary reads from them, a fresh index restores from
+ *  them, each part's norms as written or derived again, and a short buffer or a cancelled save
+ *  leave nothing a reader accepts. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_buffer_roundtrip(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
@@ -3963,36 +3958,37 @@ std::size_t test_dense_indexes_buffer_roundtrip(u64_t seed, placement_types_&...
     auto& executor = driver.executor;
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "roundtrip", 4));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
 
     indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += dense_indexes_build(indexes, executor, vectors, keys, dimensions, placement...);
-    save_config_t const monolith = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k);
-    auto const [bytes, measure_status] = indexes.storage_requirements(monolith);
+    save_config_t const config = dense_indexes_save_config<indexes_type_>();
+    auto const [bytes, measure_status] = indexes.storage_requirements(config);
     failures += expect(succeeded(measure_status));
     failures += expect(bytes > 0);
 
     std::vector<std::byte> buffer(bytes);
-    failures += expect(succeeded(indexes.save(bytes_span_t {buffer}, monolith, executor)));
+    failures += expect(succeeded(indexes.save(bytes_span_t {buffer}, config, executor)));
     auto [summary, metadata_status] = indexes_type_::metadata(bytes_view_t {buffer});
     failures += expect(succeeded(metadata_status));
     failures += expect_eq(summary.nodes, rows);
-    failures += expect_eq(summary.parts, 1u);
+    failures += expect_eq(summary.parts, indexes.shards_count());
     failures += expect_eq(regular_width(summary.value_shape).value_or(0), dimensions);
 
     indexes_type_ restored {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(restored, placement...)));
     failures += expect(succeeded(restored.load(bytes_view_t {buffer}, load_config_t {}, executor)));
     failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions, executor, seed);
-    failures += dense_indexes_expect_norms<indexes_type_, kernel_>(buffer, executor, rows, placement...);
 
-    // A buffer one byte short, a distributed layout, and a cancelled save all leave no monolith.
+    bytes_view_t const first_part = dense_first_part(bytes_view_t {buffer});
+    failures += dense_indexes_expect_norms<indexes_type_, kernel_>(
+        std::vector<std::byte>(first_part.begin(), first_part.end()), executor, indexes.shard(0).size(), placement...);
+
+    // A buffer one byte short and a cancelled save both leave nothing a reader accepts.
     std::vector<std::byte> shorter(bytes - 1);
-    failures += expect_eq(indexes.save(bytes_span_t {shorter}, monolith, executor), status_t::overflow_k);
-    save_config_t const distributed = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::distributed_k);
-    failures += expect_eq(indexes.save(bytes_span_t {buffer}, distributed, executor), status_t::config_mismatch_k);
+    failures += expect_eq(indexes.save(bytes_span_t {shorter}, config, executor), status_t::overflow_k);
     std::vector<std::byte> cancelled(bytes);
-    failures += expect_eq(indexes.save(bytes_span_t {cancelled}, monolith, executor,
+    failures += expect_eq(indexes.save(bytes_span_t {cancelled}, config, executor,
                                        [](std::size_t) noexcept { return continuation_t::cancel_k; }),
                           status_t::cancelled_k);
     failures += expect(failed(indexes_type_::metadata(bytes_view_t {cancelled}).status));
@@ -4015,14 +4011,13 @@ std::size_t test_dense_indexes_cancelled_load(u64_t seed, placement_types_&... p
     auto& executor = driver.executor;
     auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "roundtrip", 5));
     std::vector<key_t> keys(rows);
-    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
 
     indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += dense_indexes_build(indexes, executor, vectors, keys, dimensions, placement...);
     std::size_t const shards = indexes.shards_count();
-    dense_checkpoint_paths_t const paths {reinterpret_cast<std::uintptr_t>(&indexes)};
-    failures += expect(succeeded(indexes.save(
-        paths.manifest, dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::distributed_k), executor)));
+    dense_checkpoint_path_t const checkpoint {reinterpret_cast<std::uintptr_t>(&indexes)};
+    failures += expect(succeeded(indexes.save(checkpoint.path, dense_indexes_save_config<indexes_type_>(), executor)));
 
     for (std::size_t boundary = 0; boundary != shards; ++boundary) {
         indexes_type_ restored {kernel_, forkunion_allocator_t {no_memory_domain_k}};
@@ -4030,15 +4025,15 @@ std::size_t test_dense_indexes_cancelled_load(u64_t seed, placement_types_&... p
         auto cancel_at = [boundary](std::size_t shard) noexcept {
             return shard == boundary ? continuation_t::cancel_k : continuation_t::continue_k;
         };
-        failures += expect_eq(restored.load(paths.manifest, load_config_t {}, executor, cancel_at),
+        failures += expect_eq(restored.load(checkpoint.path, load_config_t {}, executor, cancel_at),
                               status_t::cancelled_k);
         failures += expect_eq(restored.size(), 0u);
         failures += expect_eq(restored.count(keys[0]), 0u);
-        failures += expect(succeeded(restored.load(paths.manifest, load_config_t {}, executor)));
+        failures += expect(succeeded(restored.load(checkpoint.path, load_config_t {}, executor)));
         failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions, executor, seed);
     }
 
-    paths.remove(shards);
+    checkpoint.remove(shards);
     return failures;
 }
 
@@ -4078,7 +4073,7 @@ std::size_t test_dense_indexes_concurrent_add(u64_t seed, placement_types_&... p
         // never masquerade as a legitimate identity.
         std::vector<key_t> range(rows_per_executor);
         for (std::size_t row = 0; row != rows_per_executor; ++row)
-            range[row] = static_cast<key_t>(1 + which * rows_per_executor + row);
+            range[row] = dense_key<key_t>(1 + which * rows_per_executor + row);
         keys.push_back(std::move(range));
     }
 
@@ -4111,7 +4106,7 @@ std::size_t test_dense_indexes_concurrent_add(u64_t seed, placement_types_&... p
 
     // Every key is stored exactly once, and resolvable without naming a shard or an ID.
     std::size_t miscounted = 0;
-    for (std::size_t row = 0; row != nodes_count; ++row) miscounted += indexes.count(static_cast<key_t>(1 + row)) != 1;
+    for (std::size_t row = 0; row != nodes_count; ++row) miscounted += indexes.count(dense_key<key_t>(1 + row)) != 1;
     failures += expect_eq(miscounted, 0u);
 
     // Sampled self-recall through the merged cross-shard search, judged by distance band.
@@ -4165,7 +4160,7 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
 
     auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_race"));
     std::vector<key_t> keys(nodes_count);
-    for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = static_cast<key_t>(1 + row);
+    for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = dense_key<key_t>(1 + row);
 
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(2))) return failures + expect(false);
@@ -4201,7 +4196,7 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
                 break;
             }
             for (std::size_t match = 0; match != result.count; ++match)
-                if (found_keys[match] < key_t {1} || found_keys[match] > static_cast<key_t>(nodes_count))
+                if (dense_key_number(found_keys[match]) < 1 || dense_key_number(found_keys[match]) > nodes_count)
                     thread_failures.fetch_add(1);
             if (indexes.size() % dense_thread_nodes_k) thread_failures.fetch_add(1);
         }

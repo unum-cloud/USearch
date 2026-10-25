@@ -404,8 +404,8 @@ std::size_t check_shapes_nvme(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = shapes_metric<fixture_t::kit_t, scratch_t>;
     using query_t = nk::shapes_packed<scalar_t, std::allocator_traits<scratch_t>::rebind_alloc<char>>;
-    using nvme_index_t = us::basic::nvme_index<codec<fixture_t::kit_t>, us::utilities::uuid_t, u32_t,
-                                               fixture_t::distance_t, blocking_files_engine<>>;
+    using nvme_indexes_t = us::basic::nvme_indexes<codec<fixture_t::kit_t>, us::utilities::uuid_t, u32_t,
+                                                   fixture_t::distance_t, blocking_files_engine<>>;
     std::vector<std::vector<scalar_t>> const clouds = make_clouds<scalar_t>(32, stream_key(seed, "nvme"));
 
     auto make_cloud = [&](std::size_t entry, counting_allocator_t const& allocator) {
@@ -426,8 +426,8 @@ std::size_t check_shapes_nvme(u64_t seed) {
         return view.extent(0) * 3 == cloud.size() &&
                std::memcmp(view.data(), cloud.data(), cloud.size() * sizeof(scalar_t)) == 0;
     };
-    return test_basic_nvme_view<fixture_t, nvme_index_t>(seed, clouds.size(), "chamfer", make_cloud, make_metric,
-                                                         query_of, matches);
+    return test_basic_nvme_view<fixture_t, nvme_indexes_t>(seed, clouds.size(), "chamfer", make_cloud, make_metric,
+                                                           query_of, matches);
 }
 
 std::size_t check_shapes(settings_t const& settings) {

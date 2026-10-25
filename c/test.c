@@ -482,6 +482,11 @@ void test_compact(size_t const dimensions) {
         expect(!outcome.message, outcome.message);
     }
     // The bounded index takes every row, one generation of shards per quarter.
+    usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = indexes[0],
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .capacity = rows_count});
+    expect(!outcome.message, outcome.message);
     usearch_dense_insert(
         &(usearch_dense_insert_t) {.index = indexes[0],
                                    .executor = executor,
@@ -512,6 +517,9 @@ void test_compact(size_t const dimensions) {
 
     // Out of place, both halves land in the fresh index, and their handles go.
     usearch_dense_index_t const target = indexes[2];
+    usearch_dense_reserve(&(
+        usearch_dense_reserve_t) {.index = indexes[1], .executor = executor, .outcome = &outcome, .capacity = quarter});
+    expect(!outcome.message, outcome.message);
     usearch_dense_insert(
         &(usearch_dense_insert_t) {.index = indexes[1],
                                    .executor = executor,
@@ -1660,6 +1668,148 @@ void test_sequence_round_trip(void) {
     printf("Test: Sequence Round Trip - PASSED\n");
 }
 
+/** A sequence RAM index bounded at ten rows a shard takes twenty-five reads in one batch, opening
+ *  three generations of shards on its one default domain: every key counts once, every read finds
+ *  itself first across the shards, a cursor pulls every key once, and a checkpoint writes a
+ *  manifest beside one part per shard that reloads as many shards. */
+void test_sequence_shards(void) {
+    printf("Test: Sequence Shards\n");
+    enum { reads_count = 25, shard_capacity = 10 };
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_ram(&(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &outcome, .threads = 2});
+    expect(!outcome.message, outcome.message);
+    usearch_arena_t const arena = create_arena(executor);
+    size_t offsets[reads_count + 1];
+    char* const bytes = create_reads(reads_count, offsets);
+    usearch_key_t keys[reads_count];
+    for (size_t read = 0; read != reads_count; ++read) keys[read] = key_of(read);
+
+    usearch_sequence_index_t index = NULL;
+    usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &index,
+                                                              .outcome = &outcome,
+                                                              .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                              .ram = {.shard_capacity = shard_capacity}});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = reads_count,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_index_description_t description = {0};
+    usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, reads_count, "Every shard's rows count once");
+
+    for (size_t read = 0; read != reads_count; ++read) {
+        usearch_sequence_key_stats_t stats = {0};
+        usearch_sequence_count(&(usearch_sequence_count_t) {.index = index,
+                                                            .executor = executor,
+                                                            .outcome = &outcome,
+                                                            .key = keys[read],
+                                                            .key_stats = &stats});
+        expect(!outcome.message, outcome.message);
+        expect_eq(stats.entries, 1, "Every key resolves to one read across the shards");
+    }
+
+    usearch_matches_view_t matches = {0};
+    usearch_sequence_search(&(usearch_sequence_search_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = reads_count,
+                                                          .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                          .matches = &matches,
+                                                          .arena = arena,
+                                                          .wanted = 1});
+    expect(!outcome.message, outcome.message);
+    for (size_t read = 0; read != reads_count; ++read)
+        expect(matches.counts[read] == 1 && value_of(matches.keys[read]) == read && matches.scores[read] == 0,
+               "Every read finds itself first, whichever shard holds it");
+
+    usearch_sequence_cursor_t cursor = NULL;
+    usearch_sequence_cursor_init(
+        &(usearch_sequence_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome});
+    expect(!outcome.message, outcome.message);
+    bool pulled[reads_count] = {false};
+    size_t pulled_count = 0;
+    for (size_t written = 1; written;) {
+        usearch_keys_view_t pulled_keys = {0};
+        usearch_sequence_cursor_next(&(usearch_sequence_cursor_next_t) {.index = index,
+                                                                        .executor = executor,
+                                                                        .outcome = &outcome,
+                                                                        .cursor = cursor,
+                                                                        .keys = &pulled_keys,
+                                                                        .written = &written,
+                                                                        .arena = arena,
+                                                                        .wanted = 7});
+        expect(!outcome.message, outcome.message);
+        for (size_t entry = 0; entry != written; ++entry) {
+            uint64_t const value = value_of(pulled_keys.data[entry]);
+            expect(value < reads_count && !pulled[value], "A cursor pulls every key once, shard after shard");
+            pulled[value] = true;
+            ++pulled_count;
+        }
+    }
+    expect_eq(pulled_count, reads_count, "A cursor pulls every shard's keys");
+    usearch_sequence_cursor_free(cursor);
+
+    char const path[] = "usearch-test-c-sequence-shards.safegraphs";
+    usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
+    usearch_sequence_save(
+        &(usearch_sequence_save_t) {.index = index, .executor = executor, .outcome = &outcome, .path = path_view});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_free(index);
+    for (int part = 1; part <= 3; ++part) {
+        char part_path[64];
+        snprintf(part_path, sizeof(part_path), "usearch-test-c-sequence-shards-%05d-of-00003.safegraphs", part);
+        FILE* const part_file = fopen(part_path, "rb");
+        expect(part_file != NULL, "A save of three shards writes one part per shard beside its manifest");
+        if (part_file) fclose(part_file);
+    }
+
+    index = NULL;
+    usearch_sequence_load_ram(
+        &(usearch_sequence_load_ram_t) {.index = &index, .executor = executor, .outcome = &outcome, .path = path_view});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_index_description_t reloaded = {0};
+    usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .description = &reloaded});
+    expect(!outcome.message, outcome.message);
+    expect_eq(reloaded.size, reads_count, "The manifest reloads every part's rows");
+    expect_eq(reloaded.shards_count, 3, "A load opens one shard per part");
+    usearch_sequence_search(&(usearch_sequence_search_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = reads_count,
+                                                          .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                          .matches = &matches,
+                                                          .arena = arena,
+                                                          .wanted = 1});
+    expect(!outcome.message, outcome.message);
+    for (size_t read = 0; read != reads_count; ++read)
+        expect(matches.counts[read] == 1 && value_of(matches.keys[read]) == read && matches.scores[read] == 0,
+               "Every read finds itself first in the reloaded parts");
+
+    usearch_sequence_free(index);
+    remove(path);
+    for (int part = 1; part <= 3; ++part) {
+        char part_path[64];
+        snprintf(part_path, sizeof(part_path), "usearch-test-c-sequence-shards-%05d-of-00003.safegraphs", part);
+        remove(part_path);
+    }
+    free(bytes);
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+    printf("Test: Sequence Shards - PASSED\n");
+}
+
 /** A GPU sequence index takes byte and rune Levenshtein, inserts and describes its rows, and lands
  *  a search's matches in its executor's device arena; local alignments, a global one without
  *  weights and the verbs it lacks refuse. An overlap index lands its scores in a host arena on the
@@ -1815,7 +1965,19 @@ void test_sequence_vram(void) {
                                                       .executor = executor,
                                                       .outcome = &outcome,
                                                       .path = {(uint8_t const*)path, sizeof(path) - 1}});
-    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU sequence index saves no checkpoint yet");
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_index_t loaded = NULL;
+    usearch_sequence_load_ram(&(usearch_sequence_load_ram_t) {.index = &loaded,
+                                                              .outcome = &outcome,
+                                                              .path = {(uint8_t const*)path, sizeof(path) - 1}});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_index_description_t loaded_description = {0};
+    usearch_sequence_describe(
+        &(usearch_sequence_describe_t) {.index = loaded, .outcome = &outcome, .description = &loaded_description});
+    expect(!outcome.message, outcome.message);
+    expect(loaded_description.size == description.size, "A GPU checkpoint loads into RAM whole");
+    usearch_sequence_free(loaded);
+    remove(path);
 
     usearch_arena_free(arena);
     usearch_sequence_free(index);
@@ -2093,7 +2255,20 @@ void test_shapes_vram(void) {
                                                   .executor = executor,
                                                   .outcome = &outcome,
                                                   .path = {(uint8_t const*)path, sizeof(path) - 1}});
-    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU shapes index saves no checkpoint yet");
+    expect(!outcome.message, outcome.message);
+    usearch_shapes_index_t loaded = NULL;
+    usearch_shapes_load_ram(&(usearch_shapes_load_ram_t) {.index = &loaded,
+                                                          .outcome = &outcome,
+                                                          .path = {(uint8_t const*)path, sizeof(path) - 1}});
+    expect(!outcome.message, outcome.message);
+    usearch_shapes_index_description_t loaded_description = {0};
+    usearch_shapes_describe(
+        &(usearch_shapes_describe_t) {.index = loaded, .outcome = &outcome, .description = &loaded_description});
+    expect(!outcome.message, outcome.message);
+    expect(loaded_description.size == description.size && loaded_description.total_points == description.total_points,
+           "A GPU checkpoint loads into RAM whole");
+    usearch_shapes_free(loaded);
+    remove(path);
 
     usearch_arena_free(arena);
     usearch_shapes_free(index);
@@ -2457,9 +2632,20 @@ void test_shapes_and_geospatial_absorb(void) {
     printf("Test: Shapes & Geospatial Absorb - PASSED\n");
 }
 
-/** A GPU geospatial index refuses a terrain and lines of sight, inserts and describes its rows, and
- *  finds every observation itself first, at zero metres, on host pages; the verbs it lacks refuse.
- *  Skipped without a GPU. */
+/** Leaves every height of a terrain window unknown. */
+static void fill_unknown_heights(size_t first_row, size_t first_column, size_t rows, size_t columns, float* heights,
+                                 size_t heights_stride, void* state) {
+    (void)first_row;
+    (void)first_column;
+    (void)state;
+    for (size_t row = 0; row != rows; ++row)
+        for (size_t column = 0; column != columns; ++column)
+            ((float*)((char*)heights + row * heights_stride))[column] = NAN;
+}
+
+/** A GPU geospatial index refuses a terrain filled by a callback and lines of sight without a
+ *  terrain, inserts and describes its rows, and finds every observation itself first, at zero
+ *  metres, on host pages; the verbs it lacks refuse. Skipped without a GPU. */
 void test_geospatial_vram(void) {
     usearch_outcome_t outcome = {0};
     size_t devices_count = 0;
@@ -2469,16 +2655,15 @@ void test_geospatial_vram(void) {
     int32_t const devices[1] = {0};
     usearch_vram_options_t const vram = {.devices = devices, .devices_count = 1};
 
-    float const height = 0;
     usearch_geospatial_terrain_t const terrain = {.rows = 1,
                                                   .columns = 1,
                                                   .row_step_degrees = 1,
                                                   .column_step_degrees = 1,
-                                                  .heights = &height};
+                                                  .callback = fill_unknown_heights};
     usearch_geospatial_index_t refused = NULL;
     usearch_geospatial_init_vram(
         &(usearch_geospatial_init_vram_t) {.index = &refused, .outcome = &outcome, .terrain = terrain, .vram = vram});
-    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU geospatial index tests no lines of sight");
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU terrain needs its heights, not a callback");
     expect(refused == NULL, "A refused initialization returns no handle");
 
     usearch_geospatial_index_t index = NULL;
@@ -2535,14 +2720,26 @@ void test_geospatial_vram(void) {
     }
     search.relation = usearch_geospatial_relation_visible_k;
     usearch_geospatial_search(&search);
-    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU geospatial index tests no lines of sight");
+    expect_eq(outcome.status, usearch_status_unsupported_k, "Lines of sight need a handle with terrain");
 
     char const path[] = "usearch-test-c-geospatial-vram.safegraphs";
     usearch_geospatial_save(&(usearch_geospatial_save_t) {.index = index,
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .path = {(uint8_t const*)path, sizeof(path) - 1}});
-    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU geospatial index saves no checkpoint yet");
+    expect(!outcome.message, outcome.message);
+    usearch_geospatial_index_t loaded = NULL;
+    usearch_geospatial_load_ram(&(usearch_geospatial_load_ram_t) {.index = &loaded,
+                                                                  .outcome = &outcome,
+                                                                  .path = {(uint8_t const*)path, sizeof(path) - 1}});
+    expect(!outcome.message, outcome.message);
+    usearch_geospatial_index_description_t loaded_description = {0};
+    usearch_geospatial_describe(
+        &(usearch_geospatial_describe_t) {.index = loaded, .outcome = &outcome, .description = &loaded_description});
+    expect(!outcome.message, outcome.message);
+    expect(loaded_description.size == description.size, "A GPU checkpoint loads into RAM whole");
+    usearch_geospatial_free(loaded);
+    remove(path);
 
     usearch_arena_free(arena);
     usearch_geospatial_free(index);
@@ -3330,6 +3527,50 @@ void drain(usearch_executor_t executor) {
     expect(!outcome.message, outcome.message);
 }
 
+/** A RAM index pinned to the serial class opens on any CPU and describes itself under that class
+ *  and no GPU class, and an NVMe executor submits through the POSIX class it names. */
+void test_pins_and_fill(void) {
+    printf("Test: Pins and Fill\n");
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t index = NULL;
+    usearch_ram_options_t const serial = {.cpu_class = usearch_cpu_class_serial_k};
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_angular_k,
+                                                        .quantization = usearch_scalar_bf16_k,
+                                                        .dimensions = 8,
+                                                        .ram = serial});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index, .outcome = &outcome, .capacity = 2});
+    expect(!outcome.message, outcome.message);
+    float const rows[16] = {1, 2, 3, 4, 5, 6, 7, 8, 8, 7, 6, 5, 4, 3, 2, 1};
+    usearch_key_t const keys[2] = {key_of(1), key_of(2)};
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
+                                                    .outcome = &outcome,
+                                                    .count = 2,
+                                                    .keys = {keys, sizeof(usearch_key_t)},
+                                                    .vectors = {rows, 8 * sizeof(float), 8, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(
+        &(usearch_dense_describe_t) {.index = index, .outcome = &outcome, .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect(description.shards_count >= 1, "A fresh index spans at least one shard");
+    expect_eq(description.size, (size_t)2, "The description counts the rows inserted");
+    expect(description.cpu_class == usearch_cpu_class_serial_k, "A serial pin dispatches the serial class");
+    expect(description.gpu_class == usearch_gpu_class_unknown_k, "A RAM index names no GPU class");
+    usearch_dense_free(index);
+
+    usearch_executor_t storage = NULL;
+    usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage,
+                                                              .outcome = &outcome,
+                                                              .threads = 1,
+                                                              .nvme_class = usearch_nvme_class_posix_k});
+    expect(!outcome.message, outcome.message);
+    usearch_executor_free(storage);
+    printf("Test: Pins and Fill - PASSED\n");
+}
+
 /** A deferred search stays deferred until waited on, then lands what a blocking one does, though its
  *  descriptor died at submission; without an executor it is final when it returns. */
 void test_deferred_search(void) {
@@ -3525,7 +3766,7 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
                                                     .outcome = &outcome,
                                                     .reachability = &saved_reachability});
     expect(!outcome.message, outcome.message);
-    char const path[] = "usearch-test-c-parts.json";
+    char const path[] = "usearch-test-c-parts.safegraphs";
     usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
     usearch_dense_save(
         &(usearch_dense_save_t) {.index = index, .executor = executor, .outcome = &outcome, .path = path_view});
@@ -3579,7 +3820,7 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
     usearch_dense_free(index);
     usearch_executor_free(executor);
     remove(path);
-    for (int part = 0; part != 4; ++part) {
+    for (int part = 1; part <= 3; ++part) {
         char part_path[64];
         snprintf(part_path, sizeof(part_path), "usearch-test-c-parts-%05d-of-00003.safegraphs", part);
         remove(part_path);
@@ -3706,6 +3947,7 @@ int main(int argc, char* argv[]) {
     if (selected("sample")) test_sample();
     if (selected("cursor_steps")) test_cursor_steps();
     if (selected("sequence_round_trip")) test_sequence_round_trip();
+    if (selected("sequence_shards")) test_sequence_shards();
     if (selected("sequence_vram")) test_sequence_vram();
     if (selected("shapes_round_trip")) test_shapes_round_trip();
     if (selected("shapes_vram")) test_shapes_vram();
@@ -3723,6 +3965,7 @@ int main(int argc, char* argv[]) {
     if (selected("nvme_view_narrow_keys")) test_nvme_view_narrow_keys();
     if (selected("vram_parts_share_a_device")) test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]);
     if (selected("vram_scan")) test_vram_scan(collection_sizes[1], dimension_counts[1]);
+    if (selected("pins_and_fill")) test_pins_and_fill();
     if (selected("deferred_search")) test_deferred_search();
     if (selected("deferred_limit")) test_deferred_limit();
     if (selected("free_finishes_deferred")) test_free_finishes_deferred();

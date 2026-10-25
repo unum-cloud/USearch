@@ -43,7 +43,7 @@
 
 #include "harness.hpp"
 #include "usearch/basic/ram_index.hpp"
-#include "usearch/basic/nvme_index.hpp"
+#include "usearch/basic/nvme_indexes.hpp"
 #include "usearch/utilities/safegraphs_format.hpp"
 
 namespace unum::usearch::test {
@@ -307,17 +307,6 @@ expected<basic_columns_storage<index_type_>> basic_saved_columns(index_type_& in
     status_t const saved = index.save(storage.columns(), codec);
     return {std::move(storage), saved};
 }
-
-/** The one-thread executor the SafeGraphs glue fans out over: every region runs on
- *  the calling thread. */
-struct serial_executor_t {
-    std::size_t size() const noexcept { return 1; }
-    template <typename callback_type_>
-    status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
-        for (std::size_t task = 0; task != tasks; ++task) callback(task, 0, 0);
-        return status_t::success_k;
-    }
-};
 
 /** A ForkUnion flat pool as the glue's executor: one region per thread when the
  *  counts agree, the calling thread otherwise. */
@@ -2358,7 +2347,7 @@ std::size_t test_basic_torn_bracket(u64_t seed) {
             index.template search<synchronization_t::immutable_k>(query[0], control_metric, control_context).status,
             status_t::success_k);
 
-        if constexpr (!thread_sanitizer_k) {
+        if constexpr (!compiled_with_thread_sanitizer_k) {
             std::atomic<bool> entered {false}, released {false};
             std::atomic<std::size_t> thread_failures {0};
             std::atomic<u32_t> parked_status {~u32_t {0}};
@@ -3389,7 +3378,7 @@ std::size_t test_basic_safegraphs_distributed(u64_t seed, std::string_view metri
 
         char manifest_path[64];
         std::snprintf(
-            manifest_path, sizeof(manifest_path), "/tmp/usearch-basic-%08x.safegraphs.json",
+            manifest_path, sizeof(manifest_path), "/tmp/usearch-basic-%08x.safegraphs",
             static_cast<unsigned>(stream_key(seed, "safegraphs") ^ reinterpret_cast<std::uintptr_t>(&indexes)));
         std::string_view const stem = safegraphs_stem(manifest_path);
         std::array<std::string, parts_k> part_paths;
@@ -3593,18 +3582,18 @@ struct per_query_metric {
 
 /**
  *  @brief A monolith viewed from storage: @p count entries saved by a RAM index, then read through
- *      @p nvme_index_type_ on a one-thread executor of blocking reads.
+ *      @p nvme_indexes_type_ on a one-thread executor of blocking reads.
  *
  *  Every entry finds itself at distance zero and ranks the same nearest entries as the RAM index it
  *  was saved from, both with candidates as wide as the graph, @c count finds every key once and an
  *  absent one never, and @c get and @c read_rows hand back every entry's own value.
  *
  *  @param[in] make_value Builds entry @c i on an allocator, as `make_value(i, allocator)`.
- *  @param[in] make_metric Builds a row slot's metric, as @c nvme_index::search takes it.
- *  @param[in] query_of Builds row @c i 's query from entry @c i, as @c nvme_index::search takes it.
+ *  @param[in] make_metric Builds a row slot's metric, as @c nvme_indexes::search takes it.
+ *  @param[in] query_of Builds row @c i 's query from entry @c i for @c nvme_indexes::search.
  *  @param[in] matches Whether a borrowed view holds entry @c i, as `matches(i, view)`.
  */
-template <typename fixture_type_, typename nvme_index_type_, typename make_value_type_, typename make_metric_type_,
+template <typename fixture_type_, typename nvme_indexes_type_, typename make_value_type_, typename make_metric_type_,
           typename query_of_type_, typename matches_type_>
 std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view metric_token,
                                  make_value_type_&& make_value, make_metric_type_&& make_metric,
@@ -3613,8 +3602,9 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
     using node_id_t = typename index_t::node_id_t;
     using context_t = typename index_t::traversal_context_t;
     using key_t = typename index_t::key_t;
-    using distance_t = typename nvme_index_type_::distance_t;
-    using executor_t = typename nvme_index_type_::executor_t;
+    using distance_t = typename nvme_indexes_type_::distance_t;
+    using executor_t = typename nvme_indexes_type_::executor_t;
+    using search_config_t = typename nvme_indexes_type_::search_config_t;
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     // Both sides rank by one metric over candidates as wide as the graph, so every row agrees.
@@ -3659,13 +3649,13 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
         config.queue_depth = 64;
         auto [executor, spawn_status] = executor_t::spawn(topology, 1, config);
         failures += expect_eq(spawn_status, status_t::success_k);
-        nvme_index_type_ viewed {forkunion_allocator_t {}};
+        nvme_indexes_type_ viewed {forkunion_allocator_t {}};
         failures += expect_eq(viewed.view(path, {}, metric_token, executor), status_t::success_k);
         failures += expect_eq(viewed.size(), count);
 
         // Candidates as wide as the graph walk all of it, so every entry meets itself, and ties
         // aside the rankings match the RAM index's: keys closer than a row's last distance agree.
-        typename nvme_index_type_::search_config_t search_config;
+        typename nvme_indexes_type_::search_config_t search_config;
         search_config.expansion_factor = count;
         std::vector<key_t> keys(count * wanted_k);
         std::vector<distance_t> distances(count * wanted_k);
@@ -3751,15 +3741,16 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
             std::span<std::size_t> {counts}, quad_predicate(is_admitted));
         failures += expect_eq(filtered_scan_status, status_t::success_k);
         failures += expect_eq(filtered_scan.count, count * filled);
-        auto gathering = gathering_per_thread<key_t, typename nvme_index_type_::walk_payload_t>(is_admitted,
-                                                                                                executor.size());
+        auto gathering = gathering_per_thread<key_t, typename nvme_indexes_type_::walk_payload_t>(is_admitted,
+                                                                                                  executor.size());
         for (bool const gathered : {false, true}) {
             auto const [filtered, filtered_status] =
-                gathered ? viewed.search(count, make_metric, query_of, executor, {}, std::span<key_t> {keys},
-                                         std::span<distance_t> {distances}, std::span<std::size_t> {counts}, gathering)
-                         : viewed.search(count, make_metric, query_of, executor, {}, std::span<key_t> {keys},
-                                         std::span<distance_t> {distances}, std::span<std::size_t> {counts},
-                                         quad_predicate(is_admitted));
+                gathered
+                    ? viewed.search(count, make_metric, query_of, executor, search_config_t {}, std::span<key_t> {keys},
+                                    std::span<distance_t> {distances}, std::span<std::size_t> {counts}, gathering)
+                    : viewed.search(count, make_metric, query_of, executor, search_config_t {}, std::span<key_t> {keys},
+                                    std::span<distance_t> {distances}, std::span<std::size_t> {counts},
+                                    quad_predicate(is_admitted));
             failures += expect_eq(filtered_status, status_t::success_k);
             failures += expect_eq(filtered.count, count * filled);
             for (std::size_t row = 0; row != count; ++row) {
@@ -3812,17 +3803,17 @@ std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view
 
 /**
  *  @brief A monolith viewed from storage at its own node-ID width: @p count entries saved by a RAM
- *      index, searched through @p nvme_index_type_, whose node IDs match the RAM index's, and
+ *      index, searched through @p nvme_indexes_type_, whose node IDs match the RAM index's, and
  *      refused by @p mismatched_nvme_index_type_, whose node IDs do not.
  *
  *  Every entry finds itself at distance zero through candidates as wide as the graph, and the
  *  mismatched view answers @c config_mismatch_k and stays empty, as the RAM loader refuses it.
  *
  *  @param[in] make_value Builds entry @c i on an allocator, as `make_value(i, allocator)`.
- *  @param[in] make_metric Builds a row slot's metric, as @c nvme_index::search takes it.
- *  @param[in] query_of Builds row @c i 's query from entry @c i, as @c nvme_index::search takes it.
+ *  @param[in] make_metric Builds a row slot's metric, as @c nvme_indexes::search takes it.
+ *  @param[in] query_of Builds row @c i 's query from entry @c i for @c nvme_indexes::search.
  */
-template <typename fixture_type_, typename nvme_index_type_, typename mismatched_nvme_index_type_,
+template <typename fixture_type_, typename nvme_indexes_type_, typename mismatched_nvme_index_type_,
           typename make_value_type_, typename make_metric_type_, typename query_of_type_>
 std::size_t test_basic_nvme_node_ids(u64_t seed, std::size_t count, std::string_view metric_token,
                                      make_value_type_&& make_value, make_metric_type_&& make_metric,
@@ -3831,9 +3822,9 @@ std::size_t test_basic_nvme_node_ids(u64_t seed, std::size_t count, std::string_
     using node_id_t = typename index_t::node_id_t;
     using context_t = typename index_t::traversal_context_t;
     using key_t = typename index_t::key_t;
-    using distance_t = typename nvme_index_type_::distance_t;
-    using executor_t = typename nvme_index_type_::executor_t;
-    static_assert(std::is_same_v<typename nvme_index_type_::node_id_t, node_id_t>);
+    using distance_t = typename nvme_indexes_type_::distance_t;
+    using executor_t = typename nvme_indexes_type_::executor_t;
+    static_assert(std::is_same_v<typename nvme_indexes_type_::node_id_t, node_id_t>);
     static_assert(!std::is_same_v<typename mismatched_nvme_index_type_::node_id_t, node_id_t>);
     std::size_t failures = 0;
     allocation_ledger_t ledger;
@@ -3865,11 +3856,11 @@ std::size_t test_basic_nvme_node_ids(u64_t seed, std::size_t count, std::string_
         config.queue_depth = 64;
         auto [executor, spawn_status] = executor_t::spawn(topology, 1, config);
         failures += expect_eq(spawn_status, status_t::success_k);
-        nvme_index_type_ viewed {forkunion_allocator_t {}};
+        nvme_indexes_type_ viewed {forkunion_allocator_t {}};
         failures += expect_eq(viewed.view(path, {}, metric_token, executor), status_t::success_k);
         failures += expect_eq(viewed.size(), count);
 
-        typename nvme_index_type_::search_config_t search_config;
+        typename nvme_indexes_type_::search_config_t search_config;
         search_config.expansion_factor = count;
         std::vector<key_t> keys(count);
         std::vector<distance_t> distances(count);

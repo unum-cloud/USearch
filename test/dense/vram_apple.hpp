@@ -44,7 +44,7 @@ struct counting_metal_allocator_t {
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::apple_k, dtype_, kernel_> {
     using index_t = vram_apple_index<dtype_, nk_cap_metal_k, counting_metal_allocator_t, counting_metal_allocator_t>;
-    using indexes_t = vram_apple_indexes<u32_t, dtype_, nk_cap_metal_k>;
+    using indexes_t = vram_apple_indexes<uuid_t, dtype_, nk_cap_metal_k>;
     inline static constexpr char const* vendor_prefix_k = "metal";
 
     /** The stream the cell's contexts ride, on the device its indexes sit on. */

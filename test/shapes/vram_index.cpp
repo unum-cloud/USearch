@@ -19,6 +19,7 @@
 #include <span>      // `std::span`
 #include <vector>    // `std::vector` - clouds, the tape, offsets, matches
 
+#include "usearch/shapes_index.h"
 #include "usearch/shapes/ram_index.hpp"
 #if USEARCH_ARCH_CUDA_
 #include "usearch/shapes/vram_nvidia_index.hpp"
@@ -272,7 +273,7 @@ static std::size_t check_shapes_vram_class(settings_t const& settings, cuda_exec
 /** Every class the device runs, as the dispatch ladder would admit it: the floor on any NVIDIA
  *  GPU, and datacenter Blackwell's packed kits on one. */
 std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& device) {
-    if (device.vendor != gpu_vendor_t::nvidia_k || !settings.selects("shapes_vram")) return 0;
+    if (device.vendor != gpu_vendor_t::nvidia_k || !settings.filter.selects("shapes_vram")) return 0;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
     auto [executor, spawn_status] = cuda_executor_t::spawn(std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println(stderr, "- CUDA: device #{} opens no stream", ordinal), 1;

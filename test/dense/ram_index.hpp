@@ -2,24 +2,19 @@
  *  @file test/dense/ram_index.hpp
  *  @author Ash Vardanian
  *  @date July 17, 2026
- *  @brief The CPU-side suite composer for @c dense::ram_index smoke & concurrency tests, shared
- *      by the per-dtype shards - each names a curated set of (dtype, kernel) cells, never the
- *      whole combinatorial space.
+ *  @brief The cells of the CPU-resident @c dense::ram_index the per-dtype units compose: the full
+ *      suite over the allocation ledger, and the starved cell over ledgered scratch.
  *
- *  The scenarios themselves live in @c dense_index.cuh, templated over the index type;
- *  each shard names its instantiations, their compile-time & runtime gates, and composes
- *  the suite explicitly. Cells are gated by a compile-time concept, so combinations whose
- *  serial kernels are not yet adapted in @c dense/ram_metric.hpp report as skipped and
- *  light up automatically once the kits land. Shards may repeat cells with a deliberately
- *  flaky waiter that oversleeps at random, widening the interleaving windows around locks
- *  and watermark turns far beyond hardware timing, and may add tiles cells exercising the
- *  matrix engines end to end where the machine offers them. Removal, update, and
- *  filtering tests are deliberately absent: those features are banned at this layer by
- *  design.
+ *  The scenarios live in @c dense.cuh, templated over the index type. Cells are gated by a
+ *  compile-time concept, so a kit absent from the build reports as skipped. The flaky waiter
+ *  oversleeps at random, widening the interleaving windows around locks and watermark turns far
+ *  beyond hardware timing. Removal, update, and filtering tests are deliberately absent: those
+ *  features are banned at this layer by design.
  */
 #pragma once
 
 #include <fmt/format.h>
+
 #include <numkong/numkong.hpp>
 
 #include "usearch/dense/ram_index.hpp"
@@ -63,8 +58,6 @@ static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
             new (std::nothrow) index_t(kernel_, counting_allocator_t(ledger), counting_allocator_t(ledger)));
     };
 
-    // The suite is composed here, not reflected: every call below is a capability claim
-    // this fully-concurrent, serializable category makes about itself.
     std::size_t failures_count = 0;
     failures_count += test_dense_guards<index_t>(make_index, seed);
     failures_count += test_dense_three_vectors<index_t, kernel_>(make_index, seed);
@@ -116,16 +109,5 @@ static std::size_t test_starved_configuration(char const* name, u64_t seed) {
     return report(
         name, test_dense_saturated<index_t>(make_index, seed) + test_dense_refine_atomic<index_t>(make_index, seed));
 }
-
-/** Per-dtype CPU index suite entries the shard translation units define and
- *  @c dense.cpp composes explicitly; each returns its shard's failure count. */
-std::size_t check_ram_index_f32(settings_t const& settings);
-std::size_t check_ram_index_bf16(settings_t const& settings);
-std::size_t check_ram_index_f16(settings_t const& settings);
-std::size_t check_ram_index_e5m2(settings_t const& settings);
-std::size_t check_ram_index_i8(settings_t const& settings);
-std::size_t check_ram_index_i4(settings_t const& settings);
-std::size_t check_ram_index_u8(settings_t const& settings);
-std::size_t check_ram_index_u1(settings_t const& settings);
 
 } // namespace unum::usearch::test::dense

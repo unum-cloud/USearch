@@ -10,6 +10,7 @@ Run:
 from __future__ import annotations
 
 import copy
+import ctypes
 import pickle
 import uuid
 from enum import IntEnum
@@ -219,3 +220,85 @@ def test_every_failing_status_raises_its_own_class():
 
 
 # endregion Telemetry & Failures
+
+# region Layouts
+
+
+class _RAMOptions(ctypes.Structure):
+    _fields_ = [
+        ("memory_domains", ctypes.c_void_p),
+        ("memory_domains_count", ctypes.c_size_t),
+        ("shard_capacity", ctypes.c_size_t),
+        ("cpu_class", ctypes.c_int),
+    ]
+
+
+class _VRAMOptions(ctypes.Structure):
+    _fields_ = [
+        ("devices", ctypes.c_void_p),
+        ("devices_count", ctypes.c_size_t),
+        ("shard_capacity", ctypes.c_size_t),
+        ("gpu_class", ctypes.c_int),
+    ]
+
+
+class _NVMeOptions(ctypes.Structure):
+    _fields_ = [("paths", ctypes.c_void_p), ("paths_count", ctypes.c_size_t), ("cpu_class", ctypes.c_int)]
+
+
+class _ExecutorForNVMe(ctypes.Structure):
+    _fields_ = [
+        ("executor", ctypes.c_void_p),
+        ("outcome", ctypes.c_void_p),
+        ("nvme", _NVMeOptions),
+        ("threads", ctypes.c_size_t),
+        ("deferred_limit", ctypes.c_size_t),
+        ("nvme_class", ctypes.c_int),
+    ]
+
+
+class _TraversalStats(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_size_t) for name in ("visited_members", "computed_distances", "restarts")]
+
+
+class _DenseMetadata(ctypes.Structure):
+    _fields_ = [
+        ("metric", ctypes.c_int),
+        ("quantization", ctypes.c_int),
+        ("dimensions", ctypes.c_size_t),
+        ("connectivity", ctypes.c_size_t),
+    ]
+
+
+class _DenseIndexDescription(ctypes.Structure):
+    _fields_ = [
+        ("metadata", _DenseMetadata),
+        ("size", ctypes.c_size_t),
+        ("capacity", ctypes.c_size_t),
+        ("memory_usage", ctypes.c_size_t),
+        ("cpu_class", ctypes.c_int),
+        ("gpu_class", ctypes.c_int),
+        ("shards_count", ctypes.c_size_t),
+    ]
+
+
+@pytest.mark.parametrize(
+    "name, mirror",
+    [
+        ("usearch_ram_options_t", _RAMOptions),
+        ("usearch_vram_options_t", _VRAMOptions),
+        ("usearch_nvme_options_t", _NVMeOptions),
+        ("usearch_executor_for_nvme_t", _ExecutorForNVMe),
+        ("usearch_traversal_stats_t", _TraversalStats),
+        ("usearch_dense_index_description_t", _DenseIndexDescription),
+    ],
+)
+def test_struct_layouts(name: str, mirror: type):
+    """The argument structs the other bindings lay out by hand match the sizes and offsets the compiler chose."""
+    size, offsets = usearch.lib.layouts()[name]
+    assert ctypes.sizeof(mirror) == size
+    for field, offset in offsets.items():
+        assert getattr(mirror, field).offset == offset, field
+
+
+# endregion Layouts

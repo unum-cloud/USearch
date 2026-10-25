@@ -450,8 +450,8 @@ static std::size_t check_observations_admits() {
 static std::size_t check_positions_nvme(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
-    using nvme_index_t = us::basic::nvme_index<earth_observation_codec_t, us::utilities::uuid_t, u32_t, nk_u64_t,
-                                               blocking_files_engine<>>;
+    using nvme_indexes_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid_t, u32_t, nk_u64_t,
+                                                   blocking_files_engine<>>;
     allocation_ledger_t ledger;
     std::vector<earth_observation_t> const values = positions_fixture_t::make_values(64, stream_key(seed, "nvme"),
                                                                                      counting_allocator_t {ledger});
@@ -465,8 +465,8 @@ static std::size_t check_positions_nvme(u64_t seed) {
         return expected<earth_observation_t> {values[row], status_t::success_k};
     };
     auto matches = [&](std::size_t entry, earth_observation_t const& view) noexcept { return view == values[entry]; };
-    return test_basic_nvme_view<positions_fixture_t, nvme_index_t>(seed, values.size(), "chord", make_value,
-                                                                   make_metric, query_of, matches);
+    return test_basic_nvme_view<positions_fixture_t, nvme_indexes_t>(seed, values.size(), "chord", make_value,
+                                                                     make_metric, query_of, matches);
 }
 
 /** Containment over storage lands what the radius walk finds in RAM: for every probe and radius, a
@@ -474,8 +474,8 @@ static std::size_t check_positions_nvme(u64_t seed) {
 static std::size_t check_positions_nvme_within(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
-    using nvme_index_t = us::basic::nvme_index<earth_observation_codec_t, us::utilities::uuid_t, u32_t, nk_u64_t,
-                                               blocking_files_engine<>>;
+    using nvme_indexes_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid_t, u32_t, nk_u64_t,
+                                                   blocking_files_engine<>>;
     using index_t = positions_fixture_t::index_t;
     using key_t = index_t::key_t;
     constexpr std::size_t nodes_k = 256, probes_k = 6;
@@ -522,9 +522,9 @@ static std::size_t check_positions_nvme_within(u64_t seed) {
     {
         io_engine_config_t config;
         config.queue_depth = 64;
-        auto [executor, spawn_status] = nvme_index_t::executor_t::spawn(topology, 1, config);
+        auto [executor, spawn_status] = nvme_indexes_t::executor_t::spawn(topology, 1, config);
         failures += expect_eq(spawn_status, status_t::success_k);
-        nvme_index_t viewed {forkunion_allocator_t {}};
+        nvme_indexes_t viewed {forkunion_allocator_t {}};
         failures += expect_eq(viewed.view(path, {}, "chord", executor), status_t::success_k);
         auto make_metric = [](scratch_t const& allocator, std::size_t staging) noexcept {
             metric_t made {allocator};

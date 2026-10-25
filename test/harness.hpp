@@ -10,43 +10,37 @@
  *  @c expect_near when diagnosis needs the values, and @c report for the verdict column.
  *  A status becomes a condition through @c succeeded(), so no fifth verb is needed.
  *
- *  Both suites read their settings once, at the top of @c main, into one @c settings_t:
- *
- *  @verbatim
- *  USEARCH_SEED    42    Seed every scenario's data derives from, an unsigned integer or random
- *  USEARCH_FILTER  none  Checks to run, by name, as an ECMAScript regex or else as a substring
- *  @endverbatim
+ *  The suite reads its settings once, at the top of @c main, into the one @c settings_t the
+ *  benchmarks and tools read too, with @c USEARCH_SEED, @c USEARCH_FILTER, @c USEARCH_DEVICES and
+ *  @c USEARCH_NVME_PATHS from the environment.
  */
 #pragma once
 
 #include <cmath>   // `std::fabs`, `std::fmax` - the relative tolerance of `expect_near`
-#include <cstdint> // `std::uint32_t` - the seed
-#include <cstdlib> // `std::malloc`, `std::free`, `std::abort`, `std::getenv`, `std::exit`
+#include <cstdio>  // `std::remove` - a viewed checkpoint's files
+#include <cstdlib> // `std::malloc`, `std::free`, `std::abort`
 #include <cstring> // `std::memset` - the scribble over a freed block
 
-#include <algorithm>    // `std::sort`, `std::unique` - the dispensed-ID density check
-#include <array>        // `std::array` - one latent point of the sign sketches
-#include <atomic>       // `std::atomic`
-#include <charconv>     // `std::from_chars` - the seed
-#include <chrono>       // `std::chrono::microseconds` - the flaky waiter's oversleep
-#include <limits>       // `std::numeric_limits` - the unbounded allocation budget
-#include <optional>     // `std::optional` - the settings readers
-#include <random>       // `std::random_device` - a drawn seed
-#include <regex>        // `std::regex`, `std::regex_search` - the filter
-#include <span>         // `std::span` - the dispensed-ID density check
-#include <string_view>  // `std::string_view` - the settings readers
-#include <system_error> // `std::errc`
-#include <thread>       // `std::this_thread::yield`, `std::this_thread::sleep_for`
-#include <vector>       // `std::vector` - the selected devices
+#include <algorithm>   // `std::sort`, `std::unique` - the dispensed-ID density check
+#include <array>       // `std::array` - one latent point of the sign sketches
+#include <atomic>      // `std::atomic`
+#include <chrono>      // `std::chrono::microseconds` - the flaky waiter's oversleep
+#include <limits>      // `std::numeric_limits` - the unbounded allocation budget
+#include <span>        // `std::span` - the dispensed-ID density check
+#include <string>      // `std::string` - a cell's checkpoint stem
+#include <string_view> // `std::string_view` - the stream names
+#include <thread>      // `std::this_thread::yield`, `std::this_thread::sleep_for`
+#include <vector>      // `std::vector` - the gathered predicate items
 
 #include <fmt/format.h>
-#include <fmt/ranges.h> // `fmt::join` - the selected devices
 
 #include <numkong/tensor.hpp>
 #include <numkong/vector.hpp>
 
 #include "usearch/types.h" // `usearch_version_name`, `usearch_capabilities_compiled`, `usearch_capabilities_available`
 #include "usearch/utilities/types.hpp"
+
+#include "abi.hpp" // `tools::settings_t`, `tools::landed_matches_t` - what every suite shares
 
 /** The short spelling every test reaches the library through where its `using` directive is
  *  ambiguous - Darwin declares a global `uuid_t` too - or unwanted, as inside foreign specializations. */
@@ -152,138 +146,23 @@ gathering_predicates<per_item_type_, item_type_, payload_type_> gathering_per_th
 
 #pragma region Settings
 
-/** The text of the environment variable @p name, or nothing when it is unset or empty. */
-inline std::optional<std::string_view> env_text(char const* name) noexcept {
-    char const* const text = std::getenv(name);
-    if (!text || !*text) return std::nullopt;
-    return std::string_view(text);
-}
+/** Every suite reads the settings the benchmarks and tools read, once, at the top of @c main. */
+using us::tools::print;
+using us::tools::read_environment;
+using us::tools::read_settings;
+using us::tools::settings_t;
 
-/** Parses the environment variable @p name with @p parse, or returns @p fallback when it is unset
- *  or empty. Text that does not parse prints `NAME="text" does not parse, expected <expected>` and
- *  exits with status 1, which leaves crash handlers quiet. */
-template <typename value_type_, typename parse_type_>
-[[nodiscard]] value_type_ env_parsed(char const* name, value_type_ fallback, parse_type_&& parse,
-                                     char const* expected) noexcept {
-    std::optional<std::string_view> const text = env_text(name);
-    if (!text) return fallback;
-    if (std::optional<value_type_> value = parse(*text)) return *std::move(value);
-    fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", name, *text, expected);
-    std::exit(1);
-}
-
-/** A 32-bit seed, or "random" for a fresh draw from @c std::random_device. */
-inline std::optional<std::uint32_t> parse_seed(std::string_view text) noexcept {
-    if (text == "random") return static_cast<std::uint32_t>(std::random_device {}());
-    std::uint32_t seed = 0;
-    auto const [end, parse_status] = std::from_chars(text.data(), text.data() + text.size(), seed);
-    if (parse_status != std::errc {} || end != text.data() + text.size()) return std::nullopt;
-    return seed;
-}
-
-inline std::uint32_t env_seed(char const* name, std::uint32_t fallback) noexcept {
-    return env_parsed(name, fallback, parse_seed, "an unsigned integer or random");
-}
-
-/** Comma-separated unsigned device ordinals, like "0" or "0,2". */
-inline std::optional<std::vector<std::uint32_t>> parse_ordinals(std::string_view text) {
-    std::vector<std::uint32_t> ordinals;
-    for (std::size_t begin = 0; begin <= text.size();) {
-        std::size_t const end = min_of(text.find(',', begin), text.size());
-        std::uint32_t ordinal = 0;
-        auto const [parsed, parse_status] = std::from_chars(text.data() + begin, text.data() + end, ordinal);
-        if (parse_status != std::errc {} || parsed != text.data() + end) return std::nullopt;
-        ordinals.push_back(ordinal);
-        begin = end + 1;
-    }
-    return ordinals;
-}
-
-/** Comma-separated paths in the grammar of @c usearch_nvme_options_t::paths: files, block devices
- *  or SPDK transport IDs like "trtype:PCIe traddr:0000:01:00.0". */
-inline std::optional<std::vector<std::string_view>> parse_paths(std::string_view text) {
-    std::vector<std::string_view> paths;
-    for (std::size_t begin = 0; begin <= text.size();) {
-        std::size_t const end = min_of(text.find(',', begin), text.size());
-        if (end == begin) return std::nullopt;
-        paths.push_back(text.substr(begin, end - begin));
-        begin = end + 1;
-    }
-    return paths;
-}
-
-/** Every setting the suites read, its default as the initializer, filled once by @c read_settings. */
-struct settings_t {
-
-    /** Checks to run, by ECMAScript regex or else substring. Override: @c USEARCH_FILTER. */
-    std::string_view filter;
-    std::optional<std::regex> filter_regex;
-
-    /** Seed every scenario family derives its streams from. Override: @c USEARCH_SEED, where random draws one. */
-    std::uint32_t seed = 42;
-
-    /** USearch device ordinals the GPU suites run on, positions in @c gpu_devices; none runs the
-     *  first device of every vendor present. Override: @c USEARCH_DEVICES, comma-separated. */
-    std::vector<std::uint32_t> devices;
-
-    /** NVMe namespaces the SPDK suites view, as @c usearch_nvme_options_t::paths names them; none
-     *  saves the part they would view instead. Override: @c USEARCH_NVME_PATHS, comma-separated. */
-    std::vector<std::string_view> nvme_paths;
-
-    /** Whether @p name passes the filter. */
-    bool selects(std::string_view name) const {
-        if (filter.empty()) return true;
-        if (filter_regex) return std::regex_search(name.begin(), name.end(), *filter_regex);
-        return name.find(filter) != std::string_view::npos;
-    }
-};
-
-/** Reads every @c settings_t variable, exiting with status 1 on the first that does not parse. */
-inline settings_t read_settings() noexcept {
-    settings_t settings;
-    settings.filter = env_text("USEARCH_FILTER").value_or("");
-    if (!settings.filter.empty()) {
-#if defined(__cpp_exceptions) && __cpp_exceptions
-        try {
-            settings.filter_regex.emplace(settings.filter.begin(), settings.filter.end());
-        }
-        catch (std::regex_error const&) {
-        }
-#else
-        settings.filter_regex.emplace(settings.filter.begin(), settings.filter.end());
-#endif
-    }
-    settings.seed = env_seed("USEARCH_SEED", settings.seed);
-    settings.devices = env_parsed("USEARCH_DEVICES", settings.devices, parse_ordinals,
-                                  "comma-separated unsigned device ordinals");
-    settings.nvme_paths = env_parsed("USEARCH_NVME_PATHS", settings.nvme_paths, parse_paths,
-                                     "comma-separated files, block devices or transport IDs");
-    return settings;
-}
-
-/** Prints each setting as "- Name: value", in the grammar it parses from. */
-inline void print(settings_t const& settings) {
-    fmt::println("- Seed: {}", settings.seed);
-    fmt::println("- Filter: {}", settings.filter.empty() ? std::string_view("none") : settings.filter);
-    if (settings.devices.empty()) fmt::println("- Devices: first of each vendor");
-    else fmt::println("- Devices: {}", fmt::join(settings.devices, ","));
-    if (settings.nvme_paths.empty()) fmt::println("- NVMe paths: none");
-    else fmt::println("- NVMe paths: {}", fmt::join(settings.nvme_paths, ","));
-}
-
-/** One vendor's VRAM suites, as its test object registers them with the runner. */
-struct vram_suite_t {
+/** One unit's suites, as it registers them with the runner: a GPU vendor's, run once per selected
+ *  device of that vendor, or a host unit's under @c gpu_vendor_t::unknown_k, run once with no
+ *  device, so the runner names neither the vendors nor the dtypes a build compiled. */
+struct registered_suite_t {
     gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
     std::size_t (*check)(settings_t const& settings, gpu_device_t const& device) = nullptr;
-
-    /** Copies @p bytes of the vendor's device memory at @p device to @p host and waits, true once
-     *  they landed. */
-    bool (*download)(void* host, void const* device, std::size_t bytes) = nullptr;
 };
 
 /** Registers @p added when it names a check, and answers every suite registered so far. */
-inline std::span<vram_suite_t const> vram_suites(vram_suite_t added = {}) noexcept {
-    static vram_suite_t suites[4];
+inline std::span<registered_suite_t const> registered_suites(registered_suite_t added = {}) noexcept {
+    static registered_suite_t suites[16];
     static std::size_t count = 0;
     if (added.check && count != std::size(suites)) suites[count++] = added;
     return {suites, count};
@@ -545,7 +424,14 @@ nk::matrix<scalar_, allocator_type_> make_vectors(std::size_t count, std::size_t
     return vectors;
 }
 
+using us::tools::landed_matches;
+using us::tools::landed_matches_t;
+
 std::size_t check_dense(settings_t const& settings);
+
+namespace dense {
+std::size_t check_ram_metric(settings_t const& settings);
+} // namespace dense
 
 namespace utilities {
 std::size_t check_ram_buffers(settings_t const& settings);
@@ -573,6 +459,155 @@ namespace geospatial {
 std::size_t check_geospatial(settings_t const& settings);
 std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const& device);
 } // namespace geospatial
+
+/** The suites over the C interface, each sweeping its modality's diagonal, and the checks every
+ *  modality's cells share. */
+namespace abi {
+using namespace unum::usearch::tools;
+
+std::size_t check_dense_abi(settings_t const& settings);
+std::size_t check_sequence_abi(settings_t const& settings);
+std::size_t check_shapes_abi(settings_t const& settings);
+std::size_t check_geospatial_abi(settings_t const& settings);
+
+/** Rows each insert or search call of a cell takes, so a build spans several calls. */
+inline constexpr std::size_t cell_batch_k = 384;
+
+/** Matches a cell judges per query. */
+inline constexpr std::size_t cell_wanted_k = 10;
+
+/** Inserts @p count rows of @p inputs into the empty @p index under their keys, which must land
+ *  across the cell's shards and each count once where the residency serves a count. */
+template <typename verbs_type_>
+std::size_t expect_built(sweep_cell_t const& cell, handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs,
+                         std::size_t count) {
+    usearch_traversal_stats_t stats {};
+    std::size_t failures = check(insert_rows(index, inputs, count, 0, cell_batch_k, 0, stats));
+    if (failures) return failures;
+    description<verbs_type_> const built = describe(index);
+    failures += check(built.reported.size == count && built.reported.shards_count == cell.shards);
+    failures += check(stats.computed_distances > 0);
+    std::vector<usearch_key_t> keys(count);
+    keys_of_rows(0, keys);
+    std::size_t miscounted = 0;
+    for (usearch_key_t const& key : keys) {
+        usearch_outcome_t outcome {};
+        std::size_t entries = 0;
+        verbs_type_::count(index.get(), index.executor(), key, &entries, &outcome);
+        // A residency that serves no count yet leaves the keys to the walks' recall.
+        if (outcome.status == usearch_status_unsupported_k) break;
+        if (outcome.status == usearch_status_success_k && entries == 1) continue;
+        if (!miscounted++)
+            fmt::println(stderr, "  a key counts {} entries: {}", entries, outcome.message ? outcome.message : "");
+    }
+    return failures + check(miscounted == 0);
+}
+
+/** A walk at @p expansion keeps @p floor of the exact scan's top ten over the first @p count
+ *  queries of @p queries, ties at the cut counting wherever the scan broke them; a residency that
+ *  serves no scan yet has no oracle to judge by. */
+template <typename verbs_type_>
+std::size_t expect_walk_recall(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
+                               std::size_t expansion, double floor) {
+    landed_matches_t oracle;
+    usearch_outcome_t const scanned = scan_oracle(index, queries, count, cell_wanted_k, cell_batch_k, oracle);
+    if (scanned.status == usearch_status_unsupported_k) return 0;
+    std::size_t failures = check(scanned);
+    landed_matches_t found;
+    usearch_traversal_stats_t stats {};
+    failures += check(search_rows(index, queries, count, cell_batch_k, cell_wanted_k, expansion,
+                                  usearch_traversal_walk_k, stats, found));
+    if (failures) return failures;
+    double const recall = recall_at(cell_wanted_k, found, oracle);
+    if (recall < floor) fmt::println(stderr, "  recall at ten {:.3f} under the floor {:.3f}", recall, floor);
+    return check(recall >= floor);
+}
+
+/** The index round-trips through all residencies under @p stem, as @ref check_checkpoint_round_trip
+ *  judges it on the first @p count queries of @p queries, within @p score_band where stored rows
+ *  round; in an NVMe cell its saved view then answers the same walk and refuses every write, one
+ *  row of @p inputs included. */
+template <typename verbs_type_>
+std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& index,
+                               typename verbs_type_::inputs_t inputs, typename verbs_type_::queries_t queries,
+                               std::size_t count, std::size_t expansion, double floor, std::string const& stem,
+                               saved_bytes_t bytes, double score_band) {
+    // Rows that round on the way may steer a walk down another path, so they compare by exact scans
+    // wherever the residency serves one.
+    auto const search = [&](handle<verbs_type_>& searched) {
+        landed_matches_t found;
+        usearch_traversal_stats_t stats {};
+        usearch_outcome_t outcome {};
+        if (score_band)
+            outcome = search_rows(searched, queries, count, cell_batch_k, cell_wanted_k, 0, usearch_traversal_scan_k,
+                                  stats, found);
+        if (!score_band || outcome.status == usearch_status_unsupported_k)
+            found = {}, outcome = search_rows(searched, queries, count, cell_batch_k, cell_wanted_k, expansion,
+                                              usearch_traversal_walk_k, stats, found);
+        return outcome.status == usearch_status_success_k ? found : landed_matches_t {};
+    };
+    std::size_t failures = check_checkpoint_round_trip(index, stem, cell.shards, bytes, score_band, search);
+    if (cell.residency != usearch_residency_nvme_k) return failures;
+    handle<verbs_type_> view = save_and_reopen(std::move(index), stem + "-view.safegraphs", usearch_residency_nvme_k);
+    failures += check(bool(view));
+    if (view) {
+        failures += expect_walk_recall(view, queries, count, expansion, floor);
+        usearch_outcome_t outcome {};
+        std::vector<usearch_key_t> keys(1);
+        keys_of_rows(0, keys);
+        verbs_type_::insert(view.get(), view.executor(), 1, keys_view(keys), inputs, 0, nullptr, &outcome);
+        failures += check(outcome.status == usearch_status_read_only_k);
+        verbs_type_::clear(view.get(), view.executor(), &outcome);
+        failures += check(outcome.status == usearch_status_read_only_k);
+    }
+    view = {};
+    for (std::string const& file : files_starting_with(stem + "-view")) std::remove(file.c_str());
+    return failures;
+}
+
+/** Two refinements settle, the second changing no more than the first; a device index answers
+ *  @p on_device instead, where refinement is not implemented yet. */
+template <typename verbs_type_>
+std::size_t expect_refined(handle<verbs_type_>& index, usearch_status_t on_device) {
+    std::size_t changed[2] = {0, 0};
+    std::size_t failures = 0;
+    for (std::size_t& pass_changed : changed) {
+        usearch_outcome_t outcome {};
+        verbs_type_::refine(index.get(), index.executor(), &pass_changed, &outcome);
+        if (index.residency == usearch_residency_vram_k) return check(outcome.status == on_device);
+        failures += check(outcome);
+    }
+    return failures + check(changed[1] <= changed[0]);
+}
+
+/** A donor of @p count rows of @p inputs, keyed past the index's own @p first_row rows, absorbs
+ *  whole: its slot is consumed and the sizes add up; a device index answers @p on_device instead,
+ *  where absorption is not implemented yet. */
+template <typename verbs_type_>
+std::size_t expect_absorbed(handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs, std::size_t count,
+                            std::size_t first_row, usearch_status_t on_device) {
+    handle<verbs_type_> donor = open_index<verbs_type_>(*index.session, index.geometry, 1);
+    if (!donor) return 1;
+    usearch_traversal_stats_t stats {};
+    std::size_t failures = check(insert_rows(donor, inputs, count, first_row, cell_batch_k, 0, stats));
+    if (failures) return failures;
+    usearch_outcome_t outcome {};
+    verbs_type_::absorb(index.get(), index.executor(), &donor.index, 1, &outcome);
+    if (index.residency == usearch_residency_vram_k && on_device != usearch_status_success_k)
+        return check(outcome.status == on_device);
+    failures += check(outcome) + check(!donor);
+    return failures + check(describe(index).reported.size == first_row + count);
+}
+
+/** A cleared index holds nothing. */
+template <typename verbs_type_>
+std::size_t expect_cleared(handle<verbs_type_>& index) {
+    usearch_outcome_t outcome {};
+    verbs_type_::clear(index.get(), index.executor(), &outcome);
+    return check(outcome) + check(describe(index).reported.size == 0);
+}
+
+} // namespace abi
 
 } // namespace unum::usearch::test
 

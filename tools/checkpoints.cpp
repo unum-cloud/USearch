@@ -209,8 +209,12 @@ static bool slot_probe_safegraphs(slot_drive_t const& drive, std::uint64_t offse
         if (field.key == "metric") metric = field.value;
         else if (field.key == "created_by") producer = field.value;
     };
-    auto const [parsed, status] = utilities::safegraphs_read_header(
-        utilities::bytes_of(header.data(), header.size()), std::allocator<utilities::byte_t> {}, per_custom_field);
+    // Producer columns such as the norms extend the monolith, so the header lists them too.
+    utilities::growing_buffer<utilities::safegraphs_named_column_t, std::allocator<utilities::byte_t>> extra_columns {
+        std::allocator<utilities::byte_t> {}};
+    auto const [parsed, status] = utilities::safegraphs_read_header(utilities::bytes_of(header.data(), header.size()),
+                                                                    std::allocator<utilities::byte_t> {},
+                                                                    per_custom_field, &extra_columns);
     if (utilities::failed(status) || parsed.monolith_bytes() > drive.bytes - offset) return false;
     file.first_slot = offset / slot_bytes_k;
     file.bytes = parsed.monolith_bytes();
