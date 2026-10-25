@@ -34,3 +34,5 @@ template struct us::shapes::vram_nvidia_index<nk::f32_t, u32_t, numkong_capabili
                                               shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f32_k>>;
 template struct us::shapes::vram_nvidia_kits<nk::f32_t, u32_t, numkong_capabilities_of(gpu_class_t::nvidia_ampere_k),
                                              shapes_nvidia_fatbin<gpu_class_t::nvidia_ampere_k, nk_f32_k>>;
+
+template struct basic_class_tables<shapes_traits_t, dense_home_t::vram_nvidia_k, gpu_class_t::nvidia_ampere_k>;

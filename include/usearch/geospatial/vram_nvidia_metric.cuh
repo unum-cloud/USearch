@@ -20,7 +20,7 @@
 #include <limits>   // `std::numeric_limits` - an unknown pitch, field or range
 #include <utility>  // `std::index_sequence` - every rung's kernels, `std::swap` - the cone winners
 
-#include <numkong/geospatial.h> // `nk_terrain_outside_view_f32_cuda_`, `nk_sqrt_f64_cuda_` - with its CUDA backend
+#include <numkong/geospatial.h> // `nk_clearance_f32_cuda_`, `nk_sqrt_f64_cuda_` and kin - with its CUDA backend
 #include <numkong/types.h>      // `NUMKONG_ARCH_CUDA_AMPERE_` - the kit this unit carries
 
 #include "usearch/utilities/types.hpp"
@@ -292,18 +292,73 @@ __device__ __forceinline__ bool cuda_admits(relation_t relation, f64_t radius_me
     return true;
 }
 
+/** Where @p position falls on the terrain of @p arguments, into @p point: its fractional column and
+ *  row, and its height above the ellipsoid, as @c terrain_t::grid_point places it on the host
+ *  through @c to_geodetic. */
+template <typename node_id_type_>
+__device__ __forceinline__ void cuda_grid_point(cuda_admit_arguments<node_id_type_> const& arguments,
+                                                earth_fixed_t position, f32_t* point) noexcept {
+    constexpr f64_t radians_to_degrees_k = 180.0 / 3.14159265358979323846;
+    constexpr f64_t equatorial_k = NUMKONG_EARTH_ELLIPSOID_EQUATORIAL_RADIUS;
+    f64_t const x = position.x_centimetres / centimetres_per_metre_k;
+    f64_t const y = position.y_centimetres / centimetres_per_metre_k;
+    f64_t const z = position.z_centimetres / centimetres_per_metre_k;
+    f64_t const horizontal = std::sqrt(x * x + y * y);
+    f64_t const parametric = std::atan2(z * equatorial_k, horizontal * wgs84_semi_minor_axis_k);
+    f64_t const sin_parametric = std::sin(parametric), cos_parametric = std::cos(parametric);
+    f64_t const latitude = std::atan2(
+        z + wgs84_second_eccentricity_squared_k * wgs84_semi_minor_axis_k * sin_parametric * sin_parametric *
+                sin_parametric,
+        horizontal - wgs84_eccentricity_squared_k * equatorial_k * cos_parametric * cos_parametric * cos_parametric);
+    f64_t const longitude = std::atan2(y, x);
+    f64_t const sin_latitude = std::sin(latitude), cos_latitude = std::cos(latitude);
+    f64_t const prime_vertical = equatorial_k /
+                                 std::sqrt(1.0 - wgs84_eccentricity_squared_k * sin_latitude * sin_latitude);
+    // Straight above a pole the horizontal component vanishes; altitude reads off the polar axis.
+    f64_t const altitude = horizontal > 1.0 ? horizontal / cos_latitude - prime_vertical
+                                            : std::fabs(z) - wgs84_semi_minor_axis_k;
+    point[0] = static_cast<f32_t>((longitude * radians_to_degrees_k - arguments.west_longitude_degrees) /
+                                  arguments.column_step_degrees);
+    point[1] = static_cast<f32_t>((arguments.north_latitude_degrees - latitude * radians_to_degrees_k) /
+                                  arguments.row_step_degrees);
+    point[2] = static_cast<f32_t>(altitude);
+}
+
+/** Whether the sight line from @p viewpoint to @p target clears the terrain of @p grid, as the host
+ *  tests it: a negative clearance is an obstruction, and NaN leaves the grid, which no terrain can
+ *  block. */
+template <typename node_id_type_>
+__device__ __forceinline__ bool cuda_clears(nk_terrain_grid_cuda_t const& grid,
+                                            cuda_admit_arguments<node_id_type_> const& arguments,
+                                            f32_t const* viewpoint, f32_t const* target) noexcept {
+    nk_clearances_arguments_cuda_t sight {};
+    sight.packed = arguments.terrain_pack;
+    sight.viewpoints = viewpoint, sight.targets = target;
+    sight.drop_scale = arguments.drop_scale;
+    return !(nk_clearance_f32_cuda_(&grid, &sight, 0, 0) < 0);
+}
+
 /** One warp per query keeps, in rank order, the candidates the relation admits, a warp-width of
- *  ranks at a time, until @c wanted landed or the candidates ran out. */
+ *  ranks at a time, until @c wanted landed or the candidates ran out; past @c near, a sight line
+ *  must also clear the terrain when one is given. */
 template <nk_capability_t capability_, typename node_id_type_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32)
     cuda_admit(cuda_admit_arguments<node_id_type_> arguments) {
     constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
     using warp_t = typename geospatial_ladder<capability_>::kit_t::warp_t;
+    // Every warp reads the shape of the terrain's pyramid, which one thread fills per block.
+    __shared__ nk_terrain_grid_cuda_t grid;
+    bool const sighted = arguments.terrain_heights && arguments.relation != relation_t::near_k;
+    if (sighted && threadIdx.x == 0)
+        nk_terrain_grid_f32_cuda_(arguments.terrain_heights, arguments.terrain_pack, &grid);
+    __syncthreads();
     u32_t const lane = threadIdx.x % warp_t::width_k;
     u32_t const warps = gridDim.x * vram_warps_per_block_k;
     for (u32_t query_index = blockIdx.x * vram_warps_per_block_k + threadIdx.x / warp_t::width_k;
          query_index < arguments.queries_count; query_index += warps) {
         earth_observation_t const query = arguments.queries[query_index];
+        f32_t query_point[3];
+        if (sighted) cuda_grid_point(arguments, query.position, query_point);
         node_id_type_ const* const candidate_ids = arguments.candidate_ids +
                                                    u64_t {query_index} * arguments.candidates_count;
         node_id_type_* const matched_ids = arguments.matched_ids + u64_t {query_index} * arguments.wanted;
@@ -320,6 +375,14 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32)
                 chord = chord_squared(query.position, entry.position);
                 admitted = cuda_admits(arguments.relation, arguments.radius_metres, arguments.slack_milliseconds, query,
                                        entry, chord);
+                if (admitted && sighted) {
+                    f32_t entry_point[3];
+                    cuda_grid_point(arguments, entry.position, entry_point);
+                    // Under `sees` the entry looks at the query, otherwise the query at the entry.
+                    admitted = arguments.relation == relation_t::sees_k
+                                   ? cuda_clears(grid, arguments, entry_point, query_point)
+                                   : cuda_clears(grid, arguments, query_point, entry_point);
+                }
             }
             typename warp_t::mask_t const admitted_mask = warp_t::ballot(admitted);
             u32_t const position = landed + warp_t::count(admitted_mask & warp_t::below(lane));

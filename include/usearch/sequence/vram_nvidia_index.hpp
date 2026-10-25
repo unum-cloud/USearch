@@ -271,7 +271,7 @@ struct vram_nvidia_index {
     friend struct utilities::shard_set;
 
     /** A plural walks the graph below its snapshot and publishes its batches inside one commit. */
-    template <typename index_type_, typename, typename, typename, typename>
+    template <typename index_type_, typename, typename, typename, typename, typename>
         requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
     friend struct basic::vram_nvidia_indexes;
 

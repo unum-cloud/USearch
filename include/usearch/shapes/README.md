@@ -8,7 +8,7 @@ Every kind is invariant to rotation, reflection and translation, and symmetric b
 
 - `ram_metric.hpp` + `ram_index.hpp`: the CPU baseline, NumKong shape kits per capability tier from serial through NEON, Haswell, Skylake, RVV and WASM, under the `basic::ram_index` graph with each node owning one packed cloud.
 - `vram_nvidia_index.hpp` + `vram_nvidia_metric.cuh`: the NVIDIA sibling for Chamfer and Hausdorff, a block walking each query and a warp scoring each candidate.
-- NVMe: a saved checkpoint is served in place by `usearch_shapes_view_nvme`, through `basic/nvme_index.hpp`, answering every read verb a RAM handle does.
+- NVMe: a saved checkpoint is served in place by `usearch_shapes_view_nvme`, through `basic/nvme_indexes.hpp`, answering every read verb a RAM handle does.
 
 Checkpoints are SafeGraphs monoliths keeping each cloud in its inserted pose, so distances after a reload agree with those before it to the storage precision.
 

@@ -7,15 +7,17 @@ None of it is a public header: the C libraries, the C test and every binding lin
 
 - `types.cpp` answers the library-wide probes of `types.h`: the version, the capability levels compiled and available, an outcome's status, and the spelling of every closed set in both directions.
 - `lib.hpp` holds what every modality's dispatch shares: the CPU classes, the executor and arena handles, the deferred table, and the outcome, progress and landing helpers.
-- `dense_index.cuh` implements `dense_index.h`: the variant grid over every compiled alternative, the handle owning the chosen one, and every exported verb as one visit apiece.
-- `dense_index.cpp` compiles that header with the host compiler for every build, the VRAM variants joining the grid for each vendor built.
-- `dense_specializations.cuh` spells one variant: the scalar and capability tables, the GPU classes, and the `specialized_index` view every class unit instantiates.
-- `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.{hip,cpp}` are the class units, each instantiating `specialized_index` over its class's variants, one per storage dtype the class advances.
-- `basic_specializations.cuh` holds what the basic modalities' variants share: the fan-outs that insert and search through an executor, and the base of every variant on an NVIDIA GPU.
-- `sequence_specializations.cuh`, `shapes_specializations.cuh` and `geospatial_specializations.cuh` spell each modality's variants, such as `sequence_ram_variant<cpu_class>` and `shapes_ram_variant<scalar, cpu_class>`, with their NVMe and NVIDIA siblings and the geometry they freeze.
-- `basic_index.cuh` holds the one handle over a modality's variant, the CPU-class ladder, and every verb once, each modality's traits supplying only what differs.
-- `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp` implement `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`: one variant over the compiled alternatives, the traits, and one forward per verb.
-- `<modality>/ram_variants_<class>.cpp` and `<modality>/nvme_variants_<class>.cpp` are their class units, each instantiating its modality's variants of one residency for the class, and `<modality>/vram_variants_nvidia.cpp` holds the modality's NVIDIA host variants beside a `vram_kernels_nvidia_<key>.cu` per metric or dtype, where geospatial's one `vram_variants_nvidia.cu` compiles both ways.
+- `dense_index.cuh` implements `dense_index.h`: the handle owning one picked variant through its home's verb table, the ladders that pick it, and every exported verb as one visit over five homes apiece.
+- `dense_index.cpp` compiles that header with the host compiler for every build, and includes no tower.
+- `dense_punned.cuh` is what the dispatch unit and the class units agree on, and includes no tower: the verb table `dense_verbs<home>` one variant compiles, the `dense_class_tables<home, class>` a class unit instantiates, and `punned_dense_index<home>`, the picked table beside its `void*` index.
+- `dense_specializations.cuh` is the one place dense variants are enumerated: the residency aliases, the static bodies of `specialized_index<indexes>` each table entry points at, and the fold over `dense_dtypes_t` that keeps the variants a class advances.
+- `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.{hip,cpp}` are the class units, each one line instantiating `dense_class_tables` for its home and class.
+- `basic_punned.cuh` is what the basic dispatch units and class units agree on, and includes no tower: the crossings of keys and tapes, the verb table `basic_verbs<traits, home>`, the `basic_class_tables<traits, home, class>`, `punned_basic_index<traits, home>`, and each modality's traits and geometry, spelled in the C argument structures alone.
+- `basic_specializations.cuh` holds what the basic modalities' variants share: the fan-outs that insert and search through an executor, each residency's lookups and cursors, the free functions every NVIDIA variant calls, and the static bodies of `specialized_variant<traits, variant>` each table entry points at.
+- `sequence_specializations.cuh`, `shapes_specializations.cuh` and `geospatial_specializations.cuh` spell each modality's variants, such as `sequence_ram_variant<cpu_class>` and `shapes_ram_variant<scalar, cpu_class>`, with their NVMe and NVIDIA siblings, the `<modality>_variants_of` each class compiles per home, and the `variant_bodies<traits>` that freeze, describe and land one variant.
+- `basic_index.cuh` holds the one handle over a modality's picked variant, the CPU and GPU ladders, and every verb once, each modality's traits supplying only what differs.
+- `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp` implement `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`: the handle and one forward per verb.
+- `<modality>/cpu_variants_<class>.cpp` are their class units, each instantiating its modality's RAM and NVMe tables for the class, and `<modality>/vram_variants_nvidia.cpp` holds the modality's NVIDIA table beside a `vram_kernels_nvidia_<key>.cu` per metric or dtype, where geospatial's one `vram_variants_nvidia.cu` compiles both ways.
 
 ## From a Verb to an Engine Template
 
@@ -26,15 +28,16 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (submitted<usearch_dense_search>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
     // ... validate the shapes, claim the arena, carve the outputs
-    std::visit([&]<typename variant_type_>(variant_type_& variant) noexcept { /* specialized_index {variant} */ },
-               arguments->index->variant);
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        /* punned.verbs.search(punned.index, ...) */
+    });
 }
 ```
 
 - `submitted<verb>` decides whether the call runs now or waits in the executor's deferred table, as described under [Deferred Calls](#deferred-calls).
 - `call_outcome_t` marks the outcome pending, collects every step's status privately, and on unwinding releases the arena before the one final store.
   A path that forgot to report finishes `usearch_status_internal_k` rather than hanging its waiters.
-- `std::visit` over `usearch_dense_index_handle_t::variant` reaches the chosen alternative, and `specialized_index {variant}` forwards to the engine's multi-shard templates from `include/usearch/dense/`.
+- `visit_punned` reaches the handle's home table, whose entries cast the handle's `void*` index back to its variant and forward to the engine's multi-shard templates from `include/usearch/dense/`.
 
 The variants are aliases over those templates, keyed by the storage dtype and the class:
 
@@ -43,9 +46,9 @@ The variants are aliases over those templates, keyed by the storage dtype and th
 - `vram_nvidia_indexes<dtype, gpu_class>` → `dense::vram_nvidia_indexes<uuid_t, dtype, cuda_fatbin<gpu_class, dtype>, fu::preferred_cache_hints_t>`, the fatbin of one dtype's kernels stating the class's NumKong mask as its `capability_k`, and `vram_amd_indexes<dtype, gpu_class>` likewise over `dense::vram_amd_indexes` and `hip_code_object<gpu_class, dtype>`.
 - `vram_apple_indexes<dtype, gpu_class>` → `dense::vram_apple_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class)>`, one variant per Apple class, each compiling its own library at first use.
 
-A variant's executor type is its residency, so `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
-The core verbs land on `specialized_index` members of the same names, `count`, `get`, `reserve`, `clear`, `refine`, `health`, `search`, `multiply`, `maxsim`, `attend`, `save` and `load`.
-`insert` becomes `add`, one plan with a step per slice that publishes every row at once.
+A variant's executor type is its home, so `home_of`, `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
+Every home fills every entry: an NVMe view answers `read_only_k` for each mutation, and a device variant `unsupported_k` for what only a host walk takes.
+`insert` is one plan with a step per slice that publishes every row at once, and refinements and cursors live behind a `void*` their own entries open, step and free.
 Rows reach every variant in the caller's scalar as a `dense::rows_view_t`, and each variant imports them into its stored scalar per thread, in scratch its executor already owns, so the C layer never stages a row.
 Scores land in the arena as the ABI's `double` straight from the engines, and row outputs export into the scalar the caller asks for.
 A `usearch_progress_t` with a handler slices a batch into its `steps`, ten unless the caller asks otherwise, each handed to the engine whole and reported once; without a handler the call is one slice, and a GPU engine windows a large one through its own staging.
@@ -55,37 +58,37 @@ A `usearch_progress_t` with a handler slices a batch into its `steps`, ten unles
 
 `init_ram`, `init_vram`, `load_*` and `view_nvme` lower the runtime geometry onto one variant:
 
-1. `with_cell` maps the quantization onto a NumKong dtype.
-   A dtype the build's `USEARCH_DENSE_DTYPES` left out answers `usearch_status_unsupported_k`.
-2. `with_metric` maps the metric onto a kernel kind: the numeric dtypes speak inner, angular and euclidean, while the bit-packed `u1x8` speaks inner, hamming and jaccard.
-3. `make_index` picks the class for the residency:
-   - RAM descends a ladder of CPU classes newest first, taking the first rung whose NumKong and ForkUnion capabilities the machine reports and ending on the unconditional serial floor.
+1. `with_variant` maps the quantization onto a NumKong dtype, and the metric onto a kernel kind: the numeric dtypes speak inner, angular and euclidean, while the bit-packed `u1x8` speaks inner, hamming and jaccard.
+   A dtype the build's `USEARCH_DENSE_DTYPES` left out of `dense_dtypes_t` answers `usearch_status_unsupported_k`.
+2. `make_index` picks the class for the residency:
+   - RAM walks `cpu_ladder_t` newest first, asking each compiled rung whose NumKong and ForkUnion capabilities the machine reports for its variant of the dtype, and ending on the serial floor.
      On x86 it reads `intel_diamond` → `intel_granite` → `intel_sapphire` → `amd_genoa` → `intel_icelake` → `intel_skylake` → `intel_sierra` → `intel_haswell`, on Arm `nvidia_vera` → `apple_m4` → `aws_g5` → `apple_m2` → `aws_g2`, then `alibaba_c930` on RISC-V and `wasm64_extended` → `wasm32_v128` on WebAssembly.
-   - NVMe walks the same classes, WebAssembly aside, and compares only kits, since a storage walk carries no waiter or atomic reference.
+   - A class pinned in `usearch_ram_options_t::cpu_class` admits every rung whose NumKong and ForkUnion masks are subsets of its own, so pinning a class behaves as deriving on a machine of it.
+   - NVMe walks the same ladder over the classes that compiled an NVMe unit, and asks only for kits, since a storage walk carries no waiter or atomic reference.
    - VRAM reads the named USearch ordinals off the process device listing and takes the class every device shares, `nvidia-ampere` through `apple-metal10`; mixed vendors refuse with `config_mismatch_k`, mixed generations with `device_k`.
 
 A CPU class is its parent plus a delta.
 `numkong_capabilities_of` lowers it onto NumKong's cumulative compute mask, `parent_class_of` names the rung it degrades to, and `waiter_for_cpu_class`, `atomic_ref_for_cpu_class` and `cache_hints_for_cpu_class` pick its ForkUnion primitives.
-A rung exists only where it advances past its parent: `rung_advances` compares the picked 4-way and tiles kits and the ForkUnion masks at compile time, and a `static_assert` fails the build while the variant still lists a variant that stopped advancing.
+A variant exists only where it advances past its parent: `variant_advances` compares the picked 4-way and tiles kits and the ForkUnion masks at compile time, and a class table without a variant of the dtype sends the walk to the next rung.
 The handle's capability string names the picked kit once, at construction, which is what `usearch_dense_describe` reports.
 
 ## Compilation Units
 
-The dispatch unit visits every variant yet compiles at the baseline instruction set.
-`extern template struct specialized_index<...>` declarations keep every variant's body out of it, and each class unit compiles its variants with the class's own flags.
+The dispatch unit visits five homes and compiles at the baseline instruction set, never seeing a tower.
+Each class unit compiles its variants with the class's own flags into a table of function pointers, every body `static` or a static member of a template over the variant's own types, so no body compiled under a class's flags merges into a baseline caller.
 
 - `usearch_dense_ram_variants` collects the CPU class units.
   `src/CMakeLists.txt` restates the lineage row for row: `usearch_dense_ram_variant(<class> <CLASS> OVER <parent> <kits>...)` unions the parent's flags with those of every delta kit that compiled, and the unit exists only when its parent does and some delta compiled, which the dispatch units read as `USEARCH_TARGET_<CLASS>`, the one gate of that class's variants in every list and ladder.
 - `usearch_dense_nvme_variants` reuses those flags for the classes whose kits a storage walk tells apart, so `aws_g5`, `alibaba_c930` and the WebAssembly classes take none.
 - `usearch_dense_vram_variants_nvidia_<class>` embeds one NVIDIA class's fatbin per dtype, each compiled by NVCC device-only from `dense/vram_kernels_nvidia_<dtype>.cu` for the class's own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
-  The class unit `dense/vram_variants_nvidia_<class>.cpp` holds the host variants, and the device units include `dense_kernels.cuh` rather than the specializations, whose CPU metrics would bring NumKong's own kernels into every pass.
+  The class unit `dense/vram_variants_nvidia_<class>.cpp` holds the host variants, finding each dtype's fatbin in the table `dense_nvidia_<class>_bundles` CMake writes in `dense_dtypes_t` order, and the device units include `dense_kernels.cuh` rather than the specializations, whose CPU metrics would bring NumKong's own kernels into every pass.
   Nothing links `libcuda` or the CUDA runtime: `cuda_api` opens the driver at first use through entry points it declares itself, and Clang's host-only pass builds the variants.
 - `usearch_dense_vram_variants_amd_<class>` embeds one AMD class's code object per dtype, compiled for its own processors, and the CDNA3 floor for CDNA4 too.
   Its kernels sit in `dense/vram_kernels_amd_<dtype>.hip`, compiled device-only once per class beside the class unit, which names none of them.
   Nothing links `libamdhip64`: `hip_api` opens it at first use through entry points it declares itself, so host units need no ROCm headers.
 - `usearch_dense_vram_variants_apple` compiles the Apple variants as plain C++, one unit per Apple class, their kernels compiled from embedded source at first use.
   Nothing links Metal, Foundation or `libobjc`: `metal_api` opens them at first use.
-- `usearch_sequence_ram_variants`, `usearch_shapes_ram_variants` and `usearch_geospatial_ram_variants` collect each modality's RAM class units, and their `_nvme_` twins the NVMe ones, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
+- `usearch_sequence_cpu_variants`, `usearch_shapes_cpu_variants` and `usearch_geospatial_cpu_variants` collect each modality's class units, `<modality>/cpu_variants_<class>.cpp`, each instantiating its RAM and NVMe tables, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
 - `usearch_<modality>_vram_variants_nvidia` embeds a basic modality's NVIDIA fatbins, one per sequence metric or shapes dtype and one for geospatial, every kit compiled past the Ampere floor.
 - `usearch_punned` - `types.cpp` & the dispatch units, `dense_index.cpp`, `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp`.
 

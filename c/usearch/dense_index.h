@@ -21,18 +21,19 @@
  *
  *  @section dense_index_serialization Serialization
  *
- *  Checkpoints ride the SafeGraphs interchange format, and the path extension picks the layout. A
- *  @c .safegraphs path is one monolith: a self-describing file holding every shard's vectors,
- *  neighbor lists and keys as one graph, rows in placement order and node IDs rebased. A
- *  @c .safegraphs.json path is a manifest: a small JSON catalog of one monolith per shard - each
- *  with shard-local node IDs, so neighbors never cross files - with every part resolved relative to
- *  the manifest. Loading reads the content, never the extension, so either form loads into any
- *  shard count: part @c p lands whole on shard @c p modulo the shard count. A manifest records
- *  where its parts were written, never where a reader must keep them, so a checkpoint written
- *  from a mounted bucket lands across a handle's own memory domains as it loads. In-memory
- *  buffers hold single monoliths only, since a manifest's relative paths have nothing to resolve
- *  against in memory. A cancelled or failed save leaves a file without its header, which every
- *  reader rejects, and a cancelled or failed load creates no handle.
+ *  Checkpoints ride the SafeGraphs interchange format, and the shard count picks the layout. A
+ *  handle holding one shard writes one monolith at the path: a self-describing file holding its
+ *  vectors, neighbor lists and keys. A handle holding several writes a manifest at the path, a
+ *  small JSON catalog of one monolith per shard named @c <stem>-00001-of-0000S.safegraphs beside
+ *  it, each with its shard's own node IDs, so neighbors never cross files. Only compaction merges
+ *  graphs. Loading reads the content, never the extension, and opens one shard per part: part @c p
+ *  lands whole on shard @c p, beside any placed shards the parts leave empty, and the shards past
+ *  the placed ones open over the call's memory domains or devices in turn. A manifest records where
+ *  its parts were written, never where a reader must keep them, so a checkpoint written from a
+ *  mounted bucket lands across a handle's own memory domains as it loads. An in-memory buffer of
+ *  several shards leads with the same manifest, listing each part by its offset inside the buffer.
+ *  A cancelled or failed save leaves a file without its header, which every reader rejects, and a
+ *  cancelled or failed load creates no handle.
  *
  *  A file is read through a memory mapping, so a path and a buffer are the same bytes reached two
  *  ways. Loading copies them into the handle's own shards; viewing serves the mapping itself, so a
@@ -346,7 +347,8 @@ typedef struct usearch_dense_load_ram_t {
     /** The manifest of a sharded checkpoint, or a single @c .safegraphs monolith. */
     usearch_bytes_view_t path;
 
-    /** The memory domains to place the parts on, part @c p landing on shard @c p modulo their count. */
+    /** The memory domains to place the parts on, part @c p landing on shard @c p, those past the
+     *  named domains opened over them in turn. */
     usearch_ram_options_t ram;
 
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
@@ -366,9 +368,9 @@ typedef struct usearch_dense_load_ram_t {
  *  over a hundred files is opened by naming a single one. Naming a part directly is legal and
  *  loads exactly that part as a monolith, which is a fragment of the index rather than the index.
  *
- *  Where the parts end up is the call's own memory domains, never the manifest's: part @c p
- *  lands whole on shard @c p modulo the shard count, so a checkpoint written from a mounted bucket
- *  and loaded naming four domains places its parts across those four as it reads.
+ *  Where the parts end up is the call's own memory domains, never the manifest's: part @c p lands
+ *  whole on shard @c p, and shards past the placed ones open over those domains in turn, so a
+ *  checkpoint of eight parts loaded naming four domains places two parts on each.
  *
  *  A cancelled or failed load reports its status and creates no handle.
  */
@@ -392,8 +394,8 @@ typedef struct usearch_dense_load_vram_t {
     /** The manifest of a sharded checkpoint, or a single @c .safegraphs monolith. */
     usearch_bytes_view_t path;
 
-    /** The devices to place the parts on, part @c p landing on device @c p modulo their count, in
-     *  a shard of its own. */
+    /** The devices to place the parts on, part @c p landing on shard @c p, those past the named
+     *  devices opened over them in turn. */
     usearch_vram_options_t vram;
 
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
@@ -422,10 +424,10 @@ typedef struct usearch_dense_load_ram_buffer_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Source holding one serialized monolith. */
+    /** Source holding one serialized monolith, or the manifest of several parts leading them. */
     usearch_bytes_view_t buffer;
 
-    /** The memory domains to place shards on; the monolith lands whole on the first. */
+    /** The memory domains to place shards on; part @c p lands whole on shard @c p. */
     usearch_ram_options_t ram;
 
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
@@ -436,7 +438,7 @@ typedef struct usearch_dense_load_ram_buffer_t {
 } usearch_dense_load_ram_buffer_t;
 
 /**
- *  @brief Copies a monolith from a memory buffer into a new, mutable index in host memory.
+ *  @brief Copies a checkpoint from a memory buffer into a new, mutable index in host memory.
  *
  *  This reports and cancels like its path-taking sibling and creates no handle when stopped. That
  *  sibling reaches the same bytes through a mapping, so @c buffer needs no file behind it and a
@@ -459,11 +461,12 @@ typedef struct usearch_dense_load_vram_buffer_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Source holding one serialized monolith, in host or device memory; a device one is copied
-     *  to the host first, so the call holds twice its bytes while it runs. */
+    /** Source holding one serialized monolith, or the manifest of several parts leading them, in
+     *  host or device memory; a device one is copied to the host first, so the call holds twice
+     *  its bytes while it runs. */
     usearch_bytes_view_t buffer;
 
-    /** The devices to place shards on; the monolith lands whole on the first. */
+    /** The devices to place shards on; part @c p lands whole on shard @c p. */
     usearch_vram_options_t vram;
 
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
@@ -473,7 +476,7 @@ typedef struct usearch_dense_load_vram_buffer_t {
     usearch_progress_t progress;
 } usearch_dense_load_vram_buffer_t;
 
-/** Copies a monolith from a memory buffer into a new, mutable index in device memory, reporting
+/** Copies a checkpoint from a memory buffer into a new, mutable index in device memory, reporting
  *  and cancelling like @c usearch_dense_load_ram_buffer. */
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments);
 
@@ -1494,7 +1497,7 @@ typedef struct usearch_dense_save_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Destination path, whose extension picks the layout. */
+    /** Destination path: the monolith of a lone shard, or the manifest beside the parts of many. */
     usearch_bytes_view_t path;
 
     /** The @b optional handler, called with shards written. */
@@ -1502,7 +1505,7 @@ typedef struct usearch_dense_save_t {
 } usearch_dense_save_t;
 
 /**
- *  @brief Saves a mutable index under @c path in the layout its extension picks - one monolith,
+ *  @brief Saves a mutable index under @c path in the layout its shard count picks - one monolith,
  *      or a manifest beside its shards; concurrent readers keep searching throughout.
  *      @ref dense_index_serialization
  *  @retval usearch_status_contended_k A RAM save meeting an insertion in flight or one publishing
@@ -1530,7 +1533,7 @@ typedef struct usearch_dense_save_buffer_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Output for the monolith's bytes and length, inside @c arena. */
+    /** Output for the checkpoint's bytes and length, inside @c arena. */
     usearch_bytes_view_t* monolith;
 
     /** Memory for @c monolith, rewound by the call. */
@@ -1541,15 +1544,17 @@ typedef struct usearch_dense_save_buffer_t {
 } usearch_dense_save_buffer_t;
 
 /**
- *  @brief Saves a mutable index into @c arena as one monolith. @ref dense_index_serialization
+ *  @brief Saves a mutable index into @c arena: one monolith for a handle of one shard, or a
+ *      manifest leading one part per shard. @ref dense_index_serialization
  *
- *  The monolith holds every shard - rows in placement order, node IDs rebased - so it reads as one
- *  graph and loads into any shard count. It is the same shape the path-taking sibling writes into
- *  its own mapping, so the two produce identical bytes. A caller who needs the bytes in memory it
- *  already owns, such as a mapped file, saves to a path instead. A VRAM handle's monolith lands in
- *  device memory, written on the host first, so the call holds twice its bytes while it runs.
+ *  A lone shard's monolith is the same bytes the path-taking sibling writes into its own mapping.
+ *  Several shards write the manifest first, listing each part by its offset inside the buffer,
+ *  then every part on the header's alignment, each with its shard's own node IDs, so a load opens
+ *  one shard per part again. A caller who needs the bytes in memory it already owns, such as a
+ *  mapped file, saves to a path instead. A VRAM handle's checkpoint lands in device memory,
+ *  written on the host first, so the call holds twice its bytes while it runs.
  *
- *  Writing to memory is not writing quickly. A terabyte monolith on a handful of cores runs for
+ *  Writing to memory is not writing quickly. A terabyte checkpoint on a handful of cores runs for
  *  minutes, so this reports and cancels like its path-taking sibling, and a cancelled call leaves
  *  @c monolith->data @c NULL.
  */
@@ -1618,14 +1623,14 @@ typedef struct usearch_dense_metadata_read_buffer_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Source holding one serialized monolith. */
+    /** Source holding one serialized monolith, or the manifest of several parts leading them. */
     usearch_bytes_view_t buffer;
 
-    /** Output for every field the monolith froze. */
+    /** Output for every field the checkpoint froze. */
     usearch_dense_metadata_t* metadata;
 } usearch_dense_metadata_read_buffer_t;
 
-/** Reads geometry & metric from a serialized monolith buffer. */
+/** Reads geometry & metric from a serialized checkpoint buffer. */
 USEARCH_EXPORT void usearch_dense_metadata_read_buffer(usearch_dense_metadata_read_buffer_t* arguments);
 
 /** A live index's state. Each counter is read once, so under concurrent insertions they may come
@@ -1644,8 +1649,17 @@ typedef struct usearch_dense_index_description_t {
     /** Bytes the handle holds; traversal scratch is the executor's. */
     size_t memory_usage;
 
-    /** Static codename of the kernels the index dispatched to on this machine. */
-    char const* capabilities;
+    /** The CPU class whose kits the index dispatched to on RAM and NVMe;
+     *  @c usearch_cpu_class_unknown_k on VRAM. */
+    usearch_cpu_class_t cpu_class;
+
+    /** The GPU class whose kernels the index dispatched to on VRAM; @c usearch_gpu_class_unknown_k
+     *  on RAM and NVMe. */
+    usearch_gpu_class_t gpu_class;
+
+    /** Live shards, each a graph of its own; a fresh index has one per memory domain or device it
+     *  was placed on. */
+    size_t shards_count;
 } usearch_dense_index_description_t;
 
 /** The arguments of @c usearch_dense_describe. */

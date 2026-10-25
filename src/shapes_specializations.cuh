@@ -14,9 +14,11 @@
 #include <cstring> // `std::memcpy` - a view's points exported as saved
 
 #include <array>       // `std::array` - the one cloud a query packs, the checkpoint's recorded fields
-#include <memory>      // `std::allocator_traits` - a query's packs on a thread's arena
+#include <memory>      // `std::allocator_traits` - a query's packs on a thread's arena, a GPU shard's face
+#include <new>         // `std::nothrow` - a GPU shard built on its device
 #include <span>        // `std::span` - a cloud's coordinates
 #include <string_view> // `std::string_view` - tokens and paths
+#include <variant>     // `std::monostate` - nothing a freeze reads past the geometry
 
 #include "usearch/shapes/ram_index.hpp"
 #if USEARCH_ARCH_CUDA_
@@ -27,26 +29,6 @@
 
 #pragma region Shapes Variants
 
-/** The checkpoint token of one shapes kind, spelled as NumKong spells its kernels. */
-inline std::string_view token_of(usearch_shapes_metric_t metric) noexcept {
-    switch (metric) {
-    case usearch_shapes_metric_chamfer_k: return "chamfer";
-    case usearch_shapes_metric_hausdorff_k: return "hausdorff";
-    case usearch_shapes_metric_gromov_wasserstein_k: return "gromov_wasserstein";
-    case usearch_shapes_metric_wasserstein_procrustes_k: return "wasserstein_procrustes";
-    default: return {};
-    }
-}
-
-/** The shapes kind a checkpoint token names, or @c unknown_k. */
-inline usearch_shapes_metric_t shapes_metric_of(std::string_view token) noexcept {
-    for (usearch_shapes_metric_t metric :
-         {usearch_shapes_metric_chamfer_k, usearch_shapes_metric_hausdorff_k,
-          usearch_shapes_metric_gromov_wasserstein_k, usearch_shapes_metric_wasserstein_procrustes_k})
-        if (token == token_of(metric)) return metric;
-    return usearch_shapes_metric_unknown_k;
-}
-
 /** The NumKong kernel one shapes kind scores with. */
 constexpr nk_kernel_kind_t kernel_of(usearch_shapes_metric_t metric) noexcept {
     switch (metric) {
@@ -56,21 +38,6 @@ constexpr nk_kernel_kind_t kernel_of(usearch_shapes_metric_t metric) noexcept {
     default: return nk_kernel_chamfers_packed_k;
     }
 }
-
-/** The kind, scalar, point count and connectivity a shapes handle freezes, as an init or a
- *  checkpoint states them; every variant holds one. */
-struct shapes_geometry_t {
-    usearch_shapes_metric_t metric = usearch_shapes_metric_unknown_k;
-
-    /** The scalar every point is stored in. */
-    usearch_scalar_t quantization = usearch_scalar_unknown_k;
-
-    /** The frozen point count, or zero for any count. */
-    std::size_t points = 0;
-
-    /** Neighbors per node the insertions select; zero until frozen, which takes the default. */
-    std::size_t connectivity = 0;
-};
 
 /** A factory of @p metric_type_ under @p metric over a thread's arena, sized for a round of
  *  candidates. */
@@ -83,18 +50,20 @@ auto shapes_metric_factory(usearch_shapes_metric_t metric) noexcept {
     };
 }
 
-/** One shapes alternative: the basic index over packs of @p scalar_type_, the kind it scores with,
- *  and the kits @p cpu_class_ picks; verbs defined below the class, like the sequence ones. */
+/** One shapes alternative: the basic shards over packs of @p scalar_type_, the kind they score
+ *  with, and the kits @p cpu_class_ picks; verbs defined below the class, like the sequence ones.
+ *  Checkpoints and refinements serve an index of one shard. */
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 struct shapes_ram_variant {
     using executor_t = forkunion_executor_t;
     using scalar_t = scalar_type_;
     using kit_t = typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_class_)>::kit_t;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
-    using index_t = us::shapes::ram_index<kit_t, us::utilities::uuid_t, waiter_of<cpu_class_>,
+    using shard_t = us::shapes::ram_index<kit_t, us::utilities::uuid_t, waiter_of<cpu_class_>,
                                           atomic_ref_for_cpu_class<cpu_class_>::template type, forkunion_allocator_t,
                                           cache_hints_t>;
-    using value_t = typename index_t::value_t;
+    using index_t = basic::ram_indexes<shard_t>;
+    using value_t = typename shard_t::value_t;
     using codec_t = us::shapes::codec<kit_t>;
     using metric_t = us::shapes::shapes_metric<kit_t, thread_allocator_t>;
     using refine_plan_t = typename index_t::refine_plan_t;
@@ -127,11 +96,17 @@ struct shapes_ram_variant {
     expected<traversal_telemetry_t> search(usearch_shapes_search_t const& arguments, matches_landing_t& landing,
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
 
-    /** Opens a refinement once @p donors land, its walks as wide as @p expansion or twice the
-     *  connectivity, as an insertion's. */
-    expected<refine_plan_t> plan_refine(std::span<index_t*> donors, std::size_t expansion) noexcept {
-        typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
+    /** Opens a refinement that first moves every shard of each of @p donors into this index, then
+     *  re-links across, its walks as wide as @p expansion or twice the connectivity. */
+    expected<refine_plan_t> plan_absorb(std::span<index_t*> donors, std::size_t expansion) noexcept {
+        typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
         return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion});
+    }
+
+    /** Opens a refinement of every live shard in place, its walks as wide as @p expansion. */
+    expected<refine_plan_t> plan_refine(std::size_t expansion) noexcept {
+        typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
+        return index.plan_refine(planning, basic::keep_diverse_t {geometry.connectivity}, {expansion});
     }
     status_t refine(refine_plan_t& plan, progress_ticks_t& ticks, executor_t& executor) noexcept;
 
@@ -229,7 +204,7 @@ expected<traversal_telemetry_t> shapes_ram_variant<scalar_type_, cpu_class_>::se
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 status_t shapes_ram_variant<scalar_type_, cpu_class_>::refine(refine_plan_t& plan, progress_ticks_t& ticks,
                                                               executor_t& executor) noexcept {
-    auto [scratch, prepare_status] = prepare_refinement<index_t>(
+    auto [scratch, prepare_status] = prepare_refinement<shard_t>(
         plan, geometry.connectivity, shapes_metric_factory<metric_t>(geometry.metric), executor);
     if (failed(prepare_status)) return prepare_status;
     return drive_refinement(plan, scratch, basic::keep_diverse_t {geometry.connectivity}, ticks, executor);
@@ -252,9 +227,10 @@ status_t shapes_ram_variant<scalar_type_, cpu_class_>::export_points(value_t con
     return us::shapes::status_of(kit_t::cast(unpacked.data(), dtype_k, output, dtype, elements, nullptr));
 }
 
-template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
-status_t shapes_ram_variant<scalar_type_, cpu_class_>::save(std::string_view path, executor_t& executor,
-                                                            progress_ticks_t& ticks) noexcept {
+/** Hands @p write, as `write(config) → status_t`, the save configuration recording what @p geometry
+ *  froze, the connectivity and the point count, as every residency's checkpoint records them. */
+template <typename write_type_>
+status_t with_shapes_provenance(shapes_geometry_t const& geometry, write_type_&& write) noexcept {
     std::array<char, 24> connectivity_text, points_text;
     std::array<safegraphs_custom_field_t, 2> const fields {{
         {"connectivity", decimal_of(geometry.connectivity, connectivity_text)},
@@ -262,18 +238,25 @@ status_t shapes_ram_variant<scalar_type_, cpu_class_>::save(std::string_view pat
     }};
     save_config_t config;
     config.provenance = fields;
-    return safegraphs_write_index(path, index, codec_t {}, executor, config, token_of(geometry.metric), ticks);
+    return write(config);
+}
+
+template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
+status_t shapes_ram_variant<scalar_type_, cpu_class_>::save(std::string_view path, executor_t& executor,
+                                                            progress_ticks_t& ticks) noexcept {
+    return with_shapes_provenance(geometry, [&](save_config_t const& config) noexcept {
+        return index.save(path, codec_t {}, executor, config, token_of(geometry.metric), ticks);
+    });
 }
 
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 status_t shapes_ram_variant<scalar_type_, cpu_class_>::load(std::string_view path, executor_t& executor,
                                                             progress_ticks_t& ticks) noexcept {
-    if (status_t const loaded = safegraphs_read_index(path, index, codec_t {}, executor, load_config_t {}, ticks);
-        failed(loaded))
+    if (status_t const loaded = index.load(path, codec_t {}, executor, load_config_t {}, ticks); failed(loaded))
         return loaded;
-    std::size_t const nodes = index.size();
-    for (std::size_t node = 0; node != nodes; ++node)
-        total_points += index.published_value_of(static_cast<typename index_t::node_id_t>(node)).max_points();
+    for (shard_t const& one : index.live_shards())
+        for (std::size_t node = 0; node != one.size(); ++node)
+            total_points += one.published_value_of(static_cast<typename shard_t::node_id_t>(node)).max_points();
     return status_t::success_k;
 }
 
@@ -288,8 +271,8 @@ struct shapes_nvme_variant {
     using kit_t = typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_class_)>::kit_t;
     using codec_t = us::shapes::codec<kit_t>;
     using metric_t = us::shapes::shapes_metric<kit_t, thread_allocator_t>;
-    using index_t = basic::nvme_index<codec_t, us::utilities::uuid_t, u32_t, typename kit_t::distance_t,
-                                      default_io_engine_t, row_kit_of<cpu_class_>>;
+    using index_t = basic::nvme_indexes<codec_t, us::utilities::uuid_t, u32_t, typename kit_t::distance_t,
+                                        default_io_engine_t, row_kit_of<cpu_class_>>;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
 
@@ -371,33 +354,51 @@ extern template struct us::shapes::vram_nvidia_index<nk::f16_t, u32_t,
                                                      numkong_capabilities_of(gpu_class_t::nvidia_blackwell_k),
                                                      shapes_nvidia_fatbin<gpu_class_t::nvidia_blackwell_k, nk_f16_k>>;
 
-/** The shapes alternative on one NVIDIA GPU of @p gpu_class_ or newer: the basic VRAM index over
+/** Builds one shard of the shapes face over packs of @p scalar_type_ for @p gpu_class_ on a CUDA
+ *  device, scoring under the kernel the variant's frozen geometry names. */
+template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+struct shapes_vram_nvidia_build {
+    using face_t = us::shapes::vram_nvidia_index<scalar_type_, u32_t, numkong_capabilities_of(gpu_class_),
+                                                 shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>;
+
+    /** The kernel every shard scores under. */
+    nk_kernel_kind_t kernel = nk_kernel_unknown_k;
+
+    std::unique_ptr<face_t> operator()(int device) const noexcept {
+        return std::unique_ptr<face_t> {new (std::nothrow)
+                                            face_t(kernel, cuda_virtual_memory_allocator<byte_t> {device})};
+    }
+};
+
+/** The shapes alternative on NVIDIA GPUs of @p gpu_class_ or newer: the basic VRAM shards over
  *  packs of @p scalar_type_, scoring Chamfer or Hausdorff as the geometry names, with 32-bit node
  *  IDs. A batch packs its clouds on the host end to end through the serial kit, as the RAM variants
  *  pack them. */
 template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
-struct shapes_vram_nvidia_variant
-    : vram_nvidia_variant<us::shapes::vram_nvidia_index<scalar_type_, u32_t, numkong_capabilities_of(gpu_class_),
-                                                        shapes_nvidia_fatbin<gpu_class_, scalar_type_::dtype()>>> {
+struct shapes_vram_nvidia_variant {
+    using executor_t = cuda_executor_t;
+    using build_t = shapes_vram_nvidia_build<scalar_type_, gpu_class_>;
+    using face_t = typename build_t::face_t;
+    using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid_t, build_t>;
+    using refine_plan_t = vram_nvidia_refine_plan_t;
     using scalar_t = scalar_type_;
     using pack_kit_t = typename us::shapes::shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
     static constexpr gpu_class_t gpu_class_k = gpu_class_;
 
-    /** Places the index on CUDA device @p device, scoring under the kernel @p frozen names. */
-    shapes_vram_nvidia_variant(int device, shapes_geometry_t const& frozen) noexcept
-        : shapes_vram_nvidia_variant::vram_nvidia_variant(device, frozen.metric == usearch_shapes_metric_hausdorff_k
-                                                                      ? nk_kernel_hausdorffs_packed_k
-                                                                      : nk_kernel_chamfers_packed_k) {}
+    index_t index;
+
+    /** Holds no shard until the handle places them, each scoring under the kernel @p frozen
+     *  names. */
+    shapes_vram_nvidia_variant(int, shapes_geometry_t const& frozen) noexcept
+        : index(forkunion_allocator_t {no_memory_domain_k},
+                build_t {frozen.metric == usearch_shapes_metric_hausdorff_k ? nk_kernel_hausdorffs_packed_k
+                                                                            : nk_kernel_chamfers_packed_k}) {}
 
     shapes_geometry_t geometry;
 
     /** Points across every stored entry, added to by insertions through @c atomic_ref. */
     std::size_t total_points = 0;
-
-    /** The host pages a batch packs its clouds into, rewound per batch while its plan holds the
-     *  index's claim, so no other batch touches them. */
-    growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
 
     /** Reserves the entries and points @p arguments name, a pack taking a header and a partial
      *  alignment line per axis past its points. */
@@ -408,7 +409,7 @@ struct shapes_vram_nvidia_variant
         std::size_t const pack_overhead = header + 3 * nk_default_alignment_k;
         std::size_t const bytes = arguments.entries * pack_overhead +
                                   arguments.points * 3 * sizeof(typename scalar_type_::raw_t);
-        return this->reserve_(arguments.entries, geometry.connectivity, bytes);
+        return vram_nvidia_reserve(index, arguments.entries, geometry.connectivity, bytes);
     }
 
     expected<traversal_telemetry_t> insert(usearch_shapes_insert_t const& arguments, progress_ticks_t& ticks,
@@ -420,7 +421,33 @@ struct shapes_vram_nvidia_variant
                                            growing_arena<forkunion_allocator_t>& pages, matches_landing_t& landing,
                                            progress_ticks_t& ticks, cuda_executor_t& executor) noexcept;
 
+    /** Writes the clouds as the RAM variants write them: a lone live shard's monolith, or one per
+     *  live shard beside the manifest the path names. */
+    status_t save(std::string_view path, cuda_executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Reads a checkpoint any residency wrote into the placed shards, one part per shard. */
+    status_t load(std::string_view path, cuda_executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Empties the index and its point count, retiring every shard behind a fresh shard generation
+     *  on the same devices. */
+    status_t clear() noexcept {
+        status_t const cleared = index.clear();
+        if (succeeded(cleared)) standard_atomic_ref<std::size_t>(total_points).store(0, std::memory_order_relaxed);
+        return cleared;
+    }
+
+    /** The refinements, which no GPU variant opens yet, each answering @c unsupported_k. */
+    expected<refine_plan_t> plan_absorb(std::span<index_t*>, std::size_t) noexcept {
+        return {{}, status_t::unsupported_k};
+    }
+    expected<refine_plan_t> plan_refine(std::size_t) noexcept { return {{}, status_t::unsupported_k}; }
+    status_t refine(refine_plan_t&, progress_ticks_t&, executor_t&) noexcept { return status_t::unsupported_k; }
+    status_t sample(usearch_shapes_sample_t const&) noexcept { return status_t::unsupported_k; }
+
   private:
+
+    /** The wire format every residency's checkpoints share: each cloud's points, unpacked. */
+    using codec_t = us::shapes::codec<pack_kit_t>;
 
     /** The @p count clouds of @p tape packed end to end on @p pages, cast to the stored scalar
      *  where the caller's differs; refuses a count other than a frozen one. */
@@ -474,17 +501,38 @@ expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, gpu_cla
     usearch_shapes_insert_t const& arguments, progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
     usearch_tape_view_t const& shapes = arguments.shapes;
     std::size_t const count = arguments.count;
-    auto [plan, plan_status] = this->index.plan_insert(count);
-    if (failed(plan_status)) return {{}, plan_status};
-    staging.clear();
+    // The batch's own pages, since batches routed to disjoint shards may land at once.
+    growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
     auto const [packs, pack_status] = pack_(shapes, count, staging);
     if (failed(pack_status)) return {{}, pack_status};
-    expected<traversal_telemetry_t> const landed = this->insert_(arguments.keys, packs, plan, geometry.connectivity,
-                                                                 arguments.expansion_factor, ticks, executor);
+    expected<traversal_telemetry_t> const landed = vram_nvidia_insert(
+        index, arguments.keys, packs, geometry.connectivity, arguments.expansion_factor, ticks, executor);
     if (failed(landed.status)) return landed;
     standard_atomic_ref<std::size_t>(total_points)
         .fetch_add(shapes.offsets[count] - shapes.offsets[0], std::memory_order_relaxed);
     return landed;
+}
+
+template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+status_t shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::save(std::string_view path, cuda_executor_t& executor,
+                                                                    progress_ticks_t& ticks) noexcept {
+    return with_shapes_provenance(geometry, [&](save_config_t const& config) noexcept {
+        return vram_nvidia_save(index, path, codec_t {}, config, token_of(geometry.metric), executor, ticks);
+    });
+}
+
+template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
+status_t shapes_vram_nvidia_variant<scalar_type_, gpu_class_>::load(std::string_view path, cuda_executor_t& executor,
+                                                                    progress_ticks_t& ticks) noexcept {
+    if (status_t const loaded = index.load(path, codec_t {}, executor, load_config_t {},
+                                           static_cast<connectivity_t>(geometry.connectivity), ticks);
+        failed(loaded))
+        return loaded;
+    // The value columns hold three scalars per point, summed over every part.
+    auto const [metadata, status] = safegraphs_read_index_metadata(path);
+    if (failed(status)) return status;
+    total_points += metadata.value_bytes / (3 * sizeof(typename scalar_type_::raw_t));
+    return status_t::success_k;
 }
 
 template <nk::shapes_dtype scalar_type_, gpu_class_t gpu_class_>
@@ -493,9 +541,119 @@ expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, gpu_cla
     progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
     auto const [queries, pack_status] = pack_(arguments.queries, arguments.count, pages);
     if (failed(pack_status)) return {{}, pack_status};
-    return this->search_(queries, arguments.wanted, arguments.expansion_factor, landing, ticks, executor);
+    return vram_nvidia_search(index, queries, arguments.wanted, arguments.expansion_factor, landing, ticks, executor);
 }
 
 #endif
 
 #pragma endregion Shapes Variants
+
+#pragma region Shapes Bodies
+
+/** The shapes variants each class unit compiles: one per CPU class and stored scalar on the host
+ *  and on storage, and one per stored scalar a GPU class's kits serve. */
+template <auto class_>
+struct shapes_variants_of<dense_home_t::ram_k, class_> {
+    using type = type_list<shapes_ram_variant<nk::f32_t, class_>, shapes_ram_variant<nk::f16_t, class_>>;
+};
+template <auto class_>
+struct shapes_variants_of<dense_home_t::nvme_k, class_> {
+    using type = type_list<shapes_nvme_variant<nk::f32_t, class_>, shapes_nvme_variant<nk::f16_t, class_>>;
+};
+#if USEARCH_ARCH_CUDA_
+template <>
+struct shapes_variants_of<dense_home_t::vram_nvidia_k, gpu_class_t::nvidia_blackwell_k> {
+    using type = type_list<shapes_vram_nvidia_variant<nk::f16_t, gpu_class_t::nvidia_blackwell_k>>;
+};
+template <>
+struct shapes_variants_of<dense_home_t::vram_nvidia_k, gpu_class_t::nvidia_ampere_k> {
+    using type = type_list<shapes_vram_nvidia_variant<nk::f32_t, gpu_class_t::nvidia_ampere_k>,
+                           shapes_vram_nvidia_variant<nk::f16_t, gpu_class_t::nvidia_ampere_k>>;
+};
+#endif
+
+/** What the shapes verbs do to one variant: describe it, and export and tally its clouds. */
+template <>
+struct variant_bodies<shapes_traits_t> {
+    using geometry_t = shapes_geometry_t;
+
+    /** What a view keeps of a cloud it read: its points as saved, in its thread's arena. */
+    using kept_t = bytes_view_t;
+
+    /** Whether @p donor lands in @p variant: the same kind, scalar, point count and
+     *  connectivity. */
+    template <typename variant_type_, typename donor_type_>
+    static bool matches(variant_type_ const& variant, donor_type_ const& donor) noexcept {
+        geometry_t const &index = variant.geometry, &other = donor.geometry;
+        return index.metric == other.metric && index.quantization == other.quantization &&
+               index.points == other.points && index.connectivity == other.connectivity;
+    }
+
+    /** Copies @p geometry into @p variant, a zero connectivity taking the default. */
+    template <typename variant_type_>
+    static bool freeze(variant_type_& variant, geometry_t& geometry, std::monostate, usearch_outcome_t*) noexcept {
+        if (!geometry.connectivity) geometry.connectivity = connectivity_32_k;
+        variant.geometry = geometry;
+        return true;
+    }
+
+    template <typename variant_type_>
+    static void describe(variant_type_ const& variant, usearch_shapes_index_description_t& description) noexcept {
+        description.metadata = shapes_traits_t::metadata_of(variant.geometry);
+        description.total_points =
+            standard_atomic_ref<std::size_t const>(variant.total_points).load(std::memory_order_relaxed);
+    }
+
+    template <typename variant_type_>
+    static bool accepts(variant_type_ const&, usearch_shapes_search_t const& arguments,
+                        usearch_outcome_t* outcome) noexcept {
+        return accepts_shapes(arguments.queries, arguments.count, outcome);
+    }
+
+    template <typename cloud_type_>
+    static status_t keep(nvme_executor_t& executor, std::size_t thread, cloud_type_ const& cloud,
+                         kept_t& kept) noexcept {
+        return keep_row(executor, thread, bytes_of(cloud.data(), cloud.extent(0) * 3), kept);
+    }
+
+    /** Lands @p count clouds, the @c i th as @p value_at hands it, as points in the scalar the call
+     *  asks for in @p memory, their offsets counting points; a variant's own values are packs,
+     *  which unpack through @p memory too where the scalar is not the stored one. */
+    template <typename variant_type_, typename value_at_type_, typename arguments_type_>
+    static bool land(variant_type_ const& variant, std::size_t count, value_at_type_&& value_at,
+                     growing_arena<forkunion_allocator_t>& memory, arguments_type_ const& arguments,
+                     usearch_outcome_t* outcome) noexcept {
+        nk_dtype_t const exported = nk_dtype_of(arguments.outputs_scalar);
+        std::size_t const element_bytes = nk_dtype_bits(exported) / 8;
+        std::size_t* const offsets = carve<std::size_t>(memory, count + 1);
+        if (!offsets) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+        offsets[0] = 0;
+        for (std::size_t entry = 0; entry != count; ++entry)
+            offsets[entry + 1] = offsets[entry] + variant.points_of(value_at(entry));
+        byte_t* const points = carve<byte_t>(memory, offsets[count] * 3 * element_bytes);
+        if (offsets[count] && !points)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+        thread_allocator_t const scratch {memory};
+        for (std::size_t entry = 0; entry != count; ++entry) {
+            byte_t* const output = points + offsets[entry] * 3 * element_bytes;
+            if (status_t const exported_status = variant.export_points(value_at(entry), exported, output, scratch);
+                failed(exported_status))
+                return propagate_error(exported_status, outcome);
+        }
+        *arguments.shapes = {points, offsets, arguments.outputs_scalar};
+        return true;
+    }
+
+    /** Adds one entry's points to a key's statistics, from any thread: a variant's packs count
+     *  their points, and a view's clouds hold a row per point. */
+    template <typename cloud_type_>
+    static void tally(usearch_shapes_key_stats_t& stats, cloud_type_ const& cloud) noexcept {
+        std::size_t points = 0;
+        if constexpr (requires { cloud.max_points(); }) points = cloud.max_points();
+        else points = cloud.extent(0);
+        standard_atomic_ref<std::size_t>(stats.total_points).fetch_add(points, std::memory_order_relaxed);
+        raise_to(stats.largest_points, points);
+    }
+};
+
+#pragma endregion Shapes Bodies

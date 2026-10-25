@@ -688,9 +688,13 @@ typedef struct usearch_ram_options_t {
     /** Number of entries in @c memory_domains; zero derives. */
     size_t memory_domains_count;
 
-    /** Rows one shard may hold before the index opens another generation of shards on the same
+    /** Entries one shard may hold before the index opens another shard generation on the same
      *  domains; zero, or anything past the 32-bit ID space, means 2^32 - 2. */
     size_t shard_capacity;
+
+    /** The class to dispatch as if the CPU were of it, admitting every rung whose features it
+     *  holds; @c usearch_cpu_class_unknown_k derives the CPU's own. */
+    usearch_cpu_class_t cpu_class;
 } usearch_ram_options_t;
 
 /**
@@ -719,10 +723,14 @@ typedef struct usearch_vram_options_t {
     /** Number of entries in @c devices; zero derives. */
     size_t devices_count;
 
-    /** Rows one shard may hold before the index opens another generation of shards on the same
+    /** Entries one shard may hold before the index opens another shard generation on the same
      *  devices, while their memory lasts; zero, or anything past the 32-bit ID space, means
      *  2^32 - 2. */
     size_t shard_capacity;
+
+    /** The class to dispatch as if every named device were of it, admitting only a class the
+     *  devices run; @c usearch_gpu_class_unknown_k derives the devices' own. */
+    usearch_gpu_class_t gpu_class;
 } usearch_vram_options_t;
 
 /**
@@ -752,6 +760,10 @@ typedef struct usearch_nvme_options_t {
 
     /** Number of entries in @c paths; zero derives. */
     size_t paths_count;
+
+    /** The class to dispatch as if the CPU were of it, admitting every rung whose features it
+     *  holds; @c usearch_cpu_class_unknown_k derives the CPU's own. */
+    usearch_cpu_class_t cpu_class;
 } usearch_nvme_options_t;
 
 /** Whether a filtered search admits one candidate key or passes over it. */
@@ -807,7 +819,7 @@ typedef enum usearch_continuation_t {
 
 /**
  *  @brief Periodic report of a long operation's advance, and the caller's chance to stop it.
- *      Counts are in whatever units the verb consumes - rows for an insertion, queries for a
+ *      Counts are in whatever units the verb consumes - entries for an insertion, queries for a
  *      search, shards for a checkpoint - so one handler serves every one of them.
  *
  *  Never invoked concurrently, however many threads perform the work, so the handler needs no
@@ -1037,6 +1049,33 @@ typedef struct usearch_gpu_devices_t {
  */
 USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments);
 
+/** The I/O engines USearch drives external memory through, newest first; an executor pinned to
+ *  one tries it and degrades down the ladder the media admit. */
+typedef enum usearch_nvme_class_t {
+
+    /** Derives the newest engine the host and the media admit: io_uring, then Linux AIO, then
+     *  blocking reads on kernel paths, and SPDK on transport identifiers. */
+    usearch_nvme_class_unknown_k = 0,
+
+    /** @c pread or @c ReadFile on the calling thread. */
+    usearch_nvme_class_posix_k,
+
+    /** Linux AIO over @c io_submit and @c io_getevents, with @c O_DIRECT. */
+    usearch_nvme_class_linux_aio_k,
+
+    /** io_uring reads on files and block devices. */
+    usearch_nvme_class_linux_uring_k,
+
+    /** io_uring NVMe passthrough on namespace character devices, such as @c /dev/ng0n1. */
+    usearch_nvme_class_linux_uring_passthrough_k,
+
+    /** The SPDK user-space driver, over namespaces named by transport identifiers. */
+    usearch_nvme_class_linux_spdk_k,
+
+    /** I/O Rings, on Windows 11 22H2 and newer. */
+    usearch_nvme_class_windows_ioring_k,
+} usearch_nvme_class_t;
+
 /** The arguments of @c usearch_executor_for_nvme. */
 typedef struct usearch_executor_for_nvme_t {
 
@@ -1054,6 +1093,11 @@ typedef struct usearch_executor_for_nvme_t {
 
     /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
     size_t deferred_limit;
+
+    /** The newest I/O engine every ring may submit through, which degrades down the ladder where
+     *  its setup is refused; @c usearch_nvme_class_unknown_k derives it. Passthrough and SPDK open
+     *  only when pinned, as they need character devices or transport identifiers. */
+    usearch_nvme_class_t nvme_class;
 } usearch_executor_for_nvme_t;
 
 /**
@@ -1219,6 +1263,9 @@ USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class)
 
 /** The canonical spelling of a GPU class, as the dispatch ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class);
+
+/** The canonical spelling of an NVMe class, as the I/O engine ladder names its rungs. */
+USEARCH_EXPORT char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class);
 
 /**
  *  @brief Reports the version of the library this process linked, which may differ from the

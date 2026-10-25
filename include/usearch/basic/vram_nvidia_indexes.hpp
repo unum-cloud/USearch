@@ -46,15 +46,18 @@ namespace unum::usearch::basic {
  *  @tparam key_type_ The caller-visible identity, opaque to every shard.
  *  @tparam build_type_ Builds one unreserved shard, configured as every other, on a device:
  *      `build(device) → std::unique_ptr<index_type_>`, null when the allocation fails.
+ *  @tparam landed_score_type_ The scores a shard's search lands on the host before the merge, the
+ *      shard's own distance unless a modality's search lands another.
  *  @tparam wait_type_ What a reader spanning the shards waits through while a commit is in flight.
  *  @tparam key_hash_type_ The locator map's hash of a key.
  */
-template <                                         //
-    typename index_type_,                          //
-    typename key_type_,                            //
-    typename build_type_,                          //
-    typename wait_type_ = dummy_waiter_t,          //
-    typename key_hash_type_ = std::hash<key_type_> //
+template <                                                          //
+    typename index_type_,                                           //
+    typename key_type_,                                             //
+    typename build_type_,                                           //
+    typename landed_score_type_ = typename index_type_::distance_t, //
+    typename wait_type_ = dummy_waiter_t,                           //
+    typename key_hash_type_ = std::hash<key_type_>                  //
     >
     requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
 struct vram_nvidia_indexes {
@@ -83,7 +86,7 @@ struct vram_nvidia_indexes {
     using executor_t = cuda_executor_t;
 
   private:
-    using fanout_t = utilities::vram_shard_fanout<shards_t, cuda_vendor_t>;
+    using fanout_t = utilities::vram_shard_fanout<shards_t, cuda_vendor_t, landed_score_type_>;
     using traversals_t = typename fanout_t::traversals_t;
     using shard_insert_plan_t = typename index_t::insert_plan_t;
 
@@ -502,29 +505,50 @@ struct vram_nvidia_indexes {
      *  @param[inout] executor The streams and their scratch, claimed for the call.
      *  @param[in] config The walks' breadth; the matches per query are as many as @p keys is wide.
      *  @param[out] keys One row of merged keys per query.
-     *  @param[out] distances The same rankings' distances.
+     *  @param[out] distances The same rankings' distances, in any type a distance converts to.
      *  @param[out] counts The matches each query's row holds.
      */
+    template <typename score_type_>
     expected<search_result_t> search(tape_view<byte_t const> queries, executor_t& executor, search_config_t config,
-                                     nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
+                                     nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                      std::span<std::size_t> counts) noexcept {
-        std::size_t const queries_count = queries.size();
-        if (status_t const refused = fanout_t::refusal(shards_, executor, queries_count, keys, distances, counts);
+        config.count = static_cast<small_size_t>(keys.extent(1));
+        auto search_shard = [&](index_t& shard, nk::matrix_span<node_id_t> ids, nk::matrix_span<distance_t> scores,
+                                std::span<std::size_t>, traversal_context_t& traversal, std::size_t visible) noexcept {
+            return shard.graph_.search_below_(queries, ids, scores, traversal, config, visible).status;
+        };
+        return search_every_shard(queries.size(), executor, search_shard, keys, distances, counts, queries, config);
+    }
+
+    /**
+     *  @brief Ranks @p queries_count queries on every live shard through @p search_shard, a
+     *      modality's own search, and merges the shards' rankings by score into @p keys,
+     *      @p scores and @p counts, as many matches per query as @p keys is wide.
+     *
+     *  @p search_shard is called as `search_shard(index, node_ids, scores, counts, traversal,
+     *  visible) → status_t` on each shard holding visible rows, landing its rows' matches in the
+     *  host landing in @p landed_score_type_ scores; a row ends at its count or at its first
+     *  sentinel ID. One snapshot bounds every shard's walk, so the merged rankings see each batch
+     *  on every shard or on none, and @p usage, the arguments of a shard's
+     *  @c traversal_memory_usage, sizes every context.
+     */
+    template <typename search_shard_type_, typename score_type_, typename... usage_types_>
+    expected<search_result_t> search_every_shard(std::size_t queries_count, executor_t& executor,
+                                                 search_shard_type_&& search_shard, nk::matrix_span<key_t> keys,
+                                                 nk::matrix_span<score_type_> scores, std::span<std::size_t> counts,
+                                                 usage_types_ const&... usage) noexcept {
+        if (status_t const refused = fanout_t::refusal(shards_, executor, queries_count, keys, scores, counts);
             failed(refused))
             return {{}, refused};
         for (std::size_t& count : counts) count = 0;
         if (!queries_count || !keys.extent(1)) return {{}, status_t::success_k};
-        config.count = static_cast<small_size_t>(keys.extent(1));
-
-        // One snapshot bounds every shard's walk, so the merged rankings see each batch on every
-        // shard or on none; a shard generation opened since takes no part.
         fanout_t fanout {shards_, executor};
-        if (status_t const begun = fanout.begin(queries, config); failed(begun)) return {{}, begun};
-        auto search_shard = [&](std::size_t shard, nk::matrix_span<node_id_t> ids, nk::matrix_span<distance_t> scores,
-                                traversal_context_t& traversal, std::size_t visible) noexcept {
-            return shards_[shard].index->graph_.search_below_(queries, ids, scores, traversal, config, visible).status;
+        if (status_t const begun = fanout.begin(usage...); failed(begun)) return {{}, begun};
+        auto search_one = [&](std::size_t shard, auto ids, auto shard_scores, std::span<std::size_t> shard_counts,
+                              traversal_context_t& traversal, std::size_t visible) noexcept {
+            return search_shard(*shards_[shard].index, ids, shard_scores, shard_counts, traversal, visible);
         };
-        return fanout.search_every_shard(queries_count, config.count, search_shard, keys, distances, counts);
+        return fanout.search_every_shard(queries_count, keys.extent(1), search_one, keys, scores, counts);
     }
 
     /** Entries under @p key across every shard. */
@@ -535,55 +559,6 @@ struct vram_nvidia_indexes {
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
         shards_.locators().find_each(
             key, [&](key_locator_t locator) noexcept { callback(*shards_[locator.shard].index, locator.node); });
-    }
-
-    /** One shard's matches as a judge lands them on the host: @c wanted node IDs and distances per
-     *  query, row by row, and how many of each row hold matches. */
-    struct landing_span_t {
-        std::span<node_id_t> ids;
-        std::span<f64_t> distances;
-        std::span<std::size_t> counts;
-        std::size_t wanted = 0;
-    };
-
-    /**
-     *  @brief Ranks the queries of a modality's own search on every live shard in turn through
-     *      @p judge, and merges the shards' rankings by distance into @p keys and @p distances, row
-     *      by row, @p staging.wanted wide.
-     *
-     *  @p judge is called as `judge(shard, staging) → expected<traversal_telemetry_t>` per live
-     *  shard holding rows, landing that shard's matches in @p staging, the caller's host buffers,
-     *  which this call merges before the next shard reuses them; a refusal stops at its shard.
-     *
-     *  @param[in] staging One shard's landing, as wide as the rows this call fills.
-     *  @param[out] keys The merged rankings' keys, @c staging.wanted per query.
-     *  @param[out] distances The same rankings' distances, ascending per query.
-     *  @param[out] counts The matches each query's row holds.
-     */
-    template <typename judge_type_>
-    expected<traversal_telemetry_t> search_shards(landing_span_t staging, std::span<key_t> keys,
-                                                  std::span<f64_t> distances, std::span<std::size_t> counts,
-                                                  judge_type_&& judge) noexcept {
-        using entry_t = scored_node<node_id_t, f64_t>;
-        std::size_t const wanted = staging.wanted;
-        for (std::size_t& count : counts) count = 0;
-        traversal_telemetry_t total;
-        std::size_t const first = shards_.retired_shards(), shards = shards_.size();
-        for (std::size_t position = first; position != shards; ++position) {
-            shard_t& one = shards_[position];
-            if (!one.index->size()) continue;
-            auto const [walked, status] = judge(*one.index, staging);
-            if (failed(status)) return {total, status};
-            total += walked;
-            for (std::size_t row = 0; row != counts.size(); ++row)
-                for (std::size_t match = 0; match != staging.counts[row]; ++match) {
-                    entry_t const entry {staging.ids[row * wanted + match], staging.distances[row * wanted + match]};
-                    counts[row] = merge_search_results(std::span<entry_t const> {&entry, 1}, one.keys,
-                                                       keys.subspan(row * wanted, wanted),
-                                                       distances.subspan(row * wanted, wanted), counts[row]);
-                }
-        }
-        return {total, status_t::success_k};
     }
 
 #pragma endregion Search and Lookups

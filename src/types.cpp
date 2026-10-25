@@ -234,4 +234,16 @@ USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class)
     }
 }
 
+USEARCH_EXPORT char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class) {
+    switch (nvme_class) {
+    case usearch_nvme_class_posix_k: return "posix";
+    case usearch_nvme_class_linux_aio_k: return "linux-aio";
+    case usearch_nvme_class_linux_uring_k: return "linux-uring";
+    case usearch_nvme_class_linux_uring_passthrough_k: return "linux-uring-passthrough";
+    case usearch_nvme_class_linux_spdk_k: return "linux-spdk";
+    case usearch_nvme_class_windows_ioring_k: return "windows-ioring";
+    default: return "unknown";
+    }
+}
+
 } // extern "C"

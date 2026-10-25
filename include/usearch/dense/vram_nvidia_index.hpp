@@ -1471,7 +1471,7 @@ struct vram_nvidia_index {
     friend struct vram_nvidia_indexes;
     template <typename, typename, typename, typename, template <typename> class, typename>
     friend struct utilities::shard_set;
-    template <typename, typename>
+    template <typename, typename, typename>
     friend struct utilities::vram_shard_fanout;
     template <typename, typename>
     friend struct vram_nvidia_compact_plan;

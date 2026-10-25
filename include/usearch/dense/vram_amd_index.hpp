@@ -1130,7 +1130,7 @@ struct vram_amd_index {
     friend struct vram_amd_indexes;
     template <typename, typename, typename, typename, template <typename> class, typename>
     friend struct utilities::shard_set;
-    template <typename, typename>
+    template <typename, typename, typename>
     friend struct utilities::vram_shard_fanout;
     template <typename, typename>
     friend struct vram_amd_compact_plan;

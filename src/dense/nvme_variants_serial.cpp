@@ -2,38 +2,9 @@
  *  @file src/dense/nvme_variants_serial.cpp
  *  @author Ash Vardanian
  *  @date October 11, 2026
- *  @brief The serial NVMe unit: every cell's storage walk at the portable floor.
+ *  @brief The serial NVMe unit: every variant's storage walk at the portable floor.
  */
+
 #include "dense_specializations.cuh"
 
-template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::serial_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::serial_k>>;
-#endif
+template struct dense_class_tables<dense_home_t::nvme_k, cpu_class_t::serial_k>;

@@ -229,6 +229,7 @@ An index lives in RAM, VRAM or on NVMe, and every lifecycle verb names its actio
 The options name where an index lives, never who walks it.
 `usearch_ram_options_t` names NUMA nodes, one shard per node, so a dual-socket box gets two graphs whose walks stay local; payload blocks claim huge pages where a pool is provisioned.
 `usearch_vram_options_t` names device ordinals, one shard per device and never a replica, so an index outgrowing them fails rather than paging to the host.
+Both take a `shard_capacity`, the entries one shard may hold, zero meaning the 32-bit ID space: an insertion past it opens another generation of shards on the same nodes or devices, and only the newest generation takes insertions.
 `usearch_nvme_options_t` names paths: a filesystem path selects a kernel I/O engine, a transport identifier like `trtype:PCIe traddr:0000:5e:00.0` selects SPDK in a `-D USEARCH_BUILD_SPDK=1` build, and a FUSE mount over a bucket reads as an ordinary path.
 
 Memory follows residency: an index keeps its payload where its lifecycle verb put it, an executor keeps its scratch next to its threads or devices, and an arena lives where the executor that created it computes.
@@ -631,8 +632,8 @@ One call reports an index's frozen geometry and its current counters:
 usearch_dense_index_description_t description = {0};
 usearch_dense_describe(&(usearch_dense_describe_t) {
     .index = index, .executor = executor, .outcome = &outcome, .description = &description});
-printf("%zu of %zu entries, %zu bytes, %zu dimensions, kernels: %s\n", description.size, description.capacity,
-       description.memory_usage, description.metadata.dimensions, description.capabilities);
+printf("%zu of %zu entries, %zu bytes, %zu dimensions, class: %s\n", description.size, description.capacity,
+       description.memory_usage, description.metadata.dimensions, usearch_cpu_class_name(description.cpu_class));
 ```
 
 `usearch_dense_count` reports how many entries a key holds, as when a long document is split into chunks.
@@ -645,7 +646,7 @@ usearch_dense_health(&(usearch_dense_health_t) {
 // `reachability.reachable` of `reachability.audited` entries are found by some search
 ```
 
-`usearch_capabilities_compiled` and `usearch_capabilities_available` name the SIMD and GPU capabilities the library was built with and the machine offers, and `description.capabilities` names the kernels an index dispatched to.
+`usearch_capabilities_compiled` and `usearch_capabilities_available` name the SIMD and GPU capabilities the library was built with and the machine offers, and `description.cpu_class` or `description.gpu_class` names the class an index dispatched to, which `usearch_cpu_class_name` and `usearch_gpu_class_name` spell.
 `usearch_version` reports the linked library's version, which may differ from the `USEARCH_VERSION_MAJOR` family of macros the caller compiled against.
 
 ## Sequence Indexes

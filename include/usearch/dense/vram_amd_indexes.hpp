@@ -129,7 +129,7 @@ struct vram_amd_indexes {
         shard_set<index_t, device_shard_keys_t, key_t, key_hash_type_, fu::standard_atomic_ref, wait_type_>;
 
     /** One batched read's fan-out over every shard's device. */
-    using fanout_t = utilities::vram_shard_fanout<shards_t, hip_vendor_t>;
+    using fanout_t = utilities::vram_shard_fanout<shards_t, hip_vendor_t, typename index_t::distance_t>;
     using key_locator_t = typename shards_t::key_locator_t;
     using shard_t = typename shards_t::shard_t;
     using shard_generation_t = typename shards_t::shard_generation_t;
@@ -2094,7 +2094,7 @@ struct vram_amd_indexes {
             if (found.status != status_t::deferred_k) return found;
         }
         auto search_shard = [&](std::size_t shard, nk::matrix_span<node_id_t> ids, nk::matrix_span<distance_t> scores,
-                                traversal_context_t& traversal, std::size_t visible) noexcept {
+                                std::span<std::size_t>, traversal_context_t& traversal, std::size_t visible) noexcept {
             return shards_[shard]
                 .index->submit_search_(queries, ids, scores, traversal, config, visible, heads...)
                 .status;

@@ -9,104 +9,15 @@
  *  beside them; HIP-Clang compiles every @c vram_kernels_amd_<dtype>.hip device-only into this
  *  class's.
  */
+
 #include "dense_specializations.cuh"
 #include "usearch/dense/vram_amd_index.hip"
 
-/** Each dtype's code object, linked in as raw bytes beside the variants. */
-extern "C" byte_t const dense_amd_cdna4_bf16_bundle_start[], dense_amd_cdna4_bf16_bundle_end[];
+/** The bounds of each dtype's code object, linked in as raw bytes beside the variants, in the table
+ *  CMake writes. */
+extern "C" byte_t const* const dense_amd_cdna4_bundles[];
 template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_bf16_k>::bytes() noexcept {
-    return {dense_amd_cdna4_bf16_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_bf16_bundle_end - dense_amd_cdna4_bf16_bundle_start)};
+std::span<byte_t const* const> bundle_bounds<gpu_class_t::amd_cdna4_k>() noexcept {
+    return {dense_amd_cdna4_bundles, 2 * dense_dtypes_t::size_k};
 }
-template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna4_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern "C" byte_t const dense_amd_cdna4_u1_bundle_start[], dense_amd_cdna4_u1_bundle_end[];
-template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_u1_k>::bytes() noexcept {
-    return {dense_amd_cdna4_u1_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_u1_bundle_end - dense_amd_cdna4_u1_bundle_start)};
-}
-template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern "C" byte_t const dense_amd_cdna4_i8_bundle_start[], dense_amd_cdna4_i8_bundle_end[];
-template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_i8_k>::bytes() noexcept {
-    return {dense_amd_cdna4_i8_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_i8_bundle_end - dense_amd_cdna4_i8_bundle_start)};
-}
-template struct specialized_index<vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern "C" byte_t const dense_amd_cdna4_e4m3_bundle_start[], dense_amd_cdna4_e4m3_bundle_end[];
-template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_e4m3_k>::bytes() noexcept {
-    return {dense_amd_cdna4_e4m3_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_e4m3_bundle_end - dense_amd_cdna4_e4m3_bundle_start)};
-}
-template struct specialized_index<vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern "C" byte_t const dense_amd_cdna4_f16_bundle_start[], dense_amd_cdna4_f16_bundle_end[];
-template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_f16_k>::bytes() noexcept {
-    return {dense_amd_cdna4_f16_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_f16_bundle_end - dense_amd_cdna4_f16_bundle_start)};
-}
-template struct specialized_index<vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern "C" byte_t const dense_amd_cdna4_u8_bundle_start[], dense_amd_cdna4_u8_bundle_end[];
-template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_u8_k>::bytes() noexcept {
-    return {dense_amd_cdna4_u8_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_u8_bundle_end - dense_amd_cdna4_u8_bundle_start)};
-}
-template struct specialized_index<vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern "C" byte_t const dense_amd_cdna4_e5m2_bundle_start[], dense_amd_cdna4_e5m2_bundle_end[];
-template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_e5m2_k>::bytes() noexcept {
-    return {dense_amd_cdna4_e5m2_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_e5m2_bundle_end - dense_amd_cdna4_e5m2_bundle_start)};
-}
-template struct specialized_index<vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern "C" byte_t const dense_amd_cdna4_i4_bundle_start[], dense_amd_cdna4_i4_bundle_end[];
-template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_i4_k>::bytes() noexcept {
-    return {dense_amd_cdna4_i4_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_i4_bundle_end - dense_amd_cdna4_i4_bundle_start)};
-}
-template struct specialized_index<vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern "C" byte_t const dense_amd_cdna4_u4_bundle_start[], dense_amd_cdna4_u4_bundle_end[];
-template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_u4_k>::bytes() noexcept {
-    return {dense_amd_cdna4_u4_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_u4_bundle_end - dense_amd_cdna4_u4_bundle_start)};
-}
-template struct specialized_index<vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern "C" byte_t const dense_amd_cdna4_e3m2_bundle_start[], dense_amd_cdna4_e3m2_bundle_end[];
-template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_e3m2_k>::bytes() noexcept {
-    return {dense_amd_cdna4_e3m2_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_e3m2_bundle_end - dense_amd_cdna4_e3m2_bundle_start)};
-}
-template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern "C" byte_t const dense_amd_cdna4_e2m3_bundle_start[], dense_amd_cdna4_e2m3_bundle_end[];
-template <>
-bytes_view_t hip_code_object<gpu_class_t::amd_cdna4_k, nk_e2m3_k>::bytes() noexcept {
-    return {dense_amd_cdna4_e2m3_bundle_start,
-            static_cast<std::size_t>(dense_amd_cdna4_e2m3_bundle_end - dense_amd_cdna4_e2m3_bundle_start)};
-}
-template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna4_k>>;
-#endif
+template struct dense_class_tables<dense_home_t::vram_amd_k, gpu_class_t::amd_cdna4_k>;

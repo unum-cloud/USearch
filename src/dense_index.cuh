@@ -2,22 +2,21 @@
  *  @file src/dense_index.cuh
  *  @author Ash Vardanian
  *  @date August 14, 2026
- *  @brief The dense modality's C surface: the variant grid over every compiled backend, the handle
- *      owning the chosen one, and every exported entry point as one visit apiece.
+ *  @brief The dense modality's C surface: the handle owning one picked variant through its home's
+ *      verb table, the ladders that pick it, and every exported entry point as one visit over five
+ *      homes apiece.
  *
- *  Compiled once, as @c dense_index.cpp by the host compiler, with @c USEARCH_ARCH_CUDA_,
- *  @c USEARCH_ARCH_ROCM_ and @c USEARCH_ARCH_METAL_ deciding which vendors' VRAM variants join the
- *  variant and @c USEARCH_DENSE_DTYPES how many storage dtypes every class contributes to it.
- *  Variants are ordered newest-capability-first inside each dtype cell, since a machine reporting
- *  Ice Lake also reports Haswell and Skylake; the serial floor is last and unconditional. The
- *  variants' bodies compile in the per-class units, never here.
+ *  Compiled once, as @c dense_index.cpp by the host compiler at the baseline, with
+ *  @c USEARCH_TARGET_<CLASS> naming the class units the build compiled. It includes no tower: each
+ *  class unit compiles its variants into home tables, and a ladder walks the classes newest first,
+ *  asking each one's table for the dtype, the serial floor last. The variants' bodies compile in
+ *  the class units, never here.
  */
 #pragma once
 
 #include <cassert> // `assert` - the CPU casts never refuse
 #include <cmath>   // `std::sqrt` - attention's default logit scale
-#include <cstdio>  // `std::snprintf` - composing the capability string
-#include <cstring> // `std::memcpy`, `std::memmove`, `std::strlen` - landing rows & the capability string
+#include <cstring> // `std::memcpy`, `std::memmove` - landing rows and device names
 
 #include <atomic>             // `std::atomic` - serializing the progress ticks
 #include <bit>                // `std::bit_cast` - the softmax carry crossing the ABI
@@ -28,7 +27,7 @@
 #include <new>                // `std::nothrow`
 #include <span>               // `std::span` - key batches crossing the ABI
 #include <string_view>        // `std::string_view` - checkpoint paths
-#include <type_traits>        // `std::is_same_v` - the variant-membership audit
+#include <type_traits>        // `std::is_same_v` - the placements' host allocator
 #include <utility>            // `std::exchange` - nulling each donor slot an absorb consumes
 #include <variant>            // `std::variant`, `std::visit`
 
@@ -37,2261 +36,69 @@
 #include <numkong/capabilities.h> // `nk_cpu_capabilities_enabled`, `nk_cpu_configure_thread`
 #include <numkong/cast.h>         // `nk_cast_best` - converting foreign scalar rows at the boundary
 
-#include "dense_specializations.cuh"
-#include "usearch/utilities/ram_device.hpp" // `forkunion_allocator`, `no_memory_domain_k` - the multi-indexes' host tables
+#include "dense_punned.cuh"
+#include "usearch/utilities/nvme_walks.hpp"  // `nvme_read_metadata` - an NVMe view's own header read
+#include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator`, `no_memory_domain_k` - the handles' host tables
 #include "usearch/utilities/vram_device.hpp" // `gpu_devices`, `gpu_executor_t`, `gpu_arena_t`
 
 #pragma region Multi Index
 
+/** The verb table of every home, one of which a handle holds. */
+using dense_home_tables_t =
+    std::variant<dense_verbs<dense_home_t::ram_k> const*, dense_verbs<dense_home_t::nvme_k> const*,
+                 dense_verbs<dense_home_t::vram_nvidia_k> const*, dense_verbs<dense_home_t::vram_amd_k> const*,
+                 dense_verbs<dense_home_t::vram_apple_k> const*>;
+
 /**
- *  @brief The one dynamically-typed dense index every binding consumes: a variant over the
- *      compiled multi-index alternatives, plus the geometry & capability metadata no shard
- *      answers.
+ *  @brief The one dynamically-typed dense index every binding consumes: the variant picked once at
+ *      construction, plus the geometry metadata no shard answers.
  *
- *  Variants exist per wired @c (dtype,capability) cell - those whose NumKong kernel kits are
- *  adapted - never the full cross product: an unwired cell would not compile, and advertising it
- *  would only move the failure from the build to the caller. Each variant keeps its metric as a
- *  runtime field, since only the distance epilogue reads it. The VRAM siblings join per GPU vendor
- *  the build carries, and the read-only NVMe siblings wherever a CPU class picks a kit of its own.
+ *  Variants exist per wired @c (dtype,class) pair whose kits a class unit compiles, never the full
+ *  cross product; each keeps its metric as a runtime field, since only the distance epilogue reads
+ *  it. The VRAM homes join per GPU vendor the build carries, and the read-only NVMe home wherever a
+ *  CPU class picks a kit of its own.
  */
 struct usearch_dense_index_handle_t {
 
-    using dense_variant_t = std::variant<
-#if USEARCH_TARGET_INTEL_HASWELL
-        // intel_haswell over serial by haswell: every dtype, 11 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        ram_indexes<nk_i4_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        ram_indexes<nk_u4_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#endif // USEARCH_TARGET_INTEL_HASWELL
-#if USEARCH_TARGET_INTEL_SIERRA
-#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-        // intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd:
-        // bf16 u1 e4m3 f16 e5m2 i4 u4 e3m2, 8 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::intel_sierra_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        ram_indexes<nk_i4_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        ram_indexes<nk_u4_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-    // intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd, alder, sierra:
-    // i8 u8 e2m3, 3 variants
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#endif // USEARCH_TARGET_INTEL_SIERRA
-#if USEARCH_TARGET_INTEL_SKYLAKE
-        // intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>, //
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::intel_skylake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::intel_skylake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::intel_skylake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>, //
-#endif
-#endif // USEARCH_TARGET_INTEL_SKYLAKE
-#if USEARCH_TARGET_INTEL_ICELAKE
-    // intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 variants
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::intel_icelake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::intel_icelake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        ram_indexes<nk_i4_k, cpu_class_t::intel_icelake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        ram_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>, //
-#endif
-#endif // USEARCH_TARGET_INTEL_ICELAKE
-#if USEARCH_TARGET_AMD_GENOA
-        // amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>, //
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>, //
-#endif
-#endif // USEARCH_TARGET_AMD_GENOA
-#if USEARCH_TARGET_INTEL_SAPPHIRE
-#if NUMKONG_TARGET_SAPPHIREAMX
-        // intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>, //
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#endif // NUMKONG_TARGET_SAPPHIREAMX
-#endif // USEARCH_TARGET_INTEL_SAPPHIRE
-#if USEARCH_TARGET_INTEL_GRANITE
-    // intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 variants
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::intel_granite_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>, //
-#endif
-#endif // USEARCH_TARGET_INTEL_GRANITE
-#if USEARCH_TARGET_INTEL_DIAMOND
-#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-        // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd:
-        // bf16 u1 f16 i4 u4 e3m2, 6 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::intel_diamond_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        ram_indexes<nk_i4_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        ram_indexes<nk_u4_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
-    // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, diamond: e4m3 e5m2, 2 variants
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
-#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-    // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, alder, sierra:
-    // i8 u8 e2m3, 3 variants
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER ||
-       // NUMKONG_TARGET_SIERRA
-#endif // USEARCH_TARGET_INTEL_DIAMOND
-#if USEARCH_TARGET_AWS_G2
-        // aws_g2 over serial by neon: bf16 u1 f16, 3 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::aws_g2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::aws_g2_k>, //
-#endif
-#endif // USEARCH_TARGET_AWS_G2
-#if USEARCH_TARGET_APPLE_M2
-#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONBFDOT
-        // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 1 variant
-        ram_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
-    // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonfhm: e4m3 f16 e5m2, 3 variants
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::apple_m2_k>, //
-#endif
-#endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
-#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
-    // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 variants
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        ram_indexes<nk_i4_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        ram_indexes<nk_u4_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::apple_m2_k>, //
-#endif
-#endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
-#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
-    // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc: u1, 1 variant
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::apple_m2_k>, //
-#endif
-#endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
-#endif // USEARCH_TARGET_APPLE_M2
-#if USEARCH_TARGET_APPLE_M4
-#if NUMKONG_TARGET_SME
-        // apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>, //
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        ram_indexes<nk_i4_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        ram_indexes<nk_u4_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::apple_m4_k>, //
-#endif
-#endif // NUMKONG_TARGET_SME
-#if NUMKONG_TARGET_SMEBI32
-    // apple_m4 over apple_m2 by smebi32: u1, 1 variant
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::apple_m4_k>, //
-#endif
-#endif // NUMKONG_TARGET_SMEBI32
-#endif // USEARCH_TARGET_APPLE_M4
-#if USEARCH_TARGET_AWS_G5
-        // aws_g5 over apple_m2 by arm64_wfet: every dtype, 11 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::aws_g5_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::aws_g5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::aws_g5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::aws_g5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::aws_g5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::aws_g5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::aws_g5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        ram_indexes<nk_i4_k, cpu_class_t::aws_g5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        ram_indexes<nk_u4_k, cpu_class_t::aws_g5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::aws_g5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::aws_g5_k>, //
-#endif
-#endif // USEARCH_TARGET_AWS_G5
-#if USEARCH_TARGET_NVIDIA_VERA
-    // nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 variants
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::nvidia_vera_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::nvidia_vera_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>, //
-#endif
-#endif // USEARCH_TARGET_NVIDIA_VERA
-#if USEARCH_TARGET_ALIBABA_C930
-#if FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
-        // alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 11 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::alibaba_c930_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::alibaba_c930_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::alibaba_c930_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::alibaba_c930_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::alibaba_c930_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::alibaba_c930_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::alibaba_c930_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        ram_indexes<nk_i4_k, cpu_class_t::alibaba_c930_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        ram_indexes<nk_u4_k, cpu_class_t::alibaba_c930_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::alibaba_c930_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::alibaba_c930_k>, //
-#endif
-#endif // FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
-#endif // USEARCH_TARGET_ALIBABA_C930
-#if USEARCH_TARGET_WASM32_V128
-        // wasm32_v128 over serial by v128: bf16 u1 i8 u8, 4 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::wasm32_v128_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::wasm32_v128_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::wasm32_v128_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::wasm32_v128_k>, //
-#endif
-#endif // USEARCH_TARGET_WASM32_V128
-#if USEARCH_TARGET_WASM64_EXTENDED
-        // wasm64_extended over wasm32_v128 by v128relaxed:
-        // bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants
-        ram_indexes<nk_bf16_k, cpu_class_t::wasm64_extended_k>, //
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::wasm64_extended_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::wasm64_extended_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::wasm64_extended_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::wasm64_extended_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::wasm64_extended_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        ram_indexes<nk_i4_k, cpu_class_t::wasm64_extended_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        ram_indexes<nk_u4_k, cpu_class_t::wasm64_extended_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::wasm64_extended_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::wasm64_extended_k>, //
-#endif
-#endif // USEARCH_TARGET_WASM64_EXTENDED
-#if USEARCH_TARGET_INTEL_HASWELL
-        // NVMe intel_haswell over serial by haswell: every dtype, 11 variants
-        nvme_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        nvme_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        nvme_indexes<nk_i8_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        nvme_indexes<nk_e4m3_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        nvme_indexes<nk_f16_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        nvme_indexes<nk_u8_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        nvme_indexes<nk_e5m2_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        nvme_indexes<nk_i4_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        nvme_indexes<nk_u4_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        nvme_indexes<nk_e3m2_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        nvme_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>, //
-#endif
-#endif // USEARCH_TARGET_INTEL_HASWELL
-#if USEARCH_TARGET_INTEL_SIERRA
-#if NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-    // NVMe intel_sierra over intel_haswell by alder, sierra: i8 u8 e2m3, 3 variants
-#if USEARCH_DENSE_DTYPES >= 3
-        nvme_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        nvme_indexes<nk_u8_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>, //
-#endif
-#endif // NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-#endif // USEARCH_TARGET_INTEL_SIERRA
-#if USEARCH_TARGET_INTEL_SKYLAKE
-        // NVMe intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3,
-        // 6 variants
-        nvme_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>, //
-#if USEARCH_DENSE_DTYPES >= 4
-        nvme_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        nvme_indexes<nk_f16_k, cpu_class_t::intel_skylake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        nvme_indexes<nk_e5m2_k, cpu_class_t::intel_skylake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        nvme_indexes<nk_e3m2_k, cpu_class_t::intel_skylake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        nvme_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>, //
-#endif
-#endif // USEARCH_TARGET_INTEL_SKYLAKE
-#if USEARCH_TARGET_INTEL_ICELAKE
-    // NVMe intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 variants
-#if USEARCH_DENSE_DTYPES >= 2
-        nvme_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        nvme_indexes<nk_i8_k, cpu_class_t::intel_icelake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        nvme_indexes<nk_u8_k, cpu_class_t::intel_icelake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        nvme_indexes<nk_i4_k, cpu_class_t::intel_icelake_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        nvme_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>, //
-#endif
-#endif // USEARCH_TARGET_INTEL_ICELAKE
-#if USEARCH_TARGET_AMD_GENOA
-        // NVMe amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 variants
-        nvme_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>, //
-#if USEARCH_DENSE_DTYPES >= 4
-        nvme_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        nvme_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>, //
-#endif
-#endif // USEARCH_TARGET_AMD_GENOA
-#if USEARCH_TARGET_INTEL_SAPPHIRE
-#if NUMKONG_TARGET_SAPPHIREAMX
-        // NVMe intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3,
-        // 7 variants
-        nvme_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>, //
-#if USEARCH_DENSE_DTYPES >= 3
-        nvme_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        nvme_indexes<nk_e4m3_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        nvme_indexes<nk_u8_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        nvme_indexes<nk_e5m2_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        nvme_indexes<nk_e3m2_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>, //
-#endif
-#endif // NUMKONG_TARGET_SAPPHIREAMX
-#endif // USEARCH_TARGET_INTEL_SAPPHIRE
-#if USEARCH_TARGET_INTEL_GRANITE
-    // NVMe intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 variants
-#if USEARCH_DENSE_DTYPES >= 5
-        nvme_indexes<nk_f16_k, cpu_class_t::intel_granite_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        nvme_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>, //
-#endif
-#endif // USEARCH_TARGET_INTEL_GRANITE
-#if USEARCH_TARGET_INTEL_DIAMOND
-#if NUMKONG_TARGET_DIAMOND
-    // NVMe intel_diamond over intel_granite by diamond: e4m3 e5m2, 2 variants
-#if USEARCH_DENSE_DTYPES >= 4
-        nvme_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        nvme_indexes<nk_e5m2_k, cpu_class_t::intel_diamond_k>, //
-#endif
-#endif // NUMKONG_TARGET_DIAMOND
-#endif // USEARCH_TARGET_INTEL_DIAMOND
-#if USEARCH_TARGET_AWS_G2
-        // NVMe aws_g2 over serial by neon: bf16 u1 f16, 3 variants
-        nvme_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        nvme_indexes<nk_u1_k, cpu_class_t::aws_g2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        nvme_indexes<nk_f16_k, cpu_class_t::aws_g2_k>, //
-#endif
-#endif // USEARCH_TARGET_AWS_G2
-#if USEARCH_TARGET_APPLE_M2
-#if NUMKONG_TARGET_NEONBFDOT
-        // NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 1 variant
-        nvme_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if NUMKONG_TARGET_NEONFHM
-    // NVMe apple_m2 over aws_g2 by neonfhm: e4m3 f16 e5m2, 3 variants
-#if USEARCH_DENSE_DTYPES >= 4
-        nvme_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        nvme_indexes<nk_f16_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        nvme_indexes<nk_e5m2_k, cpu_class_t::apple_m2_k>, //
-#endif
-#endif // NUMKONG_TARGET_NEONFHM
-#if NUMKONG_TARGET_NEONSDOT
-    // NVMe apple_m2 over aws_g2 by neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 variants
-#if USEARCH_DENSE_DTYPES >= 3
-        nvme_indexes<nk_i8_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        nvme_indexes<nk_u8_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        nvme_indexes<nk_i4_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        nvme_indexes<nk_u4_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        nvme_indexes<nk_e3m2_k, cpu_class_t::apple_m2_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        nvme_indexes<nk_e2m3_k, cpu_class_t::apple_m2_k>, //
-#endif
-#endif // NUMKONG_TARGET_NEONSDOT
-#endif // USEARCH_TARGET_APPLE_M2
-#if USEARCH_TARGET_APPLE_M4
-#if NUMKONG_TARGET_SME
-        // NVMe apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants
-        nvme_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>, //
-#if USEARCH_DENSE_DTYPES >= 3
-        nvme_indexes<nk_i8_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        nvme_indexes<nk_e4m3_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        nvme_indexes<nk_f16_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        nvme_indexes<nk_u8_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        nvme_indexes<nk_e5m2_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        nvme_indexes<nk_i4_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        nvme_indexes<nk_u4_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        nvme_indexes<nk_e3m2_k, cpu_class_t::apple_m4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        nvme_indexes<nk_e2m3_k, cpu_class_t::apple_m4_k>, //
-#endif
-#endif // NUMKONG_TARGET_SME
-#if NUMKONG_TARGET_SMEBI32
-    // NVMe apple_m4 over apple_m2 by smebi32: u1, 1 variant
-#if USEARCH_DENSE_DTYPES >= 2
-        nvme_indexes<nk_u1_k, cpu_class_t::apple_m4_k>, //
-#endif
-#endif // NUMKONG_TARGET_SMEBI32
-#endif // USEARCH_TARGET_APPLE_M4
-#if USEARCH_TARGET_NVIDIA_VERA
-    // NVMe nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 variants
-#if USEARCH_DENSE_DTYPES >= 4
-        nvme_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        nvme_indexes<nk_e5m2_k, cpu_class_t::nvidia_vera_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        nvme_indexes<nk_e3m2_k, cpu_class_t::nvidia_vera_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        nvme_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>, //
-#endif
-#endif // USEARCH_TARGET_NVIDIA_VERA
-#if USEARCH_TARGET_NVIDIA_BLACKWELLRTX
-        // nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 variants
-        vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
-#endif
-#endif // USEARCH_TARGET_NVIDIA_BLACKWELLRTX
-#if USEARCH_TARGET_NVIDIA_BLACKWELL
-        // nvidia_blackwell over nvidia_ampere by "100f": every cell, 11 variants
-        vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_blackwell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_blackwell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_blackwell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_blackwell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_blackwell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_blackwell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_blackwell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_blackwell_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>, //
-#endif
-#endif // USEARCH_TARGET_NVIDIA_BLACKWELL
-#if USEARCH_TARGET_NVIDIA_HOPPER
-        // nvidia_hopper over nvidia_ampere by "90a": every cell, 11 variants
-        vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_hopper_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_hopper_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_hopper_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_hopper_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_hopper_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_hopper_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_hopper_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>, //
-#endif
-#endif // USEARCH_TARGET_NVIDIA_HOPPER
-#if USEARCH_TARGET_NVIDIA_ADA
-        // nvidia_ada over nvidia_ampere by "89": every cell, 11 variants
-        vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ada_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ada_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_ada_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_ada_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_ada_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_ada_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_ada_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_ada_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_ada_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_ada_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ada_k>, //
-#endif
-#endif // USEARCH_TARGET_NVIDIA_ADA
-#if USEARCH_TARGET_NVIDIA_AMPERE
-        // nvidia_ampere, the floor by "80", its PTX serving every GPU without a class:
-        // every cell, 11 variants
-        vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ampere_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ampere_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_ampere_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_ampere_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_ampere_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_ampere_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_ampere_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>, //
-#endif
-#endif // USEARCH_TARGET_NVIDIA_AMPERE
-#if USEARCH_TARGET_AMD_CDNA5
-        // amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 variants
-        vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna5_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna5_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna5_k>, //
-#endif
-#endif // USEARCH_TARGET_AMD_CDNA5
-#if USEARCH_TARGET_AMD_CDNA4
-        // amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 variants
-        vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna4_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna4_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna4_k>, //
-#endif
+    /** The variant picked once at construction: its home's verb table, and the index it serves,
+     *  which only that table's entries cast back to their type. */
+    dense_home_tables_t tables;
+    void* index = nullptr;
 
-#endif // USEARCH_TARGET_AMD_CDNA4
-#if USEARCH_TARGET_AMD_CDNA3
-        // amd_cdna3, the AMD floor by "gfx942": every cell, 11 variants
-        vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna3_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna3_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna3_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna3_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna3_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna3_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna3_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna3_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna3_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna3_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna3_k>, //
-#endif
-#endif // USEARCH_TARGET_AMD_CDNA3
-#if USEARCH_TARGET_APPLE_METAL10
-        // apple_metal10 over apple_metal7 by apple10: every cell, 11 variants
-        vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal10_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal10_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal10_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal10_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal10_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal10_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal10_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal10_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal10_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal10_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal10_k>, //
-#endif
-#endif // USEARCH_TARGET_APPLE_METAL10
-#if USEARCH_TARGET_APPLE_METAL9
-        // apple_metal9 over apple_metal7 by apple9: every cell, 11 variants
-        vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal9_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#endif // USEARCH_TARGET_APPLE_METAL9
-#if USEARCH_TARGET_APPLE_METAL7
-        // apple_metal7, the Apple floor by metal: every cell, 11 variants
-        vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal7_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#endif // USEARCH_TARGET_APPLE_METAL7
-
-        // The NVMe serial floor: every wired cell, every platform.
-        nvme_indexes<nk_bf16_k, cpu_class_t::serial_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        nvme_indexes<nk_u1_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        nvme_indexes<nk_i8_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        nvme_indexes<nk_e4m3_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        nvme_indexes<nk_f16_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        nvme_indexes<nk_u8_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        nvme_indexes<nk_e5m2_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        nvme_indexes<nk_i4_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        nvme_indexes<nk_u4_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        nvme_indexes<nk_e3m2_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        nvme_indexes<nk_e2m3_k, cpu_class_t::serial_k>, //
-#endif
-    // The serial floor: every wired cell, every platform, the standard yield. The bf16 rung every
-    // build keeps closes the list, so no trailing comma ever depends on the ladder.
-#if USEARCH_DENSE_DTYPES >= 2
-        ram_indexes<nk_u1_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        ram_indexes<nk_i8_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        ram_indexes<nk_e4m3_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        ram_indexes<nk_f16_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        ram_indexes<nk_u8_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        ram_indexes<nk_e5m2_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        ram_indexes<nk_i4_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        ram_indexes<nk_u4_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        ram_indexes<nk_e3m2_k, cpu_class_t::serial_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        ram_indexes<nk_e2m3_k, cpu_class_t::serial_k>, //
-#endif
-        ram_indexes<nk_bf16_k, cpu_class_t::serial_k>>; //
-
-    /** The chosen backend - one alternative of the compiled grid, selected once at construction.
-     *  Residency, quantization and compute tier all live in the alternative's own type. */
-    dense_variant_t variant;
-
-    /** The dimensionality the init arguments requested, consumed by the first @c reserve; once any shard
-     *  froze real geometry, the variant answers and this stops mattering. */
+    /** The dimensionality the init arguments requested, consumed by the first @c reserve; once any
+     *  shard froze real geometry, the index answers and this stops mattering. */
     std::size_t requested_dimensions = 0;
 
-    /** The neighbors-per-node bound the init arguments requested, consumed like the dimensionality. */
+    /** The neighbors-per-node bound the init arguments requested, consumed like the
+     *  dimensionality. */
     connectivity_t requested_connectivity = connectivity_32_k;
 
-    /** The dispatched tiers, composed once at construction - @c usearch_dense_describe hands out
-     *  this buffer, so it must outlive every call. */
-    char capabilities_string[128] = {};
-
-    template <typename variant_type_, typename... arguments_types_>
-    explicit usearch_dense_index_handle_t(std::in_place_type_t<variant_type_> tag,
-                                          arguments_types_... arguments) noexcept
-        : variant(tag, arguments...) {}
+    usearch_dense_index_handle_t(dense_home_tables_t picked, void* created) noexcept : tables(picked), index(created) {}
+    usearch_dense_index_handle_t(usearch_dense_index_handle_t const&) = delete;
+    usearch_dense_index_handle_t& operator=(usearch_dense_index_handle_t const&) = delete;
+    ~usearch_dense_index_handle_t() noexcept {
+        std::visit([&](auto const* verbs) noexcept { verbs->destroy(index); }, tables);
+    }
 };
 
-/** The variants' explicit instantiation declarations: every body compiles in its class's unit, so
- *  this unit only visits. */
-#if USEARCH_TARGET_INTEL_HASWELL
-/* intel_haswell over serial by haswell: every dtype, 11 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#endif // USEARCH_TARGET_INTEL_HASWELL
-#if USEARCH_TARGET_INTEL_SIERRA
-#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-/* intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd:
- * bf16 u1 e4m3 f16 e5m2 i4 u4 e3m2, 8 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_sierra_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-/* intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd, alder, sierra:
- * i8 u8 e2m3, 3 variants */
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#endif // USEARCH_TARGET_INTEL_SIERRA
-#if USEARCH_TARGET_INTEL_SKYLAKE
-/* intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_skylake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_skylake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_skylake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>>;
-#endif
-#endif // USEARCH_TARGET_INTEL_SKYLAKE
-#if USEARCH_TARGET_INTEL_ICELAKE
-/* intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 variants */
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_icelake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel_icelake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::intel_icelake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>>;
-#endif
-#endif // USEARCH_TARGET_INTEL_ICELAKE
-#if USEARCH_TARGET_AMD_GENOA
-/* amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>>;
-#endif
-#endif // USEARCH_TARGET_AMD_GENOA
-#if USEARCH_TARGET_INTEL_SAPPHIRE
-#if NUMKONG_TARGET_SAPPHIREAMX
-/* intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#endif // NUMKONG_TARGET_SAPPHIREAMX
-#endif // USEARCH_TARGET_INTEL_SAPPHIRE
-#if USEARCH_TARGET_INTEL_GRANITE
-/* intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 variants */
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_granite_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>>;
-#endif
-#endif // USEARCH_TARGET_INTEL_GRANITE
-#if USEARCH_TARGET_INTEL_DIAMOND
-#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-/* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd: bf16 u1 f16 i4 u4 e3m2,
- * 6 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_diamond_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
-#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
-/* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, diamond: e4m3 e5m2, 2 variants */
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
-#if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-/* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, alder, sierra:
- * i8 u8 e2m3, 3 variants */
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER ||
-       // NUMKONG_TARGET_SIERRA
-#endif // USEARCH_TARGET_INTEL_DIAMOND
-#if USEARCH_TARGET_AWS_G2
-/* aws_g2 over serial by neon: bf16 u1 f16, 3 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::aws_g2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::aws_g2_k>>;
-#endif
-#endif // USEARCH_TARGET_AWS_G2
-#if USEARCH_TARGET_APPLE_M2
-#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONBFDOT
-/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 1 variant */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
-/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonfhm: e4m3 f16 e5m2, 3 variants */
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::apple_m2_k>>;
-#endif
-#endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
-#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
-/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 variants */
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::apple_m2_k>>;
-#endif
-#endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
-#if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
-/* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc: u1, 1 variant */
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::apple_m2_k>>;
-#endif
-#endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
-#endif // USEARCH_TARGET_APPLE_M2
-#if USEARCH_TARGET_APPLE_M4
-#if NUMKONG_TARGET_SME
-/* apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>>;
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::apple_m4_k>>;
-#endif
-#endif // NUMKONG_TARGET_SME
-#if NUMKONG_TARGET_SMEBI32
-/* apple_m4 over apple_m2 by smebi32: u1, 1 variant */
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::apple_m4_k>>;
-#endif
-#endif // NUMKONG_TARGET_SMEBI32
-#endif // USEARCH_TARGET_APPLE_M4
-#if USEARCH_TARGET_AWS_G5
-/* aws_g5 over apple_m2 by arm64_wfet: every dtype, 11 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::aws_g5_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::aws_g5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::aws_g5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::aws_g5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::aws_g5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::aws_g5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::aws_g5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::aws_g5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::aws_g5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::aws_g5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::aws_g5_k>>;
-#endif
-#endif // USEARCH_TARGET_AWS_G5
-#if USEARCH_TARGET_NVIDIA_VERA
-/* nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 variants */
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::nvidia_vera_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::nvidia_vera_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>>;
-#endif
-#endif // USEARCH_TARGET_NVIDIA_VERA
-#if USEARCH_TARGET_ALIBABA_C930
-#if FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
-/* alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 11 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::alibaba_c930_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::alibaba_c930_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::alibaba_c930_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::alibaba_c930_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::alibaba_c930_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::alibaba_c930_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::alibaba_c930_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::alibaba_c930_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::alibaba_c930_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::alibaba_c930_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::alibaba_c930_k>>;
-#endif
-#endif // FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
-#endif // USEARCH_TARGET_ALIBABA_C930
-#if USEARCH_TARGET_WASM32_V128
-/* wasm32_v128 over serial by v128: bf16 u1 i8 u8, 4 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::wasm32_v128_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::wasm32_v128_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::wasm32_v128_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::wasm32_v128_k>>;
-#endif
-#endif // USEARCH_TARGET_WASM32_V128
-#if USEARCH_TARGET_WASM64_EXTENDED
-/* wasm64_extended over wasm32_v128 by v128relaxed:
- * bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::wasm64_extended_k>>;
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::wasm64_extended_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::wasm64_extended_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::wasm64_extended_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::wasm64_extended_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::wasm64_extended_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::wasm64_extended_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::wasm64_extended_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::wasm64_extended_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::wasm64_extended_k>>;
-#endif
-#endif // USEARCH_TARGET_WASM64_EXTENDED
-#if USEARCH_TARGET_NVIDIA_BLACKWELLRTX
-/* nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 variants */
-extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
-#endif
-#endif // USEARCH_TARGET_NVIDIA_BLACKWELLRTX
-#if USEARCH_TARGET_NVIDIA_BLACKWELL
-/* nvidia_blackwell over nvidia_ampere by "100f": every cell, 11 variants */
-extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_blackwell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_blackwell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_blackwell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_blackwell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_blackwell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_blackwell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_blackwell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_blackwell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>>;
-#endif
-#endif // USEARCH_TARGET_NVIDIA_BLACKWELL
-#if USEARCH_TARGET_NVIDIA_HOPPER
-/* nvidia_hopper over nvidia_ampere by "90a": every cell, 11 variants */
-extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_hopper_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_hopper_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_hopper_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_hopper_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_hopper_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_hopper_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_hopper_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>>;
-#endif
-#endif // USEARCH_TARGET_NVIDIA_HOPPER
-#if USEARCH_TARGET_NVIDIA_ADA
-/* nvidia_ada over nvidia_ampere by "89": every cell, 11 variants */
-extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ada_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ada_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_ada_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_ada_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_ada_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_ada_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_ada_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_ada_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_ada_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_ada_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ada_k>>;
-#endif
-#endif // USEARCH_TARGET_NVIDIA_ADA
-#if USEARCH_TARGET_NVIDIA_AMPERE
-/* nvidia_ampere, the floor by "80", its PTX serving every GPU without a class:
- * every cell, 11 variants */
-extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ampere_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ampere_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_ampere_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_ampere_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_ampere_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_ampere_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_ampere_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>>;
-#endif
-#endif // USEARCH_TARGET_NVIDIA_AMPERE
-#if USEARCH_TARGET_AMD_CDNA5
-/* amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 variants */
-extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna5_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna5_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna5_k>>;
-#endif
-#endif // USEARCH_TARGET_AMD_CDNA5
-#if USEARCH_TARGET_AMD_CDNA4
-/* amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 variants */
-extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna4_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna4_k>>;
-#endif
-#endif // USEARCH_TARGET_AMD_CDNA4
-#if USEARCH_TARGET_AMD_CDNA3
-/* amd_cdna3, the AMD floor by "gfx942": every cell, 11 variants */
-extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna3_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna3_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna3_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna3_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna3_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna3_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna3_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna3_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna3_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna3_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna3_k>>;
-#endif
-#endif // USEARCH_TARGET_AMD_CDNA3
-#if USEARCH_TARGET_APPLE_METAL10
-/* apple_metal10 over apple_metal7 by apple10: every cell, 11 variants */
-extern template struct specialized_index<vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal10_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal10_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal10_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal10_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal10_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal10_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal10_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal10_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal10_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal10_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal10_k>>;
-#endif
-#endif // USEARCH_TARGET_APPLE_METAL10
-#if USEARCH_TARGET_APPLE_METAL9
-/* apple_metal9 over apple_metal7 by apple9: every cell, 11 variants */
-extern template struct specialized_index<vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal9_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#endif // USEARCH_TARGET_APPLE_METAL9
-#if USEARCH_TARGET_APPLE_METAL7
-/* apple_metal7, the Apple floor by metal: every cell, 11 variants */
-extern template struct specialized_index<vram_apple_indexes<nk_bf16_k, gpu_class_t::apple_metal7_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_apple_indexes<nk_u1_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_apple_indexes<nk_i8_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_apple_indexes<nk_e4m3_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_apple_indexes<nk_f16_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_apple_indexes<nk_u8_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_apple_indexes<nk_e5m2_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_apple_indexes<nk_i4_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_apple_indexes<nk_u4_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_apple_indexes<nk_e3m2_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_apple_indexes<nk_e2m3_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#endif // USEARCH_TARGET_APPLE_METAL7
-#if USEARCH_TARGET_INTEL_HASWELL
-/* NVMe intel_haswell over serial by haswell: every dtype, 11 variants */
-extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>>;
-#endif
-#endif // USEARCH_TARGET_INTEL_HASWELL
-#if USEARCH_TARGET_INTEL_SIERRA
-#if NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-/* NVMe intel_sierra over intel_haswell by alder, sierra: i8 u8 e2m3, 3 variants */
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>>;
-#endif
-#endif // NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
-#endif // USEARCH_TARGET_INTEL_SIERRA
-#if USEARCH_TARGET_INTEL_SKYLAKE
-/* NVMe intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 variants */
-extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::intel_skylake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_skylake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::intel_skylake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>>;
-#endif
-#endif // USEARCH_TARGET_INTEL_SKYLAKE
-#if USEARCH_TARGET_INTEL_ICELAKE
-/* NVMe intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 variants */
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_icelake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::intel_icelake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::intel_icelake_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>>;
-#endif
-#endif // USEARCH_TARGET_INTEL_ICELAKE
-#if USEARCH_TARGET_AMD_GENOA
-/* NVMe amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 variants */
-extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>>;
-#endif
-#endif // USEARCH_TARGET_AMD_GENOA
-#if USEARCH_TARGET_INTEL_SAPPHIRE
-#if NUMKONG_TARGET_SAPPHIREAMX
-/* NVMe intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 variants */
-extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#endif // NUMKONG_TARGET_SAPPHIREAMX
-#endif // USEARCH_TARGET_INTEL_SAPPHIRE
-#if USEARCH_TARGET_INTEL_GRANITE
-/* NVMe intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 variants */
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::intel_granite_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>>;
-#endif
-#endif // USEARCH_TARGET_INTEL_GRANITE
-#if USEARCH_TARGET_INTEL_DIAMOND
-#if NUMKONG_TARGET_DIAMOND
-/* NVMe intel_diamond over intel_granite by diamond: e4m3 e5m2, 2 variants */
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_diamond_k>>;
-#endif
-#endif // NUMKONG_TARGET_DIAMOND
-#endif // USEARCH_TARGET_INTEL_DIAMOND
-#if USEARCH_TARGET_AWS_G2
-/* NVMe aws_g2 over serial by neon: bf16 u1 f16, 3 variants */
-extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::aws_g2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::aws_g2_k>>;
-#endif
-#endif // USEARCH_TARGET_AWS_G2
-#if USEARCH_TARGET_APPLE_M2
-#if NUMKONG_TARGET_NEONBFDOT
-/* NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 1 variant */
-extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if NUMKONG_TARGET_NEONFHM
-/* NVMe apple_m2 over aws_g2 by neonfhm: e4m3 f16 e5m2, 3 variants */
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::apple_m2_k>>;
-#endif
-#endif // NUMKONG_TARGET_NEONFHM
-#if NUMKONG_TARGET_NEONSDOT
-/* NVMe apple_m2 over aws_g2 by neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 variants */
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::apple_m2_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::apple_m2_k>>;
-#endif
-#endif // NUMKONG_TARGET_NEONSDOT
-#endif // USEARCH_TARGET_APPLE_M2
-#if USEARCH_TARGET_APPLE_M4
-#if NUMKONG_TARGET_SME
-/* NVMe apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 variants */
-extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>>;
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::apple_m4_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::apple_m4_k>>;
-#endif
-#endif // NUMKONG_TARGET_SME
-#if NUMKONG_TARGET_SMEBI32
-/* NVMe apple_m4 over apple_m2 by smebi32: u1, 1 variant */
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::apple_m4_k>>;
-#endif
-#endif // NUMKONG_TARGET_SMEBI32
-#endif // USEARCH_TARGET_APPLE_M4
-#if USEARCH_TARGET_NVIDIA_VERA
-/* NVMe nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 variants */
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::nvidia_vera_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::nvidia_vera_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>>;
-#endif
-#endif // USEARCH_TARGET_NVIDIA_VERA
-/* The NVMe serial floor: every wired cell, every platform. */
-extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::serial_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::serial_k>>;
-#endif
-/* The serial floor: every wired cell, every platform, the standard yield. */
-extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::serial_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::serial_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::serial_k>>;
-#endif
+/** Applies @p visitor to the variant @p handle picked, as `visitor(punned_dense_index<home>)`. */
+template <typename visitor_type_>
+static void visit_punned(usearch_dense_index_handle_t const& handle, visitor_type_&& visitor) noexcept {
+    std::visit(
+        [&]<dense_home_t home_>(dense_verbs<home_> const* verbs) noexcept {
+            visitor(punned_dense_index<home_> {*verbs, handle.index});
+        },
+        handle.tables);
+}
+
+/** The variant of @p other when it shares the home table of @p punned, so both are one dtype, class
+ *  and residency; null otherwise. */
+template <dense_home_t home_>
+static void* same_punned_index(punned_dense_index<home_> const& punned,
+                               usearch_dense_index_handle_t const& other) noexcept {
+    dense_verbs<home_> const* const* const verbs = std::get_if<dense_verbs<home_> const*>(&other.tables);
+    return verbs && *verbs == &punned.verbs ? other.index : nullptr;
+}
 
 #pragma endregion Multi Index
 
@@ -2299,31 +106,18 @@ extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::ser
 
 /** Appends one RAM shard per named memory domain - or one per allocatable domain of a transient
  *  topology when the list is empty, so a bare init still spans the machine. */
-template <typename multi_type_>
-static status_t place_shards(multi_type_& variant, usearch_ram_options_t const& ram) noexcept {
-    specialized_index {variant}.bound_shards(ram.shard_capacity);
-    if (ram.memory_domains && ram.memory_domains_count) {
-        for (std::size_t position = 0; position != ram.memory_domains_count; ++position)
-            if (status_t const placed = specialized_index {variant}.emplace(
-                    static_cast<fu_memory_domain_id_t>(ram.memory_domains[position]));
-                failed(placed))
-                return placed;
-        return status_t::success_k;
-    }
-    fu_topology_t topology = nullptr;
-    if (fu_topology_new(&topology) != fu_success_k) return status_t::uninitialized_k;
-    std::size_t domains_count = 0;
-    status_t placed = status_t::uninitialized_k;
-    if (fu_memory_domains_count(topology, &domains_count) == fu_success_k && domains_count)
-        placed = status_t::success_k;
-    for (std::size_t position = 0; position != domains_count && succeeded(placed); ++position) {
-        fu_memory_domain_id_t domain = -1;
-        if (fu_memory_domain_id_at_index(topology, position, &domain) != fu_success_k)
-            placed = status_t::uninitialized_k;
-        else placed = specialized_index {variant}.emplace(domain);
-    }
-    fu_topology_delete(topology);
-    return placed;
+template <dense_home_t home_>
+static status_t place_shards(punned_dense_index<home_> const& punned, usearch_ram_options_t const& ram) noexcept {
+    punned.verbs.bound_shards(punned.index, ram.shard_capacity);
+    auto const emplace = [&](fu_memory_domain_id_t domain) noexcept {
+        return punned.verbs.emplace(punned.index, static_cast<int>(domain));
+    };
+    if (!ram.memory_domains || !ram.memory_domains_count) return emplace_on_every_domain(emplace);
+    for (std::size_t position = 0; position != ram.memory_domains_count; ++position)
+        if (status_t const placed = emplace(static_cast<fu_memory_domain_id_t>(ram.memory_domains[position]));
+            failed(placed))
+            return placed;
+    return status_t::success_k;
 }
 
 /** Where an NVMe view's parts come from: the checkpoint, and one device or directory per part when
@@ -2331,72 +125,35 @@ static status_t place_shards(multi_type_& variant, usearch_ram_options_t const& 
 struct nvme_placement_t {
     std::string_view path;
     std::span<std::string_view const> paths;
+
+    /** The class the view dispatches as, @c usearch_cpu_class_unknown_k for the CPU's own. */
+    usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
 };
 
 /** Opens every part of the checkpoint @p nvme names, served in place. */
-template <typename multi_type_>
-static status_t place_shards(multi_type_& variant, nvme_placement_t const& nvme) noexcept {
-    return specialized_index {variant}.view(nvme.path, nvme.paths);
-}
-
-/** Appends one comma-separated codename to the handle's capability string. */
-static void append_capability(usearch_dense_index_handle_t& handle, char const* name) noexcept {
-    std::size_t const used = std::strlen(handle.capabilities_string);
-    std::snprintf(handle.capabilities_string + used, sizeof(handle.capabilities_string) - used, "%s%s", used ? "," : "",
-                  name);
-}
-
-/** Fills the handle's capability string once, from the picked NumKong kit of a variant placed on
- *  the host or its storage. */
-template <typename multi_type_, typename placement_type_>
-static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_ const&,
-                                 placement_type_ const&) noexcept {
-    constexpr nk_capability_t picked = multi_type_::quads_kit_t::capability_k;
-    for (numkong_capability_name_t const& named : numkong_capability_names_k)
-        if (picked & named.bit) append_capability(handle, named.name);
-}
-
-/** Devices @p vram names, one when it names none. */
-static std::size_t named_count(usearch_vram_options_t const& vram) noexcept {
-    return vram.devices && vram.devices_count ? vram.devices_count : 1;
-}
-
-/** The USearch device ordinal shard @p shard of @p vram sits on - the named devices dealt
- *  round-robin, device zero when it names none. */
-static std::size_t named_ordinal(usearch_vram_options_t const& vram, std::size_t shard) noexcept {
-    return vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[shard % vram.devices_count]) : 0;
+template <dense_home_t home_>
+static status_t place_shards(punned_dense_index<home_> const& punned, nvme_placement_t const& nvme) noexcept {
+    return punned.verbs.view(punned.index, nvme.path, nvme.paths);
 }
 
 /** Appends one VRAM shard per named USearch device ordinal, on that device's vendor ordinal. */
-template <typename multi_type_>
-static status_t place_shards(multi_type_& variant, usearch_vram_options_t const& vram) noexcept {
-    specialized_index {variant}.bound_shards(vram.shard_capacity);
+template <dense_home_t home_>
+static status_t place_shards(punned_dense_index<home_> const& punned, usearch_vram_options_t const& vram) noexcept {
+    punned.verbs.bound_shards(punned.index, vram.shard_capacity);
     std::span<gpu_device_t const> const devices = gpu_devices();
     for (std::size_t shard = 0; shard != named_count(vram); ++shard) {
         std::size_t const ordinal = named_ordinal(vram, shard);
         if (ordinal >= devices.size()) return status_t::device_error_k;
-        if (status_t const placed = specialized_index {variant}.emplace(
-                static_cast<int>(devices[ordinal].vendor_ordinal));
+        if (status_t const placed = punned.verbs.emplace(punned.index,
+                                                         static_cast<int>(devices[ordinal].vendor_ordinal));
             failed(placed))
             return placed;
     }
     return status_t::success_k;
 }
 
-/** Fills the handle's capability string once, from the listed class of the device the first shard
- *  was placed on. */
-template <typename multi_type_>
-static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_ const&,
-                                 usearch_vram_options_t const& vram) noexcept {
-    std::span<gpu_device_t const> const devices = gpu_devices();
-    std::size_t const ordinal = named_ordinal(vram, 0);
-    if (ordinal >= devices.size()) return;
-    for (gpu_class_name_t const& named : gpu_class_names_k)
-        if (named.gpu_class == devices[ordinal].gpu_class) return append_capability(handle, named.name);
-}
-
-/** The host allocator a multi-index keeps its tables on: the first named memory domain on RAM,
- *  the heap's domain otherwise. */
+/** The host allocator a variant keeps its tables on: the first named memory domain on RAM, the
+ *  heap's domain otherwise. */
 template <typename placement_type_>
 static forkunion_allocator_t host_allocator_of(placement_type_ const& placement) noexcept {
     if constexpr (std::is_same_v<placement_type_, usearch_ram_options_t>)
@@ -2405,202 +162,102 @@ static forkunion_allocator_t host_allocator_of(placement_type_ const& placement)
     return forkunion_allocator_t {no_memory_domain_k};
 }
 
-/** Allocates the handle holding @p variant_type_, scoring under @p kernel, with its tables where
- *  @p placement names. */
-template <typename variant_type_, typename placement_type_>
-static usearch_dense_index_t new_dense_handle(placement_type_ const& placement, nk_kernel_kind_t kernel) noexcept {
-    return new (std::nothrow)
-        usearch_dense_index_handle_t(std::in_place_type<variant_type_>, kernel, host_allocator_of(placement));
-}
-
-/** Allocates the handle holding the RAM variant @p variant_type_, its shards streaming rows by this
- *  machine's cache line. */
-template <typename variant_type_>
-static usearch_dense_index_t new_dense_handle(usearch_ram_options_t const& placement,
-                                              nk_kernel_kind_t kernel) noexcept {
-    return new (std::nothrow) usearch_dense_index_handle_t(std::in_place_type<variant_type_>, kernel,
-                                                           host_allocator_of(placement), machine_cache_line_bytes());
-}
-
-/** Allocates the handle holding the NVMe view @p variant_type_, which takes its metric from the
- *  parts' headers. */
-template <typename variant_type_>
-static usearch_dense_index_t new_dense_handle(nvme_placement_t const& placement, nk_kernel_kind_t) noexcept {
-    return new (std::nothrow)
-        usearch_dense_index_handle_t(std::in_place_type<variant_type_>, host_allocator_of(placement));
-}
-
-/** Allocates the handle holding @p variant_type_ and places its shards. The constructors below
- *  finish @p outcome only on failure, since a load still has work to do on success. */
-template <typename variant_type_, typename placement_type_>
-static usearch_dense_index_t make_punned_dense_index(usearch_dense_metadata_t const& geometry,
-                                                     placement_type_ const& placement, nk_kernel_kind_t kernel,
-                                                     usearch_outcome_t* outcome) noexcept {
-    usearch_dense_index_t const handle = new_dense_handle<variant_type_>(placement, kernel);
-    if (!handle)
+/** Creates the index of the variant @p verbs, scoring under @p kernel, and places its shards where
+ *  @p placement names. The constructors below finish @p outcome only on failure, since a load still
+ *  has work to do on success. */
+template <dense_home_t home_, typename placement_type_>
+static usearch_dense_index_t make_dense_handle(usearch_dense_metadata_t const& geometry,
+                                               placement_type_ const& placement, dense_verbs<home_> const& verbs,
+                                               nk_kernel_kind_t kernel, usearch_outcome_t* outcome) noexcept {
+    void* const created = verbs.create(kernel, host_allocator_of(placement));
+    if (!created)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
+    usearch_dense_index_t const handle = new (std::nothrow) usearch_dense_index_handle_t(&verbs, created);
+    if (!handle)
+        return verbs.destroy(created),
+               propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
     handle->requested_dimensions = geometry.dimensions;
     handle->requested_connectivity = geometry.connectivity ? static_cast<connectivity_t>(geometry.connectivity)
                                                            : connectivity_32_k;
     // Placement is init's job, so a bad domain fails here rather than at the first reservation.
-    variant_type_& variant = std::get<variant_type_>(handle->variant);
-    if (status_t const placed = place_shards(variant, placement); failed(placed))
+    punned_dense_index<home_> const punned {verbs, created};
+    if (status_t const placed = place_shards(punned, placement); failed(placed))
         return delete handle, propagate_error(placed, outcome), nullptr;
-    compose_capabilities(*handle, variant, placement);
     return handle;
 }
 
-/** Whether one rung of a compiled class is genuinely distinct from the class it degrades to: a
- *  different picked 4-way or tiles kit, or a different ForkUnion mask - the one fact justifying its
- *  instantiation. */
-template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
-consteval bool rung_advances() noexcept {
-    constexpr cpu_class_t parent_k = parent_class_of(cpu_class_);
-    return cpu_class_compiled(cpu_class_) &&
-           (!std::is_same_v<quads_kit_of<dtype_, cpu_class_>, quads_kit_of<dtype_, parent_k>> ||
-            !std::is_same_v<tiles_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, parent_k>> ||
-            forkunion_capabilities_of<cpu_class_>() != forkunion_capabilities_of<parent_k>());
+/** Whether @p home_ compiled a unit for the CPU class @p cpu_class. */
+template <dense_home_t home_>
+static constexpr bool cpu_home_compiled(cpu_class_t cpu_class) noexcept {
+    return home_ == dense_home_t::nvme_k ? nvme_class_compiled(cpu_class) : cpu_class_compiled(cpu_class);
 }
 
-/** The unconditional serial floor - every ladder's last rung. */
-template <nk_dtype_t dtype_>
-static usearch_dense_index_t descend_ram_ladder(usearch_dense_metadata_t const& geometry,
-                                                usearch_ram_options_t const& ram, nk_kernel_kind_t kernel,
-                                                nk_capability_t, usearch_outcome_t* outcome) noexcept {
-    return make_punned_dense_index<ram_indexes<dtype_, cpu_class_t::serial_k>>(geometry, ram, kernel, outcome);
+/** The RAM or NVMe variant of @p dtype on the newest rung of @p ladder the machine admits and
+ *  @p pinned holds, the serial floor last: a RAM rung needs the class's ForkUnion features too, an
+ *  NVMe one its kits alone, as a storage walk carries no waiter or atomic reference. A rung whose
+ *  table holds no variant of the dtype picks nothing its parent does not, so the walk goes on. */
+template <dense_home_t home_, cpu_class_t... classes_>
+static dense_verbs<home_> const* pick_cpu_variant(cpu_ladder<classes_...>, nk_dtype_t dtype, usearch_cpu_class_t pinned,
+                                                  nk_capability_t available) noexcept {
+    dense_verbs<home_> const* picked = nullptr;
+    auto rung = [&]<cpu_class_t class_>() noexcept {
+        if constexpr (cpu_home_compiled<home_>(class_)) {
+            if (picked) return;
+            if constexpr (class_ != cpu_class_t::serial_k) {
+                if (!cpu_pin_takes(pinned, class_) || !numkong_admits(available, class_)) return;
+                if constexpr (home_ == dense_home_t::ram_k)
+                    if (!forkunion_admits<class_>()) return;
+            }
+            picked = dense_class_tables<home_, class_>::find(dtype);
+        }
+    };
+    (rung.template operator()<classes_>(), ...);
+    return picked;
 }
 
-/** One rung: taken when the machine reports the class, else falls through; a class that picks
- *  nothing new is skipped without instantiating its index. */
-template <nk_dtype_t dtype_, cpu_class_t cpu_class_, cpu_class_t... lower_classes_>
-static usearch_dense_index_t descend_ram_ladder(usearch_dense_metadata_t const& geometry,
-                                                usearch_ram_options_t const& ram, nk_kernel_kind_t kernel,
-                                                nk_capability_t available, usearch_outcome_t* outcome) noexcept {
-    if constexpr (rung_advances<dtype_, cpu_class_>()) {
-        if (numkong_admits(available, cpu_class_) && forkunion_admits<cpu_class_>())
-            return make_punned_dense_index<ram_indexes<dtype_, cpu_class_>>(geometry, ram, kernel, outcome);
-    }
-    else {
-        // A class picking its parent's kits, waiter and atomics names the parent's very variant.
-        static_assert(
-            std::is_same_v<ram_indexes<dtype_, cpu_class_>, ram_indexes<dtype_, parent_class_of(cpu_class_)>> ||
-                !variant_carries<ram_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::dense_variant_t>,
-            "This rung no longer advances past the one below - drop it from the variant list");
-    }
-    return descend_ram_ladder<dtype_, lower_classes_...>(geometry, ram, kernel, available, outcome);
+/** The device variant of @p dtype on the newest rung of @p ladder the build compiled and the
+ *  devices' @p available capabilities admit, whose unit alone carries kernels for them. */
+template <dense_home_t home_, gpu_class_t... classes_>
+static dense_verbs<home_> const* pick_gpu_variant(gpu_ladder<classes_...>, nk_dtype_t dtype,
+                                                  nk_capability_t available) noexcept {
+    dense_verbs<home_> const* picked = nullptr;
+    auto rung = [&]<gpu_class_t class_>() noexcept {
+        if constexpr (gpu_class_compiled(class_))
+            if (!picked && numkong_admits(available, class_)) picked = dense_class_tables<home_, class_>::find(dtype);
+    };
+    (rung.template operator()<classes_>(), ...);
+    return picked;
 }
 
-/** Picks the RAM variant for one dtype, walking by @p kernel: CPU classes newest-first, each rung
- *  compiled only where it advances past the class it degrades to. A refused rung falls to the next
- *  in the list, so lineages that share a floor interleave. */
-template <nk_dtype_t dtype_>
+/** Picks the RAM variant for one dtype, walking the CPU ladder newest-first; a refused rung falls
+ *  to the next in the list, so lineages that share a floor interleave. */
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, usearch_ram_options_t const& ram,
-                                        nk_kernel_kind_t kernel, usearch_outcome_t* outcome) noexcept {
+                                        nk_dtype_t dtype, nk_kernel_kind_t kernel,
+                                        usearch_outcome_t* outcome) noexcept {
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-#if NUMKONG_ARCH_X8664_
-    return descend_ram_ladder<dtype_,                        //
-                              cpu_class_t::intel_diamond_k,  //
-                              cpu_class_t::intel_granite_k,  //
-                              cpu_class_t::intel_sapphire_k, //
-                              cpu_class_t::amd_genoa_k,      //
-                              cpu_class_t::intel_icelake_k,  //
-                              cpu_class_t::intel_skylake_k,  //
-                              cpu_class_t::intel_sierra_k,   //
-                              cpu_class_t::intel_haswell_k>( //
-        geometry, ram, kernel, available, outcome);
-#elif NUMKONG_ARCH_ARM64_
-    return descend_ram_ladder<dtype_,                     //
-                              cpu_class_t::nvidia_vera_k, //
-                              cpu_class_t::apple_m4_k,    //
-                              cpu_class_t::aws_g5_k,      //
-                              cpu_class_t::apple_m2_k,    //
-                              cpu_class_t::aws_g2_k>(     //
-        geometry, ram, kernel, available, outcome);
-#elif NUMKONG_ARCH_RISCV64_
-    return descend_ram_ladder<dtype_, cpu_class_t::alibaba_c930_k>(geometry, ram, kernel, available, outcome);
-#elif NUMKONG_ARCH_WASM_
-    return descend_ram_ladder<dtype_, cpu_class_t::wasm64_extended_k, cpu_class_t::wasm32_v128_k>( //
-        geometry, ram, kernel, available, outcome);
-#else
-    return descend_ram_ladder<dtype_>(geometry, ram, kernel, available, outcome);
-#endif
+    if (!cpu_pin_admitted(ram.cpu_class, available))
+        return propagate_error(usearch_status_unsupported_k, outcome, "The CPU does not admit the pinned class"),
+               nullptr;
+    dense_verbs<dense_home_t::ram_k> const* const verbs = pick_cpu_variant<dense_home_t::ram_k>(
+        cpu_ladder_t {}, dtype, ram.cpu_class, available);
+    return make_dense_handle(geometry, ram, *verbs, kernel, outcome);
 }
 
-/** Whether one NVMe rung of a compiled class picks a different 4-way or tiles kit than the class it
- *  degrades to: a storage walk carries no waiter or atomic reference, and a scan streams through
- *  the tiles kit, so the kits alone tell two classes apart. */
-template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
-consteval bool nvme_rung_advances() noexcept {
-    using scalar_t = typename nk::type_for<dtype_>::type;
-    constexpr nk_capability_t upper = numkong_capabilities_of(cpu_class_);
-    constexpr nk_capability_t lower = numkong_capabilities_of(parent_class_of(cpu_class_));
-    return cpu_class_compiled(cpu_class_) &&
-           (us::dense::quads_ladder<scalar_t, upper>::picked_k != us::dense::quads_ladder<scalar_t, lower>::picked_k ||
-            us::dense::tiles_ladder<scalar_t, upper>::picked_k != us::dense::tiles_ladder<scalar_t, lower>::picked_k);
-}
-
-/** The unconditional serial floor of every NVMe ladder. */
-template <nk_dtype_t dtype_>
-static usearch_dense_index_t descend_nvme_ladder(usearch_dense_metadata_t const& geometry, nvme_placement_t const& nvme,
-                                                 nk_kernel_kind_t kernel, nk_capability_t,
-                                                 usearch_outcome_t* outcome) noexcept {
-    return make_punned_dense_index<nvme_indexes<dtype_, cpu_class_t::serial_k>>(geometry, nvme, kernel, outcome);
-}
-
-/** One NVMe rung: taken when the machine reports the class's kits, else falls through; a class that
- *  picks no kit of its own is skipped without instantiating its index. */
-template <nk_dtype_t dtype_, cpu_class_t cpu_class_, cpu_class_t... lower_classes_>
-static usearch_dense_index_t descend_nvme_ladder(usearch_dense_metadata_t const& geometry, nvme_placement_t const& nvme,
-                                                 nk_kernel_kind_t kernel, nk_capability_t available,
-                                                 usearch_outcome_t* outcome) noexcept {
-    if constexpr (nvme_rung_advances<dtype_, cpu_class_>()) {
-        if (numkong_admits(available, cpu_class_))
-            return make_punned_dense_index<nvme_indexes<dtype_, cpu_class_>>(geometry, nvme, kernel, outcome);
-    }
-    else {
-        // A class picking its parent's kits names the parent's very variant, which the variant
-        // rightly carries.
-        static_assert(
-            std::is_same_v<nvme_indexes<dtype_, cpu_class_>, nvme_indexes<dtype_, parent_class_of(cpu_class_)>> ||
-                !variant_carries<nvme_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::dense_variant_t>,
-            "This NVMe rung no longer advances past the one below - drop it from the variant list");
-    }
-    return descend_nvme_ladder<dtype_, lower_classes_...>(geometry, nvme, kernel, available, outcome);
-}
-
-/** Picks the NVMe variant for one dtype on the RAM ladder's classes, the WebAssembly ones aside,
- *  since a module reads no storage directly. The parts' headers name the metric @p kernel was read
- *  from, so the view checks them against each other rather than against it. */
-template <nk_dtype_t dtype_>
+/** Picks the NVMe variant for one dtype on the RAM ladder's classes that compiled one. The parts'
+ *  headers name the metric @p kernel was read from, so the view checks them against each other
+ *  rather than against it. */
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, nvme_placement_t const& nvme,
-                                        nk_kernel_kind_t kernel, usearch_outcome_t* outcome) noexcept {
+                                        nk_dtype_t dtype, nk_kernel_kind_t kernel,
+                                        usearch_outcome_t* outcome) noexcept {
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-#if NUMKONG_ARCH_X8664_
-    return descend_nvme_ladder<dtype_,                        //
-                               cpu_class_t::intel_diamond_k,  //
-                               cpu_class_t::intel_granite_k,  //
-                               cpu_class_t::intel_sapphire_k, //
-                               cpu_class_t::amd_genoa_k,      //
-                               cpu_class_t::intel_icelake_k,  //
-                               cpu_class_t::intel_skylake_k,  //
-                               cpu_class_t::intel_sierra_k,   //
-                               cpu_class_t::intel_haswell_k>( //
-        geometry, nvme, kernel, available, outcome);
-#elif NUMKONG_ARCH_ARM64_
-    return descend_nvme_ladder<dtype_,                     //
-                               cpu_class_t::nvidia_vera_k, //
-                               cpu_class_t::apple_m4_k,    //
-                               cpu_class_t::aws_g5_k,      //
-                               cpu_class_t::apple_m2_k,    //
-                               cpu_class_t::aws_g2_k>(     //
-        geometry, nvme, kernel, available, outcome);
-#elif NUMKONG_ARCH_RISCV64_
-    return descend_nvme_ladder<dtype_, cpu_class_t::alibaba_c930_k>(geometry, nvme, kernel, available, outcome);
-#else
-    return descend_nvme_ladder<dtype_>(geometry, nvme, kernel, available, outcome);
-#endif
+    if (!cpu_pin_admitted(nvme.cpu_class, available))
+        return propagate_error(usearch_status_unsupported_k, outcome, "The CPU does not admit the pinned class"),
+               nullptr;
+    dense_verbs<dense_home_t::nvme_k> const* const verbs = pick_cpu_variant<dense_home_t::nvme_k>(
+        cpu_ladder_t {}, dtype, nvme.cpu_class, available);
+    return make_dense_handle(geometry, nvme, *verbs, kernel, outcome);
 }
 
 /** The class every named device shares, read off the process listing: an index spans one vendor,
@@ -2621,141 +278,78 @@ static expected<gpu_class_t> shared_gpu_class(usearch_vram_options_t const& vram
     return {shared.gpu_class, status_t::success_k};
 }
 
-/** The end of a GPU ladder: no class this build compiled runs on the devices. */
-template <template <nk_dtype_t, gpu_class_t> class indexes_template_, nk_dtype_t dtype_>
-static usearch_dense_index_t descend_vram_ladder(usearch_dense_metadata_t const&, usearch_vram_options_t const&,
-                                                 nk_kernel_kind_t, nk_capability_t,
-                                                 usearch_outcome_t* outcome) noexcept {
-    return propagate_error(usearch_status_device_k, outcome, "This build carries no kernels for the devices"), nullptr;
-}
-
-/** One rung: taken when the build compiled the class and the devices' capabilities admit it, else
- *  falls through to the older classes of the same vendor. */
-template <template <nk_dtype_t, gpu_class_t> class indexes_template_, nk_dtype_t dtype_, gpu_class_t gpu_class_,
-          gpu_class_t... lower_classes_>
-static usearch_dense_index_t descend_vram_ladder(usearch_dense_metadata_t const& geometry,
-                                                 usearch_vram_options_t const& vram, nk_kernel_kind_t kernel,
-                                                 nk_capability_t available, usearch_outcome_t* outcome) noexcept {
-    if constexpr (gpu_class_compiled(gpu_class_))
-        if (numkong_admits(available, gpu_class_))
-            return make_punned_dense_index<indexes_template_<dtype_, gpu_class_>>(geometry, vram, kernel, outcome);
-    return descend_vram_ladder<indexes_template_, dtype_, lower_classes_...>(geometry, vram, kernel, available,
-                                                                             outcome);
-}
-
 /** The VRAM sibling of the RAM @ref make_index: the devices' vendor picks the ladder, and its
- *  classes newest-first the first rung the devices admit, whose unit alone carries kernels for
- *  them, as the CPU ladder picks the class the machine reports; every dtype has a kit there, and
- *  @ref with_metric admits only the metrics its family scores by. */
-template <nk_dtype_t dtype_>
+ *  classes newest-first the first rung the devices admit, narrowed to the pinned class when one is
+ *  named; every dtype has a kit there, and @ref with_variant admits only the metrics its family
+ *  scores by. */
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, usearch_vram_options_t const& vram,
-                                        nk_kernel_kind_t kernel, usearch_outcome_t* outcome) noexcept {
+                                        nk_dtype_t dtype, nk_kernel_kind_t kernel,
+                                        usearch_outcome_t* outcome) noexcept {
     auto const [gpu_class, status] = shared_gpu_class(vram);
     if (status == status_t::config_mismatch_k)
-        return propagate_error(status, outcome, "One index spans one GPU vendor and generation"), nullptr;
-    nk_capability_t const available = numkong_capabilities_of(gpu_class);
-#if USEARCH_ARCH_CUDA_
+        return propagate_error(status, outcome, "One index spans one GPU vendor and shard_generation"), nullptr;
+    nk_capability_t const available = gpu_pin_capabilities(gpu_class, vram.gpu_class);
+    if (!available)
+        return propagate_error(usearch_status_unsupported_k, outcome, "The devices do not run the pinned class"),
+               nullptr;
     if (available & nk_cap_cuda_k)
-        return descend_vram_ladder<vram_nvidia_indexes, dtype_, gpu_class_t::nvidia_blackwellrtx_k,
-                                   gpu_class_t::nvidia_blackwell_k, gpu_class_t::nvidia_hopper_k,
-                                   gpu_class_t::nvidia_ada_k, gpu_class_t::nvidia_ampere_k>(geometry, vram, kernel,
-                                                                                            available, outcome);
-#endif
-#if USEARCH_ARCH_ROCM_
+        if (dense_verbs<dense_home_t::vram_nvidia_k> const* const verbs = pick_gpu_variant<dense_home_t::vram_nvidia_k>(
+                gpu_ladder<gpu_class_t::nvidia_blackwellrtx_k, gpu_class_t::nvidia_blackwell_k,
+                           gpu_class_t::nvidia_hopper_k, gpu_class_t::nvidia_ada_k, gpu_class_t::nvidia_ampere_k> {},
+                dtype, available))
+            return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
     if (available & nk_cap_rocm_k)
-        return descend_vram_ladder<vram_amd_indexes, dtype_, gpu_class_t::amd_cdna5_k, gpu_class_t::amd_cdna4_k,
-                                   gpu_class_t::amd_cdna3_k>(geometry, vram, kernel, available, outcome);
-#endif
-#if USEARCH_ARCH_METAL_
+        if (dense_verbs<dense_home_t::vram_amd_k> const* const verbs = pick_gpu_variant<dense_home_t::vram_amd_k>(
+                gpu_ladder<gpu_class_t::amd_cdna5_k, gpu_class_t::amd_cdna4_k, gpu_class_t::amd_cdna3_k> {}, dtype,
+                available))
+            return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
     if (available & nk_cap_metal_k)
-        return descend_vram_ladder<vram_apple_indexes, dtype_, gpu_class_t::apple_metal10_k,
-                                   gpu_class_t::apple_metal9_k, gpu_class_t::apple_metal7_k>(geometry, vram, kernel,
-                                                                                             available, outcome);
-#endif
+        if (dense_verbs<dense_home_t::vram_apple_k> const* const verbs = pick_gpu_variant<dense_home_t::vram_apple_k>(
+                gpu_ladder<gpu_class_t::apple_metal10_k, gpu_class_t::apple_metal9_k, gpu_class_t::apple_metal7_k> {},
+                dtype, available))
+            return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
     return propagate_error(usearch_status_device_k, outcome,
                            "The devices are not listed, or this build carries no kernels for them"),
            nullptr;
 }
 
-/** Routes a numeric dtype's metric onto its three wired kernels, built where @p placement names. */
-template <nk_dtype_t dtype_, typename placement_type_>
-    requires(dtype_ != nk_u1_k)
-static usearch_dense_index_t with_metric(usearch_dense_metadata_t const& geometry, placement_type_ const& placement,
-                                         usearch_outcome_t* outcome) noexcept {
+/** Routes the geometry onto its variant, built where @p placement names: every numeric dtype speaks
+ *  inner, angular & euclidean; the bit dtype speaks inner, hamming & jaccard. A storage dtype the
+ *  build's @c USEARCH_DENSE_DTYPES left out is unsupported rather than unknown. */
+template <typename placement_type_>
+static usearch_dense_index_t with_variant(usearch_dense_metadata_t const& geometry, placement_type_ const& placement,
+                                          usearch_outcome_t* outcome) noexcept {
+    nk_dtype_t const dtype = nk_dtype_of(geometry.quantization);
+    if (dense_dtypes_t::position_of(dtype) == dense_dtypes_t::size_k) {
+        // Only f32, f64 & the geospatial i32 cross the boundary without ever being stored as rows,
+        // so any other scalar the table knows was left out.
+        if (dtype == nk_dtype_unknown_k || dtype == nk_f32_k || dtype == nk_f64_k || dtype == nk_i32_k)
+            return propagate_error(usearch_status_unknown_kind_k, outcome, "Unsupported quantization"), nullptr;
+        return propagate_error(usearch_status_unsupported_k, outcome,
+                               "This build's USEARCH_DENSE_DTYPES leaves the quantization out"),
+               nullptr;
+    }
+    bool const bits = dtype == nk_u1_k;
     switch (geometry.metric) {
-    case usearch_dense_metric_inner_k: return make_index<dtype_>(geometry, placement, nk_kernel_dot_k, outcome);
-    case usearch_dense_metric_angular_k: return make_index<dtype_>(geometry, placement, nk_kernel_angular_k, outcome);
+    case usearch_dense_metric_inner_k: return make_index(geometry, placement, dtype, nk_kernel_dot_k, outcome);
+    case usearch_dense_metric_angular_k:
+        if (!bits) return make_index(geometry, placement, dtype, nk_kernel_angular_k, outcome);
+        break;
     case usearch_dense_metric_euclidean_k:
-        return make_index<dtype_>(geometry, placement, nk_kernel_euclidean_k, outcome);
-    default:
+        if (!bits) return make_index(geometry, placement, dtype, nk_kernel_euclidean_k, outcome);
+        break;
+    case usearch_dense_metric_hamming_k:
+        if (bits) return make_index(geometry, placement, dtype, nk_kernel_hamming_k, outcome);
         return propagate_error(usearch_status_unknown_kind_k, outcome, "This metric needs a bit-packed quantization"),
                nullptr;
-    }
-}
-
-/** Routes the bit-packed dtype's metric onto the bit kernels. */
-template <nk_dtype_t dtype_, typename placement_type_>
-    requires(dtype_ == nk_u1_k)
-static usearch_dense_index_t with_metric(usearch_dense_metadata_t const& geometry, placement_type_ const& placement,
-                                         usearch_outcome_t* outcome) noexcept {
-    switch (geometry.metric) {
-    case usearch_dense_metric_inner_k: return make_index<dtype_>(geometry, placement, nk_kernel_dot_k, outcome);
-    case usearch_dense_metric_hamming_k: return make_index<dtype_>(geometry, placement, nk_kernel_hamming_k, outcome);
-    case usearch_dense_metric_jaccard_k: return make_index<dtype_>(geometry, placement, nk_kernel_jaccard_k, outcome);
-    default:
-        return propagate_error(usearch_status_unknown_kind_k, outcome,
-                               "No kernel kit is wired for this (quantization,metric) pair"),
+    case usearch_dense_metric_jaccard_k:
+        if (bits) return make_index(geometry, placement, dtype, nk_kernel_jaccard_k, outcome);
+        return propagate_error(usearch_status_unknown_kind_k, outcome, "This metric needs a bit-packed quantization"),
                nullptr;
-    }
-}
-
-/** Lowers the runtime @c (quantization,metric) pair onto the wired cells - every numeric dtype
- *  speaks inner, angular & euclidean; the bit dtype speaks inner, hamming & jaccard. A storage
- *  dtype the build's @c USEARCH_DENSE_DTYPES left out is unsupported rather than unknown. */
-template <typename placement_type_>
-static usearch_dense_index_t with_cell(usearch_dense_metadata_t const& geometry, placement_type_ const& placement,
-                                       usearch_outcome_t* outcome) noexcept {
-    switch (geometry.quantization) {
-    case usearch_scalar_bf16_k: return with_metric<nk_bf16_k>(geometry, placement, outcome);
-#if USEARCH_DENSE_DTYPES >= 2
-    case usearch_scalar_u1x8_k: return with_metric<nk_u1_k>(geometry, placement, outcome);
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-    case usearch_scalar_i8_k: return with_metric<nk_i8_k>(geometry, placement, outcome);
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-    case usearch_scalar_e4m3_k: return with_metric<nk_e4m3_k>(geometry, placement, outcome);
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-    case usearch_scalar_f16_k: return with_metric<nk_f16_k>(geometry, placement, outcome);
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-    case usearch_scalar_u8_k: return with_metric<nk_u8_k>(geometry, placement, outcome);
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-    case usearch_scalar_e5m2_k: return with_metric<nk_e5m2_k>(geometry, placement, outcome);
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-    case usearch_scalar_i4x2_k: return with_metric<nk_i4_k>(geometry, placement, outcome);
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-    case usearch_scalar_u4x2_k: return with_metric<nk_u4_k>(geometry, placement, outcome);
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-    case usearch_scalar_e3m2_k: return with_metric<nk_e3m2_k>(geometry, placement, outcome);
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-    case usearch_scalar_e2m3_k: return with_metric<nk_e2m3_k>(geometry, placement, outcome);
-#endif
     default: break;
     }
-    // Only f32, f64 & the geospatial i32 cross the boundary without ever being stored as rows, so
-    // any other scalar the table knows was left out.
-    nk_dtype_t const dtype = nk_dtype_of(geometry.quantization);
-    if (dtype == nk_dtype_unknown_k || dtype == nk_f32_k || dtype == nk_f64_k || dtype == nk_i32_k)
-        return propagate_error(usearch_status_unknown_kind_k, outcome, "Unsupported quantization"), nullptr;
-    return propagate_error(usearch_status_unsupported_k, outcome,
-                           "This build's USEARCH_DENSE_DTYPES leaves the quantization out"),
+    return propagate_error(usearch_status_unknown_kind_k, outcome,
+                           "No kernel kit is wired for this (quantization,metric) pair"),
            nullptr;
 }
 
@@ -2780,36 +374,21 @@ static nk_dtype_t rows_dtype_of(usearch_scalar_t scalar, std::size_t columns, us
     return dtype;
 }
 
-/** Bytes of cache each thread over @p topology keeps to itself: the deepest cache a compute domain
- *  confines to its cores, split across them, at its smallest across domains, or zero where no
- *  platform source names one. */
-static std::size_t thread_cache_bytes(fu_topology_t topology) noexcept {
-    std::size_t domains = 0, smallest = 0;
-    if (fu_compute_domains_count(topology, &domains) != fu_success_k) return 0;
-    for (std::size_t domain = 0; domain != domains; ++domain) {
-        std::size_t bytes = 0, cores = 0;
-        if (fu_compute_cache_bytes_in(topology, domain, &bytes) != fu_success_k ||
-            fu_logical_cores_count_in(topology, domain, &cores) != fu_success_k || !bytes || !cores)
-            continue;
-        smallest = smallest ? min_of(smallest, bytes / cores) : bytes / cores;
-    }
-    return smallest;
-}
-
 /**
  *  @brief The one loop every row verb drives on a variant that serves it: hands @p rows to @p sink
  *      chunk by chunk, each variant importing its rows into its own scalar.
  *
  *  Chunks hold whole queries of @p rows_per_query rows, one per step of @p progress, or the whole
- *  call without a handler, as each engine bounds its own scratch; progress counts queries. Finishes
+ *  call without a handler, as each engine bounds its own scratch; progress counts queries. Each
+ *  chunk is one call of the verb, so the variant rewinds its arenas once per chunk. Finishes
  *  @p outcome only on failure, leaving the success to the verb once its last output is written.
  */
-template <typename variant_type_, typename sink_type_>
-static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t executor_handle,   //
-                                 std::size_t rows_count, usearch_rows_view_t const& rows,      //
-                                 std::size_t rows_per_query, std::size_t expansion_factor,     //
-                                 usearch_progress_t progress,                                  //
-                                 usearch_traversal_stats_t* stats, usearch_outcome_t* outcome, //
+template <dense_home_t home_, typename sink_type_>
+static bool for_each_dense_chunk(punned_dense_index<home_> punned, usearch_executor_t executor_handle, //
+                                 std::size_t rows_count, usearch_rows_view_t const& rows,              //
+                                 std::size_t rows_per_query, std::size_t expansion_factor,             //
+                                 usearch_progress_t progress,                                          //
+                                 usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,         //
                                  sink_type_&& sink) noexcept {
     if (stats) *stats = {};
     if (!rows_count) return true;
@@ -2817,13 +396,11 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
     nk_dtype_t const source_dtype = rows_dtype_of(rows.scalar, rows.columns, outcome);
     if (source_dtype == nk_dtype_unknown_k) return false;
     usearch_executor_handle_t call_executor;
-    typename variant_type_::executor_t* const executor = executor_of(variant, executor_handle, call_executor, outcome);
+    typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, executor_handle, call_executor,
+                                                                                 outcome);
     if (!executor) return false;
-    typename variant_type_::search_config_t search_config {};
-    search_config.expansion_factor = static_cast<u32_t>(expansion_factor);
-    // A RAM scan blocks its rows by each thread's own cache.
-    if constexpr (requires { search_config.cache_bytes; })
-        search_config.cache_bytes = thread_cache_bytes(executor->topology());
+    dense_walk_config_t walk {};
+    walk.expansion_factor = static_cast<u32_t>(expansion_factor);
     if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row");
 
@@ -2833,13 +410,8 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
     us::dense::rows_view_t const all = rows_of(rows, rows_count);
     for (std::size_t resolved = 0; resolved != rows_count;) {
         std::size_t const taking = min_of(chunk, rows_count - resolved);
-        // Each chunk is one call of the verb, so it rewinds the arenas once and carves contexts.
-        dense_scratch<variant_type_> scratch {*executor};
-        if (status_t const prepared = scratch.prepare(*executor); failed(prepared))
-            return propagate_error(prepared, outcome, "Failed to carve the contexts");
-        expected<typename variant_type_::search_result_t> const found = sink(specialized_index {variant},
-                                                                             all.slice(resolved, taking), *executor,
-                                                                             scratch, search_config, resolved, taking);
+        expected<usearch_traversal_stats_t> const found = sink(all.slice(resolved, taking), *executor, walk, resolved,
+                                                               taking);
         if (!crossed(found, stats, outcome)) return false;
         resolved += taking;
         if (ticks(resolved / rows_per_query, queries) == continuation_t::cancel_k)
@@ -2851,27 +423,26 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
 /** The matching verbs' sink on one serving variant: keys and scores land in @p landing as the walk
  *  writes them, viewed as one row of @c wanted per output row; @p rows_per_query input rows share
  *  one output row, and @p count output rows land. */
-template <typename variant_type_, typename verb_type_>
-static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor,          //
-                             std::size_t count, usearch_rows_view_t const& rows,           //
-                             std::size_t rows_per_query, matches_landing_t const& landing, //
-                             std::size_t expansion_factor, usearch_progress_t progress,    //
-                             usearch_traversal_stats_t* stats, usearch_outcome_t* outcome, //
+template <dense_home_t home_, typename verb_type_>
+static bool match_dense_rows(punned_dense_index<home_> punned, usearch_executor_t executor, //
+                             std::size_t count, usearch_rows_view_t const& rows,            //
+                             std::size_t rows_per_query, matches_landing_t const& landing,  //
+                             std::size_t expansion_factor, usearch_progress_t progress,     //
+                             usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,  //
                              verb_type_&& verb) noexcept {
-    using key_t = typename variant_type_::key_t;
+    using key_t = typename dense_verbs<home_>::key_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
     std::size_t const wanted = landing.wanted;
     nk::matrix_span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys), count, wanted};
     nk::matrix_span<f64_t> const scores {landing.scores, count, wanted};
-    auto sink = [&](specialized_index<variant_type_> view, us::dense::rows_view_t chunk_rows,
-                    typename variant_type_::executor_t& executor, dense_scratch<variant_type_>& scratch,
-                    typename variant_type_::search_config_t config, std::size_t resolved, std::size_t taking) noexcept {
+    auto sink = [&](us::dense::rows_view_t chunk_rows, typename punned_dense_index<home_>::executor_t& executor,
+                    dense_walk_config_t walk, std::size_t resolved, std::size_t taking) noexcept {
         std::size_t const first = resolved / rows_per_query, matched = taking / rows_per_query;
         nk::range_t const chunk_range = nk::range(first, first + matched);
-        return verb(view, chunk_rows, executor, scratch, config, keys(chunk_range, nk::slice),
-                    scores(chunk_range, nk::slice), std::span<std::size_t> {landing.counts + first, matched});
+        return verb(chunk_rows, executor, walk, keys(chunk_range, nk::slice), scores(chunk_range, nk::slice),
+                    std::span<std::size_t> {landing.counts + first, matched});
     };
-    return for_each_dense_chunk(variant, executor, count * rows_per_query, rows, rows_per_query, expansion_factor,
+    return for_each_dense_chunk(punned, executor, count * rows_per_query, rows, rows_per_query, expansion_factor,
                                 progress, stats, outcome, sink);
 }
 
@@ -2888,8 +459,8 @@ static bool accepts_query_offsets(std::span<std::size_t const> query_offsets, us
  *  per executor thread, and the runs then count, prefix-sum and scatter into @p keys, @p scores and
  *  @p offsets growing in @p arena, as geospatial `within` lands, while @p required sums the keys
  *  every query scored; @p predicate narrows the nominations once it names a callback. */
-template <typename variant_type_>
-static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const& arguments,
+template <dense_home_t home_>
+static bool maxsim_queries(punned_dense_index<home_> punned, usearch_dense_maxsim_t const& arguments,
                            std::span<std::size_t const> query_offsets, predicate_t& predicate,
                            usearch_arena_handle_t& arena, usearch_key_t*& landed_keys,
                            usearch_distance_t*& landed_scores, std::size_t*& landed_offsets, std::size_t& required,
@@ -2903,13 +474,12 @@ static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const&
     if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row");
     usearch_executor_handle_t call_executor;
-    typename variant_type_::executor_t* const executor = executor_of(variant, arguments.executor, call_executor,
-                                                                     outcome);
+    typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments.executor,
+                                                                                 call_executor, outcome);
     if (!executor) return false;
-    typename variant_type_::search_config_t config {};
-    config.expansion_factor = static_cast<u32_t>(arguments.expansion_factor);
-    config.traversal = static_cast<traversal_t>(arguments.traversal);
-    if constexpr (requires { config.cache_bytes; }) config.cache_bytes = thread_cache_bytes(executor->topology());
+    dense_walk_config_t walk {};
+    walk.expansion_factor = static_cast<u32_t>(arguments.expansion_factor);
+    walk.traversal = static_cast<traversal_t>(arguments.traversal);
 
     // The runs' headers and the tape sit in the call's arena, which no engine rewinds.
     thread_allocator_t const staging {arena.memory};
@@ -2917,7 +487,7 @@ static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const&
     growing_buffer<std::size_t, thread_allocator_t> offsets {staging}, cursors {staging}, scored {staging};
     growing_buffer<usearch_key_t, thread_allocator_t> keys {staging};
     growing_buffer<usearch_distance_t, thread_allocator_t> scores {staging};
-    if (failed(open_maxsim_runs<variant_type_>(runs, *executor, staging)) || failed(offsets.resize(count + 1)) ||
+    if (failed(open_maxsim_runs(runs, *executor, staging)) || failed(offsets.resize(count + 1)) ||
         failed(scored.resize_uninitialized(count)))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
 
@@ -2930,17 +500,13 @@ static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const&
         // Each chunk is one call of the verb, which rewinds the arenas once, so the runs restart
         // empty and first allocate after it.
         for (run_t& run : runs) run.reset();
-        dense_scratch<variant_type_> scratch {*executor};
-        if (status_t const prepared = scratch.prepare(*executor); failed(prepared))
-            return propagate_error(prepared, outcome, "Failed to carve the contexts");
-        specialized_index view {variant};
         maxsim_landing_t const landing {to_writable_span(runs), staging};
         std::span<std::size_t> const chunk_scored = to_writable_span(scored).subspan(first, taking);
-        expected<typename variant_type_::search_result_t> const found =
-            predicate.predicate.callback
-                ? view.maxsim_if(all, chunk_offsets, *executor, scratch, config, arguments.wanted, chunk_scored,
-                                 landing, predicate)
-                : view.maxsim(all, chunk_offsets, *executor, scratch, config, arguments.wanted, chunk_scored, landing);
+        expected<usearch_traversal_stats_t> const found =
+            predicate.predicate.callback ? punned.verbs.maxsim_if(punned.index, all, chunk_offsets, *executor, walk,
+                                                                  arguments.wanted, chunk_scored, landing, predicate)
+                                         : punned.verbs.maxsim(punned.index, all, chunk_offsets, *executor, walk,
+                                                               arguments.wanted, chunk_scored, landing);
         if (!crossed(found, arguments.stats, outcome)) return false;
         for (std::size_t const query_scored : chunk_scored) required += query_scored;
 
@@ -2969,77 +535,51 @@ static bool maxsim_queries(variant_type_& variant, usearch_dense_maxsim_t const&
 
 #pragma endregion Multi Verbs
 
-/** The cursor of a variant declaring one; a variant reading its rows back by key or search alone
- *  has none. */
-template <typename variant_type_>
-struct cursor_of {
-    using type = std::monostate;
-};
-template <typename variant_type_>
-    requires requires { typename variant_type_::cursor_t; }
-struct cursor_of<variant_type_> {
-    using type = typename variant_type_::cursor_t;
-};
-
-/** The cursors of every variant of @p variant_type_, as one variant of their own. */
-template <typename variant_type_>
-struct cursors_of;
-template <typename... alternatives_>
-struct cursors_of<std::variant<alternatives_...>> {
-    using type = std::variant<std::monostate, typename cursor_of<alternatives_>::type...>;
-};
-
-/** What @c usearch_dense_cursor_t owns: the walk state of one variant, with no hold on its
- *  index. */
+/** What @c usearch_dense_cursor_t owns: the walk state of one variant, with no hold on its index,
+ *  and the table whose entries step and free it, which outlives every index. */
 struct usearch_dense_cursor_handle_t {
-    typename cursors_of<usearch_dense_index_handle_t::dense_variant_t>::type walk;
+    dense_home_tables_t tables;
+    void* walk = nullptr;
 
     /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
-    usearch_dense_index_handle_t const* opened_on;
+    usearch_dense_index_handle_t const* opened_on = nullptr;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
     std::atomic_flag busy;
+
+    usearch_dense_cursor_handle_t(dense_home_tables_t picked, usearch_dense_index_handle_t const* index) noexcept
+        : tables(picked), opened_on(index) {}
+    usearch_dense_cursor_handle_t(usearch_dense_cursor_handle_t const&) = delete;
+    usearch_dense_cursor_handle_t& operator=(usearch_dense_cursor_handle_t const&) = delete;
+    ~usearch_dense_cursor_handle_t() noexcept {
+        if (walk) std::visit([&](auto const* verbs) noexcept { verbs->cursor_free(walk); }, tables);
+    }
 };
 
-/** The plan of a variant declaring one, with the donors it lands; an NVMe view declares none, as it
- *  never mutates. */
-template <typename variant_type_>
-struct refinement_of {
-    using type = std::monostate;
-};
-template <typename variant_type_>
-    requires requires { typename variant_type_::refine_plan_t; }
-struct refinement_of<variant_type_> {
-    struct type {
-
-        /** The typed donors the plan lands, each nulled once landed; the plan reads them in
-         *  place. */
-        growing_buffer<variant_type_*> donors;
-        typename variant_type_::refine_plan_t plan;
-    };
-};
-
-/** The refinements of every variant of @p variant_type_, as one variant of their own. */
-template <typename variant_type_>
-struct refinements_of;
-template <typename... alternatives_>
-struct refinements_of<std::variant<alternatives_...>> {
-    using type = std::variant<std::monostate, typename refinement_of<alternatives_>::type...>;
-};
-
-/** What @c usearch_dense_refinement_t owns: one variant's plan, which keeps its index closed
- *  until it dies, and the caller's donor slots it nulls. */
+/** What @c usearch_dense_refinement_t owns: one variant's plan with the donors it lands, which
+ *  keeps its index closed until it dies, and the caller's donor slots it nulls. */
 struct usearch_dense_refinement_handle_t {
-    typename refinements_of<usearch_dense_index_handle_t::dense_variant_t>::type refining;
+    dense_home_tables_t tables;
+    void* refining = nullptr;
 
     /** The handle and executor the refinement was opened with, only ever compared with the ones
      *  each call passes. */
-    usearch_dense_index_handle_t const* opened_on;
-    usearch_executor_t opened_with;
+    usearch_dense_index_handle_t const* opened_on = nullptr;
+    usearch_executor_t opened_with = nullptr;
 
     /** The caller's donor array, @c count slots. */
-    usearch_dense_index_t* donors;
-    std::size_t count;
+    usearch_dense_index_t* donors = nullptr;
+    std::size_t count = 0;
+
+    usearch_dense_refinement_handle_t(dense_home_tables_t picked, usearch_dense_index_handle_t const* index,
+                                      usearch_executor_t executor, usearch_dense_index_t* slots,
+                                      std::size_t slots_count) noexcept
+        : tables(picked), opened_on(index), opened_with(executor), donors(slots), count(slots_count) {}
+    usearch_dense_refinement_handle_t(usearch_dense_refinement_handle_t const&) = delete;
+    usearch_dense_refinement_handle_t& operator=(usearch_dense_refinement_handle_t const&) = delete;
+    ~usearch_dense_refinement_handle_t() noexcept {
+        if (refining) std::visit([&](auto const* verbs) noexcept { verbs->refinement_free(refining); }, tables);
+    }
 };
 
 /** Fills every field a checkpoint froze; the type carries nothing a checkpoint cannot say. */
@@ -3066,31 +606,61 @@ static void load_dense_index(source_type_ source, placement_type_ const& placeme
     adopt_metadata(checkpoint, &geometry);
     // More parts than named devices keep a shard each, part `p` on device `p` modulo their count.
     placement_type_ placed = placement;
-    growing_buffer<int32_t> dealt {global_allocator};
+    growing_buffer<int32_t> part_devices {global_allocator};
     if constexpr (std::is_same_v<placement_type_, usearch_vram_options_t>)
         if (checkpoint.parts > named_count(placement)) {
-            if (failed(dealt.resize(checkpoint.parts)))
-                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to deal the parts"), void();
-            for (std::size_t part = 0; part != dealt.size(); ++part)
-                dealt[part] = static_cast<int32_t>(named_ordinal(placement, part));
-            placed.devices = dealt.data();
+            if (failed(part_devices.resize(checkpoint.parts)))
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the parts' devices"),
+                       void();
+            for (std::size_t part = 0; part != part_devices.size(); ++part)
+                part_devices[part] = static_cast<int32_t>(named_ordinal(placement, part));
+            placed.devices = part_devices.data();
             placed.devices_count = checkpoint.parts;
         }
-    usearch_dense_index_t const loaded = with_cell(geometry, placed, outcome);
+    usearch_dense_index_t const loaded = with_variant(geometry, placed, outcome);
     if (!loaded) return;
-    // A load places RAM or VRAM variants alone, and fills the fresh handle as a mutation.
     bool filled = false;
-    visit_writable(*loaded, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+    visit_punned(*loaded, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const typed = executor_of(variant, executor, call_executor, outcome);
+        typename punned_dense_index<home_>::executor_t* const typed = executor_of(punned, executor, call_executor,
+                                                                                  outcome);
         if (!typed) return;
-        progress_ticks_t ticks {progress, specialized_index {variant}.shards_count()};
-        status_t const status = specialized_index {variant}.load(source, *typed, ticks);
+        progress_ticks_t ticks {progress, punned.verbs.shards_count(punned.index)};
+        status_t const status = [&]() noexcept {
+            if constexpr (std::is_same_v<source_type_, std::string_view>)
+                return punned.verbs.load(punned.index, source, *typed, ticks);
+            else return punned.verbs.load_buffer(punned.index, source, *typed, ticks);
+        }();
         filled = succeeded(status) || propagate_error(status, outcome);
     });
     if (!filled) return delete loaded, void();
     *index = loaded;
     propagate_error(usearch_status_success_k, outcome, nullptr);
+}
+
+/** Collects the indexes of the @p count handles @p others names into @p indexes, each of the very
+ *  variant @p punned is, waiting out the calls naming them first; false once @p outcome records why
+ *  not. The handle @p self appears among them only when no @p refusal is named. */
+template <dense_home_t home_>
+static bool collect_variants(punned_dense_index<home_> const& punned, usearch_dense_index_t const* others,
+                             std::size_t count, usearch_dense_index_t self, char const* refusal,
+                             growing_buffer<void*>& indexes, usearch_outcome_t* outcome) noexcept {
+    if (failed(indexes.reserve_exactly(count))) return propagate_error(status_t::bad_alloc_k, outcome);
+    for (std::size_t position = 0; position != count; ++position) {
+        usearch_dense_index_t const other = others[position];
+        if (!other) return propagate_error(usearch_status_invalid_argument_k, outcome, "A handle must not be null");
+        // Ahead of the wait below, which a deferred call would spend on its own handle.
+        if (other == self && refusal) return propagate_error(usearch_status_config_mismatch_k, outcome, refusal);
+        // Every scalar, class and residency is a variant of its own, so another shape is another
+        // table.
+        void* const index = same_punned_index(punned, *other);
+        if (!index)
+            return propagate_error(usearch_status_config_mismatch_k, outcome,
+                                   "Every handle must share the index's residency, scalar and class");
+        if (other != self) finish_calls_using(other);
+        indexes.push_back_reserved(index);
+    }
+    return true;
 }
 
 /** The one registry and resuming slot @c lib.hpp declares for every modality's calls, defined
@@ -3107,7 +677,7 @@ USEARCH_EXPORT void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) 
     *arguments->index = nullptr;
     usearch_dense_metadata_t const geometry {arguments->metric, arguments->quantization, arguments->dimensions,
                                              arguments->connectivity};
-    usearch_dense_index_t const index = with_cell(geometry, arguments->ram, outcome);
+    usearch_dense_index_t const index = with_variant(geometry, arguments->ram, outcome);
     if (!index) return;
     *arguments->index = index;
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -3118,7 +688,7 @@ USEARCH_EXPORT void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments
     *arguments->index = nullptr;
     usearch_dense_metadata_t const geometry {arguments->metric, arguments->quantization, arguments->dimensions,
                                              arguments->connectivity};
-    usearch_dense_index_t const index = with_cell(geometry, arguments->vram, outcome);
+    usearch_dense_index_t const index = with_variant(geometry, arguments->vram, outcome);
     if (!index) return;
     *arguments->index = index;
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -3150,12 +720,12 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
     for (std::size_t path = 0; path != paths_count; ++path) paths[path] = as_text(nvme.paths[path]);
 
     // The view's own header read, so a transport ID names a checkpoint as a file path does.
-    auto const [checkpoint, read_status] = us::dense::nvme_read_metadata(as_text(arguments->path));
+    auto const [checkpoint, read_status] = nvme_read_metadata(as_text(arguments->path));
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
-    nvme_placement_t const placement {as_text(arguments->path), to_span(paths)};
-    usearch_dense_index_t const index = with_cell(geometry, placement, outcome);
+    nvme_placement_t const placement {as_text(arguments->path), to_span(paths), nvme.cpu_class};
+    usearch_dense_index_t const index = with_variant(geometry, placement, outcome);
     if (!index) return;
     *arguments->index = index;
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -3169,19 +739,22 @@ USEARCH_EXPORT void usearch_dense_free(usearch_dense_index_t index) {
 USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_reserve_t* arguments) {
     if (submitted<usearch_dense_reserve>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    usearch_dense_index_t const index = arguments->index;
-    visit_writable(*index, outcome, [&](auto& variant) noexcept {
-        propagate_error(specialized_index {variant}.reserve(
-                            {arguments->capacity, index->requested_connectivity, index->requested_dimensions}),
-                        outcome);
-    });
+    usearch_dense_index_handle_t const& handle = *arguments->index;
+    std::visit(
+        [&](auto const* verbs) noexcept {
+            propagate_error(verbs->reserve(handle.index, arguments->capacity, handle.requested_connectivity,
+                                           handle.requested_dimensions),
+                            outcome);
+        },
+        handle.tables);
 }
 
 USEARCH_EXPORT void usearch_dense_clear(usearch_dense_clear_t* arguments) {
     if (submitted<usearch_dense_clear>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    visit_writable(*arguments->index, outcome,
-                   [&](auto& variant) noexcept { propagate_error(specialized_index {variant}.clear(), outcome); });
+    usearch_dense_index_handle_t const& handle = *arguments->index;
+    std::visit([&](auto const* verbs) noexcept { propagate_error(verbs->clear(handle.index), outcome); },
+               handle.tables);
 }
 
 #pragma endregion Lifetime
@@ -3211,21 +784,22 @@ USEARCH_EXPORT usearch_dense_metric_t usearch_dense_metric_from_name(usearch_byt
 USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) {
     if (submitted<usearch_dense_describe>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    usearch_dense_index_t const index = arguments->index;
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            specialized_index const view {variant};
-            std::size_t const dimensions = view.dimensions(), connectivity = view.connectivity();
-            *arguments->description = {
-                {usearch_metric_of(variant.kernel()), usearch_scalar_of(variant_type_::vector_dtype_k),
-                 dimensions ? dimensions : index->requested_dimensions,
-                 connectivity ? connectivity : static_cast<std::size_t>(index->requested_connectivity)},
-                view.size(),
-                view.capacity(),
-                view.memory_usage(),
-                index->capabilities_string};
-        },
-        index->variant);
+    usearch_dense_index_handle_t const& handle = *arguments->index;
+    visit_punned(handle, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        std::size_t const dimensions = punned.verbs.dimensions(punned.index);
+        std::size_t const connectivity = punned.verbs.connectivity(punned.index);
+        usearch_dense_index_description_t& description = *arguments->description;
+        description.metadata = {usearch_metric_of(punned.verbs.kernel(punned.index)),
+                                usearch_scalar_of(punned.verbs.dtype),
+                                dimensions ? dimensions : handle.requested_dimensions,
+                                connectivity ? connectivity : static_cast<std::size_t>(handle.requested_connectivity)};
+        description.size = punned.verbs.size(punned.index);
+        description.capacity = punned.verbs.capacity(punned.index);
+        description.memory_usage = punned.verbs.memory_usage(punned.index);
+        description.cpu_class = static_cast<usearch_cpu_class_t>(punned.verbs.cpu_class);
+        description.gpu_class = static_cast<usearch_gpu_class_t>(punned.verbs.gpu_class);
+        description.shards_count = punned.verbs.shards_count(punned.index);
+    });
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
@@ -3234,17 +808,15 @@ USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     us::utilities::uuid_t const key = uuid_of(arguments->key);
     *arguments->entries = 0;
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            usearch_executor_handle_t call_executor;
-            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                             call_executor, outcome);
-            if (!executor) return;
-            // The single key rides the batched lookup, which an NVMe view answers with one scan of
-            // its key columns.
-            propagate_error(specialized_index {variant}.count({&key, 1}, {arguments->entries, 1}, *executor), outcome);
-        },
-        arguments->index->variant);
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
+        if (!executor) return;
+        // The single key rides the batched lookup, which an NVMe view answers with one scan of its
+        // key columns.
+        propagate_error(punned.verbs.count(punned.index, {&key, 1}, {arguments->entries, 1}, *executor), outcome);
+    });
 }
 
 #pragma endregion Introspection
@@ -3253,10 +825,10 @@ USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
 
 /** Refuses @p count rows of @p columns values unless that is the geometry @p index froze - its
  *  shards' once reserved, and the init's until then. */
-static bool rejects_columns(usearch_dense_index_handle_t& index, std::size_t count, std::size_t columns,
+static bool rejects_columns(usearch_dense_index_handle_t const& index, std::size_t count, std::size_t columns,
                             usearch_outcome_t* outcome) noexcept {
-    std::size_t const reserved = std::visit(
-        [](auto& variant) noexcept { return specialized_index {variant}.dimensions(); }, index.variant);
+    std::size_t reserved = 0;
+    std::visit([&](auto const* verbs) noexcept { reserved = verbs->dimensions(index.index); }, index.tables);
     std::size_t const frozen = reserved ? reserved : index.requested_dimensions;
     if (count && !frozen)
         return !propagate_error(usearch_status_uninitialized_k, outcome, "The geometry was never frozen");
@@ -3280,24 +852,23 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The key stride is shorter than a key"),
                void();
     if (rejects_columns(*arguments->index, count, vectors.columns, outcome)) return;
-    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
         nk_dtype_t const source_dtype = rows_dtype_of(vectors.scalar, vectors.columns, outcome);
         if (source_dtype == nk_dtype_unknown_k) return;
         usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
-                                                                         outcome);
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
         if (!executor) return;
-        using key_t = typename variant_type_::key_t;
+        using key_t = typename dense_verbs<home_>::key_t;
         static_assert(sizeof(key_t) == sizeof(usearch_key_t), "The engine reads the caller's keys in place");
-        typename variant_type_::insert_config_t insert_config {};
-        insert_config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
         if (vectors.stride && vectors.stride < us::dense::packed_bytes(source_dtype, vectors.columns))
             return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row"),
                    void();
         nk::vector_view<key_t> const uuids {reinterpret_cast<char const*>(keys.data), count, keys.stride};
         progress_ticks_t ticks {arguments->progress, count};
-        expected<typename variant_type_::insert_result_t> const inserted = specialized_index {variant}.add(
-            uuids, rows_of(vectors, count), ticks, *executor, insert_config);
+        expected<usearch_traversal_stats_t> const inserted = punned.verbs.insert(
+            punned.index, uuids, rows_of(vectors, count), ticks, *executor,
+            static_cast<u32_t>(arguments->expansion_factor));
         if (crossed(inserted, stats, outcome)) propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -3307,15 +878,14 @@ USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     usearch_traversal_stats_t* const stats = arguments->stats;
     if (stats) *stats = {};
-    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
-                                                                         outcome);
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
         if (!executor) return;
-        typename variant_type_::refine_config_t config {};
-        config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
-        progress_ticks_t ticks {arguments->progress, specialized_index {variant}.size()};
-        auto const [refined, refined_status] = specialized_index {variant}.refine(*executor, config, ticks);
+        progress_ticks_t ticks {arguments->progress, punned.verbs.size(punned.index)};
+        auto const [refined, refined_status] = punned.verbs.refine(
+            punned.index, *executor, static_cast<u32_t>(arguments->expansion_factor), ticks);
         accumulate_stats(stats, refined);
         // A stopped pass still healed, so its report stands beside the cancel.
         if (failed(refined_status) && refined_status != status_t::cancelled_k)
@@ -3333,18 +903,16 @@ USEARCH_EXPORT void usearch_dense_health(usearch_dense_health_t* arguments) {
     if (submitted<usearch_dense_health>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     *arguments->reachability = {};
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            usearch_executor_handle_t call_executor;
-            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                             call_executor, outcome);
-            if (!executor) return;
-            auto const [audit, status] = specialized_index {variant}.health(*executor);
-            if (failed(status)) return propagate_error(status, outcome), void();
-            *arguments->reachability = {audit.audited_nodes, audit.reachable_nodes, audit.sweeps, audit.back_sweeps};
-            propagate_error(usearch_status_success_k, outcome, nullptr);
-        },
-        arguments->index->variant);
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
+        if (!executor) return;
+        auto const [audit, status] = punned.verbs.health(punned.index, *executor);
+        if (failed(status)) return propagate_error(status, outcome), void();
+        *arguments->reachability = {audit.audited_nodes, audit.reachable_nodes, audit.sweeps, audit.back_sweeps};
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
@@ -3355,53 +923,45 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     *arguments->matches = {};
     if (rejects_columns(*arguments->index, count, arguments->queries.columns, outcome)) return;
     predicate_t keyed {arguments->predicate};
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if (accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) {
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
-                                                                  arguments->executor, device_of(variant),
-                                                                  {arguments->queries.data}, outcome);
-                if (!arena) return;
-                if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                if (!wanted) {
-                    // No walk serves zero matches; the counts are zeros staged on the host.
-                    auto const [zeros, carve_status] = carve_matches(arena->memory, count, 0);
-                    if (failed(carve_status))
-                        return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
-                    for (std::size_t row = 0; row != count; ++row) zeros.counts[row] = 0;
-                    auto const [matches, publish_status] = publish_matches(*arena, zeros, count);
-                    if (failed(publish_status)) return propagate_error(publish_status, outcome), void();
-                    *arguments->matches = matches;
-                    return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                }
-                // A VRAM arena's matches are carved on its device, where the shards' rankings merge
-                // in place.
-                auto [landing, carve_status] = arena->device_memory ? carve_matches(arena->device_memory, count, wanted)
-                                                                    : carve_matches(arena->memory, count, wanted);
-                if (failed(carve_status))
-                    return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
-                auto search_with = [&](auto&& predicate) noexcept {
-                    return match_dense_rows(variant, arguments->executor, count, arguments->queries, 1, landing,
-                                            arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
-                                            [&](auto view, auto rows, auto& executor, auto& scratch, auto config,
-                                                auto keys, auto distances, auto counts) {
-                                                config.traversal = static_cast<traversal_t>(arguments->traversal);
-                                                return view.search(rows, executor, scratch, config, keys, distances,
-                                                                   counts, predicate);
-                                            });
-                };
-                bool searched = false;
-                if (!keyed.predicate.callback) searched = search_with(dummy_predicate_t {});
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        int const device = punned.verbs.device(punned.index, 0);
+        if (!accepts_traversal(device, arguments->traversal, arguments->predicate, outcome)) return;
+        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                          device, {arguments->queries.data}, outcome);
+        if (!arena) return;
+        if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+        if (!wanted) {
+            // No walk serves zero matches; the counts are zeros staged on the host.
+            auto const [zeros, carve_status] = carve_matches(arena->memory, count, 0);
+            if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
+            for (std::size_t row = 0; row != count; ++row) zeros.counts[row] = 0;
+            auto const [matches, publish_status] = publish_matches(*arena, zeros, count);
+            if (failed(publish_status)) return propagate_error(publish_status, outcome), void();
+            *arguments->matches = matches;
+            return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+        }
+        // A VRAM arena's matches are carved on its device, where the shards' rankings merge in
+        // place.
+        auto [landing, carve_status] = arena->device_memory ? carve_matches(arena->device_memory, count, wanted)
+                                                            : carve_matches(arena->memory, count, wanted);
+        if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
+        bool const searched = match_dense_rows(
+            punned, arguments->executor, count, arguments->queries, 1, landing, arguments->expansion_factor,
+            arguments->progress, arguments->stats, outcome,
+            [&](auto rows, auto& executor, dense_walk_config_t walk, auto keys, auto distances, auto counts) noexcept {
+                walk.traversal = static_cast<traversal_t>(arguments->traversal);
+                if (!keyed.predicate.callback)
+                    return punned.verbs.search(punned.index, rows, executor, walk, keys, distances, counts);
                 // An expensive one stays the C struct, from which each call builds its own family.
-                else if (keyed.predicate.cost == usearch_predicate_cost_expensive_k)
-                    searched = search_with(keyed.predicate);
-                else searched = search_with(keyed);
-                if (!searched) return;
-                *arguments->matches = landing.view();
-                propagate_error(usearch_status_success_k, outcome, nullptr);
-            }
-        },
-        arguments->index->variant);
+                if (keyed.predicate.cost == usearch_predicate_cost_expensive_k)
+                    return punned.verbs.search_if_expensive(punned.index, rows, executor, walk, keys, distances, counts,
+                                                            keyed.predicate);
+                return punned.verbs.search_if(punned.index, rows, executor, walk, keys, distances, counts, keyed);
+            });
+        if (!searched) return;
+        *arguments->matches = landing.view();
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
@@ -3411,56 +971,49 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
     usearch_scalar_t const scalar = arguments->outputs_scalar;
     *arguments->vectors = {};
     if (arguments->written) *arguments->written = 0;
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            specialized_index view {variant};
-            std::size_t const dimensions = view.dimensions();
-            nk_dtype_t const target_dtype = rows_dtype_of(scalar, dimensions, outcome);
-            if (target_dtype == nk_dtype_unknown_k) return;
-            usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                              device_of(variant), {}, outcome);
-            if (!arena) return;
-            usearch_executor_handle_t call_executor;
-            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                             call_executor, outcome);
-            if (!executor) return;
-            // The single key rides the batched lookups, which size the landing first and fill it
-            // second.
-            std::size_t entries = 0;
-            if (status_t const counted = view.count({&key, 1}, {&entries, 1}, *executor); failed(counted))
-                return propagate_error(counted, outcome), void();
-            if (!entries) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-            std::size_t const row_bytes = us::dense::packed_bytes(target_dtype, dimensions);
-            std::byte* rows = carve<std::byte>(arena->memory, entries * row_bytes);
-            if (!rows)
-                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-            std::size_t total = 0;
-            us::dense::rows_span_t const target {rows, entries, dimensions, row_bytes, target_dtype};
-            // Rows in another scalar than the stored one are read in the stored one, which every
-            // face exports, and cast on the host by the serial kit, as a GPU face has no CPU class.
-            nk_dtype_t const stored_dtype = variant_type_::vector_dtype_k;
-            std::size_t const stored_bytes = us::dense::packed_bytes(stored_dtype, dimensions);
-            std::byte* const stored = stored_dtype == target_dtype
-                                          ? rows
-                                          : carve<std::byte>(arena->memory, entries * stored_bytes);
-            if (!stored)
-                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-            if (status_t const got = view.get({&key, 1}, {stored, entries, dimensions, stored_bytes, stored_dtype},
-                                              entries, {&total, 1}, *executor);
-                failed(got))
-                return propagate_error(got, outcome, "Failed to export the rows"), void();
-            if (stored != rows)
-                for (std::size_t row = 0; row != min_of(total, entries); ++row)
-                    us::dense::export_row<us::dense::serial_elementwise_kit_t>(stored + row * stored_bytes,
-                                                                               stored_dtype, target, row);
-            auto const [published, publish_status] = publish(*arena, rows, entries * row_bytes);
-            if (status_t const landed = drained(*arena, publish_status); failed(landed))
-                return propagate_error(landed, outcome, "Failed to land the rows on the device"), void();
-            *arguments->vectors = {published, row_bytes, dimensions, scalar};
-            if (arguments->written) *arguments->written = min_of(total, entries);
-            propagate_error(usearch_status_success_k, outcome, nullptr);
-        },
-        arguments->index->variant);
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        std::size_t const dimensions = punned.verbs.dimensions(punned.index);
+        nk_dtype_t const target_dtype = rows_dtype_of(scalar, dimensions, outcome);
+        if (target_dtype == nk_dtype_unknown_k) return;
+        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                          punned.verbs.device(punned.index, 0), {}, outcome);
+        if (!arena) return;
+        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
+        if (!executor) return;
+        // The single key rides the batched lookups, which size the landing first and fill it
+        // second.
+        std::size_t entries = 0;
+        if (status_t const counted = punned.verbs.count(punned.index, {&key, 1}, {&entries, 1}, *executor);
+            failed(counted))
+            return propagate_error(counted, outcome), void();
+        if (!entries) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+        std::size_t const row_bytes = us::dense::packed_bytes(target_dtype, dimensions);
+        std::byte* rows = carve<std::byte>(arena->memory, entries * row_bytes);
+        if (!rows) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+        std::size_t total = 0;
+        us::dense::rows_span_t const target {rows, entries, dimensions, row_bytes, target_dtype};
+        // Rows in another scalar than the stored one are read in the stored one first.
+        nk_dtype_t const stored_dtype = punned.verbs.dtype;
+        std::size_t const stored_bytes = us::dense::packed_bytes(stored_dtype, dimensions);
+        std::byte* const stored = stored_dtype == target_dtype
+                                      ? rows
+                                      : carve<std::byte>(arena->memory, entries * stored_bytes);
+        if (!stored)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+        if (status_t const got = punned.verbs.get(punned.index, {&key, 1},
+                                                  {stored, entries, dimensions, stored_bytes, stored_dtype}, target,
+                                                  entries, {&total, 1}, *executor);
+            failed(got))
+            return propagate_error(got, outcome, "Failed to export the rows"), void();
+        auto const [published, publish_status] = publish(*arena, rows, entries * row_bytes);
+        if (status_t const landed = drained(*arena, publish_status); failed(landed))
+            return propagate_error(landed, outcome, "Failed to land the rows on the device"), void();
+        *arguments->vectors = {published, row_bytes, dimensions, scalar};
+        if (arguments->written) *arguments->written = min_of(total, entries);
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 USEARCH_EXPORT void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {
@@ -3492,12 +1045,17 @@ USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* argum
     if (arguments->starts_count)
         return propagate_error(usearch_status_unsupported_k, outcome, "No residency steps through graph links yet"),
                void();
-    usearch_dense_cursor_t const opened = new (std::nothrow) usearch_dense_cursor_handle_t {{}, arguments->index, {}};
+    usearch_dense_index_handle_t const& handle = *arguments->index;
+    usearch_dense_cursor_t const opened = new (std::nothrow) usearch_dense_cursor_handle_t(handle.tables, &handle);
     if (!opened)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor"), void();
     status_t const placed = std::visit(
-        [&](auto& variant) noexcept { return specialized_index {variant}.open(opened->walk); },
-        arguments->index->variant);
+        [&](auto const* verbs) noexcept {
+            auto const [walk, status] = verbs->cursor_open(handle.index);
+            opened->walk = walk;
+            return status;
+        },
+        handle.tables);
     if (failed(placed)) return delete opened, propagate_error(placed, outcome), void();
     *arguments->cursor = opened;
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -3524,36 +1082,27 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
     if (busy.test_and_set(std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull is still running on the cursor"),
                void();
-    std::visit(
-        [&]<typename cursor_type_>(cursor_type_& walk) noexcept {
-            if constexpr (std::is_same_v<cursor_type_, std::monostate>)
-                propagate_error(usearch_status_internal_k, outcome, "The cursor lost its variant");
-            else {
-                using key_t = typename cursor_type_::key_t;
-                using indexes_t = typename cursor_type_::indexes_t;
-                static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
-                // A handle never changes its variant, so it is still the one the cursor opened on.
-                auto& indexes = std::get<indexes_t>(arguments->index->variant);
-                if (!wanted) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                usearch_executor_handle_t call_executor;
-                typename indexes_t::executor_t* const executor = executor_of(indexes, arguments->executor,
-                                                                             call_executor, outcome);
-                if (!executor) return;
-                usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, wanted);
-                if (!keys)
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                std::span<key_t> const identities {reinterpret_cast<key_t*>(keys), wanted};
-                expected<std::size_t> const read = specialized_index {indexes}.read(
-                    walk, identities, us::dense::rows_span_t {}, *executor);
-                if (!read) return propagate_error(read.status, outcome, "Failed to export the keys"), void();
-                if (read.value) {
-                    *arguments->keys = {keys, sizeof(usearch_key_t)};
-                    *arguments->written = read.value;
-                }
-                propagate_error(usearch_status_success_k, outcome, nullptr);
-            }
-        },
-        arguments->cursor->walk);
+    // A handle never changes its variant, so it is still the one the cursor opened on.
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        using key_t = typename dense_verbs<home_>::key_t;
+        static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
+        if (!wanted) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
+        if (!executor) return;
+        usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, wanted);
+        if (!keys) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+        std::span<key_t> const identities {reinterpret_cast<key_t*>(keys), wanted};
+        expected<std::size_t> const read = punned.verbs.cursor_next(punned.index, arguments->cursor->walk, identities,
+                                                                    *executor);
+        if (!read) return propagate_error(read.status, outcome, "Failed to export the keys"), void();
+        if (read.value) {
+            *arguments->keys = {keys, sizeof(usearch_key_t)};
+            *arguments->written = read.value;
+        }
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
     busy.clear(std::memory_order_release);
 }
 
@@ -3568,42 +1117,23 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
     if (arguments->stats) *arguments->stats = {};
     if (arguments->count && !arguments->donors)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
-    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
-                                                                         outcome);
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
         if (!executor) return;
-        growing_buffer<variant_type_*> typed_donors {global_allocator};
-        if (failed(typed_donors.reserve_exactly(arguments->count)))
-            return propagate_error(status_t::bad_alloc_k, outcome), void();
-        std::size_t population = specialized_index {variant}.size();
-        for (std::size_t position = 0; position != arguments->count; ++position) {
-            usearch_dense_index_t& donor = arguments->donors[position];
-            if (!donor)
-                return propagate_error(usearch_status_invalid_argument_k, outcome, "A donor must not be null"), void();
-            // Ahead of the wait below, which a deferred absorb would spend on its own call.
-            if (donor == arguments->index)
-                return propagate_error(usearch_status_config_mismatch_k, outcome, "An index cannot absorb itself"),
-                       void();
-            // Every scalar, class and residency is a variant of its own, so a donor of another
-            // shape is another variant.
-            variant_type_* const typed = std::get_if<variant_type_>(&donor->variant);
-            if (!typed)
-                return propagate_error(usearch_status_config_mismatch_k, outcome,
-                                       "A donor must share the index's residency, scalar and class"),
-                       void();
-            finish_calls_using(donor);
-            typed_donors.push_back_reserved(typed);
-            population += specialized_index {*typed}.size();
-        }
-        typename variant_type_::refine_config_t config {};
-        config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
+        growing_buffer<void*> donors {global_allocator};
+        if (!collect_variants(punned, arguments->donors, arguments->count, arguments->index,
+                              "An index cannot absorb itself", donors, outcome))
+            return;
+        std::size_t population = punned.verbs.size(punned.index);
+        for (void* const donor : donors) population += punned.verbs.size(donor);
         progress_ticks_t ticks {arguments->progress, population};
-        auto const [refined, status] = specialized_index {variant}.absorb(to_writable_span(typed_donors), *executor,
-                                                                          config, ticks);
+        auto const [refined, status] = punned.verbs.absorb(punned.index, to_writable_span(donors), *executor,
+                                                           static_cast<u32_t>(arguments->expansion_factor), ticks);
         // The engine nulls every donor it consumed; their handles go with them.
         for (std::size_t position = 0; position != arguments->count; ++position)
-            if (!typed_donors[position]) delete std::exchange(arguments->donors[position], nullptr);
+            if (!donors[position]) delete std::exchange(arguments->donors[position], nullptr);
         accumulate_stats(arguments->stats, refined);
         // A stopped closing refine still healed, so its report stands beside the cancel.
         if (failed(status) && status != status_t::cancelled_k) return propagate_error(status, outcome), void();
@@ -3624,34 +1154,22 @@ USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments) {
     if (arguments->stats) *arguments->stats = {};
     if (arguments->count && !arguments->sources)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The sources must name handles"), void();
-    visit_writable(*arguments->target, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+    visit_punned(*arguments->target, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
-                                                                         outcome);
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
         if (!executor) return;
-        growing_buffer<variant_type_*> typed_sources {global_allocator};
-        if (failed(typed_sources.reserve_exactly(arguments->count)))
-            return propagate_error(status_t::bad_alloc_k, outcome), void();
+        growing_buffer<void*> sources {global_allocator};
+        if (!collect_variants(punned, arguments->sources, arguments->count, arguments->target, nullptr, sources,
+                              outcome))
+            return;
         std::size_t population = 0;
-        for (std::size_t position = 0; position != arguments->count; ++position) {
-            usearch_dense_index_t const source = arguments->sources[position];
-            if (!source)
-                return propagate_error(usearch_status_invalid_argument_k, outcome, "A source must not be null"), void();
-            variant_type_* const typed = std::get_if<variant_type_>(&source->variant);
-            if (!typed)
-                return propagate_error(usearch_status_config_mismatch_k, outcome,
-                                       "A source must share the target's residency, scalar and class"),
-                       void();
-            if (source != arguments->target) finish_calls_using(source);
-            typed_sources.push_back_reserved(typed);
-            population += specialized_index {*typed}.size();
-        }
+        for (void* const source : sources) population += punned.verbs.size(source);
         us::dense::compact_config_t config;
         config.shard_capacity = arguments->shard_capacity;
         config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
         progress_ticks_t ticks {arguments->progress, population};
-        auto const [compacted, status] = specialized_index {variant}.compact(to_span(typed_sources), *executor, config,
-                                                                             ticks);
+        auto const [compacted, status] = punned.verbs.compact(punned.index, to_span(sources), *executor, config, ticks);
         // Only a whole compaction consumed every other source; a failure frees none of them.
         if (succeeded(status) || status == status_t::cancelled_k)
             for (std::size_t position = 0; position != arguments->count; ++position)
@@ -3687,42 +1205,24 @@ USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_
                void();
     if (arguments->receivers_count)
         return propagate_error(usearch_status_unsupported_k, outcome, "No residency splits an index yet"), void();
-    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
-                                                                         outcome);
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
         if (!executor) return;
-        growing_buffer<variant_type_*> typed_donors {global_allocator};
-        if (failed(typed_donors.reserve_exactly(arguments->count)))
-            return propagate_error(status_t::bad_alloc_k, outcome), void();
-        for (std::size_t position = 0; position != arguments->count; ++position) {
-            usearch_dense_index_t const donor = arguments->donors[position];
-            if (!donor)
-                return propagate_error(usearch_status_invalid_argument_k, outcome, "A donor must not be null"), void();
-            if (donor == arguments->index)
-                return propagate_error(usearch_status_config_mismatch_k, outcome, "An index cannot absorb itself"),
-                       void();
-            variant_type_* const typed = std::get_if<variant_type_>(&donor->variant);
-            if (!typed)
-                return propagate_error(usearch_status_config_mismatch_k, outcome,
-                                       "A donor must share the index's residency, scalar and class"),
-                       void();
-            finish_calls_using(donor);
-            typed_donors.push_back_reserved(typed);
-        }
-        typename variant_type_::refine_config_t config {};
-        config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
-        auto [plan, status] = specialized_index {variant}.plan_absorb(to_writable_span(typed_donors), *executor,
-                                                                      config);
-        if (failed(status)) return propagate_error(status, outcome), void();
-        using refining_t = typename refinement_of<variant_type_>::type;
-        usearch_dense_refinement_t const opened = new (std::nothrow) usearch_dense_refinement_handle_t {
-            decltype(usearch_dense_refinement_handle_t::refining) {std::in_place_type<refining_t>,
-                                                                   std::move(typed_donors), std::move(plan)},
-            arguments->index, arguments->executor, arguments->donors, arguments->count};
+        growing_buffer<void*> donors {global_allocator};
+        if (!collect_variants(punned, arguments->donors, arguments->count, arguments->index,
+                              "An index cannot absorb itself", donors, outcome))
+            return;
+        usearch_dense_refinement_t const opened = new (std::nothrow) usearch_dense_refinement_handle_t(
+            arguments->index->tables, arguments->index, arguments->executor, arguments->donors, arguments->count);
         if (!opened)
             return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the refinement"),
                    void();
+        auto const [refining, status] = punned.verbs.refinement_open(punned.index, to_span(donors), *executor,
+                                                                     static_cast<u32_t>(arguments->expansion_factor));
+        if (failed(status)) return delete opened, propagate_error(status, outcome), void();
+        opened->refining = refining;
         *arguments->refinement = opened;
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
@@ -3741,26 +1241,19 @@ USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The refinement was opened on another index or executor"),
                void();
-    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
-        auto* const refining = std::get_if<typename refinement_of<variant_type_>::type>(&refinement->refining);
-        if (!refining)
-            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another variant"),
-                   void();
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
-                                                                         outcome);
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
         if (!executor) return;
-        progress_ticks_t ticks {arguments->progress, specialized_index {variant}.size()};
-        dense_scratch<variant_type_> scratch {*executor};
-        if (status_t const prepared = scratch.prepare(*executor); failed(prepared))
-            return propagate_error(prepared, outcome, "Failed to carve the contexts"), void();
-        status_t const ran = specialized_index {variant}.run(refining->plan, *executor, scratch, ticks);
+        progress_ticks_t ticks {arguments->progress, punned.verbs.size(punned.index)};
+        status_t const ran = punned.verbs.refinement_run(punned.index, refinement->refining, *executor, ticks);
         // The plan nulls every donor it landed; their handles go with them.
         for (std::size_t position = 0; position != refinement->count; ++position)
-            if (!refining->donors[position] && refinement->donors[position])
+            if (refinement->donors[position] && punned.verbs.refinement_landed(refinement->refining, position))
                 delete std::exchange(refinement->donors[position], nullptr);
         // Running totals, so a cancelled or failed call still says how far the pass got.
-        auto const refined = refining->plan.running();
+        us::dense::refine_result_t const refined = punned.verbs.refinement_running(refinement->refining);
         if (arguments->visited) *arguments->visited = refined.visited_nodes;
         if (arguments->changed) *arguments->changed = refined.changed_nodes;
         accumulate_stats(arguments->stats, refined);
@@ -3781,19 +1274,12 @@ USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_fin
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The refinement was opened on another index or executor"),
                void();
-    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
-        auto* const refining = std::get_if<typename refinement_of<variant_type_>::type>(&refinement->refining);
-        if (!refining)
-            return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement serves another variant"),
-                   void();
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
-                                                                         outcome);
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
         if (!executor) return;
-        dense_scratch<variant_type_> scratch {*executor};
-        if (status_t const prepared = scratch.prepare(*executor); failed(prepared))
-            return propagate_error(prepared, outcome, "Failed to carve the contexts"), void();
-        auto const [refined, status] = specialized_index {variant}.finish(refining->plan, *executor, scratch);
+        auto const [refined, status] = punned.verbs.refinement_finish(punned.index, refinement->refining, *executor);
         accumulate_stats(arguments->stats, refined);
         if (failed(status)) return propagate_error(status, outcome), void();
         if (arguments->changed) *arguments->changed = refined.changed_nodes;
@@ -3840,84 +1326,80 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
     if (arguments->stats) *arguments->stats = {};
     if (rejects_columns(*arguments->index, count, arguments->left.columns, outcome)) return;
     predicate_t keyed {arguments->predicate};
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if (!accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) return;
-            if (variant.kernel() != nk_kernel_dot_k)
-                propagate_error(usearch_status_config_mismatch_k, outcome,
-                                "A product is a dot, so the kind must be inner product");
-            else if (arguments->traversal == usearch_traversal_scan_k)
-                propagate_error(usearch_status_unsupported_k, outcome, "No residency multiplies by an exact scan yet");
-            else {
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
-                                                                  arguments->executor, device_of(variant),
-                                                                  {arguments->left.data}, outcome);
-                if (!arena) return;
-                if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                using key_t = typename variant_type_::key_t;
-                static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
-                // A row's scored count lands one past its offset, which it becomes once compacted.
-                std::size_t* offsets = carve<std::size_t>(arena->memory, count + 1);
-                if (!offsets)
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                std::span<std::size_t> const scored {offsets + 1, count};
-                usearch_key_t* keys = nullptr;
-                usearch_distance_t* scores = nullptr;
-                // Every row keeps the pairs its walks scored until `width` of them fill its row,
-                // compacted once the counts are known.
-                auto walk = [&](std::size_t width, usearch_progress_t progress) noexcept {
-                    keys = width ? carve<usearch_key_t>(arena->memory, count * width) : nullptr;
-                    scores = width ? carve<usearch_distance_t>(arena->memory, count * width) : nullptr;
-                    if (width && (!keys || !scores))
-                        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
-                    nk::matrix_span<key_t> const kept_keys {reinterpret_cast<key_t*>(keys), count, width};
-                    nk::matrix_span<f64_t> const kept_scores {scores, count, width};
-                    auto sink = [&](specialized_index<variant_type_> view, us::dense::rows_view_t chunk_rows,
-                                    typename variant_type_::executor_t& executor, dense_scratch<variant_type_>& scratch,
-                                    typename variant_type_::search_config_t config, std::size_t resolved,
-                                    std::size_t taking) noexcept {
-                        nk::range_t const chunk = nk::range(resolved, resolved + taking);
-                        if (keyed.predicate.callback)
-                            return view.multiply_if(chunk_rows, executor, scratch, config, kept_keys(chunk, nk::slice),
-                                                    kept_scores(chunk, nk::slice), scored.subspan(resolved, taking),
-                                                    keyed);
-                        return view.multiply(chunk_rows, executor, scratch, config, kept_keys(chunk, nk::slice),
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        int const device = punned.verbs.device(punned.index, 0);
+        if (!accepts_traversal(device, arguments->traversal, arguments->predicate, outcome)) return;
+        if (punned.verbs.kernel(punned.index) != nk_kernel_dot_k)
+            return propagate_error(usearch_status_config_mismatch_k, outcome,
+                                   "A product is a dot, so the kind must be inner product"),
+                   void();
+        if (arguments->traversal == usearch_traversal_scan_k)
+            return propagate_error(usearch_status_unsupported_k, outcome,
+                                   "No residency multiplies by an exact scan yet"),
+                   void();
+        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                          device, {arguments->left.data}, outcome);
+        if (!arena) return;
+        if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+        using key_t = typename dense_verbs<home_>::key_t;
+        static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
+        // A row's scored count lands one past its offset, which it becomes once compacted.
+        std::size_t* offsets = carve<std::size_t>(arena->memory, count + 1);
+        if (!offsets)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+        std::span<std::size_t> const scored {offsets + 1, count};
+        usearch_key_t* keys = nullptr;
+        usearch_distance_t* scores = nullptr;
+        // Every row keeps the pairs its walks scored until `width` of them fill its row, compacted
+        // once the counts are known.
+        auto walk = [&](std::size_t width, usearch_progress_t progress) noexcept {
+            keys = width ? carve<usearch_key_t>(arena->memory, count * width) : nullptr;
+            scores = width ? carve<usearch_distance_t>(arena->memory, count * width) : nullptr;
+            if (width && (!keys || !scores))
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+            nk::matrix_span<key_t> const kept_keys {reinterpret_cast<key_t*>(keys), count, width};
+            nk::matrix_span<f64_t> const kept_scores {scores, count, width};
+            auto sink = [&](us::dense::rows_view_t chunk_rows, typename punned_dense_index<home_>::executor_t& executor,
+                            dense_walk_config_t config, std::size_t resolved, std::size_t taking) noexcept {
+                nk::range_t const chunk = nk::range(resolved, resolved + taking);
+                if (keyed.predicate.callback)
+                    return punned.verbs.multiply_if(punned.index, chunk_rows, executor, config,
+                                                    kept_keys(chunk, nk::slice), kept_scores(chunk, nk::slice),
+                                                    scored.subspan(resolved, taking), keyed);
+                return punned.verbs.multiply(punned.index, chunk_rows, executor, config, kept_keys(chunk, nk::slice),
                                              kept_scores(chunk, nk::slice), scored.subspan(resolved, taking));
-                    };
-                    return for_each_dense_chunk(variant, arguments->executor, count, arguments->left, 1,
-                                                arguments->expansion_factor, progress, arguments->stats, outcome, sink);
-                };
-                // Keeping every pair needs the widest row first, which only a counting walk can tell.
-                std::size_t width = arguments->wanted;
-                if (!width) {
-                    if (!walk(0, usearch_progress_t {})) return;
-                    for (std::size_t const row_scored : scored) width = max_of(width, row_scored);
-                }
-                if (!walk(width, arguments->progress)) return;
+            };
+            return for_each_dense_chunk(punned, arguments->executor, count, arguments->left, 1,
+                                        arguments->expansion_factor, progress, arguments->stats, outcome, sink);
+        };
+        // Keeping every pair needs the widest row first, which only a counting walk can tell.
+        std::size_t width = arguments->wanted;
+        if (!width) {
+            if (!walk(0, usearch_progress_t {})) return;
+            for (std::size_t const row_scored : scored) width = max_of(width, row_scored);
+        }
+        if (!walk(width, arguments->progress)) return;
 
-                std::size_t required = 0;
-                offsets[0] = 0;
-                for (std::size_t row = 0; row != count; ++row) {
-                    std::size_t const row_scored = offsets[row + 1], kept = min_of(row_scored, width);
-                    required += row_scored;
-                    offsets[row + 1] = offsets[row] + kept;
-                    if (!kept) continue;
-                    // A run starts no later than its own row, so moving rows in order
-                    // overwrites only rows already moved.
-                    std::memmove(keys + offsets[row], keys + row * width, kept * sizeof(usearch_key_t));
-                    std::memmove(scores + offsets[row], scores + row * width, kept * sizeof(usearch_distance_t));
-                }
-                auto const [products, publish_status] = publish_matches(*arena, keys, scores, offsets, count);
-                if (failed(publish_status))
-                    return propagate_error(publish_status, outcome, "Failed to land the products on the device"),
-                           void();
-                *arguments->products = products;
-                if (arguments->written) *arguments->written = offsets[count];
-                if (arguments->required) *arguments->required = required;
-                propagate_error(usearch_status_success_k, outcome, nullptr);
-            }
-        },
-        arguments->index->variant);
+        std::size_t required = 0;
+        offsets[0] = 0;
+        for (std::size_t row = 0; row != count; ++row) {
+            std::size_t const row_scored = offsets[row + 1], kept = min_of(row_scored, width);
+            required += row_scored;
+            offsets[row + 1] = offsets[row] + kept;
+            if (!kept) continue;
+            // A run starts no later than its own row, so moving rows in order overwrites only rows
+            // already moved.
+            std::memmove(keys + offsets[row], keys + row * width, kept * sizeof(usearch_key_t));
+            std::memmove(scores + offsets[row], scores + row * width, kept * sizeof(usearch_distance_t));
+        }
+        auto const [products, publish_status] = publish_matches(*arena, keys, scores, offsets, count);
+        if (failed(publish_status))
+            return propagate_error(publish_status, outcome, "Failed to land the products on the device"), void();
+        *arguments->products = products;
+        if (arguments->written) *arguments->written = offsets[count];
+        if (arguments->required) *arguments->required = required;
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 static_assert(sizeof(us::dense::softmax_state_t) == sizeof(usearch_dense_softmax_state_t));
@@ -3943,61 +1425,54 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     f32_t const requested_scale = arguments->score_scale;
     predicate_t keyed {arguments->predicate};
 
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if (!accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) return;
-            if (variant.kernel() != nk_kernel_dot_k)
-                propagate_error(usearch_status_config_mismatch_k, outcome,
-                                "A softmax weighs logits, so the kind must be inner product");
-            else if (arguments->traversal == usearch_traversal_scan_k)
-                propagate_error(usearch_status_unsupported_k, outcome, "No residency attends by an exact scan yet");
-            else if (!arguments->value_lookup)
-                propagate_error(usearch_status_invalid_argument_k, outcome, "The value lookup must be set");
-            else {
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
-                                                                  arguments->executor, device_of(variant),
-                                                                  {arguments->queries.data, carry}, outcome);
-                if (!arena) return;
-                if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                // A VRAM arena's outputs are carved on its device, where the shards' merge lands
-                // them in place.
-                std::byte* const landing = arena->device_memory
-                                               ? carve<std::byte>(arena->device_memory, count * row_bytes)
-                                               : carve<std::byte>(arena->memory, count * row_bytes);
-                if (!landing)
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                value_lookup_t const value_lookup {arguments->value_lookup, arguments->value_lookup_state,
-                                                   usearch_scalar_of(variant_type_::vector_dtype_k), columns};
-                us::dense::rows_span_t const outputs {landing, count, columns, row_bytes, outputs_dtype};
-                // The engine's carry mirrors the C one, so it writes the caller's states in place.
-                std::span<us::dense::softmax_state_t> const carried {
-                    reinterpret_cast<us::dense::softmax_state_t*>(carry), carry ? count : 0};
-                auto sink = [&](specialized_index<variant_type_> view, us::dense::rows_view_t chunk_rows,
-                                typename variant_type_::executor_t& executor, dense_scratch<variant_type_>& scratch,
-                                typename variant_type_::search_config_t config, std::size_t resolved,
-                                std::size_t taking) noexcept {
-                    f32_t const score_scale = requested_scale > 0
-                                                  ? requested_scale
-                                                  : 1 / std::sqrt(static_cast<f32_t>(view.dimensions()));
-                    std::span<us::dense::softmax_state_t> const chunk_carry = carried.empty()
-                                                                                  ? carried
-                                                                                  : carried.subspan(resolved, taking);
-                    if (keyed.predicate.callback)
-                        return view.attend_if(chunk_rows, head_count, value_lookup, score_scale,
-                                              outputs.slice(resolved, taking), chunk_carry, executor, scratch, config,
-                                              keyed);
-                    return view.attend(chunk_rows, head_count, value_lookup, score_scale,
-                                       outputs.slice(resolved, taking), chunk_carry, executor, scratch, config);
-                };
-                if (!for_each_dense_chunk(variant, arguments->executor, count, arguments->queries, head_count,
-                                          arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
-                                          sink))
-                    return;
-                *arguments->outputs = {landing, row_bytes, columns, outputs_scalar};
-                propagate_error(usearch_status_success_k, outcome, nullptr);
-            }
-        },
-        arguments->index->variant);
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        int const device = punned.verbs.device(punned.index, 0);
+        if (!accepts_traversal(device, arguments->traversal, arguments->predicate, outcome)) return;
+        if (punned.verbs.kernel(punned.index) != nk_kernel_dot_k)
+            return propagate_error(usearch_status_config_mismatch_k, outcome,
+                                   "A softmax weighs logits, so the kind must be inner product"),
+                   void();
+        if (arguments->traversal == usearch_traversal_scan_k)
+            return propagate_error(usearch_status_unsupported_k, outcome, "No residency attends by an exact scan yet"),
+                   void();
+        if (!arguments->value_lookup)
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The value lookup must be set"), void();
+        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                          device, {arguments->queries.data, carry}, outcome);
+        if (!arena) return;
+        if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+        // A VRAM arena's outputs are carved on its device, where the shards' merge lands them in
+        // place.
+        std::byte* const landing = arena->device_memory ? carve<std::byte>(arena->device_memory, count * row_bytes)
+                                                        : carve<std::byte>(arena->memory, count * row_bytes);
+        if (!landing)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+        value_lookup_t const value_lookup {arguments->value_lookup, arguments->value_lookup_state,
+                                           usearch_scalar_of(punned.verbs.dtype), columns};
+        us::dense::rows_span_t const outputs {landing, count, columns, row_bytes, outputs_dtype};
+        // The engine's carry mirrors the C one, so it writes the caller's states in place.
+        std::span<us::dense::softmax_state_t> const carried {reinterpret_cast<us::dense::softmax_state_t*>(carry),
+                                                             carry ? count : 0};
+        f32_t const score_scale = requested_scale > 0
+                                      ? requested_scale
+                                      : 1 / std::sqrt(static_cast<f32_t>(punned.verbs.dimensions(punned.index)));
+        auto sink = [&](us::dense::rows_view_t chunk_rows, typename punned_dense_index<home_>::executor_t& executor,
+                        dense_walk_config_t config, std::size_t resolved, std::size_t taking) noexcept {
+            std::span<us::dense::softmax_state_t> const chunk_carry = carried.empty()
+                                                                          ? carried
+                                                                          : carried.subspan(resolved, taking);
+            if (keyed.predicate.callback)
+                return punned.verbs.attend_if(punned.index, chunk_rows, head_count, value_lookup, score_scale,
+                                              outputs.slice(resolved, taking), chunk_carry, executor, config, keyed);
+            return punned.verbs.attend(punned.index, chunk_rows, head_count, value_lookup, score_scale,
+                                       outputs.slice(resolved, taking), chunk_carry, executor, config);
+        };
+        if (!for_each_dense_chunk(punned, arguments->executor, count, arguments->queries, head_count,
+                                  arguments->expansion_factor, arguments->progress, arguments->stats, outcome, sink))
+            return;
+        *arguments->outputs = {landing, row_bytes, columns, outputs_scalar};
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
@@ -4011,47 +1486,40 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     if (!arguments->query_offsets && !rows_per_query)
         return propagate_error(usearch_status_shape_mismatch_k, outcome, "Every query needs at least one row"), void();
     predicate_t keyed {arguments->predicate};
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if (!accepts_traversal(device_of(variant), arguments->traversal, arguments->predicate, outcome)) return;
-            if (variant.kernel() != nk_kernel_dot_k)
-                propagate_error(usearch_status_config_mismatch_k, outcome,
-                                "Late interaction sums maxima over logits, so the kind must be inner product");
-            else {
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
-                                                                  arguments->executor, device_of(variant),
-                                                                  {arguments->queries.data}, outcome);
-                if (!arena) return;
-                if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                // Uniform queries become offsets in the arena, so every residency reads one layout.
-                std::size_t* const uniform = arguments->query_offsets ? nullptr
-                                                                      : carve<std::size_t>(arena->memory, count + 1);
-                if (!arguments->query_offsets && !uniform)
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                for (std::size_t query = 0; uniform && query != count + 1; ++query)
-                    uniform[query] = query * rows_per_query;
-                std::span<std::size_t const> const query_offsets {
-                    arguments->query_offsets ? arguments->query_offsets : uniform, count + 1};
-                if (!accepts_query_offsets(query_offsets, outcome)) return;
-                if (rejects_columns(*arguments->index, query_offsets.back(), arguments->queries.columns, outcome))
-                    return;
-                usearch_key_t* keys = nullptr;
-                usearch_distance_t* scores = nullptr;
-                std::size_t* offsets = nullptr;
-                std::size_t required = 0;
-                if (!maxsim_queries(variant, *arguments, query_offsets, keyed, *arena, keys, scores, offsets, required,
-                                    outcome))
-                    return;
-                auto const [matches, publish_status] = publish_matches(*arena, keys, scores, offsets, count);
-                if (failed(publish_status))
-                    return propagate_error(publish_status, outcome, "Failed to land the matches on the device"), void();
-                *arguments->matches = matches;
-                if (arguments->written) *arguments->written = offsets[count];
-                if (arguments->required) *arguments->required = required;
-                propagate_error(usearch_status_success_k, outcome, nullptr);
-            }
-        },
-        arguments->index->variant);
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        int const device = punned.verbs.device(punned.index, 0);
+        if (!accepts_traversal(device, arguments->traversal, arguments->predicate, outcome)) return;
+        if (punned.verbs.kernel(punned.index) != nk_kernel_dot_k)
+            return propagate_error(usearch_status_config_mismatch_k, outcome,
+                                   "Late interaction sums maxima over logits, so the kind must be inner product"),
+                   void();
+        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                          device, {arguments->queries.data}, outcome);
+        if (!arena) return;
+        if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+        // Uniform queries become offsets in the arena, so every residency reads one layout.
+        std::size_t* const uniform = arguments->query_offsets ? nullptr : carve<std::size_t>(arena->memory, count + 1);
+        if (!arguments->query_offsets && !uniform)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+        for (std::size_t query = 0; uniform && query != count + 1; ++query) uniform[query] = query * rows_per_query;
+        std::span<std::size_t const> const query_offsets {arguments->query_offsets ? arguments->query_offsets : uniform,
+                                                          count + 1};
+        if (!accepts_query_offsets(query_offsets, outcome)) return;
+        if (rejects_columns(*arguments->index, query_offsets.back(), arguments->queries.columns, outcome)) return;
+        usearch_key_t* keys = nullptr;
+        usearch_distance_t* scores = nullptr;
+        std::size_t* offsets = nullptr;
+        std::size_t required = 0;
+        if (!maxsim_queries(punned, *arguments, query_offsets, keyed, *arena, keys, scores, offsets, required, outcome))
+            return;
+        auto const [matches, publish_status] = publish_matches(*arena, keys, scores, offsets, count);
+        if (failed(publish_status))
+            return propagate_error(publish_status, outcome, "Failed to land the matches on the device"), void();
+        *arguments->matches = matches;
+        if (arguments->written) *arguments->written = offsets[count];
+        if (arguments->required) *arguments->required = required;
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 #pragma endregion Linear Algebra
@@ -4082,7 +1550,7 @@ USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_vram_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    // The header parses on the host, so a monolith on an NVIDIA or AMD device, where a VRAM
+    // The headers parse on the host, so a checkpoint on an NVIDIA or AMD device, where a VRAM
     // `usearch_dense_save_buffer` lands it, is read back first; Apple's unified memory is read in
     // place.
     bytes_view_t source = as_bytes(arguments->buffer);
@@ -4097,49 +1565,44 @@ USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     if (!arguments->path.data || !arguments->path.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            usearch_executor_handle_t call_executor;
-            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                             call_executor, outcome);
-            if (!executor) return;
-            progress_ticks_t ticks {arguments->progress, specialized_index {variant}.shards_count()};
-            propagate_error(specialized_index {variant}.save(as_text(arguments->path), *executor, ticks), outcome);
-        },
-        arguments->index->variant);
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
+        if (!executor) return;
+        progress_ticks_t ticks {arguments->progress, punned.verbs.shards_count(punned.index)};
+        propagate_error(punned.verbs.save(punned.index, as_text(arguments->path), *executor, ticks), outcome);
+    });
 }
 
 USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
     if (submitted<usearch_dense_save_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->monolith = {};
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                              device_of(variant), {}, outcome);
-            if (!arena) return;
-            usearch_executor_handle_t call_executor;
-            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                             call_executor, outcome);
-            if (!executor) return;
-            auto const [length, status] = specialized_index {variant}.storage_requirements();
-            if (failed(status)) return propagate_error(status, outcome), void();
-            std::byte* monolith = carve<std::byte>(arena->memory, length);
-            if (!monolith)
-                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-            progress_ticks_t ticks {arguments->progress, specialized_index {variant}.shards_count()};
-            status_t const saved = specialized_index {variant}.save(
-                bytes_span_t {reinterpret_cast<byte_t*>(monolith), length}, *executor, ticks);
-            if (failed(saved)) return propagate_error(saved, outcome), void();
-            // A VRAM monolith is written on the host, then lands on the arena's device in one
-            // upload.
-            auto const [published, publish_status] = publish(*arena, monolith, length);
-            if (status_t const landed = drained(*arena, publish_status); failed(landed))
-                return propagate_error(landed, outcome, "Failed to land the monolith on the device"), void();
-            *arguments->monolith = {reinterpret_cast<uint8_t const*>(published), length};
-            propagate_error(usearch_status_success_k, outcome, nullptr);
-        },
-        arguments->index->variant);
+    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                          punned.verbs.device(punned.index, 0), {}, outcome);
+        if (!arena) return;
+        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                     call_executor, outcome);
+        if (!executor) return;
+        auto const [length, status] = punned.verbs.storage_requirements(punned.index);
+        if (failed(status)) return propagate_error(status, outcome), void();
+        std::byte* checkpoint = carve<std::byte>(arena->memory, length);
+        if (!checkpoint)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+        progress_ticks_t ticks {arguments->progress, punned.verbs.shards_count(punned.index)};
+        status_t const saved = punned.verbs.save_buffer(punned.index, bytes_span_t {checkpoint, length}, *executor,
+                                                        ticks);
+        if (failed(saved)) return propagate_error(saved, outcome), void();
+        // A VRAM checkpoint is written on the host, then lands on the arena's device in one upload.
+        auto const [published, publish_status] = publish(*arena, checkpoint, length);
+        if (status_t const landed = drained(*arena, publish_status); failed(landed))
+            return propagate_error(landed, outcome, "Failed to land the checkpoint on the device"), void();
+        *arguments->monolith = {reinterpret_cast<uint8_t const*>(published), length};
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* arguments) {
@@ -4283,8 +1746,24 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
         return propagate_error(usearch_status_config_mismatch_k, outcome,
                                "Kernel paths and transport identifiers need different engines"),
                void();
+    usearch_nvme_class_t const nvme_class = arguments->nvme_class;
+    if (nvme_class > usearch_nvme_class_windows_ioring_k)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "Unknown NVMe class"), void();
+    if (nvme_class != usearch_nvme_class_unknown_k &&
+        (nvme_class == usearch_nvme_class_linux_spdk_k) != (transport_ids != 0))
+        return propagate_error(usearch_status_config_mismatch_k, outcome,
+                               "SPDK serves transport identifiers, and the kernel engines serve paths"),
+               void();
     io_engine_config_t config;
     config.queue_depth = nvme_queue_depth_k;
+    switch (nvme_class) {
+    case usearch_nvme_class_posix_k: config.transport = io_transport_t::blocking_k; break;
+    case usearch_nvme_class_linux_aio_k: config.transport = io_transport_t::linux_aio_k; break;
+    case usearch_nvme_class_linux_uring_k: config.transport = io_transport_t::linux_uring_k; break;
+    case usearch_nvme_class_linux_uring_passthrough_k: config.transport = io_transport_t::linux_uring_nvme_k; break;
+    case usearch_nvme_class_windows_ioring_k: config.transport = io_transport_t::windows_ioring_k; break;
+    default: break;
+    }
     if (transport_ids) {
 #if USEARCH_WITH_LINUX_SPDK
         // Fabrics copy every byte through a socket, so only PCIe controllers need hugepages to DMA

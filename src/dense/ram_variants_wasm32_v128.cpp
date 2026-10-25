@@ -2,17 +2,9 @@
  *  @file src/dense/ram_variants_wasm32_v128.cpp
  *  @author Ash Vardanian
  *  @date September 12, 2026
- *  @brief The wasm32_v128 unit: fixed-width SIMD128, one thread, the cells with a strict kit.
+ *  @brief The wasm32_v128 unit: fixed-width SIMD128, one thread, the variants with a strict kit.
  */
+
 #include "dense_specializations.cuh"
 
-template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::wasm32_v128_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::wasm32_v128_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::wasm32_v128_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::wasm32_v128_k>>;
-#endif
+template struct dense_class_tables<dense_home_t::ram_k, cpu_class_t::wasm32_v128_k>;

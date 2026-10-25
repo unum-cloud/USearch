@@ -76,36 +76,6 @@ inline usearch_scalar_t usearch_scalar_of(nk_dtype_t dtype) noexcept {
  *  call apart. */
 inline constexpr std::size_t default_progress_steps_k = 10;
 
-/** Codenames of the dispatchable CPU tiers, composed into the capability string once. */
-struct numkong_capability_name_t {
-    nk_capability_t bit;
-    char const* name;
-};
-inline constexpr numkong_capability_name_t numkong_capability_names_k[] = {
-    {nk_cap_serial_k, "serial"},
-    {nk_cap_neon_k, "neon"},
-    {nk_cap_neonsdot_k, "neonsdot"},
-    {nk_cap_neonbfdot_k, "neonbfdot"},
-    {nk_cap_neonfhm_k, "neonfhm"},
-    {nk_cap_neonfp8_k, "neonfp8"},
-    {nk_cap_sme_k, "sme"},
-    {nk_cap_smebi32_k, "smebi32"},
-    {nk_cap_haswell_k, "haswell"},
-    {nk_cap_skylake_k, "skylake"},
-    {nk_cap_icelake_k, "icelake"},
-    {nk_cap_genoa_k, "genoa"},
-    {nk_cap_sapphire_k, "sapphire"},
-    {nk_cap_sapphireamx_k, "sapphireamx"},
-    {nk_cap_graniteamx_k, "graniteamx"},
-    {nk_cap_alder_k, "alder"},
-    {nk_cap_sierra_k, "sierra"},
-    {nk_cap_diamond_k, "diamond"},
-    {nk_cap_rvv_k, "rvv"},
-    {nk_cap_rvvbb_k, "rvvbb"},
-    {nk_cap_v128_k, "v128"},
-    {nk_cap_v128relaxed_k, "v128relaxed"},
-};
-
 /** Marks @p outcome as running; no waiter watches for this store, so it is relaxed. */
 inline void propagate_pending(usearch_outcome_t* outcome) noexcept {
     outcome->message = nullptr;
@@ -138,6 +108,31 @@ inline void accumulate_stats(usearch_traversal_stats_t* stats, result_type_ cons
     stats->visited_members += result.visited_members;
     stats->computed_distances += result.computed_distances;
     stats->restarts += result.restarts;
+}
+
+/** Places one shard per memory domain the process may allocate on through @p emplace, as
+ *  `emplace(domain) → status_t`, over a transient topology; @c uninitialized_k where it names
+ *  none. */
+template <typename emplace_type_>
+status_t emplace_on_every_domain(emplace_type_&& emplace) noexcept {
+    fu_topology_t topology = nullptr;
+    if (fu_topology_new(&topology) != fu_success_k) return status_t::uninitialized_k;
+    // The topology dies on every path, so the domains are walked before it is deleted.
+    auto place_on_every_domain = [&]() noexcept {
+        std::size_t domains_count = 0;
+        if (fu_memory_domains_count(topology, &domains_count) != fu_success_k || !domains_count)
+            return status_t::uninitialized_k;
+        for (std::size_t position = 0; position != domains_count; ++position) {
+            fu_memory_domain_id_t domain = -1;
+            if (fu_memory_domain_id_at_index(topology, position, &domain) != fu_success_k)
+                return status_t::uninitialized_k;
+            if (status_t const placed = emplace(domain); failed(placed)) return placed;
+        }
+        return status_t::success_k;
+    };
+    status_t const placed = place_on_every_domain();
+    fu_topology_delete(topology);
+    return placed;
 }
 
 /** Whether a result carries traversal telemetry - one probe both crossings read. */
@@ -327,6 +322,59 @@ struct progress_ticks_t {
 };
 
 #pragma endregion Scaffolding
+
+#pragma region Type Lists
+
+/** How many storage dtypes the dense variants cover, from the front of the ladder bf16, u1, i8,
+ *  e4m3, f16, u8, e5m2, i4, u4, e3m2, e2m3. CMake passes it, so only builds that bypass CMake take
+ *  this default. */
+#if !defined(USEARCH_DENSE_DTYPES)
+#define USEARCH_DENSE_DTYPES 4
+#endif
+#if USEARCH_DENSE_DTYPES < 1 || USEARCH_DENSE_DTYPES > 11
+#error "USEARCH_DENSE_DTYPES must be an integer from 1 to 11"
+#endif
+
+/** Types in order, the variants one basic class unit compiles in one home. */
+template <typename... types_>
+struct type_list {
+    static constexpr std::size_t size_k = sizeof...(types_);
+};
+
+/** Storage dtypes in ladder order, the one list every dense class unit folds its variants over. */
+template <nk_dtype_t... dtypes_>
+struct dtype_list {
+    static constexpr std::size_t size_k = sizeof...(dtypes_);
+    static constexpr std::array<nk_dtype_t, sizeof...(dtypes_)> dtypes_k {dtypes_...};
+
+    /** The position of @p dtype in the list, or @c size_k when it is absent. */
+    static constexpr std::size_t position_of(nk_dtype_t dtype) noexcept {
+        std::size_t position = 0;
+        while (position != size_k && dtypes_k[position] != dtype) ++position;
+        return position;
+    }
+};
+
+/** Takes dtypes off the front of a pack into @p taken_type_ until @p count_ are taken. */
+template <std::size_t count_, typename taken_type_, nk_dtype_t... rest_>
+struct first_dtypes_of {
+    using type = taken_type_;
+};
+template <std::size_t count_, nk_dtype_t... taken_, nk_dtype_t next_, nk_dtype_t... rest_>
+    requires(count_ != 0)
+struct first_dtypes_of<count_, dtype_list<taken_...>, next_, rest_...> {
+    using type = typename first_dtypes_of<count_ - 1, dtype_list<taken_..., next_>, rest_...>::type;
+};
+
+/** The leading @p count_ dtypes of the pack, as a @c dtype_list. */
+template <std::size_t count_, nk_dtype_t... dtypes_>
+using first_dtypes = typename first_dtypes_of<count_, dtype_list<>, dtypes_...>::type;
+
+/** The dense storage dtypes this build compiles variants for. */
+using dense_dtypes_t = first_dtypes<USEARCH_DENSE_DTYPES, nk_bf16_k, nk_u1_k, nk_i8_k, nk_e4m3_k, nk_f16_k, nk_u8_k,
+                                    nk_e5m2_k, nk_i4_k, nk_u4_k, nk_e3m2_k, nk_e2m3_k>;
+
+#pragma endregion Type Lists
 
 #pragma region CPU Classes
 
@@ -712,6 +760,118 @@ inline bool forkunion_admits() noexcept {
     return (fu::runtime_capabilities() & wanted) == wanted;
 }
 
+/** ForkUnion's mask for a class named at run time, read off the template per class. */
+constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) noexcept {
+    switch (cpu_class) {
+    case cpu_class_t::intel_haswell_k: return forkunion_capabilities_of<cpu_class_t::intel_haswell_k>();
+    case cpu_class_t::intel_sierra_k: return forkunion_capabilities_of<cpu_class_t::intel_sierra_k>();
+    case cpu_class_t::intel_skylake_k: return forkunion_capabilities_of<cpu_class_t::intel_skylake_k>();
+    case cpu_class_t::intel_icelake_k: return forkunion_capabilities_of<cpu_class_t::intel_icelake_k>();
+    case cpu_class_t::amd_genoa_k: return forkunion_capabilities_of<cpu_class_t::amd_genoa_k>();
+    case cpu_class_t::intel_sapphire_k: return forkunion_capabilities_of<cpu_class_t::intel_sapphire_k>();
+    case cpu_class_t::intel_granite_k: return forkunion_capabilities_of<cpu_class_t::intel_granite_k>();
+    case cpu_class_t::intel_diamond_k: return forkunion_capabilities_of<cpu_class_t::intel_diamond_k>();
+    case cpu_class_t::aws_g2_k: return forkunion_capabilities_of<cpu_class_t::aws_g2_k>();
+    case cpu_class_t::apple_m2_k: return forkunion_capabilities_of<cpu_class_t::apple_m2_k>();
+    case cpu_class_t::apple_m4_k: return forkunion_capabilities_of<cpu_class_t::apple_m4_k>();
+    case cpu_class_t::aws_g5_k: return forkunion_capabilities_of<cpu_class_t::aws_g5_k>();
+    case cpu_class_t::nvidia_vera_k: return forkunion_capabilities_of<cpu_class_t::nvidia_vera_k>();
+    case cpu_class_t::alibaba_c930_k: return forkunion_capabilities_of<cpu_class_t::alibaba_c930_k>();
+    case cpu_class_t::wasm32_v128_k: return forkunion_capabilities_of<cpu_class_t::wasm32_v128_k>();
+    case cpu_class_t::wasm64_extended_k: return forkunion_capabilities_of<cpu_class_t::wasm64_extended_k>();
+    default: return forkunion_capabilities_of<cpu_class_t::serial_k>();
+    }
+}
+
+/** Whether @p rung runs wherever @p pinned does: its NumKong and ForkUnion masks are subsets of
+ *  the pinned class's, so a pin admits exactly the rungs a machine of that class would. */
+constexpr bool cpu_class_within(cpu_class_t rung, cpu_class_t pinned) noexcept {
+    nk_capability_t const rung_compute = numkong_capabilities_of(rung),
+                          pinned_compute = numkong_capabilities_of(pinned);
+    fu::capabilities_t const rung_sync = forkunion_capabilities_of(rung),
+                             pinned_sync = forkunion_capabilities_of(pinned);
+    return (rung_compute & pinned_compute) == rung_compute && (rung_sync & pinned_sync) == rung_sync;
+}
+
+/** The C enum's class as the engines name it; @c usearch_cpu_class_unknown_k derives nothing, so
+ *  it names the serial floor. */
+constexpr cpu_class_t cpu_class_of(usearch_cpu_class_t cpu_class) noexcept {
+    if (cpu_class == usearch_cpu_class_unknown_k || cpu_class > usearch_cpu_class_wasm64_extended_k)
+        return cpu_class_t::serial_k;
+    return static_cast<cpu_class_t>(cpu_class);
+}
+
+/** Whether this machine runs @p pinned, the class a caller told an index to dispatch as: every
+ *  NumKong bit in @p available and every ForkUnion bit the runtime confirms; no pin always runs. */
+inline bool cpu_pin_admitted(usearch_cpu_class_t pinned, nk_capability_t available) noexcept {
+    if (pinned == usearch_cpu_class_unknown_k) return true;
+    if (pinned > usearch_cpu_class_wasm64_extended_k) return false;
+    cpu_class_t const pinned_class = cpu_class_of(pinned);
+    fu::capabilities_t const wanted = forkunion_capabilities_of(pinned_class);
+    return numkong_admits(available, pinned_class) && (fu::runtime_capabilities() & wanted) == wanted;
+}
+
+/** Whether a ladder may take @p rung under @p pinned: every rung when nothing is pinned. */
+constexpr bool cpu_pin_takes(usearch_cpu_class_t pinned, cpu_class_t rung) noexcept {
+    return pinned == usearch_cpu_class_unknown_k || cpu_class_within(rung, cpu_class_of(pinned));
+}
+
+/** CPU classes newest first, the order a ladder tries them in. */
+template <cpu_class_t... classes_>
+struct cpu_ladder {};
+
+/** GPU classes of one vendor newest first, the order its ladder tries them in. */
+template <gpu_class_t... classes_>
+struct gpu_ladder {};
+
+/** This architecture's ladder, the serial floor last; a rung the build left out is skipped by the
+ *  walk, never by the list. */
+#if NUMKONG_ARCH_X8664_
+using cpu_ladder_t =
+    cpu_ladder<cpu_class_t::intel_diamond_k, cpu_class_t::intel_granite_k, cpu_class_t::intel_sapphire_k,
+               cpu_class_t::amd_genoa_k, cpu_class_t::intel_icelake_k, cpu_class_t::intel_skylake_k,
+               cpu_class_t::intel_sierra_k, cpu_class_t::intel_haswell_k, cpu_class_t::serial_k>;
+#elif NUMKONG_ARCH_ARM64_
+using cpu_ladder_t = cpu_ladder<cpu_class_t::nvidia_vera_k, cpu_class_t::apple_m4_k, cpu_class_t::aws_g5_k,
+                                cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k, cpu_class_t::serial_k>;
+#elif NUMKONG_ARCH_RISCV64_
+using cpu_ladder_t = cpu_ladder<cpu_class_t::alibaba_c930_k, cpu_class_t::serial_k>;
+#elif NUMKONG_ARCH_WASM_
+using cpu_ladder_t = cpu_ladder<cpu_class_t::wasm64_extended_k, cpu_class_t::wasm32_v128_k, cpu_class_t::serial_k>;
+#else
+using cpu_ladder_t = cpu_ladder<cpu_class_t::serial_k>;
+#endif
+
+/** Whether the dense NVMe variants compiled a unit for @p cpu_class, as
+ *  @c usearch_dense_nvme_classes_ in @c src/CMakeLists.txt lists them: a storage walk carries no
+ *  waiter or atomic reference, so the classes advancing by those alone take none, and a WebAssembly
+ *  module reads no storage. */
+constexpr bool nvme_class_compiled(cpu_class_t cpu_class) noexcept {
+    switch (cpu_class) {
+    case cpu_class_t::aws_g5_k:
+    case cpu_class_t::alibaba_c930_k:
+    case cpu_class_t::wasm32_v128_k:
+    case cpu_class_t::wasm64_extended_k: return false;
+    default: return cpu_class_compiled(cpu_class);
+    }
+}
+
+/** Whether the basic modalities compiled a unit for @p cpu_class, as @c usearch_basic_cpu_classes_
+ *  in @c src/CMakeLists.txt lists them: the classes where a StringZilla or NumKong kit they inline
+ *  advances. */
+constexpr bool basic_class_compiled(cpu_class_t cpu_class) noexcept {
+    switch (cpu_class) {
+    case cpu_class_t::serial_k:
+    case cpu_class_t::intel_haswell_k:
+    case cpu_class_t::intel_skylake_k:
+    case cpu_class_t::aws_g2_k:
+    case cpu_class_t::apple_m2_k:
+    case cpu_class_t::alibaba_c930_k:
+    case cpu_class_t::wasm64_extended_k: return cpu_class_compiled(cpu_class);
+    default: return false;
+    }
+}
+
 #pragma endregion CPU Classes
 
 #pragma region Residencies
@@ -731,18 +891,46 @@ inline constexpr bool is_vram_index = is_gpu_executor<typename multi_type_::exec
 template <typename multi_type_>
 inline constexpr bool is_nvme_index = std::is_same_v<typename multi_type_::executor_t, nvme_executor_t>;
 
-/** Visits the variant of @p index with @p mutate when it is writable; an NVMe view serves its
- *  checkpoint in place, so it refuses every mutation with @c usearch_status_read_only_k. */
-template <typename handle_type_, typename mutate_type_>
-void visit_writable(handle_type_& index, usearch_outcome_t* outcome, mutate_type_&& mutate) noexcept {
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if constexpr (is_nvme_index<variant_type_>)
-                propagate_error(usearch_status_read_only_k, outcome, "An NVMe view never mutates");
-            else mutate(variant);
-        },
-        index.variant);
-}
+/** Where a variant runs and which executor it takes, the dense and basic modalities alike. */
+enum class dense_home_t : u32_t {
+    ram_k,
+    nvme_k,
+    vram_nvidia_k,
+    vram_amd_k,
+    vram_apple_k,
+};
+
+/** The executor each home's verbs take. */
+template <dense_home_t home_>
+struct dense_home_executor;
+template <>
+struct dense_home_executor<dense_home_t::ram_k> {
+    using type = forkunion_executor_t;
+};
+template <>
+struct dense_home_executor<dense_home_t::nvme_k> {
+    using type = nvme_executor_t;
+};
+template <>
+struct dense_home_executor<dense_home_t::vram_nvidia_k> {
+    using type = cuda_executor_t;
+};
+template <>
+struct dense_home_executor<dense_home_t::vram_amd_k> {
+    using type = hip_executor_t;
+};
+template <>
+struct dense_home_executor<dense_home_t::vram_apple_k> {
+    using type = metal_executor_t;
+};
+
+/** The home whose verbs take @p executor_type_. */
+template <typename executor_type_>
+inline constexpr dense_home_t home_of = std::is_same_v<executor_type_, forkunion_executor_t> ? dense_home_t::ram_k
+                                        : std::is_same_v<executor_type_, nvme_executor_t>    ? dense_home_t::nvme_k
+                                        : std::is_same_v<executor_type_, cuda_executor_t> ? dense_home_t::vram_nvidia_k
+                                        : std::is_same_v<executor_type_, hip_executor_t>  ? dense_home_t::vram_amd_k
+                                                                                          : dense_home_t::vram_apple_k;
 
 /** Copies @p source into @p staged when it lives on an NVIDIA or AMD device, whose memory no host
  *  read reaches, and points @p source at the copy; host pages and Apple's unified memory are read
@@ -760,14 +948,6 @@ inline status_t stage_on_host(bytes_view_t& source, growing_buffer<byte_t>& stag
     source = to_span(staged);
     return status_t::success_k;
 }
-
-/** Whether @p alternative_type_ is listed in @p variant_type_ - the membership fact the ladder
- *  asserts against the explicit list. */
-template <typename alternative_type_, typename variant_type_>
-inline constexpr bool variant_carries = false;
-template <typename alternative_type_, typename... alternative_types_>
-inline constexpr bool variant_carries<alternative_type_, std::variant<alternative_types_...>> =
-    (std::is_same_v<alternative_type_, alternative_types_> || ...);
 
 /** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, the Ampere & Ada bits
  *  accumulate, while Hopper, Blackwell & RTX Blackwell each run only their own kits, and Rubin
@@ -804,10 +984,31 @@ inline constexpr nk_capability_t cuda_class_capabilities_k = numkong_capabilitie
     : NUMKONG_TARGET_ADA        ? gpu_class_t::nvidia_ada_k
                                 : gpu_class_t::nvidia_ampere_k);
 
+/** Devices @p vram names, one when it names none. */
+inline std::size_t named_count(usearch_vram_options_t const& vram) noexcept {
+    return vram.devices && vram.devices_count ? vram.devices_count : 1;
+}
+
+/** The USearch device ordinal shard @p shard of @p vram sits on: the named devices taken
+ *  round-robin, device zero when it names none. */
+inline std::size_t named_ordinal(usearch_vram_options_t const& vram, std::size_t shard) noexcept {
+    return vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[shard % vram.devices_count]) : 0;
+}
+
 /** Whether a device of @p available capabilities runs every kit one GPU class lowers onto. */
 constexpr bool numkong_admits(nk_capability_t available, gpu_class_t gpu_class) noexcept {
     nk_capability_t const wanted = numkong_capabilities_of(gpu_class);
     return (available & wanted) == wanted;
+}
+
+/** The capabilities a GPU ladder walks under: the devices' class @p device_class, narrowed to
+ *  @p pinned when a caller names one; zero when the devices do not run the pinned class. */
+constexpr nk_capability_t gpu_pin_capabilities(gpu_class_t device_class, usearch_gpu_class_t pinned) noexcept {
+    nk_capability_t const device = numkong_capabilities_of(device_class);
+    if (pinned == usearch_gpu_class_unknown_k) return device;
+    if (pinned > usearch_gpu_class_apple_metal10_k) return 0;
+    gpu_class_t const pinned_class = static_cast<gpu_class_t>(pinned);
+    return numkong_admits(device, pinned_class) ? numkong_capabilities_of(pinned_class) : 0;
 }
 
 /** Whether the build compiled device code for @p gpu_class, as CMake decided and told the dispatch

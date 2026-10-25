@@ -5,24 +5,7 @@
  *  @brief The intel_sapphire NVMe unit: storage scans streaming through the AMX-BF16 & AMX-INT8
  *      tiles.
  */
+
 #include "dense_specializations.cuh"
 
-template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
-#if USEARCH_DENSE_DTYPES >= 3
-template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::intel_sapphire_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>>;
-#endif
+template struct dense_class_tables<dense_home_t::nvme_k, cpu_class_t::intel_sapphire_k>;

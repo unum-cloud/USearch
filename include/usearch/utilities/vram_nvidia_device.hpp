@@ -1410,6 +1410,10 @@ struct cuda_traversal_context {
     cuda_stream_handle_t stream() const noexcept { return allocator_.stream(); }
     int device() const noexcept { return allocator_.device(); }
 
+    /** The allocator this context carves its scratch from, for a caller's own launches beside
+     *  it. */
+    allocator_t allocator() const noexcept { return allocator_; }
+
     /** Whether this context can walk at all: every device-side word and its host twin claimed, and
      *  its event born. */
     explicit operator bool() const noexcept {

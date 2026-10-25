@@ -320,9 +320,9 @@ typedef struct usearch_geospatial_load_ram_t {
  *  @brief Copies a checkpoint into a new, mutable index in host memory, its geometry read from
  *      the checkpoint's own headers.
  *
- *  Where the parts end up is the call's own memory domains, never the manifest's. A part
- *  carries its own length in its header, so a second load skips whatever already arrived
- *  whole and cancelling costs the part being read rather than everything behind it.
+ *  Where the parts end up is the call's own memory domains, never the manifest's: part @c p lands
+ *  whole on shard @c p, beside any placed shards the parts leave empty, and the shards past the
+ *  placed ones open over those domains in turn.
  */
 USEARCH_EXPORT void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments);
 
@@ -1260,7 +1260,7 @@ typedef struct usearch_geospatial_save_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Destination path, whose extension picks the layout. */
+    /** Destination path: the monolith of a lone shard, or the manifest beside the parts of many. */
     usearch_bytes_view_t path;
 
     /** The @b optional handler, called with parts written and their count. */
@@ -1271,6 +1271,8 @@ typedef struct usearch_geospatial_save_t {
  *  @brief Saves a mutable index under @c path. Demands a mutation-free window; concurrent readers
  *      keep searching throughout.
  *
+ *  The shard count picks the layout: one shard writes one monolith at @c path, and several write
+ *  the manifest at @c path beside one part per shard, each with its shard's own node IDs.
  *  A cancelled save leaves the parts it already wrote and no manifest referencing them, so the
  *  checkpoint reads as absent rather than half-valid. Those leftovers are the caller's to remove.
  */
@@ -1322,8 +1324,17 @@ typedef struct usearch_geospatial_index_description_t {
      *  executor's. */
     size_t memory_usage;
 
-    /** Static codename of the kernels the index dispatched to on this machine. */
-    char const* capabilities;
+    /** The CPU class whose kits the index dispatched to on RAM and NVMe;
+     *  @c usearch_cpu_class_unknown_k on VRAM. */
+    usearch_cpu_class_t cpu_class;
+
+    /** The GPU class whose kernels the index dispatched to on VRAM; @c usearch_gpu_class_unknown_k
+     *  on RAM and NVMe. */
+    usearch_gpu_class_t gpu_class;
+
+    /** Live shards, each a graph of its own; a fresh index has one per memory domain or device it
+     *  was placed on. */
+    size_t shards_count;
 } usearch_geospatial_index_description_t;
 
 /** The arguments of @c usearch_geospatial_describe. */

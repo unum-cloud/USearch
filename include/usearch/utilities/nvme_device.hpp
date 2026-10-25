@@ -262,7 +262,8 @@ static_assert(sizeof(io_completion_t) == 2 * sizeof(u64_t) && std::is_trivially_
 enum class io_transport_t : u32_t {
 
     /** The first kernel files engine whose setup the host admits: io_uring, then AIO, then blocking
-     *  reads. */
+     *  reads. Any other transport is a ceiling: its engine opens first, and a refused setup passes
+     *  to the kernel files engines below it, except SPDK, which opens alone. */
     automatic_k,
 
     /** @c pread or @c ReadFile on the calling thread. */
@@ -2399,8 +2400,9 @@ struct distinct_media_<std::variant<kept_types_...>, next_type_, types_...> {
  *      forwards to it through one @c std::visit, a predictable switch per call.
  *
  *  An @c automatic_k configuration tries the kernel files engines in order, so io_uring refused by
- *  a seccomp profile falls to AIO, and a refused AIO context to blocking reads; any other transport
- *  opens only the engine that drives it. The media are a @c std::variant of the engines' distinct
+ *  a seccomp profile falls to AIO, and a refused AIO context to blocking reads. Any other transport
+ *  is a ceiling that tries its own engine first, then the kernel files engines below it the same
+ *  way, while SPDK opens only itself. The media are a @c std::variant of the engines' distinct
  *  media types, or the one type they share.
  */
 template <typename... engine_types_>
@@ -2417,8 +2419,9 @@ class io_engine_variant {
     explicit io_engine_variant(allocator_t const& allocator = {}) noexcept
         : engines_(std::in_place_index<0>, allocator), allocator_(allocator) {}
 
-    /** Opens the engine @p config names, or under @c automatic_k the first kernel files engine
-     *  whose setup the host admits; a refused setup answers @c io_k and passes to the next. */
+    /** Opens the newest engine at or below the ceiling @p config names, or under @c automatic_k
+     *  the first kernel files engine whose setup the host admits; a refused setup answers @c io_k
+     *  and passes to the next. */
     status_t open(config_t const& config) noexcept { return open_<0>(config); }
 
     /** The transport of the engine @c open picked. */
@@ -2466,15 +2469,33 @@ class io_engine_variant {
     status_t open_(config_t const& config) noexcept {
         using engine_t = std::variant_alternative_t<index_, engines_t>;
         if (!opens_(engine_t::transport(), config.transport)) return open_<index_ + 1>(config);
-        status_t const opened = engines_.template emplace<index_>(allocator_).open(config);
-        if (opened != status_t::io_k || config.transport != io_transport_t::automatic_k) return opened;
+        // The engine vets the transport it is handed, so a ceiling opens it under its own.
+        config_t own = config;
+        if (own.transport != io_transport_t::automatic_k) own.transport = engine_t::transport();
+        status_t const opened = engines_.template emplace<index_>(allocator_).open(own);
+        if (opened != status_t::io_k || config.transport == io_transport_t::linux_spdk_k) return opened;
         return open_<index_ + 1>(config);
+    }
+
+    /** Where @p transport sits on the kernel files ladder, the engines a ceiling degrades through
+     *  ranked below it; zero for SPDK, which only a request naming it opens. */
+    static constexpr std::size_t rank_(io_transport_t transport) noexcept {
+        switch (transport) {
+        case io_transport_t::blocking_k: return 1;
+        case io_transport_t::linux_aio_k:
+        case io_transport_t::windows_ioring_k: return 2;
+        case io_transport_t::linux_uring_k: return 3;
+        case io_transport_t::linux_uring_nvme_k: return 4;
+        default: return 0;
+        }
     }
 
     /** Whether an engine driving @p engine answers a request for @p wanted. */
     static constexpr bool opens_(io_transport_t engine, io_transport_t wanted) noexcept {
-        if (wanted != io_transport_t::automatic_k) return engine == wanted;
-        return engine != io_transport_t::linux_spdk_k && engine != io_transport_t::linux_uring_nvme_k;
+        if (wanted == io_transport_t::automatic_k)
+            return engine != io_transport_t::linux_spdk_k && engine != io_transport_t::linux_uring_nvme_k;
+        if (wanted == io_transport_t::linux_spdk_k || engine == io_transport_t::linux_spdk_k) return engine == wanted;
+        return rank_(engine) <= rank_(wanted);
     }
 
     engines_t engines_;

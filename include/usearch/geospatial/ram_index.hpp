@@ -474,6 +474,10 @@ inline bool admits(relation_t relation, f64_t radius_metres, f64_t slack_millise
 
 #pragma region Terrain
 
+/** The share of the Earth's curvature light bends with, which lowers the bulge under every sight
+ *  line: a seventh. */
+inline constexpr f64_t terrain_refraction_k = 1.0 / 7;
+
 /** Fills @p rows × @p columns heights from cell (@p first_row, @p first_column), NaN where the
  *  source has none. */
 using terrain_callback_t = void (*)(std::size_t first_row, std::size_t first_column, std::size_t rows,

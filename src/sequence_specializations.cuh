@@ -11,10 +11,15 @@
  */
 #pragma once
 
+#include <cstring> // `std::memcmp` - a donor's costs
+
 #include <array>       // `std::array` - the checkpoint's recorded fields
+#include <memory>      // `std::unique_ptr` - a GPU shard built on its device
+#include <new>         // `std::nothrow` - a GPU shard built on its device
 #include <span>        // `std::span` - the overlap kind's window widths
 #include <string_view> // `std::string_view` - entries, tokens and paths
 #include <type_traits> // `std::type_identity`
+#include <variant>     // `std::monostate` - no radius walk
 
 #include "usearch/sequence/ram_index.hpp"
 #if USEARCH_ARCH_CUDA_
@@ -45,48 +50,13 @@ constexpr sz_capability_t stringzilla_capabilities_of(cpu_class_t cpu_class) noe
     }
 }
 
-/** The checkpoint token of one sequence kind, spelled as the SafeGraphs registry spells it; empty
- *  for the kinds the engine refuses. */
-inline std::string_view token_of(usearch_sequence_metric_t metric) noexcept {
-    switch (metric) {
-    case usearch_sequence_metric_levenshtein_bytes_k: return "levenshtein";
-    case usearch_sequence_metric_levenshtein_utf8_k: return "levenshtein-utf8";
-    case usearch_sequence_metric_overlap_k: return "overlap";
-    case usearch_sequence_metric_needleman_wunsch_k: return "needleman-wunsch";
-    default: return {};
-    }
-}
-
-/** The sequence kind a checkpoint token names, or @c unknown_k. */
-inline usearch_sequence_metric_t sequence_metric_of(std::string_view token) noexcept {
-    for (usearch_sequence_metric_t metric :
-         {usearch_sequence_metric_levenshtein_bytes_k, usearch_sequence_metric_levenshtein_utf8_k,
-          usearch_sequence_metric_overlap_k, usearch_sequence_metric_needleman_wunsch_k})
-        if (token == token_of(metric)) return metric;
-    return usearch_sequence_metric_unknown_k;
-}
-
-/** The kind, window widths, costs and connectivity a sequence handle freezes, as an init or a
- *  checkpoint states them; every variant holds one. */
-struct sequence_geometry_t {
-    usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
-
-    /** The window widths the overlap kind hashes, in bytes; empty for every other kind. */
-    growing_buffer<std::size_t, forkunion_allocator_t> window_widths {forkunion_allocator_t {no_memory_domain_k}};
-
-    /** The folded table and gap cost the Needleman-Wunsch kind scores with; unfolded for every
-     *  other kind. */
-    us::sequence::needleman_wunsch_costs_t costs {};
-
-    /** Neighbors per node the insertions select; zero until frozen, which takes the default. */
-    std::size_t connectivity = 0;
-};
-
 /** Calls @p callback with a factory of the metric @p geometry names over a thread's arena, sized
- *  for a round of candidates, scoring with the kits @p capability_ picks and prefetching through
- *  @p cache_hints_type_. */
+ *  for a round of candidates, scoring with the kits @p capability_ picks, the alignment kind with
+ *  the folded @p costs, and prefetching through @p cache_hints_type_. */
 template <sz_capability_t capability_, typename cache_hints_type_, typename callback_type_>
-decltype(auto) with_sequence_metric(sequence_geometry_t const& geometry, callback_type_&& callback) noexcept {
+decltype(auto) with_sequence_metric(sequence_geometry_t const& geometry,
+                                    us::sequence::needleman_wunsch_costs_t const& costs,
+                                    callback_type_&& callback) noexcept {
     using bytes_t = us::sequence::levenshtein_metric<
         typename us::sequence::levenshtein_ladder<sz_levenshtein_bytes_k, capability_>::kit_t, thread_allocator_t,
         cache_hints_type_>;
@@ -115,7 +85,7 @@ decltype(auto) with_sequence_metric(sequence_geometry_t const& geometry, callbac
             return expected<overlap_t> {std::move(made), ready};
         });
     case usearch_sequence_metric_needleman_wunsch_k:
-        return callback([&costs = geometry.costs](thread_allocator_t const& allocator, std::size_t staging) noexcept {
+        return callback([&costs](thread_allocator_t const& allocator, std::size_t staging) noexcept {
             needleman_wunsch_t made {allocator};
             status_t const ready = made.init(staging, costs);
             return expected<needleman_wunsch_t> {std::move(made), ready};
@@ -124,24 +94,28 @@ decltype(auto) with_sequence_metric(sequence_geometry_t const& geometry, callbac
     }
 }
 
-/** One sequence alternative: the basic index over owned strings, the kind it scores with, and the
+/** One sequence alternative: the basic shards over owned strings, the kind they score with, and the
  *  kits @p cpu_class_ picks. Its verbs are defined below the class, so an explicit instantiation in
  *  the class's unit compiles them with that class's flags and an @c extern one keeps them out of
- *  the dispatch unit. */
+ *  the dispatch unit. Checkpoints and refinements serve an index of one shard. */
 template <cpu_class_t cpu_class_>
 struct sequence_ram_variant {
     using executor_t = forkunion_executor_t;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
-    using index_t = us::sequence::ram_index<us::utilities::uuid_t, u32_t, waiter_of<cpu_class_>,
+    using shard_t = us::sequence::ram_index<us::utilities::uuid_t, u32_t, waiter_of<cpu_class_>,
                                             atomic_ref_for_cpu_class<cpu_class_>::template type, forkunion_allocator_t,
                                             cache_hints_t>;
-    using value_t = typename index_t::value_t;
+    using index_t = basic::ram_indexes<shard_t>;
+    using value_t = typename shard_t::value_t;
     using refine_plan_t = typename index_t::refine_plan_t;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr sz_capability_t capability_k = stringzilla_capabilities_of(cpu_class_);
 
     index_t index;
     sequence_geometry_t geometry;
+
+    /** The table and gap cost the alignment kind scores with, folded at freeze. */
+    us::sequence::needleman_wunsch_costs_t costs {};
 
     explicit sequence_ram_variant(forkunion_allocator_t const& allocator) noexcept
         : index(allocator, machine_cache_line_bytes()) {}
@@ -155,11 +129,17 @@ struct sequence_ram_variant {
     expected<traversal_telemetry_t> search(usearch_sequence_search_t const& arguments, matches_landing_t& landing,
                                            progress_ticks_t& ticks, executor_t& executor) noexcept;
 
-    /** Opens a refinement once @p donors land, its walks as wide as @p expansion or twice the
-     *  connectivity, as an insertion's. */
-    expected<refine_plan_t> plan_refine(std::span<index_t*> donors, std::size_t expansion) noexcept {
-        typename index_t::traversal_context_t planning {index.size(), index.get_allocator()};
+    /** Opens a refinement that first moves every shard of each of @p donors into this index, then
+     *  re-links across, its walks as wide as @p expansion or twice the connectivity. */
+    expected<refine_plan_t> plan_absorb(std::span<index_t*> donors, std::size_t expansion) noexcept {
+        typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
         return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion});
+    }
+
+    /** Opens a refinement of every live shard in place, its walks as wide as @p expansion. */
+    expected<refine_plan_t> plan_refine(std::size_t expansion) noexcept {
+        typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
+        return index.plan_refine(planning, basic::keep_diverse_t {geometry.connectivity}, {expansion});
     }
     status_t refine(refine_plan_t& plan, progress_ticks_t& ticks, executor_t& executor) noexcept;
     status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
@@ -183,7 +163,7 @@ expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::insert(usearch
         return insert_entries(index, arguments.keys, arguments.count, connectivity,
                               expansion ? expansion : connectivity * 2, make_metric, build, ticks, executor);
     };
-    return with_sequence_metric<capability_k, cache_hints_t>(geometry, with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
 }
 
 template <cpu_class_t cpu_class_>
@@ -199,24 +179,27 @@ expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::search(usearch
                               arguments.expansion_factor, arguments.traversal, arguments.predicate, make_metric,
                               query_of, landing, ticks, executor);
     };
-    return with_sequence_metric<capability_k, cache_hints_t>(geometry, with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
 }
 
 template <cpu_class_t cpu_class_>
 status_t sequence_ram_variant<cpu_class_>::refine(refine_plan_t& plan, progress_ticks_t& ticks,
                                                   executor_t& executor) noexcept {
     auto with_metric = [&](auto make_metric) noexcept {
-        auto [scratch, prepare_status] = prepare_refinement<index_t>(plan, geometry.connectivity, make_metric,
+        auto [scratch, prepare_status] = prepare_refinement<shard_t>(plan, geometry.connectivity, make_metric,
                                                                      executor);
         if (failed(prepare_status)) return prepare_status;
         return drive_refinement(plan, scratch, basic::keep_diverse_t {geometry.connectivity}, ticks, executor);
     };
-    return with_sequence_metric<capability_k, cache_hints_t>(geometry, with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
 }
 
-template <cpu_class_t cpu_class_>
-status_t sequence_ram_variant<cpu_class_>::save(std::string_view path, executor_t& executor,
-                                                progress_ticks_t& ticks) noexcept {
+/** Hands @p write, as `write(config) → status_t`, the save configuration recording what @p geometry
+ *  and @p costs froze: the connectivity, the window widths as decimals between commas, and the
+ *  costs as one hexadecimal digit per entry, as every residency's checkpoint records them. */
+template <typename write_type_>
+status_t with_sequence_provenance(sequence_geometry_t const& geometry,
+                                  us::sequence::needleman_wunsch_costs_t const& costs, write_type_&& write) noexcept {
     auto const& widths = geometry.window_widths;
     std::array<char, 24> connectivity_text;
     growing_buffer<char, forkunion_allocator_t> widths_text {forkunion_allocator_t {}};
@@ -226,31 +209,37 @@ status_t sequence_ram_variant<cpu_class_>::save(std::string_view path, executor_
         if (!widths_text.empty()) widths_text.push_back_reserved(',');
         for (char const digit : decimal_of(width, width_text)) widths_text.push_back_reserved(digit);
     }
-    // The folded costs as one hexadecimal digit per cell, row by row over the classes.
-    us::sequence::needleman_wunsch_costs_t const& costs = geometry.costs;
+    // The folded costs as one hexadecimal digit per entry, row by row over the classes.
     std::array<char, 24> gap_text;
     std::array<char, us::sequence::needleman_wunsch_classes_k * us::sequence::needleman_wunsch_classes_k> costs_text;
-    std::size_t const cells = std::size_t {costs.classes} * costs.classes;
-    for (std::size_t cell = 0; cell != cells; ++cell)
-        costs_text[cell] = "0123456789abcdef"[costs.substitutions[cell / costs.classes][cell % costs.classes]];
+    std::size_t const entries = std::size_t {costs.classes} * costs.classes;
+    for (std::size_t entry = 0; entry != entries; ++entry)
+        costs_text[entry] = "0123456789abcdef"[costs.substitutions[entry / costs.classes][entry % costs.classes]];
     std::array<safegraphs_custom_field_t, 3> fields {
         {{"connectivity", decimal_of(geometry.connectivity, connectivity_text)}}};
     std::size_t recorded = 1;
     if (!widths.empty()) fields[recorded++] = {"window_widths", to_string_view(widths_text)};
     if (costs.code_bits) {
-        fields[recorded++] = {"substitution_costs", std::string_view {costs_text.data(), cells}};
+        fields[recorded++] = {"substitution_costs", std::string_view {costs_text.data(), entries}};
         fields[recorded++] = {"gap_cost", decimal_of(costs.gap, gap_text)};
     }
     save_config_t config;
     config.provenance = std::span {fields}.first(recorded);
-    return safegraphs_write_index(path, index, us::sequence::codec_t {}, executor, config, token_of(geometry.metric),
-                                  ticks);
+    return write(config);
+}
+
+template <cpu_class_t cpu_class_>
+status_t sequence_ram_variant<cpu_class_>::save(std::string_view path, executor_t& executor,
+                                                progress_ticks_t& ticks) noexcept {
+    return with_sequence_provenance(geometry, costs, [&](save_config_t const& config) noexcept {
+        return index.save(path, us::sequence::codec_t {}, executor, config, token_of(geometry.metric), ticks);
+    });
 }
 
 template <cpu_class_t cpu_class_>
 status_t sequence_ram_variant<cpu_class_>::load(std::string_view path, executor_t& executor,
                                                 progress_ticks_t& ticks) noexcept {
-    return safegraphs_read_index(path, index, us::sequence::codec_t {}, executor, load_config_t {}, ticks);
+    return index.load(path, us::sequence::codec_t {}, executor, load_config_t {}, ticks);
 }
 
 /** One sequence alternative on block storage: the basic NVMe index over the strings a RAM variant
@@ -259,14 +248,17 @@ status_t sequence_ram_variant<cpu_class_>::load(std::string_view path, executor_
 template <cpu_class_t cpu_class_>
 struct sequence_nvme_variant {
     using executor_t = nvme_executor_t;
-    using index_t = basic::nvme_index<us::sequence::codec_t, us::utilities::uuid_t, u32_t, sz_size_t,
-                                      default_io_engine_t, row_kit_of<cpu_class_>>;
+    using index_t = basic::nvme_indexes<us::sequence::codec_t, us::utilities::uuid_t, u32_t, sz_size_t,
+                                        default_io_engine_t, row_kit_of<cpu_class_>>;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr sz_capability_t capability_k = stringzilla_capabilities_of(cpu_class_);
 
     index_t index;
     sequence_geometry_t geometry;
+
+    /** The table and gap cost the alignment kind scores with, folded at freeze. */
+    us::sequence::needleman_wunsch_costs_t costs {};
 
     explicit sequence_nvme_variant(forkunion_allocator_t const& allocator) noexcept : index(allocator) {}
 
@@ -296,7 +288,7 @@ expected<traversal_telemetry_t> sequence_nvme_variant<cpu_class_>::search(usearc
         return search_entries(index, arguments.count, arguments.wanted, arguments.expansion_factor, arguments.traversal,
                               arguments.predicate, make_metric, query_of, landing, ticks, executor);
     };
-    return with_sequence_metric<capability_k, cache_hints_t>(geometry, with_metric);
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
 }
 
 #if USEARCH_ARCH_CUDA_
@@ -332,43 +324,230 @@ inline constexpr usearch_distance_t distance_unit<
     us::sequence::vram_nvidia_index<usearch_sequence_metric_overlap_k, node_id_type_, capability_, kernels_type_>> =
     1.0 / us::sequence::overlap_resolution_k;
 
-/** The sequence alternative on any NVIDIA GPU: the basic VRAM index under the sequence kind
+/** Builds one shard of the sequence kind @p metric_ on a CUDA device, holding the window widths and
+ *  costs the variant's frozen @c geometry names, which its first reservation uploads. */
+template <usearch_sequence_metric_t metric_>
+struct sequence_vram_nvidia_build {
+    using face_t = us::sequence::vram_nvidia_index<metric_, u32_t, sequence_nvidia_capabilities_k,
+                                                   sequence_nvidia_fatbin<metric_>>;
+
+    /** The geometry and costs of the variant holding the shards, frozen before the first is
+     *  placed. */
+    sequence_geometry_t const* geometry = nullptr;
+    us::sequence::needleman_wunsch_costs_t const* costs = nullptr;
+
+    std::unique_ptr<face_t> operator()(int device) const noexcept {
+        std::unique_ptr<face_t> face {new (std::nothrow) face_t(cuda_virtual_memory_allocator<byte_t> {device})};
+        if (face && (failed(face->window_widths(to_span(geometry->window_widths))) || failed(face->costs(*costs))))
+            face.reset();
+        return face;
+    }
+};
+
+/** The sequence alternative on NVIDIA GPUs: the basic VRAM shards under the sequence kind
  *  @p metric_ - Levenshtein over bytes or UTF-8 runes, overlap, or Needleman-Wunsch - with 32-bit
  *  node IDs. */
 template <usearch_sequence_metric_t metric_>
-struct sequence_vram_nvidia_variant
-    : vram_nvidia_variant<us::sequence::vram_nvidia_index<metric_, u32_t, sequence_nvidia_capabilities_k,
-                                                          sequence_nvidia_fatbin<metric_>>> {
+struct sequence_vram_nvidia_variant {
+    using executor_t = cuda_executor_t;
+    using build_t = sequence_vram_nvidia_build<metric_>;
+    using face_t = typename build_t::face_t;
+    using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid_t, build_t>;
+    using refine_plan_t = vram_nvidia_refine_plan_t;
     static constexpr usearch_sequence_metric_t metric_k = metric_;
     static constexpr gpu_class_t gpu_class_k = gpu_class_t::nvidia_ampere_k;
 
-    /** Places the index on CUDA device @p device; its kind is the template's. */
-    sequence_vram_nvidia_variant(int device, sequence_geometry_t const&) noexcept
-        : sequence_vram_nvidia_variant::vram_nvidia_variant(device) {}
-
     sequence_geometry_t geometry;
+    us::sequence::needleman_wunsch_costs_t costs {};
+    index_t index;
+
+    /** Holds no shard until the handle places them; their kind is the template's, and their window
+     *  widths and costs the geometry's. */
+    sequence_vram_nvidia_variant(int, sequence_geometry_t const&) noexcept
+        : index(forkunion_allocator_t {no_memory_domain_k}, build_t {&geometry, &costs}) {}
 
     status_t reserve(usearch_sequence_reserve_t const& arguments) noexcept {
-        return this->reserve_(arguments.entries, geometry.connectivity, arguments.payload_bytes);
+        return vram_nvidia_reserve(index, arguments.entries, geometry.connectivity, arguments.payload_bytes);
     }
 
     expected<traversal_telemetry_t> insert(usearch_sequence_insert_t const& arguments, progress_ticks_t& ticks,
                                            cuda_executor_t& executor) noexcept {
-        std::size_t const count = arguments.count;
-        auto [plan, plan_status] = this->index.plan_insert(count);
-        if (failed(plan_status)) return {{}, plan_status};
-        return this->insert_(arguments.keys, bytes_tape_of(arguments.sequences, count), plan, geometry.connectivity,
-                             arguments.expansion_factor, ticks, executor);
+        return vram_nvidia_insert(index, arguments.keys, bytes_tape_of(arguments.sequences, arguments.count),
+                                  geometry.connectivity, arguments.expansion_factor, ticks, executor);
     }
 
     /** A device walk takes no host predicate. */
     expected<traversal_telemetry_t> search(usearch_sequence_search_t const& arguments, matches_landing_t& landing,
                                            progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
-        return this->search_(bytes_tape_of(arguments.queries, arguments.count), arguments.wanted,
-                             arguments.expansion_factor, landing, ticks, executor);
+        return vram_nvidia_search(index, bytes_tape_of(arguments.queries, arguments.count), arguments.wanted,
+                                  arguments.expansion_factor, landing, ticks, executor);
     }
+
+    /** Writes the strings as the RAM variants write them: a lone live shard's monolith, or one per
+     *  live shard beside the manifest the path names. */
+    status_t save(std::string_view path, cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return with_sequence_provenance(geometry, costs, [&](save_config_t const& config) noexcept {
+            return vram_nvidia_save(index, path, us::sequence::codec_t {}, config, token_of(geometry.metric), executor,
+                                    ticks);
+        });
+    }
+
+    /** Reads a checkpoint any residency wrote into the placed shards, one part per shard. */
+    status_t load(std::string_view path, cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return index.load(path, us::sequence::codec_t {}, executor, load_config_t {},
+                          static_cast<connectivity_t>(geometry.connectivity), ticks);
+    }
+
+    /** Empties the index, retiring every shard behind a fresh shard generation on the same
+     *  devices. */
+    status_t clear() noexcept { return index.clear(); }
+
+    /** The refinements, which no GPU variant opens yet, each answering @c unsupported_k. */
+    expected<refine_plan_t> plan_absorb(std::span<index_t*>, std::size_t) noexcept {
+        return {{}, status_t::unsupported_k};
+    }
+    expected<refine_plan_t> plan_refine(std::size_t) noexcept { return {{}, status_t::unsupported_k}; }
+    status_t refine(refine_plan_t&, progress_ticks_t&, executor_t&) noexcept { return status_t::unsupported_k; }
+    status_t sample(usearch_sequence_sample_t const&) noexcept { return status_t::unsupported_k; }
 };
 
 #endif
 
 #pragma endregion Sequence Variants
+
+#pragma region Sequence Bodies
+
+/** The sequence variants each class unit compiles: one per CPU class on the host and on storage,
+ *  and one per kind on an NVIDIA GPU. */
+template <auto class_>
+struct sequence_variants_of<dense_home_t::ram_k, class_> {
+    using type = type_list<sequence_ram_variant<class_>>;
+};
+template <auto class_>
+struct sequence_variants_of<dense_home_t::nvme_k, class_> {
+    using type = type_list<sequence_nvme_variant<class_>>;
+};
+#if USEARCH_ARCH_CUDA_
+template <>
+struct sequence_variants_of<dense_home_t::vram_nvidia_k, gpu_class_t::nvidia_ampere_k> {
+    using type = type_list<sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_bytes_k>,
+                           sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k>,
+                           sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k>,
+                           sequence_vram_nvidia_variant<usearch_sequence_metric_needleman_wunsch_k>>;
+};
+#endif
+
+/** What the sequence verbs do to one variant: fold its costs, describe it, and land and tally its
+ *  strings. */
+template <>
+struct variant_bodies<sequence_traits_t> {
+    using geometry_t = sequence_geometry_t;
+    using freeze_t = sequence_traits_t::freeze_t;
+    using costs_t = us::sequence::needleman_wunsch_costs_t;
+
+    /** What a view keeps of a string it read, copied into its thread's arena. */
+    using kept_t = bytes_view_t;
+
+    /** Whether @p donor lands in @p variant: the same kind, window widths, costs and
+     *  connectivity. */
+    template <typename variant_type_, typename donor_type_>
+    static bool matches(variant_type_ const& variant, donor_type_ const& donor) noexcept {
+        geometry_t const &index = variant.geometry, &other = donor.geometry;
+        if (index.metric != other.metric || index.connectivity != other.connectivity ||
+            index.window_widths.size() != other.window_widths.size() ||
+            std::memcmp(&variant.costs, &donor.costs, sizeof(costs_t)) != 0)
+            return false;
+        for (std::size_t window = 0; window != index.window_widths.size(); ++window)
+            if (index.window_widths[window] != other.window_widths[window]) return false;
+        return true;
+    }
+
+    /** Folds @p named weights into @p costs, the 256×256 scores read as similarities between class
+     *  codes, or else unfolds the costs @p geometry recalled, one hexadecimal digit per entry;
+     *  false once @p outcome records why not. */
+    static bool fold(geometry_t const& geometry, freeze_t named, costs_t& costs, usearch_outcome_t* outcome) noexcept {
+        if (named) {
+            constexpr std::size_t side_k = us::sequence::needleman_wunsch_byte_alphabet_k;
+            usearch_sequence_weights_t const& weights = *named;
+            auto const [folded, fold_status] = costs_t::fold(
+                std::span<i8_t const> {weights.substitution_matrix, side_k * side_k}, weights.gap);
+            if (failed(fold_status))
+                return propagate_error(
+                    usearch_status_config_mismatch_k, outcome,
+                    "The weights need at most 32 classes, a non-negative gap, and no pair above " "its mean " "self-" "score");
+            costs = folded;
+            return true;
+        }
+        std::string_view const recalled = to_string_view(geometry.substitution_costs);
+        if (recalled.empty()) return true;
+        std::size_t classes = 0;
+        while (classes * classes < recalled.size()) ++classes;
+        if (classes * classes != recalled.size() || classes > us::sequence::needleman_wunsch_classes_k)
+            return propagate_error(usearch_status_malformed_k, outcome, "The recorded costs are malformed");
+        costs.classes = static_cast<u8_t>(classes);
+        costs.code_bits = us::sequence::packed_code_bits(classes);
+        costs.gap = static_cast<u8_t>(geometry.gap_cost);
+        for (std::size_t entry = 0; entry != recalled.size(); ++entry) {
+            char const digit = recalled[entry];
+            costs.substitutions[entry / classes][entry % classes] = static_cast<u8_t>(digit <= '9' ? digit - '0'
+                                                                                                   : digit - 'a' + 10);
+        }
+        return true;
+    }
+
+    /** Moves @p geometry into @p variant, its weights folded, a zero connectivity taking the
+     *  default; a GPU variant's shards take the window widths and the costs from it as they are
+     *  built. */
+    template <typename variant_type_>
+    static bool freeze(variant_type_& variant, geometry_t& geometry, freeze_t weights,
+                       usearch_outcome_t* outcome) noexcept {
+        if (!geometry.connectivity) geometry.connectivity = connectivity_32_k;
+        if (!fold(geometry, weights, variant.costs, outcome)) return false;
+        variant.geometry = std::move(geometry);
+        return true;
+    }
+
+    template <typename variant_type_>
+    static void describe(variant_type_ const& variant, usearch_sequence_index_description_t& description) noexcept {
+        description.metadata = sequence_traits_t::metadata_of(variant.geometry);
+    }
+
+    template <typename variant_type_>
+    static bool accepts(variant_type_ const&, usearch_sequence_search_t const& arguments,
+                        usearch_outcome_t* outcome) noexcept {
+        return accepts_sequences(arguments.queries, arguments.count, outcome);
+    }
+
+    static status_t keep(nvme_executor_t& executor, std::size_t thread, std::string_view value, kept_t& kept) noexcept {
+        return keep_row(executor, thread, bytes_of(value.data(), value.size()), kept);
+    }
+
+    /** Lands @p count strings, the @c i th as @p value_at hands it, as one u8 tape in @p memory. */
+    template <typename variant_type_, typename value_at_type_, typename arguments_type_>
+    static bool land(variant_type_ const&, std::size_t count, value_at_type_&& value_at,
+                     growing_arena<forkunion_allocator_t>& memory, arguments_type_ const& arguments,
+                     usearch_outcome_t* outcome) noexcept {
+        std::size_t* const offsets = carve<std::size_t>(memory, count + 1);
+        if (!offsets) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+        offsets[0] = 0;
+        for (std::size_t entry = 0; entry != count; ++entry)
+            offsets[entry + 1] = offsets[entry] + value_at(entry).size();
+        byte_t* const bytes = carve<byte_t>(memory, offsets[count]);
+        if (offsets[count] && !bytes)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+        for (std::size_t entry = 0; entry != count; ++entry)
+            if (auto const& value = value_at(entry); value.size())
+                std::memcpy(bytes + offsets[entry], value.data(), value.size());
+        *arguments.sequences = {bytes, offsets, usearch_scalar_u8_k};
+        return true;
+    }
+
+    /** Adds one entry's bytes to a key's statistics, from any thread. */
+    template <typename value_type_>
+    static void tally(usearch_sequence_key_stats_t& stats, value_type_ const& value) noexcept {
+        standard_atomic_ref<std::size_t>(stats.total_bytes).fetch_add(value.size(), std::memory_order_relaxed);
+        raise_to(stats.largest_bytes, value.size());
+    }
+};
+
+#pragma endregion Sequence Bodies

@@ -37,7 +37,7 @@
 namespace unum::usearch::basic {
 using namespace unum::usearch::utilities;
 
-template <typename index_type_, typename, typename, typename, typename>
+template <typename index_type_, typename, typename, typename, typename, typename>
     requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
 struct vram_nvidia_indexes;
 
@@ -537,7 +537,7 @@ struct vram_ragged_graph {
 
     /** A plural walks its shards below one snapshot of their watermarks, and publishes a batch on
      *  every shard inside one commit. */
-    template <typename index_type_, typename, typename, typename, typename>
+    template <typename index_type_, typename, typename, typename, typename, typename>
         requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
     friend struct vram_nvidia_indexes;
 
@@ -693,6 +693,13 @@ struct vram_ragged_graph {
                aligned_(slices * arena_shape.template slice_bytes<node_id_t>()) +
                aligned_(search_staging_bytes_(queries_count, queries.offsets[queries_count] - queries.offsets[0],
                                               config.count));
+    }
+
+    /** The bytes @ref traversal_memory_usage of @p queries under @p config holds, and
+     *  @p extra_bytes a caller's own launches carve from the same context's allocator. */
+    std::size_t traversal_memory_usage(tape_view<byte_t const> queries, search_config_t config,
+                                       std::size_t extra_bytes) const noexcept {
+        return traversal_memory_usage(queries, config) + aligned_(extra_bytes);
     }
 
     /**

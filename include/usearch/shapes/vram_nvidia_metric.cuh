@@ -39,6 +39,7 @@
 #include "usearch/basic/vram_index.cuh"
 #include "usearch/basic/vram_nvidia_index.cuh" // `basic::cuda_kernel_body`
 #include "usearch/shapes/ram_metric.hpp"       // `shapes_ladder`
+#include "usearch/shapes/ram_index.hpp"        // `codec::save_pack`, `codec::load_pack` - the pose conversion
 #include "usearch/shapes/vram_nvidia_index.hpp"
 
 namespace unum::usearch::shapes {
@@ -229,12 +230,7 @@ template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capa
 status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::save_value_(
     bytes_view_t stored, bytes_span_t saved) noexcept {
     using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
-    auto const [saved_bytes, saved_status] = saved_bytes_(stored);
-    if (failed(saved_status)) return saved_status;
-    if (saved.size() != saved_bytes) return status_t::config_mismatch_k;
-    if (saved.empty()) return status_t::success_k;
-    return status_of(
-        pack_kit_t::unpack(stored.data(), reinterpret_cast<typename scalar_::raw_t*>(saved.data()), nullptr));
+    return codec<pack_kit_t>::save_pack(stored, saved);
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
@@ -253,9 +249,7 @@ template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capa
 status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::load_value_(
     bytes_view_t saved, bytes_span_t stored) noexcept {
     using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
-    constexpr std::size_t point_bytes_k = 3 * sizeof(typename scalar_::raw_t);
-    return status_of(pack_kit_t::pack(reinterpret_cast<typename scalar_::raw_t const*>(saved.data()),
-                                      saved.size() / point_bytes_k, stored.data(), nullptr));
+    return codec<pack_kit_t>::load_pack(saved, stored);
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>

@@ -140,6 +140,10 @@ struct vram_nvidia_index {
     std::size_t traversal_memory_usage(tape_view<byte_t const> queries, search_config_t config) const noexcept {
         return graph_.traversal_memory_usage(queries, config);
     }
+    std::size_t traversal_memory_usage(tape_view<byte_t const> queries, search_config_t config,
+                                       std::size_t extra_bytes) const noexcept {
+        return graph_.traversal_memory_usage(queries, config, extra_bytes);
+    }
     expected<search_result_t> search(tape_view<byte_t const> queries, nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
@@ -200,18 +204,21 @@ struct vram_nvidia_index {
     friend struct utilities::shard_set;
 
     /** A plural walks the graph below its snapshot and publishes its batches inside one commit. */
-    template <typename, typename, typename, typename, typename>
+    template <typename index_type_, typename, typename, typename, typename, typename>
+        requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
     friend struct basic::vram_nvidia_indexes;
 
     std::size_t claimed_() const noexcept { return graph_.claimed_(); }
     status_t close_() noexcept { return graph_.close_(); }
     void reopen_() noexcept { graph_.reopen_(); }
+    void retire_() noexcept { graph_.retire_(); }
 
     graph_t graph_;
 };
 
 /** One launch of @c cuda_admit, which keeps the first @c wanted entries of each walk's candidates
- *  that the relation admits, ascending, beside their chords in metres and their count. */
+ *  that the relation admits, their sight lines clearing the terrain when one is given, ascending,
+ *  beside their chords in metres and their count. */
 template <typename node_id_type_>
 struct cuda_admit_arguments {
     basic::vram_ragged_storage<node_id_type_> storage;
@@ -227,6 +234,18 @@ struct cuda_admit_arguments {
     relation_t relation = relation_t::near_k;
     f64_t radius_metres = 0;
     f64_t slack_milliseconds = 0;
+
+    /** The terrain sight lines clear, null heights for none: the row-major heights and their pack
+     *  on the device, the centre of cell [0,0] and the steps between rows and columns in degrees,
+     *  and the drop of a sight line below its chord per square metre along it, refraction folded
+     *  in. */
+    f32_t const* terrain_heights = nullptr;
+    byte_t const* terrain_pack = nullptr;
+    f64_t north_latitude_degrees = 0;
+    f64_t west_longitude_degrees = 0;
+    f64_t row_step_degrees = 0;
+    f64_t column_step_degrees = 0;
+    f64_t drop_scale = 0;
 
     /** The landing, @b [queries,wanted] IDs and metres, and a count per query. */
     node_id_type_* matched_ids = nullptr;

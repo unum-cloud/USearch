@@ -560,6 +560,7 @@ function (usearch_variants modality_ residency_ backend_)
                 )
             endif ()
             set(position_ 0)
+            set(rows_)
             foreach (kernel_ IN LISTS arg_KERNELS)
                 if (NOT modality_ STREQUAL "dense" OR position_ LESS USEARCH_DENSE_DTYPES)
                     usearch_gpu_bundle(
@@ -571,9 +572,25 @@ function (usearch_variants modality_ residency_ backend_)
                         DEVICE
                         ${CMAKE_CURRENT_SOURCE_DIR}/${modality_}/${residency_}_kernels_${backend_}_${kernel_}.${extension_}
                     )
+                    string(
+                        APPEND
+                        rows_
+                        ".quad ${modality_}_${class_}_${kernel_}_bundle_start, ${modality_}_${class_}_${kernel_}_bundle_end\n"
+                    )
                 endif ()
                 math(EXPR position_ "${position_} + 1")
             endforeach ()
+            # The dense class unit finds each dtype's bundle in one table of two addresses per dtype, in
+            # `dense_dtypes_t` order, under `<modality>_<class>_bundles`.
+            if (modality_ STREQUAL "dense")
+                set(table_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${target_}/${modality_}_${class_}_bundles.S)
+                file(WRITE ${table_}
+                     ".section .data.rel.ro\n.balign 8\n.globl ${modality_}_${class_}_bundles\n"
+                     "${modality_}_${class_}_bundles:\n${rows_}.section .note.GNU-stack,\"\",@progbits\n"
+                )
+                set_source_files_properties(${table_} PROPERTIES LANGUAGE ASM)
+                target_sources(${target_} PRIVATE ${table_})
+            endif ()
             list(APPEND libraries_ ${target_})
         endforeach ()
     endif ()
@@ -652,12 +669,7 @@ usearch_variants(
 )
 usearch_variants(dense vram apple ${usearch_apple_classes_})
 usearch_variants(
-    sequence ram cpu ${usearch_basic_cpu_classes_}
-    DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
-    LIBRARIES stringzilla::header
-)
-usearch_variants(
-    sequence nvme cpu ${usearch_basic_cpu_classes_}
+    sequence cpu cpu ${usearch_basic_cpu_classes_}
     DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
     LIBRARIES stringzilla::header
 )
@@ -667,12 +679,10 @@ usearch_variants(
     DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
     LIBRARIES stringzilla::header
 )
-usearch_variants(shapes ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
-usearch_variants(shapes nvme cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
+usearch_variants(shapes cpu cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
 usearch_variants(shapes vram nvidia nvidia KERNELS f16 f32)
 usearch_variants(shapes vram nvidia nvidia_blackwell KERNELS f16)
-usearch_variants(geospatial ram cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
-usearch_variants(geospatial nvme cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
+usearch_variants(geospatial cpu cpu ${usearch_basic_cpu_classes_} LIBRARIES stringzilla::header)
 usearch_variants(geospatial vram nvidia nvidia)
 usearch_variants(basic vram nvidia nvidia)
 
@@ -696,4 +706,17 @@ set(USEARCH_PUNNED_OBJECTS)
 foreach (library_ IN LISTS USEARCH_PUNNED_LIBRARIES)
     list(APPEND USEARCH_PUNNED_OBJECTS $<TARGET_OBJECTS:${library_}>)
 endforeach ()
-return(PROPAGATE USEARCH_PUNNED_LIBRARIES USEARCH_PUNNED_OBJECTS)
+# The behavior tests compile their class cells with the classes' own flags, so every class's variables reach the parent.
+set(usearch_class_variables_)
+foreach (
+    class_ IN
+    LISTS usearch_cpu_classes_ usearch_nvidia_classes_
+    ITEMS nvidia
+)
+    list(APPEND usearch_class_variables_ usearch_class_${class_}_exists_ usearch_class_${class_}_flags_
+         usearch_class_${class_}_definitions_
+    )
+endforeach ()
+return(PROPAGATE USEARCH_PUNNED_LIBRARIES USEARCH_PUNNED_OBJECTS usearch_cpu_classes_ usearch_nvidia_classes_
+       ${usearch_class_variables_}
+)
