@@ -602,18 +602,7 @@ struct cuda_virtual_memory_allocator {
 
     /** Maps every slab for those of @p devices that can reach the owner too, so their kernels and
      *  copies read and write it directly; placement only, named before the first @ref commit. */
-    void share_with(std::bitset<gpu_devices_capacity_k> devices) noexcept {
-        peers_.reset();
-        cuda_api_t const& api = cuda_api();
-        int owner = 0;
-        if (!api || api.get_device(&owner, device_) != cuda_success_k) return;
-        for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
-            int peer = 0, reaches = 0;
-            if (!devices[ordinal] || static_cast<int>(ordinal) == device_) continue;
-            peers_[ordinal] = api.get_device(&peer, static_cast<int>(ordinal)) == cuda_success_k &&
-                              api.can_access_peer(&reaches, peer, owner) == cuda_success_k && reaches;
-        }
-    }
+    void share_with(std::bitset<gpu_devices_capacity_k> devices) noexcept { peers_ = reachable_(devices); }
 
     /** Whether kernels and copies on CUDA ordinal @p device reach the mapped slabs. */
     bool shared_with(int device) const noexcept {
@@ -625,17 +614,10 @@ struct cuda_virtual_memory_allocator {
      *  them cannot reach the owner. No slab may be committed meanwhile. */
     status_t grant(std::bitset<gpu_devices_capacity_k> devices) noexcept {
         cuda_api_t const& api = cuda_api();
-        int owner = 0;
-        if (!api || api.get_device(&owner, device_) != cuda_success_k) return status_t::device_error_k;
-        std::bitset<gpu_devices_capacity_k> granted = peers_;
-        for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
-            int peer = 0, reaches = 0;
-            if (!devices[ordinal] || static_cast<int>(ordinal) == device_ || granted[ordinal]) continue;
-            if (api.get_device(&peer, static_cast<int>(ordinal)) != cuda_success_k ||
-                api.can_access_peer(&reaches, peer, owner) != cuda_success_k || !reaches)
-                return status_t::config_mismatch_k;
-            granted[ordinal] = true;
-        }
+        if (!api) return status_t::device_error_k;
+        devices[static_cast<std::size_t>(device_)] = false;
+        if (reachable_(devices) != devices) return status_t::config_mismatch_k;
+        std::bitset<gpu_devices_capacity_k> const granted = peers_ | devices;
         if (granted == peers_) return status_t::success_k;
         cuda_access_descriptor_t access[gpu_devices_capacity_k];
         std::size_t const readers = access_of_(granted, access);
@@ -685,6 +667,22 @@ struct cuda_virtual_memory_allocator {
     }
 
   private:
+
+    /** Those of @p devices besides the owner whose kernels and copies can reach its slabs. */
+    std::bitset<gpu_devices_capacity_k> reachable_(std::bitset<gpu_devices_capacity_k> devices) const noexcept {
+        std::bitset<gpu_devices_capacity_k> reachable;
+        cuda_api_t const& api = cuda_api();
+        int owner = 0;
+        if (!api || api.get_device(&owner, device_) != cuda_success_k) return reachable;
+        for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
+            int peer = 0, reaches = 0;
+            if (!devices[ordinal] || static_cast<int>(ordinal) == device_) continue;
+            reachable[ordinal] = api.get_device(&peer, static_cast<int>(ordinal)) == cuda_success_k &&
+                                 api.can_access_peer(&reaches, peer, owner) == cuda_success_k && reaches;
+        }
+        return reachable;
+    }
+
     static cuda_allocation_properties_t allocation_properties_(int device) noexcept {
         cuda_allocation_properties_t properties;
         properties.type = cuda_allocation_properties_t::pinned_k;

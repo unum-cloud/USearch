@@ -469,17 +469,7 @@ struct hip_virtual_memory_allocator {
 
     /** Maps every slab for those of @p devices that can reach the owner too, so their kernels and
      *  copies read and write it directly; placement only, named before the first @ref commit. */
-    void share_with(std::bitset<gpu_devices_capacity_k> devices) noexcept {
-        peers_.reset();
-        hip_api_t const& runtime = hip_api();
-        if (!runtime) return;
-        for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
-            int reaches = 0;
-            if (!devices[ordinal] || static_cast<int>(ordinal) == device_) continue;
-            peers_[ordinal] = runtime.can_access_peer(&reaches, static_cast<int>(ordinal), device_) == hip_success_k &&
-                              reaches;
-        }
-    }
+    void share_with(std::bitset<gpu_devices_capacity_k> devices) noexcept { peers_ = reachable_(devices); }
 
     /** Whether kernels and copies on HIP ordinal @p device reach the mapped slabs. */
     bool shared_with(int device) const noexcept {
@@ -492,14 +482,9 @@ struct hip_virtual_memory_allocator {
     status_t grant(std::bitset<gpu_devices_capacity_k> devices) noexcept {
         hip_api_t const& runtime = hip_api();
         if (!runtime) return status_t::device_error_k;
-        std::bitset<gpu_devices_capacity_k> granted = peers_;
-        for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
-            int reaches = 0;
-            if (!devices[ordinal] || static_cast<int>(ordinal) == device_ || granted[ordinal]) continue;
-            if (runtime.can_access_peer(&reaches, static_cast<int>(ordinal), device_) != hip_success_k || !reaches)
-                return status_t::config_mismatch_k;
-            granted[ordinal] = true;
-        }
+        devices[static_cast<std::size_t>(device_)] = false;
+        if (reachable_(devices) != devices) return status_t::config_mismatch_k;
+        std::bitset<gpu_devices_capacity_k> const granted = peers_ | devices;
         if (granted == peers_) return status_t::success_k;
         hip_access_descriptor_t access[gpu_devices_capacity_k];
         std::size_t const readers = access_of_(granted, access);
@@ -549,6 +534,22 @@ struct hip_virtual_memory_allocator {
     }
 
   private:
+
+    /** Those of @p devices besides the owner whose kernels and copies can reach its slabs. */
+    std::bitset<gpu_devices_capacity_k> reachable_(std::bitset<gpu_devices_capacity_k> devices) const noexcept {
+        std::bitset<gpu_devices_capacity_k> reachable;
+        hip_api_t const& runtime = hip_api();
+        if (!runtime) return reachable;
+        for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
+            int reaches = 0;
+            if (!devices[ordinal] || static_cast<int>(ordinal) == device_) continue;
+            reachable[ordinal] = runtime.can_access_peer(&reaches, static_cast<int>(ordinal), device_) ==
+                                     hip_success_k &&
+                                 reaches;
+        }
+        return reachable;
+    }
+
     static hip_allocation_properties_t allocation_properties_(int device) noexcept {
         hip_allocation_properties_t properties;
         properties.type = hip_allocation_properties_t::pinned_k;
