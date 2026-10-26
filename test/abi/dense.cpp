@@ -14,8 +14,11 @@
  *  NVMe view serves the same searches and refuses every write; a donor absorbs whole; a RAM index
  *  compacts into one shard; a cleared index holds nothing.
  */
-#include <string> // `std::string` - the cells' names and checkpoint stems
-#include <vector> // `std::vector` - the keys
+#include <cstring> // `std::memcmp` - the keys' order
+
+#include <algorithm> // `std::binary_search`, `std::sort` - the admitted keys
+#include <string>    // `std::string` - the cells' names and checkpoint stems
+#include <vector>    // `std::vector` - the keys
 
 #include "usearch/dense_index.h"
 
@@ -41,35 +44,39 @@ static nk::matrix<nk::f32_t> dense_rows(usearch_scalar_t scalar, std::size_t cou
                                            : make_vectors<nk::f32_t>(count, dense_dimensions_k, seed);
 }
 
-/** Every row searches for itself: nine in ten must land first, and every row ascends. */
+/** Every row searches for itself: nine in ten must land first, every landed key was minted, and
+ *  every row ascends. */
 static std::size_t expect_self_recall(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
     landed_matches_t found;
     usearch_traversal_stats_t stats {};
-    std::size_t failures = check(search_rows(index, rows, count, cell_batch_k, cell_wanted_k, dense_expansion_k,
-                                             usearch_traversal_walk_k, stats, found));
+    std::size_t failures = check(search_queries(index, rows, count, cell_batch_k, cell_wanted_k, dense_expansion_k,
+                                                usearch_traversal_walk_k, stats, found));
     if (failures) return failures;
     std::vector<std::size_t> const offsets = row_offsets(found);
-    std::size_t found_first = 0, descending = 0;
+    std::size_t found_first = 0, unminted = 0, descending = 0;
     for (std::size_t row = 0; row != count; ++row) {
         std::size_t const first = offsets[row], last = offsets[row + 1];
-        found_first += first != last && identity_of(found.keys[first]) == row;
-        for (std::size_t match = first + 1; match < last; ++match)
-            descending += found.scores[match] < found.scores[match - 1];
+        for (std::size_t match = first; match != last; ++match) {
+            std::optional<u64_t> const landed = row_of_key(index.session->seed,
+                                                           std::bit_cast<usearch_key_t>(found.keys[match]));
+            unminted += !landed;
+            found_first += match == first && landed == row;
+            if (match != first) descending += found.scores[match] < found.scores[match - 1];
+        }
     }
-    return check(found_first * 10 >= count * 9) + check(descending == 0);
+    return check(found_first * 10 >= count * 9) + check(unminted == 0) + check(descending == 0);
 }
 
 /** Every key of the first @p count rows reads one row back. */
 static std::size_t expect_gets(handle<dense_verbs_t>& index, std::size_t count) {
-    std::vector<usearch_key_t> keys(count);
-    keys_of_rows(0, keys);
     std::size_t misread = 0;
-    for (usearch_key_t const& key : keys) {
+    for (std::size_t row = 0; row != count; ++row) {
         usearch_outcome_t outcome {};
         usearch_rows_view_t vectors {};
         std::size_t written = 0;
         usearch_dense_get_t get {};
-        get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome, get.key = key;
+        get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome;
+        get.key = key_of_row(index.session->seed, row);
         get.vectors = &vectors, get.written = &written, get.arena = index.session->arena;
         get.outputs_scalar = usearch_scalar_f32_k;
         usearch_dense_get(&get);
@@ -78,34 +85,44 @@ static std::size_t expect_gets(handle<dense_verbs_t>& index, std::size_t count) 
     return check(misread == 0);
 }
 
-/** Admits the even rows alone. */
-static void admit_even_rows(usearch_key_t const* keys, usearch_admission_t* admissions, std::size_t count,
-                            void*) noexcept {
-    for (std::size_t position = 0; position != count; ++position) {
-        u64_t row = missing_row_k;
-        rows_of_keys({keys + position, 1}, {&row, 1});
-        admissions[position] = row % 2 ? usearch_reject_k : usearch_admit_k;
-    }
+/** Whether @p first sorts before @p second, byte by byte. */
+static bool key_precedes(usearch_key_t const& first, usearch_key_t const& second) noexcept {
+    return std::memcmp(first.bytes, second.bytes, sizeof(first.bytes)) < 0;
 }
 
-/** A host walk lands only the even rows the predicate admits; a device walk refuses a host
- *  predicate as unsupported. */
-static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_view_t rows) {
+/** Admits the keys the sorted run of keys at @p admitted holds. */
+static void admit_listed(usearch_key_t const* keys, usearch_admission_t* admissions, std::size_t count,
+                         void* admitted) noexcept {
+    std::vector<usearch_key_t> const& listed = *static_cast<std::vector<usearch_key_t> const*>(admitted);
+    for (std::size_t position = 0; position != count; ++position)
+        admissions[position] = std::binary_search(listed.begin(), listed.end(), keys[position], key_precedes)
+                                   ? usearch_admit_k
+                                   : usearch_reject_k;
+}
+
+/** A host walk lands only the keys of the even rows among the first @p count , chosen up front for
+ *  the predicate to look up; a device walk refuses a host predicate as unsupported. */
+static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
+    std::vector<usearch_key_t> admitted;
+    for (std::size_t row = 0; row < count; row += 2) admitted.push_back(key_of_row(index.session->seed, row));
+    std::sort(admitted.begin(), admitted.end(), key_precedes);
     usearch_outcome_t outcome {};
     usearch_matches_view_t matches {};
     usearch_dense_search_t search {};
     search.index = index.get(), search.executor = index.executor(), search.outcome = &outcome;
     search.count = dense_queries_k, search.queries = rows, search.matches = &matches;
     search.arena = index.session->arena, search.wanted = cell_wanted_k, search.expansion_factor = dense_expansion_k;
-    search.predicate = {admit_even_rows, nullptr, usearch_predicate_cost_cheap_k};
+    search.predicate = {admit_listed, &admitted, usearch_predicate_cost_cheap_k};
     usearch_dense_search(&search);
     if (index.residency == usearch_residency_vram_k) return check(outcome.status == usearch_status_unsupported_k);
     std::size_t failures = check(outcome);
     if (failures) return failures;
     landed_matches_t const found = landed_matches(matches, dense_queries_k);
-    std::size_t odd = 0;
-    for (uuid_t const& key : found.keys) odd += identity_of(key).value_or(1) % 2;
-    return check(odd == 0 && !found.keys.empty());
+    std::size_t outside = 0;
+    for (uuid_t const& key : found.keys)
+        outside += !std::binary_search(admitted.begin(), admitted.end(), std::bit_cast<usearch_key_t>(key),
+                                       key_precedes);
+    return check(outside == 0 && !found.keys.empty());
 }
 
 /** An audit reaches every row. */
@@ -129,7 +146,7 @@ static std::size_t expect_compact(handle<dense_verbs_t>& index, std::size_t coun
     compact.count = 1, compact.sources = sources, compact.shard_capacity = count;
     usearch_dense_compact(&compact);
     std::size_t const failures = check(outcome);
-    return failures + check(describe(index).reported.size == count);
+    return failures + check(describe(index).size == count);
 }
 
 /** One cell of the dense diagonal, named @p name, as the file's docblock describes. */
@@ -151,7 +168,7 @@ static std::size_t check_dense_behaviors(sweep_cell_t const& cell, settings_t co
     failures += expect_gets(index, dense_rows_k);
     failures += expect_self_recall(index, rows, dense_rows_k);
     failures += expect_walk_recall(index, rows, dense_queries_k, dense_expansion_k, 0.9);
-    failures += expect_predicate(index, rows);
+    failures += expect_predicate(index, rows, dense_rows_k);
     failures += expect_refined(index, usearch_status_success_k);
     failures += expect_health(index, dense_rows_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-dense-{:016x}", seed);

@@ -31,7 +31,7 @@ def pytest_report_header() -> list[str]:
         f"- Capabilities compiled: {usearch.capabilities_compiled()}",
         f"- Capabilities available: {usearch.capabilities_available()}",
         f"- Seed: {SETTINGS.seed}",
-        f"- Filter: {SETTINGS.filter or 'none'}",
+        f"- Filter: {getattr(SETTINGS.filter, 'pattern', SETTINGS.filter) or 'none'}",
         f"- Dims: {','.join(map(str, SETTINGS.dims))}",
     ]
 

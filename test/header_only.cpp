@@ -14,7 +14,7 @@ using namespace unum::usearch::test;
 
 int main() {
     settings_t const settings = read_environment();
-    print(settings);
+    print_environment(settings);
     std::size_t failures_count = 0;
 
     if (settings.filter.selects("ram_buffers")) failures_count += test::utilities::check_ram_buffers(settings);

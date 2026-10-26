@@ -7,7 +7,8 @@
  *      three.
  *
  *  Shapes are eight template clouds of 24 points, each entry keeping 16 to 24 of them under a
- *  hundredth of jitter, so neighbors cluster by template while point counts vary per entry. Each
+ *  hundredth of jitter, so neighbors cluster by template while point counts vary per entry; the
+ *  alignment metrics, which iterate over every pair of points, take fewer and smaller clouds. Each
  *  cell checks the verbs a caller reaches: the rows land under their keys across the shards and
  *  each counts once, a walk keeps most of the exact scan's top ten, a RAM index refines and absorbs
  *  while a GPU one refuses both, the index saves and reloads into every residency and as a view, an
@@ -19,7 +20,7 @@
 #include <cmath> // `std::sqrt` - a point's move from its coordinates' bands
 
 #include <algorithm> // `std::minmax_element` - a cloud's extent
-#include <array>     // `std::array` - the template clouds
+#include <array>     // `std::array` - the metrics and their names
 #include <string>    // `std::string` - the cells' names
 #include <vector>    // `std::vector` - the points, the offsets
 
@@ -29,11 +30,18 @@
 
 namespace unum::usearch::test::abi {
 
-/** Shapes each cell builds, the queries held out past them, and the donor's shapes. */
-static constexpr std::size_t shapes_rows_k = 512, shapes_queries_k = 64, shapes_donor_rows_k = 128;
+/** Shapes a cell builds, the queries held out past them, the donor's shapes, the points per
+ *  template cloud, the fewest an entry keeps, and the graph degree, zero deriving it. */
+struct shapes_sizes_t {
+    std::size_t rows = 0, queries = 0, donor_rows = 0, points = 0, fewest_points = 0, connectivity = 0;
+};
 
-/** Points per template cloud, the fewest an entry keeps, and the breadth every walk takes. */
-static constexpr std::size_t shapes_points_k = 24, shapes_fewest_points_k = 16, shapes_expansion_k = 128;
+/** The sizes of the point-set metrics' cells, and the smaller ones of the alignments, whose every
+ *  distance iterates a transport plan, so a refinement pass costs minutes at the derived degree. */
+static constexpr shapes_sizes_t shapes_sizes_k {512, 64, 128, 24, 16, 0}, alignment_sizes_k {64, 16, 16, 8, 6, 8};
+
+/** The breadth every walk takes. */
+static constexpr std::size_t shapes_expansion_k = 128;
 
 /** Points end to end and the offsets around them, as the C interface takes a tape of shapes. */
 struct shapes_tape_t {
@@ -43,21 +51,20 @@ struct shapes_tape_t {
     usearch_tape_view_t view() const noexcept { return {coordinates.data(), offsets.data(), usearch_scalar_f32_k}; }
 };
 
-/** @p count shapes from eight template clouds, each keeping a prefix of 16 to 24 points under a
- *  hundredth of jitter. */
-static shapes_tape_t generate_shapes(std::size_t count, u64_t seed) {
+/** @p count shapes from eight template clouds of @p sizes ' points, each keeping a prefix of
+ *  @p sizes ' fewest points or more under a hundredth of jitter. */
+static shapes_tape_t generate_shapes(std::size_t count, shapes_sizes_t const& sizes, u64_t seed) {
     constexpr std::size_t templates_k = 8;
     splitmix64_t random_generator {seed};
     uniform_between<f64_t> const unit {-1, 1}, jitter {-0.01, 0.01};
     uniform_below<u32_t> const template_distribution {templates_k};
-    uniform_below<u32_t> const kept_distribution {shapes_points_k - shapes_fewest_points_k + 1};
-    std::array<std::array<f32_t, shapes_points_k * 3>, templates_k> templates;
-    for (std::array<f32_t, shapes_points_k* 3>& cloud : templates)
-        for (f32_t& coordinate : cloud) coordinate = static_cast<f32_t>(unit(random_generator));
+    uniform_below<u32_t> const kept_distribution {static_cast<u32_t>(sizes.points - sizes.fewest_points + 1)};
+    std::vector<f32_t> templates(templates_k * sizes.points * 3);
+    for (f32_t& coordinate : templates) coordinate = static_cast<f32_t>(unit(random_generator));
     shapes_tape_t tape;
     for (std::size_t shape = 0; shape != count; ++shape) {
-        std::array<f32_t, shapes_points_k * 3> const& cloud = templates[template_distribution(random_generator)];
-        std::size_t const kept = shapes_fewest_points_k + kept_distribution(random_generator);
+        f32_t const* const cloud = templates.data() + template_distribution(random_generator) * sizes.points * 3;
+        std::size_t const kept = sizes.fewest_points + kept_distribution(random_generator);
         for (std::size_t coordinate = 0; coordinate != kept * 3; ++coordinate)
             tape.coordinates.push_back(cloud[coordinate] + static_cast<f32_t>(jitter(random_generator)));
         tape.offsets.push_back(tape.offsets.back() + kept);
@@ -95,16 +102,15 @@ static double shapes_score_band(shapes_tape_t const& tape, double unit_roundoff)
  *  cloud starting at its entry of @p offsets, which ends with the total. */
 static std::vector<float> poses_of(handle<shapes_verbs_t>& index, std::size_t count, std::vector<std::size_t>& offsets,
                                    std::size_t& failures) {
-    std::vector<usearch_key_t> keys(count);
-    keys_of_rows(0, keys);
     std::vector<float> poses;
     offsets.assign(1, 0);
-    for (usearch_key_t const& key : keys) {
+    for (std::size_t row = 0; row != count; ++row) {
         usearch_outcome_t outcome {};
         usearch_tape_view_t shapes {};
         std::size_t written = 0;
         usearch_shapes_get_t get {};
-        get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome, get.key = key;
+        get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome;
+        get.key = key_of_row(index.session->seed, row);
         get.shapes = &shapes, get.written = &written, get.arena = index.session->arena;
         get.outputs_scalar = usearch_scalar_f32_k;
         usearch_shapes_get(&get);
@@ -152,24 +158,27 @@ static std::size_t expect_poses_round_trip(handle<shapes_verbs_t>& index, std::s
 /** One metric of one cell, named @p name, as the file's docblock describes. */
 static std::size_t check_shapes_metric(sweep_cell_t const& cell, session_t& session, usearch_shapes_metadata_t geometry,
                                        std::string const& name, u64_t seed) {
+    bool const aligned = geometry.metric == usearch_shapes_metric_gromov_wasserstein_k ||
+                         geometry.metric == usearch_shapes_metric_wasserstein_procrustes_k;
+    shapes_sizes_t const sizes = aligned ? alignment_sizes_k : shapes_sizes_k;
+    geometry.connectivity = sizes.connectivity;
     handle<shapes_verbs_t> index = open_index<shapes_verbs_t>(session, geometry, cell.shards);
     if (!index) return 1;
-    shapes_tape_t const rows = generate_shapes(shapes_rows_k + shapes_queries_k, seed);
-    shapes_tape_t const donated = generate_shapes(shapes_donor_rows_k, ~seed);
-    usearch_tape_view_t const queries = shapes_verbs_t::slice(rows.view(), shapes_rows_k);
+    shapes_tape_t const rows = generate_shapes(sizes.rows + sizes.queries, sizes, seed);
+    shapes_tape_t const donated = generate_shapes(sizes.donor_rows, sizes, ~seed);
+    usearch_tape_view_t const queries = shapes_verbs_t::slice(rows.view(), sizes.rows);
 
-    std::size_t failures = expect_built(cell, index, rows.view(), shapes_rows_k);
+    std::size_t failures = expect_built(cell, index, rows.view(), sizes.rows);
     if (failures) return failures;
-    failures += expect_walk_recall(index, queries, shapes_queries_k, shapes_expansion_k, 0.8);
+    failures += expect_walk_recall(index, queries, sizes.queries, shapes_expansion_k, 0.8);
     failures += expect_refined(index, usearch_status_unsupported_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-shapes-{:016x}", stream_key(seed, name));
     if (cell.residency == usearch_residency_ram_k) failures += expect_poses_round_trip(index, stem + "-poses");
-    failures += expect_persistence(cell, index, rows.view(), queries, shapes_queries_k, shapes_expansion_k, 0.8, stem,
+    failures += expect_persistence(cell, index, rows.view(), queries, sizes.queries, shapes_expansion_k, 0.8, stem,
                                    saved_bytes_t::differing_k,
                                    shapes_score_band(rows, unit_roundoff_of(geometry.quantization)));
     if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_absorbed(index, donated.view(), shapes_donor_rows_k, shapes_rows_k,
-                                usearch_status_unsupported_k);
+    failures += expect_absorbed(index, donated.view(), sizes.donor_rows, sizes.rows, usearch_status_unsupported_k);
     return failures + expect_cleared(index);
 }
 

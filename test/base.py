@@ -74,26 +74,25 @@ class Settings:
     """Every `USEARCH_*` variable the Python suite reads, parsed once at import."""
 
     seed: int
-    filter: str
-    filter_pattern: re.Pattern[str] | None
+    filter: re.Pattern[str] | str
+    """`USEARCH_FILTER` compiled, or its text when it is no valid regex."""
     dims: list[int]
 
     def selects(self, name: str) -> bool:
         """Whether `USEARCH_FILTER` selects the test `name`, as a regex or else as a substring."""
-        return bool(self.filter_pattern.search(name)) if self.filter_pattern else self.filter in name
+        return self.filter in name if isinstance(self.filter, str) else bool(self.filter.search(name))
 
 
 def read_settings() -> Settings:
     """Reads every `USEARCH_*` variable, exiting with status 1 on the first that does not parse."""
-    filter = env_text("USEARCH_FILTER") or ""
+    text = env_text("USEARCH_FILTER") or ""
     try:
-        filter_pattern = re.compile(filter) if filter else None
+        filter = re.compile(text)
     except re.error:
-        filter_pattern = None
+        filter = text
     return Settings(
         seed=_RUN_SEED,
         filter=filter,
-        filter_pattern=filter_pattern,
         # Dimension counts bracketing the SIMD register widths, where tail handling is most likely
         # to diverge: below one register, straddling one, and several whole ones.
         dims=env_parsed(

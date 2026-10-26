@@ -535,7 +535,9 @@ void usearch_dense_describe(usearch_dense_describe_t* arguments) {
         index.entries.size(),
         index.entries.capacity(),
         index.entries.capacity() * stored_row_bytes(options.dimensions),
-        "serial",
+        usearch_cpu_class_serial_k,
+        usearch_gpu_class_unknown_k,
+        1,
     };
 }
 

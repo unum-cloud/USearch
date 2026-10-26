@@ -611,7 +611,9 @@ void usearch_sequence_describe(usearch_sequence_describe_t* arguments) {
         index.entries.size(),
         index.entries.capacity(),
         payload_extent(index, index.entries.size()) + index.options.substitution.size(),
-        "serial",
+        usearch_cpu_class_serial_k,
+        usearch_gpu_class_unknown_k,
+        1,
     };
 }
 

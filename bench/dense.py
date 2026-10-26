@@ -56,7 +56,7 @@ def main():
 
     index = DenseIndex(dimensions=arguments.dims, metric=arguments.metric, quantization=arguments.quantization)
     index.reserve(arguments.count)
-    print(f"Dispatching to {index.capabilities}")
+    print(f"Dispatching to {index.cpu_class!r}")
 
     seconds, _ = measure_seconds(lambda: index.add(keys, vectors, dtype=arguments.dtype))
     print(f"Ingest: {arguments.count / seconds:,.0f} vectors/s over {seconds:.2f} s")

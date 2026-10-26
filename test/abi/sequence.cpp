@@ -28,11 +28,18 @@ using us::sequence::pack_codes;
 using us::sequence::packed_code_bits;
 using us::sequence::packed_codes_bytes;
 
-/** Strings each cell builds, the queries held out past them, and the donor's strings. */
-static constexpr std::size_t sequence_rows_k = 1024, sequence_queries_k = 128, sequence_donor_rows_k = 256;
+/** Strings a cell builds, the queries held out past them, the donor's strings, and the nucleotides
+ *  per template. */
+struct sequence_sizes_t {
+    std::size_t rows = 0, queries = 0, donor_rows = 0, length = 0;
+};
 
-/** Nucleotides per template, and the breadth every walk takes. */
-static constexpr std::size_t sequence_length_k = 100, sequence_expansion_k = 128;
+/** The sizes of the bit-parallel metrics' cells, and the smaller ones of Needleman-Wunsch, whose
+ *  every distance fills a whole alignment matrix. */
+static constexpr sequence_sizes_t sequence_sizes_k {1024, 128, 256, 100}, aligned_sizes_k {256, 64, 64, 32};
+
+/** The breadth every walk takes. */
+static constexpr std::size_t sequence_expansion_k = 128;
 
 /** The nucleotides, whose position is their code under Needleman-Wunsch. */
 static constexpr std::string_view nucleotides_k = "ACGT";
@@ -40,9 +47,9 @@ static constexpr std::string_view nucleotides_k = "ACGT";
 /** The window widths an overlap index compares at. */
 static constexpr std::array<std::size_t, 2> sequence_window_widths_k {3, 5};
 
-/** @p count strings of about @ref sequence_length_k nucleotides from eight templates, an eighth of
- *  every string's symbols substituted, inserted or erased. */
-static std::vector<std::string> generate_nucleotides(std::size_t count, u64_t seed) {
+/** @p count strings of about @p length nucleotides from eight templates, an eighth of every
+ *  string's symbols substituted, inserted or erased. */
+static std::vector<std::string> generate_nucleotides(std::size_t count, std::size_t length, u64_t seed) {
     constexpr std::size_t templates_k = 8;
     splitmix64_t random_generator {seed};
     uniform_below<u32_t> const symbol_distribution {static_cast<u32_t>(nucleotides_k.size())};
@@ -50,12 +57,12 @@ static std::vector<std::string> generate_nucleotides(std::size_t count, u64_t se
     uniform_below<u32_t> const edit_kind_distribution {3};
     std::array<std::string, templates_k> templates;
     for (std::string& symbols : templates)
-        for (std::size_t symbol = 0; symbol != sequence_length_k; ++symbol)
+        for (std::size_t symbol = 0; symbol != length; ++symbol)
             symbols += nucleotides_k[symbol_distribution(random_generator)];
     std::vector<std::string> strings(count);
     for (std::string& symbols : strings) {
         symbols = templates[template_distribution(random_generator)];
-        for (std::size_t edit = 0; edit != sequence_length_k / 8; ++edit) {
+        for (std::size_t edit = 0; edit != length / 8; ++edit) {
             std::size_t const position = uniform_below<u32_t> {static_cast<u32_t>(symbols.size())}(random_generator);
             char const symbol = nucleotides_k[symbol_distribution(random_generator)];
             switch (edit_kind_distribution(random_generator)) {
@@ -109,15 +116,14 @@ static std::vector<std::int8_t> nucleotide_similarities() {
 /** Every key of the first @p count rows reads one string back, on host residencies. */
 static std::size_t expect_gets(handle<sequence_verbs_t>& index, std::size_t count) {
     if (index.residency == usearch_residency_vram_k) return 0;
-    std::vector<usearch_key_t> keys(count);
-    keys_of_rows(0, keys);
     std::size_t misread = 0;
-    for (usearch_key_t const& key : keys) {
+    for (std::size_t row = 0; row != count; ++row) {
         usearch_outcome_t outcome {};
         usearch_tape_view_t sequences {};
         std::size_t written = 0;
         usearch_sequence_get_t get {};
-        get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome, get.key = key;
+        get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome;
+        get.key = key_of_row(index.session->seed, row);
         get.sequences = &sequences, get.written = &written, get.arena = index.session->arena;
         usearch_sequence_get(&get);
         misread += outcome.status != usearch_status_success_k || written != 1;
@@ -136,21 +142,21 @@ static std::size_t check_sequence_metric(sweep_cell_t const& cell, session_t& se
         geometry.window_widths = sequence_window_widths_k;
     handle<sequence_verbs_t> index = open_index<sequence_verbs_t>(session, geometry, cell.shards);
     if (!index) return 1;
-    sequence_tape_t const rows = tape_of(generate_nucleotides(sequence_rows_k + sequence_queries_k, seed), aligned);
-    sequence_tape_t const donated = tape_of(generate_nucleotides(sequence_donor_rows_k, ~seed), aligned);
-    usearch_tape_view_t const queries = sequence_verbs_t::slice(rows.view(), sequence_rows_k);
+    sequence_sizes_t const sizes = aligned ? aligned_sizes_k : sequence_sizes_k;
+    sequence_tape_t const rows = tape_of(generate_nucleotides(sizes.rows + sizes.queries, sizes.length, seed), aligned);
+    sequence_tape_t const donated = tape_of(generate_nucleotides(sizes.donor_rows, sizes.length, ~seed), aligned);
+    usearch_tape_view_t const queries = sequence_verbs_t::slice(rows.view(), sizes.rows);
 
-    std::size_t failures = expect_built(cell, index, rows.view(), sequence_rows_k);
+    std::size_t failures = expect_built(cell, index, rows.view(), sizes.rows);
     if (failures) return failures;
-    failures += expect_gets(index, sequence_rows_k);
-    failures += expect_walk_recall(index, queries, sequence_queries_k, sequence_expansion_k, 0.8);
+    failures += expect_gets(index, sizes.rows);
+    failures += expect_walk_recall(index, queries, sizes.queries, sequence_expansion_k, 0.8);
     failures += expect_refined(index, usearch_status_unsupported_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-sequence-{:016x}", stream_key(seed, name));
-    failures += expect_persistence(cell, index, rows.view(), queries, sequence_queries_k, sequence_expansion_k, 0.8,
-                                   stem, saved_bytes_t::identical_k, 0.0);
+    failures += expect_persistence(cell, index, rows.view(), queries, sizes.queries, sequence_expansion_k, 0.8, stem,
+                                   saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_absorbed(index, donated.view(), sequence_donor_rows_k, sequence_rows_k,
-                                usearch_status_unsupported_k);
+    failures += expect_absorbed(index, donated.view(), sizes.donor_rows, sizes.rows, usearch_status_unsupported_k);
     return failures + expect_cleared(index);
 }
 

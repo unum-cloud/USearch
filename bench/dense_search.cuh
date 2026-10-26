@@ -71,7 +71,7 @@ inline telemetry_lane_t summed_lanes(std::vector<telemetry_lane_t> const& lanes)
 struct bench_results_t {
 
     /** The @b [queries,top_k] merged global rows of every query's gathered hits. */
-    nk::matrix<u32_t> hit_rows;
+    nk::matrix<u64_t> hit_rows;
 
     /** The @b [queries,top_k] distances matching @c hit_rows entry-for-entry. */
     nk::matrix<distance_t> hit_distances;
@@ -88,7 +88,7 @@ struct bench_results_t {
 
 /** Sizes the per-query hit matrices for @p queries_count queries of @p top_k matches each. */
 inline bool reserve_results(bench_results_t& results, std::size_t queries_count, std::size_t top_k) {
-    results.hit_rows = nk::matrix<u32_t>::zeros({queries_count, top_k}).value;
+    results.hit_rows = nk::matrix<u64_t>::zeros({queries_count, top_k}).value;
     results.hit_distances = nk::matrix<distance_t>::zeros({queries_count, top_k}).value;
     if (results.hit_rows.empty() || results.hit_distances.empty())
         return fmt::println("Failed to allocate the per-query hit matrices"), false;
@@ -282,16 +282,15 @@ bool scores_indexer(index_type_ const& index) noexcept {
 /** Reads the RetriEval matrix @p path through the opener of `--base-vectors`, in whichever scalar
  *  its extension names, widened into @p widened. */
 inline bool read_widened_rows(std::string_view path, nk::matrix<f32_t>& widened) {
-    return open_dataset(path, {}, {},
-                        [&]<typename file_scalar_type_>(utilities::persisted_dataset<file_scalar_type_> const& file) {
-                            nk::matrix_view<file_scalar_type_> const rows = file.vectors();
-                            widened = nk::matrix<f32_t>::zeros({rows.extent(0), rows.extent(1)}).value;
-                            if (widened.empty()) return fmt::println("Failed to widen {} into f32", path), 1;
-                            for (std::size_t row = 0; row != rows.extent(0); ++row)
-                                widen_row(rows.row(row).as_vector(),
-                                          std::span<f32_t> {widened.row(row).data(), rows.extent(1)});
-                            return 0;
-                        }) == 0;
+    return open_dataset(path, {}, {}, [&]<typename file_scalar_type_>(mapped_dataset<file_scalar_type_> const& file) {
+               nk::matrix_view<file_scalar_type_> const rows = file.vectors(0, file.rows());
+               if (rows.extent(0) != file.rows()) return fmt::println("{} spans several parts", path), 1;
+               widened = nk::matrix<f32_t>::zeros({rows.extent(0), rows.extent(1)}).value;
+               if (widened.empty()) return fmt::println("Failed to widen {} into f32", path), 1;
+               for (std::size_t row = 0; row != rows.extent(0); ++row)
+                   widen_row(rows.row(row).as_vector(), std::span<f32_t> {widened.row(row).data(), rows.extent(1)});
+               return 0;
+           }) == 0;
 }
 
 /** Opens `--heads` and `--weights` over the searched queries of @p streamed as @p index ranks them,
@@ -428,19 +427,19 @@ std::vector<exact_row_t> exact_best_rows(exact_scorer_t& scorer, nk::matrix_view
  *  recall/overlap/ndcg against the ground truth - one sweep per query either way. Hits are
  *  dataset rows, so `--first-vector` shifts the self rows. Against the ground truth every row
  *  is scored exactly over @p vectors, by the query's heads or its row in @p query_vectors. */
-template <typename scalar_type_, typename dataset_scalar_type_>
+template <typename scalar_type_, typename dataset_scalar_type_, typename ground_truth_row_type_>
 void judge_hits(settings_t const& settings, bench_indexer_heads<scalar_type_> const& heads,
-                bench_results_t const& results, nk::matrix_view<u32_t> ground_truth,
+                bench_results_t const& results, nk::matrix_view<ground_truth_row_type_> ground_truth,
                 nk::matrix_view<dataset_scalar_type_> vectors, nk::matrix_view<dataset_scalar_type_> query_vectors,
                 std::size_t query_count) {
     if (settings.self_search == switch_t::present_k) {
         std::size_t found_at_1 = 0, found_at_k = 0;
         for (std::size_t query = 0; query != query_count; ++query) {
             auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
-            u32_t const own_row = static_cast<u32_t>(settings.first_vector.value + query);
+            u64_t const own_row = settings.first_vector.value + query;
             found_at_1 += !returned.empty() && returned.front() == own_row;
             bool within = false;
-            for (u32_t row : returned) within |= row == own_row;
+            for (u64_t row : returned) within |= row == own_row;
             found_at_k += within;
         }
         double const queries = double(query_count);
@@ -461,7 +460,7 @@ void judge_hits(settings_t const& settings, bench_indexer_heads<scalar_type_> co
             exact_scorer_t scorer = heads.engaged()
                                         ? exact_scorer_of(heads, query)
                                         : exact_scorer_of(query_vectors.row(query).as_vector(), settings.kernel);
-            auto score_of = [&](u32_t row) {
+            auto score_of = [&](std::size_t row) {
                 return scorer(vectors.row(row - settings.first_vector.value).as_vector());
             };
             auto expected = ground_truth.row(query).as_vector();
@@ -502,15 +501,15 @@ void judge_search(settings_t const& settings, bench_indexer_heads<scalar_type_> 
         return judge_hits(settings, heads, results, ground_truth, vectors, query_vectors, query_count);
     std::size_t const judged = std::min(settings.oracle_queries.value, query_count);
     std::size_t const top_k = std::min(settings.top_k.value, vectors.extent(0));
-    std::vector<u32_t> truth(judged * top_k);
+    std::vector<u64_t> truth(judged * top_k);
     for (std::size_t query = 0; query != judged; ++query) {
         exact_scorer_t scorer = exact_scorer_of(heads, query);
         std::vector<exact_row_t> const best = exact_best_rows(scorer, vectors, top_k);
         for (std::size_t rank = 0; rank != best.size(); ++rank)
-            truth[query * top_k + rank] = best[rank].row + static_cast<u32_t>(settings.first_vector.value);
+            truth[query * top_k + rank] = settings.first_vector.value + best[rank].row;
     }
     fmt::println("  oracle: exact top-{} of {} queries", top_k, judged);
-    judge_hits(settings, heads, results, nk::matrix_view<u32_t> {truth.data(), judged, top_k}, vectors, query_vectors,
+    judge_hits(settings, heads, results, nk::matrix_view<u64_t> {truth.data(), judged, top_k}, vectors, query_vectors,
                judged);
 }
 

@@ -54,15 +54,14 @@ static std::vector<usearch_geospatial_observation_t> generate_points(std::size_t
 /** Every key of the first @p count rows reads one observation back, on host residencies. */
 static std::size_t expect_gets(handle<geospatial_verbs_t>& index, std::size_t count) {
     if (index.residency == usearch_residency_vram_k) return 0;
-    std::vector<usearch_key_t> keys(count);
-    keys_of_rows(0, keys);
     std::size_t misread = 0;
-    for (usearch_key_t const& key : keys) {
+    for (std::size_t row = 0; row != count; ++row) {
         usearch_outcome_t outcome {};
         usearch_geospatial_observation_t const* observations = nullptr;
         std::size_t written = 0;
         usearch_geospatial_get_t get {};
-        get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome, get.key = key;
+        get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome;
+        get.key = key_of_row(index.session->seed, row);
         get.observations = &observations, get.written = &written, get.arena = index.session->arena;
         usearch_geospatial_get(&get);
         misread += outcome.status != usearch_status_success_k || written != 1;
@@ -97,25 +96,30 @@ static std::size_t expect_within(handle<geospatial_verbs_t>& index, geospatial_q
     failures += check(outcome);
     if (failures) return failures;
     std::vector<std::size_t> contained_offsets(geospatial_queries_k + 1);
-    failures += check(download(*index.session, contained_offsets.data(), matches.offsets,
-                               contained_offsets.size() * sizeof(std::size_t)));
-    std::vector<usearch_key_t> contained(contained_offsets.back());
     failures += check(
-        download(*index.session, contained.data(), matches.keys, contained.size() * sizeof(usearch_key_t)));
+        download(contained_offsets.data(), matches.offsets, contained_offsets.size() * sizeof(std::size_t)));
+    std::vector<usearch_key_t> contained(contained_offsets.back());
+    failures += check(download(contained.data(), matches.keys, contained.size() * sizeof(usearch_key_t)));
+    std::size_t unminted = 0;
     std::vector<u64_t> contained_rows(contained.size());
-    rows_of_keys(contained, contained_rows);
+    for (std::size_t match = 0; match != contained.size(); ++match) {
+        std::optional<u64_t> const row = row_of_key(index.session->seed, contained[match]);
+        unminted += !row, contained_rows[match] = row.value_or(key_rows_k);
+    }
     std::size_t missed = 0;
     for (std::size_t query = 0; query != geospatial_queries_k; ++query)
         for (std::size_t match = offsets[query]; match != offsets[query + 1]; ++match) {
             // Scan scores round to f32, so an entry at the radius may land on either side of it.
             if (oracle.scores[match] >= radius_metres * (1 - 1e-4)) continue;
-            u64_t const row = identity_of(oracle.keys[match]).value_or(missing_row_k);
+            std::optional<u64_t> const row = row_of_key(index.session->seed,
+                                                        std::bit_cast<usearch_key_t>(oracle.keys[match]));
+            unminted += !row;
             missed += std::find(contained_rows.begin() + contained_offsets[query],
                                 contained_rows.begin() + contained_offsets[query + 1],
-                                row) == contained_rows.begin() + contained_offsets[query + 1];
+                                row.value_or(key_rows_k)) == contained_rows.begin() + contained_offsets[query + 1];
         }
     if (missed) fmt::println(stderr, "  {} entries inside {:.1f} m left out", missed, radius_metres);
-    return failures + check(missed == 0);
+    return failures + check(unminted == 0) + check(missed == 0);
 }
 
 /** One cell, named @p name, as the file's docblock describes. */

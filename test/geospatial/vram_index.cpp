@@ -183,7 +183,7 @@ static std::size_t check_geospatial_vram_collection(u64_t seed, std::int32_t ord
     for (std::size_t row = 1; hills && row < queries_count; row += 2) queries[row].altitude_metres = 60 + row % 31;
     usearch_geospatial_terrain_t const terrain = hills ? hills->borrowed() : usearch_geospatial_terrain_t {};
     std::vector<usearch_key_t> keys(count);
-    us::tools::keys_of_rows(0, keys);
+    for (std::size_t row = 0; row != count; ++row) keys[row] = us::tools::key_of_row(seed, row);
     usearch_geospatial_tolerance_t const tolerance {radius_metres, 0};
     std::size_t failures = 0;
 
@@ -293,10 +293,10 @@ static std::size_t check_geospatial_vram_collection(u64_t seed, std::int32_t ord
         earth_observation_t const probe = encoded(queries[query], hills);
         failures += expect_eq(vram_matches.counts[query], min_of(wanted_k, exact[query].size()));
         for (std::size_t rank = 0; rank != vram_matches.counts[query]; ++rank) {
-            u64_t row = us::tools::missing_row_k;
-            us::tools::rows_of_keys({&vram_matches.keys[query * wanted_k + rank], 1}, {&row, 1});
+            std::optional<u64_t> const minted = us::tools::row_of_key(seed, vram_matches.keys[query * wanted_k + rank]);
+            if (expect(minted && *minted < count)) return failures + 1;
+            u64_t const row = *minted;
             f64_t const metres = vram_matches.metres[query * wanted_k + rank];
-            if (expect(row < count)) return failures + 1;
             f64_t const chord = std::sqrt(static_cast<f64_t>(chord_squared(probe.position, stored[row].position))) /
                                 centimetres_per_metre_k;
             failures += expect(related(static_cast<relation_t>(relation), radius_metres, probe, stored[row], hills));

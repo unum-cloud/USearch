@@ -40,17 +40,22 @@
 #include <stringzilla/stringzilla.hpp>
 
 #include "usearch/utilities/safegraphs_format.hpp"
-#include "usearch/dense/types.hpp" // `dense::dtype_of` - the checkpoint columns
+#include "usearch/dense/types.hpp"             // `dense::dtype_of` - the checkpoint columns
+#include "usearch/dense/shard_checkpoints.hpp" // `dense::norms_column_of`, `dense::monolith_header` - the norms column
 
 #if !USEARCH_OS_WINDOWS_
 #include <unistd.h> // `isatty`
 #endif
 
-#include "arguments.hpp" // `flag_t`, `count_t`, `counts_t`, `switch_t`, `parse_or_exit`
+#include "abi.hpp" // `flag_t`, `count_t`, `counts_t`, `switch_t`, `parse_or_exit`, `mapped_rows_t`
 #include "bench.hpp"
-#include "utilities/persisted_dataset.hpp" // `persisted_dataset`, `dtype_of_extension`, `mapped_file_t`
 
 namespace unum::usearch::bench {
+using tools::count_t;
+using tools::counts_t;
+using tools::flag_t;
+using tools::parse_or_exit;
+using tools::switch_t;
 
 #pragma region Options and Styling
 
@@ -384,6 +389,18 @@ struct settings_t {
     /** How many candidates a merge keeps; absent inherits `--expansion-add`. */
     count_t expansion_merge;
 
+    /** Indexes the inserted rows build as, over equal contiguous slices, the later ones absorbed
+     *  into the first; absent builds one. */
+    count_t donors;
+
+    /** Entries one shard may hold, past which an insertion opens another shard generation; absent
+     *  bounds shards by the ID space alone. */
+    count_t shard_capacity;
+
+    /** Entries one shard may hold after the built index compacts in place; absent skips the
+     *  compaction. */
+    count_t compact_capacity;
+
     /** Upper bound on refinement passes after ingestion or a load; a pass that re-selects
      *  nothing ends the phase early, and zero skips it outright. */
     count_t max_refines {.minimum = 0};
@@ -496,14 +513,27 @@ template <typename names_type_>
     std::exit(1);
 }
 
+/** The NumKong dtype of the vectors a RetriEval @p path holds, by its extension, or unknown. */
+inline nk_dtype_t dtype_of_extension(std::string_view path) noexcept {
+    switch (tools::scalar_of_extension(path)) {
+    case usearch_scalar_f32_k: return nk_f32_k;
+    case usearch_scalar_bf16_k: return nk_bf16_k;
+    case usearch_scalar_f16_k: return nk_f16_k;
+    case usearch_scalar_i8_k: return nk_i8_k;
+    case usearch_scalar_u8_k: return nk_u8_k;
+    case usearch_scalar_u1x8_k: return nk_u1_k;
+    default: return nk_dtype_unknown_k;
+    }
+}
+
 /** Resolves the names every binary shares: the stored dtype, defaulting to the file's, and the metric. Exits with
  *  status 1 on the first name that matches nothing. */
 inline void resolve_common_names(settings_t& settings) {
     if (!settings.expansion_refine.value) settings.expansion_refine.value = settings.expansion_add.value;
     auto const dtype_names = stored_dtypes_k | std::views::transform(dtype_name);
     auto const metric_names = metrics_k | std::views::transform(nk_kernel_name);
-    nk_dtype_t const file_dtype = utilities::dtype_of_extension(settings.base_vectors_path);
-    if (file_dtype == nk_dtype_unknown_k || file_dtype == nk_u32_k) {
+    nk_dtype_t const file_dtype = dtype_of_extension(settings.base_vectors_path);
+    if (file_dtype == nk_dtype_unknown_k) {
         fmt::println(stderr, "--base-vectors=\"{}\" does not parse, expected a {} path", settings.base_vectors_path,
                      ".fbin, .bf16bin, .f16bin, .i8bin, .u8bin, .u1x8bin or .b1bin");
         std::exit(1);
@@ -626,16 +656,15 @@ inline std::filesystem::path checkpoints_folder(settings_t const& settings) {
     return std::filesystem::path(settings.checkpoints_dir);
 }
 
-/** Resolves a user-facing checkpoint name into its SafeGraphs path: one monolith for a single
- *  index, the manifest beside one monolith per shard for a sharded one. The stamp names what the
+/** Resolves a user-facing checkpoint name into its SafeGraphs path: one monolith for a single index
+ *  or a lone shard, the manifest beside one monolith per shard otherwise. The stamp names what the
  *  payload depends on - stored dtype, distance kernel, connectivity - so any backend instantiating
  *  the same combination computes the same name, and a mismatched one finds nothing. */
 template <typename index_type_>
 std::string checkpoint_path_of(settings_t const& settings, index_type_ const& index, std::string_view name) {
-    constexpr bool sharded_k = requires(index_type_ const& indexes) { indexes.shards_count(); };
     std::string const file = fmt::format( //
-        "{}-{}-{}-c{}.safegraphs{}", name, index_type_::scalar_t::dtype_name(), nk_kernel_name(index.kernel()),
-        settings.connectivity.value, sharded_k ? ".json" : "");
+        "{}-{}-{}-c{}.safegraphs", name, index_type_::scalar_t::dtype_name(), nk_kernel_name(index.kernel()),
+        settings.connectivity.value);
     return (checkpoints_folder(settings) / file).string();
 }
 
@@ -668,7 +697,7 @@ inline connectivity_t connectivity_of(std::size_t degree) noexcept {
  *  @return True on a fully restored index; false after printing what failed.
  */
 template <typename index_type_, typename... stream_types_>
-static bool load_checkpoint(settings_t const& settings, index_type_& index, std::span<u32_t> id_to_row,
+static bool load_checkpoint(settings_t const& settings, index_type_& index, std::span<u64_t> id_to_row,
                             stream_types_ const&... stream) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
@@ -678,7 +707,7 @@ static bool load_checkpoint(settings_t const& settings, index_type_& index, std:
     auto per_part = [&](safegraphs_part_t part) {
         part_paths.push_back((checkpoints_folder(settings) / part.path).string());
     };
-    if (failed(safegraphs_read_manifest(monolith_path + ".json", std::allocator<byte_t> {}, per_part).status))
+    if (failed(safegraphs_read_manifest(monolith_path, std::allocator<byte_t> {}, per_part).status))
         part_paths = {monolith_path};
 
     std::size_t loaded = 0;
@@ -689,10 +718,13 @@ static bool load_checkpoint(settings_t const& settings, index_type_& index, std:
             return false;
         }
         bytes_view_t const monolith = mapping.view();
-        auto const [header, header_status] = safegraphs_read_header(monolith);
+        growing_buffer<safegraphs_named_column_t, std::allocator<byte_t>> extra_columns {std::allocator<byte_t> {}};
+        auto const [header, header_status] = safegraphs_read_header(monolith, std::allocator<byte_t> {},
+                                                                    dummy_callback_t {}, &extra_columns);
         std::size_t const nodes = header.nodes();
         if (failed(header_status) || header.key.offsets || header.value.offsets || header.neighbors.offsets ||
-            header.key.dtype != dtype_t::u32_k || header.value.dtype != usearch::dense::dtype_of(scalar_t::dtype()) ||
+            !safegraphs_key_widens(header.key.dtype, dtype_t::u64_k) ||
+            header.value.dtype != usearch::dense::dtype_of(scalar_t::dtype()) ||
             header.neighbors.dtype != dtype_t::u32_k || regular_width(header.value.shape) != shape.dimensions ||
             regular_width(header.neighbors.shape) != shape.connectivity || header.monolith_bytes() > monolith.size() ||
             nodes > id_to_row.size() - loaded) {
@@ -702,13 +734,17 @@ static bool load_checkpoint(settings_t const& settings, index_type_& index, std:
         // Each part's IDs are its own, so it appends as one source past every earlier part.
         status_t const restored = index.load(
             {header.data_of(monolith, header.value), header.data_of(monolith, header.neighbors),
-             header.norms_of(monolith, checkpoint_norms_dtype(index))},
+             usearch::dense::norms_column_of(header, monolith, checkpoint_norms_dtype(index))},
             nodes, {0, static_cast<node_id_t>(nodes)}, stream...);
         if (failed(restored)) {
             fmt::println("Failed to restore {}: {}", path, status_to_string(restored));
             return false;
         }
-        std::memcpy(id_to_row.data() + loaded, header.data_of(monolith, header.key).data(), nodes * sizeof(u32_t));
+        // A `u32` key column zero-extends into the `u64` rows.
+        byte_t const* const keys = header.data_of(monolith, header.key).data();
+        std::size_t const key_bytes = dtype_bytes(header.key.dtype);
+        for (std::size_t node = 0; node != nodes; ++node)
+            id_to_row[loaded + node] = safegraphs_widened_key<u64_t>(keys + node * key_bytes, header.key.dtype);
         loaded += nodes;
     }
     return true;
@@ -729,7 +765,7 @@ static bool load_checkpoint(settings_t const& settings, index_type_& index, std:
  *  @return The monolith's bytes, or zero on failure - a real checkpoint never is.
  */
 template <typename index_type_, typename... stream_types_>
-static std::size_t save_checkpoint(settings_t const& settings, index_type_& index, std::span<u32_t const> id_to_row,
+static std::size_t save_checkpoint(settings_t const& settings, index_type_& index, std::span<u64_t const> id_to_row,
                                    float scale, stream_types_ const&... stream) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
@@ -737,10 +773,11 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
     std::string const path = checkpoint_path_of(settings, index, settings.save_name);
     std::string const scale_text = fmt::format("{}", scale);
     safegraphs_custom_field_t const fields[] = {{"metric", nk_kernel_name(index.kernel())}, {"scale", scale_text}};
-    auto const [header, header_status] = safegraphs_regular_header(
-        {shape.nodes, dtype_t::u32_k, usearch::dense::dtype_of(scalar_t::dtype()), shape.dimensions, dtype_t::u32_k,
+    safegraphs_named_column_t norms;
+    auto const [header, header_status] = usearch::dense::monolith_header(
+        {shape.nodes, dtype_t::u64_k, usearch::dense::dtype_of(scalar_t::dtype()), shape.dimensions, dtype_t::u32_k,
          shape.connectivity, checkpoint_norms_dtype(index)},
-        safegraphs_alignment_default_k, fields);
+        safegraphs_alignment_default_k, fields, norms);
     if (failed(header_status) || id_to_row.size() < shape.nodes) {
         fmt::println("Failed to frame {} rows for {}", shape.nodes, path);
         return 0;
@@ -756,14 +793,14 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
     bytes_span_t const monolith = file.span();
     status_t const saved = index.save({header.rows_of(monolith, header.value, 0, shape.nodes),
                                        header.rows_of(monolith, header.neighbors, 0, shape.nodes),
-                                       header.rows_of(monolith, header.norms, 0, shape.nodes)},
+                                       header.rows_of(monolith, norms.column, 0, shape.nodes)},
                                       synchronization_t::immutable_k, scratch.span(), stream...);
     if (failed(saved)) {
         fmt::println("Failed to serialize the index: {}", status_to_string(saved));
         return 0;
     }
     std::memcpy(header.rows_of(monolith, header.key, 0, shape.nodes).data(), id_to_row.data(),
-                shape.nodes * sizeof(u32_t));
+                shape.nodes * sizeof(u64_t));
     if (failed(safegraphs_write_header(monolith, header, fields)) || failed(file.sync())) {
         fmt::println("Failed to commit {}", path);
         return 0;
@@ -847,7 +884,7 @@ struct streamed_dataset {
     nk::matrix_view<u32_t> ground_truth;
 
     /** The @b [rows] recall bookkeeping: dense node ID → global dataset row, filled while inserting. */
-    std::vector<u32_t> id_to_row;
+    std::vector<u64_t> id_to_row;
 
     /** The @b [threads,rows_per_thread,dimensions] staging trampoline rows. */
     nk::tensor_span<scalar_t, 3> staging;
@@ -968,11 +1005,69 @@ inline void print(machine_t const& machine) {
     fmt::println("- Compute: {}", fmt::join(named_choices("serial", compute_choices_k, machine.compute), " "));
 }
 
+/**
+ *  @brief A RetriEval triple viewed as @p scalar_type_ rows in place: the base vectors, a glob of
+ *      parts numbering their rows on across each other, the queries, and the ground truth's @c u32
+ *      rows, widened only where the judgment compares them.
+ *
+ *  Queries and ground truth are optional: without queries a run searches its own rows, and without
+ *  ground truth it skips the judgment against it.
+ */
+template <typename scalar_type_>
+struct mapped_dataset {
+    tools::mapped_rows_t base, query_rows, neighbor_rows;
+
+    /** Opens the triple, failing on a dimensionality mismatch between the base and the queries, or
+     *  a row-count mismatch between the queries and the ground truth. */
+    static expected<mapped_dataset> open(std::string_view vectors_path, std::string_view queries_path,
+                                         std::string_view neighbors_path) noexcept {
+        mapped_dataset dataset;
+        auto [base, base_status] = tools::mapped_rows_t::open(vectors_path);
+        if (failed(base_status)) return {std::move(dataset), base_status};
+        dataset.base = std::move(base);
+        if (!queries_path.empty()) {
+            auto [queries, queries_status] = tools::mapped_rows_t::open(queries_path);
+            if (failed(queries_status)) return {std::move(dataset), queries_status};
+            if (queries.columns() != dataset.base.columns()) return {std::move(dataset), status_t::config_mismatch_k};
+            dataset.query_rows = std::move(queries);
+        }
+        if (!neighbors_path.empty()) {
+            auto [neighbors, neighbors_status] = tools::mapped_rows_t::open(neighbors_path);
+            if (failed(neighbors_status)) return {std::move(dataset), neighbors_status};
+            if (dataset.query_rows && neighbors.rows() != dataset.query_rows.rows())
+                return {std::move(dataset), status_t::config_mismatch_k};
+            dataset.neighbor_rows = std::move(neighbors);
+        }
+        return {std::move(dataset), status_t::success_k};
+    }
+
+    /** Base rows `[first_row, first_row + rows)`, viewed in place when one part holds them all;
+     *  empty when they straddle two parts or run past the last. */
+    nk::matrix_view<scalar_type_> vectors(std::size_t first_row, std::size_t rows) const noexcept {
+        usearch_rows_view_t const viewed = base.view(first_row, rows);
+        if (!viewed.data) return {};
+        return {static_cast<scalar_type_ const*>(viewed.data), rows, base.columns()};
+    }
+    nk::matrix_view<scalar_type_> queries() const noexcept {
+        usearch_rows_view_t const viewed = query_rows.view(0, query_rows.rows());
+        return {static_cast<scalar_type_ const*>(viewed.data), query_rows.rows(), query_rows.columns()};
+    }
+    nk::matrix_view<u32_t> neighbors() const noexcept {
+        usearch_rows_view_t const viewed = neighbor_rows.view(0, neighbor_rows.rows());
+        return {static_cast<u32_t const*>(viewed.data), neighbor_rows.rows(), neighbor_rows.columns()};
+    }
+
+    bool has_queries() const noexcept { return static_cast<bool>(query_rows); }
+    bool has_ground_truth() const noexcept { return static_cast<bool>(neighbor_rows); }
+    std::size_t rows() const noexcept { return base.rows(); }
+    std::size_t dimensions() const noexcept { return base.columns(); }
+};
+
 /** Bundles the launch state a CPU cascade threads through its compile-time hops: the dataset, the parsed CLI, and the
  *  machine whose pool or topology the run spawns its threads on. */
 template <typename dataset_scalar_type_>
 struct bench_launch {
-    utilities::persisted_dataset<dataset_scalar_type_> const& dataset;
+    mapped_dataset<dataset_scalar_type_> const& dataset;
     settings_t const& settings;
     machine_t const& machine;
 };
@@ -991,17 +1086,18 @@ inline bool huge_pages_provisioned(machine_t const& machine, settings_t const& s
     return volume != 0;
 }
 
-/** Opens the RetriEval matrix @p path in the scalar its extension names, the hop lowering the file's dtype to the C++
- *  wrapper a run is instantiated over, with the rows of @p queries_path and @p neighbors_path when named, and exits
- *  with what @p on_dataset makes of it. */
+/** Opens the RetriEval matrix @p path, or the parts its glob pattern names, in the scalar its
+ *  extension names, the hop lowering the file's dtype to the C++ wrapper a run is instantiated
+ *  over, with the rows of @p queries_path and @p neighbors_path when named, and exits with what
+ *  @p on_dataset makes of it. */
 template <typename on_dataset_type_>
 int open_dataset(std::string_view path, std::string_view queries_path, std::string_view neighbors_path,
                  on_dataset_type_&& on_dataset) {
     return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_u8_k, nk_u1_k>(
-        utilities::dtype_of_extension(path),
+        dtype_of_extension(path),
         [&](auto dtype) {
-            auto [dataset, status] = utilities::persisted_dataset<typename nk::type_for<dtype.value>::type>::open(
-                path, queries_path, neighbors_path);
+            auto [dataset, status] = mapped_dataset<typename nk::type_for<dtype.value>::type>::open(path, queries_path,
+                                                                                                    neighbors_path);
             if (status != status_t::success_k) {
                 fmt::println("Failed to open {}", path);
                 return 1;
@@ -1080,7 +1176,7 @@ int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on
 
     int const exit_code = open_dataset(
         settings.base_vectors_path, settings.query_vectors_path, settings.query_neighbors_path,
-        [&]<typename dataset_scalar_type_>(utilities::persisted_dataset<dataset_scalar_type_> const& dataset) {
+        [&]<typename dataset_scalar_type_>(mapped_dataset<dataset_scalar_type_> const& dataset) {
             return on_launch(bench_launch<dataset_scalar_type_> {dataset, settings, machine});
         });
     fu_pool_delete(machine.pool);

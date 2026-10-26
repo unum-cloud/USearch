@@ -482,18 +482,16 @@ template <typename verbs_type_>
 std::size_t expect_built(sweep_cell_t const& cell, handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs,
                          std::size_t count) {
     usearch_traversal_stats_t stats {};
-    std::size_t failures = check(insert_rows(index, inputs, count, 0, cell_batch_k, 0, stats));
+    std::size_t failures = check(insert_entries(index, inputs, count, 0, cell_batch_k, 0, stats));
     if (failures) return failures;
-    description<verbs_type_> const built = describe(index);
-    failures += check(built.reported.size == count && built.reported.shards_count == cell.shards);
+    typename verbs_type_::description_t const built = describe(index);
+    failures += check(built.size == count && built.shards_count == cell.shards);
     failures += check(stats.computed_distances > 0);
-    std::vector<usearch_key_t> keys(count);
-    keys_of_rows(0, keys);
     std::size_t miscounted = 0;
-    for (usearch_key_t const& key : keys) {
+    for (std::size_t row = 0; row != count; ++row) {
         usearch_outcome_t outcome {};
         std::size_t entries = 0;
-        verbs_type_::count(index.get(), index.executor(), key, &entries, &outcome);
+        verbs_type_::count(index.get(), index.executor(), key_of_row(index.session->seed, row), &entries, &outcome);
         // A residency that serves no count yet leaves the keys to the walks' recall.
         if (outcome.status == usearch_status_unsupported_k) break;
         if (outcome.status == usearch_status_success_k && entries == 1) continue;
@@ -515,8 +513,8 @@ std::size_t expect_walk_recall(handle<verbs_type_>& index, typename verbs_type_:
     std::size_t failures = check(scanned);
     landed_matches_t found;
     usearch_traversal_stats_t stats {};
-    failures += check(search_rows(index, queries, count, cell_batch_k, cell_wanted_k, expansion,
-                                  usearch_traversal_walk_k, stats, found));
+    failures += check(search_queries(index, queries, count, cell_batch_k, cell_wanted_k, expansion,
+                                     usearch_traversal_walk_k, stats, found));
     if (failures) return failures;
     double const recall = recall_at(cell_wanted_k, found, oracle);
     if (recall < floor) fmt::println(stderr, "  recall at ten {:.3f} under the floor {:.3f}", recall, floor);
@@ -539,11 +537,11 @@ std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& in
         usearch_traversal_stats_t stats {};
         usearch_outcome_t outcome {};
         if (score_band)
-            outcome = search_rows(searched, queries, count, cell_batch_k, cell_wanted_k, 0, usearch_traversal_scan_k,
-                                  stats, found);
+            outcome = search_queries(searched, queries, count, cell_batch_k, cell_wanted_k, 0, usearch_traversal_scan_k,
+                                     stats, found);
         if (!score_band || outcome.status == usearch_status_unsupported_k)
-            found = {}, outcome = search_rows(searched, queries, count, cell_batch_k, cell_wanted_k, expansion,
-                                              usearch_traversal_walk_k, stats, found);
+            found = {}, outcome = search_queries(searched, queries, count, cell_batch_k, cell_wanted_k, expansion,
+                                                 usearch_traversal_walk_k, stats, found);
         return outcome.status == usearch_status_success_k ? found : landed_matches_t {};
     };
     std::size_t failures = check_checkpoint_round_trip(index, stem, cell.shards, bytes, score_band, search);
@@ -553,9 +551,8 @@ std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& in
     if (view) {
         failures += expect_walk_recall(view, queries, count, expansion, floor);
         usearch_outcome_t outcome {};
-        std::vector<usearch_key_t> keys(1);
-        keys_of_rows(0, keys);
-        verbs_type_::insert(view.get(), view.executor(), 1, keys_view(keys), inputs, 0, nullptr, &outcome);
+        usearch_key_t const key = key_of_row(view.session->seed, 0);
+        verbs_type_::insert(view.get(), view.executor(), 1, keys_view({&key, 1}), inputs, 0, nullptr, &outcome);
         failures += check(outcome.status == usearch_status_read_only_k);
         verbs_type_::clear(view.get(), view.executor(), &outcome);
         failures += check(outcome.status == usearch_status_read_only_k);
@@ -589,14 +586,14 @@ std::size_t expect_absorbed(handle<verbs_type_>& index, typename verbs_type_::in
     handle<verbs_type_> donor = open_index<verbs_type_>(*index.session, index.geometry, 1);
     if (!donor) return 1;
     usearch_traversal_stats_t stats {};
-    std::size_t failures = check(insert_rows(donor, inputs, count, first_row, cell_batch_k, 0, stats));
+    std::size_t failures = check(insert_entries(donor, inputs, count, first_row, cell_batch_k, 0, stats));
     if (failures) return failures;
     usearch_outcome_t outcome {};
     verbs_type_::absorb(index.get(), index.executor(), &donor.index, 1, &outcome);
     if (index.residency == usearch_residency_vram_k && on_device != usearch_status_success_k)
         return check(outcome.status == on_device);
     failures += check(outcome) + check(!donor);
-    return failures + check(describe(index).reported.size == first_row + count);
+    return failures + check(describe(index).size == first_row + count);
 }
 
 /** A cleared index holds nothing. */
@@ -604,7 +601,7 @@ template <typename verbs_type_>
 std::size_t expect_cleared(handle<verbs_type_>& index) {
     usearch_outcome_t outcome {};
     verbs_type_::clear(index.get(), index.executor(), &outcome);
-    return check(outcome) + check(describe(index).reported.size == 0);
+    return check(outcome) + check(describe(index).size == 0);
 }
 
 } // namespace abi

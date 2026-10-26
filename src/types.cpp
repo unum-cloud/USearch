@@ -212,8 +212,18 @@ USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class)
     case usearch_cpu_class_aws_g5_k: return "aws-g5";
     case usearch_cpu_class_nvidia_vera_k: return "nvidia-vera";
     case usearch_cpu_class_alibaba_c930_k: return "alibaba-c930";
+    case usearch_cpu_class_wasm32_v128_k: return "wasm32-v128";
+    case usearch_cpu_class_wasm64_extended_k: return "wasm64-extended";
     default: return "unknown";
     }
+}
+
+USEARCH_EXPORT usearch_cpu_class_t usearch_cpu_class_from_name(usearch_bytes_view_t name) {
+    for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_wasm64_extended_k; ++code) {
+        usearch_cpu_class_t const cpu_class = static_cast<usearch_cpu_class_t>(code);
+        if (named(name, usearch_cpu_class_name(cpu_class))) return cpu_class;
+    }
+    return usearch_cpu_class_unknown_k;
 }
 
 USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class) {
@@ -234,6 +244,14 @@ USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class)
     }
 }
 
+USEARCH_EXPORT usearch_gpu_class_t usearch_gpu_class_from_name(usearch_bytes_view_t name) {
+    for (int code = usearch_gpu_class_nvidia_ampere_k; code <= usearch_gpu_class_apple_metal10_k; ++code) {
+        usearch_gpu_class_t const gpu_class = static_cast<usearch_gpu_class_t>(code);
+        if (named(name, usearch_gpu_class_name(gpu_class))) return gpu_class;
+    }
+    return usearch_gpu_class_unknown_k;
+}
+
 USEARCH_EXPORT char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class) {
     switch (nvme_class) {
     case usearch_nvme_class_posix_k: return "posix";
@@ -244,6 +262,14 @@ USEARCH_EXPORT char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_cla
     case usearch_nvme_class_windows_ioring_k: return "windows-ioring";
     default: return "unknown";
     }
+}
+
+USEARCH_EXPORT usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_view_t name) {
+    for (int code = usearch_nvme_class_posix_k; code <= usearch_nvme_class_windows_ioring_k; ++code) {
+        usearch_nvme_class_t const nvme_class = static_cast<usearch_nvme_class_t>(code);
+        if (named(name, usearch_nvme_class_name(nvme_class))) return nvme_class;
+    }
+    return usearch_nvme_class_unknown_k;
 }
 
 } // extern "C"

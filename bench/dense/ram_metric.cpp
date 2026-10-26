@@ -31,8 +31,6 @@
 #include <algorithm>   // `std::max`
 #include <array>       // `std::array`
 #include <chrono>      // `std::chrono::steady_clock`, `std::chrono::milliseconds`
-#include <optional>    // `std::optional`
-#include <regex>       // `std::regex`, `std::regex_search`
 #include <string>      // `std::string`
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::is_same_v`
@@ -49,11 +47,14 @@
 #include "usearch/types.h" // `USEARCH_VERSION_MAJOR`
 #include "usearch/dense/ram_metric.hpp"
 
-#include "arguments.hpp" // `flag_t`, `parse_or_exit`
+#include "abi.hpp" // `flag_t`, `filter_t`, `parse_or_exit`
 #include "bench.hpp"
+#include "lib.hpp" // `dense_dtypes_t` - the storage dtypes the library compiles, in ladder order
 
 namespace unum::usearch::bench {
 using namespace unum::usearch::dense;
+using tools::filter_t;
+using tools::flag_t;
 
 #pragma region Harness
 
@@ -167,9 +168,8 @@ class loop_t {
 /** Every flag this binary reads, its default as the initializer, filled once by @c read_settings. */
 struct settings_t {
 
-    /** Rows to run, by ECMAScript regex or else substring. Override: @c --filter. */
-    std::string_view filter;
-    std::optional<std::regex> filter_regex;
+    /** Rows to run, by regex or else substring. Override: @c USEARCH_FILTER, then @c --filter. */
+    filter_t filter;
 
     /** Seed the row picks and the adjacency noise derive from. Override: @c --seed, where random draws one. */
     std::uint32_t seed = 42;
@@ -179,37 +179,20 @@ struct settings_t {
 
     /** Timed run of each row. Override: @c --time-limit. */
     std::chrono::milliseconds time_limit = std::chrono::seconds(10);
-
-    /** Whether @p name passes the filter. */
-    bool selects(std::string_view name) const {
-        if (filter.empty()) return true;
-        if (filter_regex) return std::regex_search(name.begin(), name.end(), *filter_regex);
-        return name.find(filter) != std::string_view::npos;
-    }
 };
 
 /** Parses the flags into one @ref settings_t. On `--help` prints the usage and exits with status 0; on a bad flag
  *  prints one line and exits with status 1. */
 inline settings_t read_settings(int argc, char const* const* argv) {
     settings_t settings;
+    settings.filter = tools::filter_of(tools::environment_text("USEARCH_FILTER").value_or(""));
     std::array<flag_t, 4> const flags {{
         {"--seed", "seed", "seed of the row picks and the adjacency noise, or `random`; 42 by default", &settings.seed},
         {"--filter", "pattern", "rows to run, as a regex or else a substring, like `dot/f32/serial`", &settings.filter},
         {"--warmup", "duration", "untimed run ahead of each row, like `200ms`; 1s by default", &settings.warmup},
         {"--time-limit", "duration", "timed run of each row, like `200ms`; 10s by default", &settings.time_limit},
     }};
-    parse_or_exit(argc, argv, "usearch_bench_dense_ram_metric [flags]", flags);
-    if (!settings.filter.empty()) {
-#if defined(__cpp_exceptions) && __cpp_exceptions
-        try {
-            settings.filter_regex.emplace(settings.filter.begin(), settings.filter.end());
-        }
-        catch (std::regex_error const&) {
-        }
-#else
-        settings.filter_regex.emplace(settings.filter.begin(), settings.filter.end());
-#endif
-    }
+    tools::parse_or_exit(argc, argv, "usearch_bench_dense_ram_metric [flags]", flags);
     return settings;
 }
 
@@ -222,7 +205,7 @@ inline std::string spell_duration(std::chrono::milliseconds duration) {
 /** Prints each setting as "- Name: value", in the grammar its flag parses from. */
 inline void print(settings_t const& settings) {
     fmt::println("- Seed: {}", settings.seed);
-    fmt::println("- Filter: {}", settings.filter.empty() ? std::string_view("none") : settings.filter);
+    fmt::println("- Filter: {}", settings.filter.pattern.empty() ? std::string_view("none") : settings.filter.pattern);
     fmt::println("- Warm-up: {}", spell_duration(settings.warmup));
     fmt::println("- Time limit: {}", spell_duration(settings.time_limit));
 }
@@ -261,7 +244,7 @@ struct environment_t {
 template <typename measure_type_, typename... arguments_types_>
 void run_benchmark(environment_t const& env, std::string const& name, measure_type_ measure,
                    arguments_types_... arguments) {
-    if (!env.settings.selects(name)) return;
+    if (!env.settings.filter.selects(name)) return;
     loop_t loop(env.settings.warmup, env.settings.time_limit);
     measure(loop, env, arguments...);
     print(loop.row(name));
@@ -628,6 +611,13 @@ static void bench_scalar(environment_t const& env, std::string_view scalar_name)
     }
 }
 
+/** Benches every storage dtype of @p dtypes_, the ladder's prefix this build compiles, so a dtype
+ *  the build cuts is never instantiated. */
+template <nk_dtype_t... dtypes_>
+static void bench_stored_scalars(environment_t const& env, dtype_list<dtypes_...>) {
+    (bench_scalar<typename nk::type_for<dtypes_>::type>(env, nk::type_for<dtypes_>::type::dtype_name()), ...);
+}
+
 } // namespace unum::usearch::bench
 
 int main(int argc, char** argv) {
@@ -636,20 +626,9 @@ int main(int argc, char** argv) {
     print(env.machine);
     print(env.settings);
 
+    // NumKong's own references always, then the storage dtypes the library compiles.
     bench_scalar<nk::f64_t>(env, "f64");
     bench_scalar<nk::f32_t>(env, "f32");
-    bench_scalar<nk::bf16_t>(env, "bf16");
-    bench_scalar<nk::f16_t>(env, "f16");
-    bench_scalar<nk::e5m2_t>(env, "e5m2");
-    bench_scalar<nk::e4m3_t>(env, "e4m3");
-    bench_scalar<nk::e3m2_t>(env, "e3m2");
-    bench_scalar<nk::e2m3_t>(env, "e2m3");
-
-    bench_scalar<nk::i8_t>(env, "i8");
-    bench_scalar<nk::i4x2_t>(env, "i4x2");
-
-    bench_scalar<nk::u8_t>(env, "u8");
-    bench_scalar<nk::u4x2_t>(env, "u4x2");
-    bench_scalar<nk::u1x8_t>(env, "u1x8");
+    bench_stored_scalars(env, dense_dtypes_t {});
     return 0;
 }

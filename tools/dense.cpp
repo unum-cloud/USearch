@@ -40,7 +40,7 @@
 
 #include "usearch/dense_index.h"
 
-#include "abi.hpp"   // `count_t`, `keys_of_rows`, `devices_from_environment`
+#include "abi.hpp"   // `count_t`, `devices_from_environment`
 #include "world.hpp" // `world_t`, `parse_verb`
 
 namespace unum::usearch::tools {
@@ -372,7 +372,9 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
                     key.bytes[15 - byte_index] = staging.key_integers[position * source.key_bytes + byte_index];
             }
         }
-        else keys_of_rows(row, std::span {staging.keys}.first(count));
+        else
+            for (std::size_t position = 0; position != count; ++position)
+                staging.keys[position] = std::bit_cast<usearch_key_t>(uuid_of(row + position));
         usearch_dense_insert_t insert {
             .index = engine.indexes[0],
             .executor = engine.executor,

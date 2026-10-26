@@ -10,115 +10,90 @@ Every result is a throughput, a latency and a recall under one explicit configur
 
 ## The Suite
 
-The index benchmarks of `bench/CMakeLists.txt` come in two families that never share a binary, beside the kernel microbenchmark under [Kernels](#kernels).
-Every index binary is named `usearch_bench_dense_<residency>_<arity>_<family>`: the residency is `ram`, `vram` or `nvme`, the arity a single `index` or sharded `indexes`, and the family `search` or `algebra`.
-The `ram` and `vram` binaries of both families build the index the same way, from the same dataset, dtype, graph, refinement and checkpoint flags, and the `nvme` binaries view the parts they saved.
+The index benchmarks of `bench/CMakeLists.txt` drive the library through its C interface, as users and bindings do, beside one sparse probe and the kernel microbenchmark under [Kernels](#kernels).
+One binary serves every residency, CPU class and GPU class the library compiled, so `--residency`, `--cpu-class`, `--gpu-class` and `--nvme-class` choose what a run measures, and the report names the class dispatch picked.
 
-The search family searches the built index, by plain rows or by a lightning indexer's heads, and judges the hits.
+-   `usearch_bench_dense_index_search` builds one dense index of any residency from a RetriEval dataset, searches it at every `--expansion-search` breadth and judges the hits against ground truth, against itself, or against an exact scan.
+-   `usearch_bench_dense_index_algebra` builds one inner-product index the same way and measures the graph products `multiply` and the graph attention `attend` over it, attention judged against exact softmax attention.
+-   `usearch_bench_sequence_index_search`, `usearch_bench_shapes_index_search` and `usearch_bench_geospatial_index_search` build one index of their modality, hold the file's last `--queries` entries out of it, and judge the hits against an exact scan of `--oracle-queries`.
+-   `usearch_bench_dense_ram_index_search` instantiates one `dense::ram_index` itself, at `f32` or `bf16` storage and at the serial class or the newest one its host compiled, for what only a benchmark looks inside: plan stepping, saturated walks and islands, per-query latency percentiles, immutable mode, indexer heads and managed memory.
 
-- `usearch_bench_dense_ram_index_search` builds one `dense::ram_index` on one memory domain and isolates kernel kits, wait instructions, connectivity and expansion, per-thread staging and latency percentiles.
-- `usearch_bench_dense_ram_indexes_search` builds one `dense::ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
-- `usearch_bench_dense_vram_index_search` builds one `dense::vram_nvidia_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory flat matrices.
-- `usearch_bench_dense_vram_indexes_search` builds one `dense::vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates what the C interface drives across GPUs: rotation across devices, scatter-gather search merged on the host, and SafeGraphs checkpoints.
-- `usearch_bench_dense_nvme_indexes_search` views the checkpoint any RAM or VRAM binary saved as one `dense::nvme_indexes`, building nothing in RAM, and isolates what storage adds to the batched search: the I/O transport, the queue depth, and the reads and bytes each query costs.
-
-The algebra family measures the graph products `multiply` and the graph attention `attend` over the built index instead of searching it.
-
-- `usearch_bench_dense_ram_index_algebra` builds one `dense::ram_index` on one memory domain and isolates graph products and grouped-query graph attention over every key a walk scores, pair dumps and an exact softmax oracle.
-- `usearch_bench_dense_ram_indexes_algebra` builds one `dense::ram_indexes` over every memory domain and isolates the same verbs batched through the executor, every token's walks crossing every shard.
-- `usearch_bench_dense_vram_index_algebra` builds one `dense::vram_nvidia_index` on one device and isolates the same graph products and graph attention on the device, judged against the same oracle.
-- `usearch_bench_dense_vram_indexes_algebra` builds one `dense::vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates the same verbs across GPUs, the shards' attention merged on the first device.
-- `usearch_bench_dense_nvme_indexes_algebra` views the same saved parts as one `dense::nvme_indexes` and isolates the same verbs answered from storage, with the reads and bytes each row costs.
-
-The sequence and shapes binaries drive one RAM index through the C interface, as users do, holding the file's last `--queries` entries out of it, and judge the hits against an exact scan of `--oracle-queries`.
-A hit counts when its distance is within the exact k-th, so edit distances, where many entries tie, are not undercounted.
-
-- `usearch_bench_sequence_index_search` reads `--base-texts`, one entry per line, under `levenshtein`, `levenshtein-utf8` or `overlap` with `--window-widths`.
-- `usearch_bench_shapes_index_search` reads `--base-points`, a `.fbin` or `.f16bin` of 3 columns stored in that scalar, cut by `--base-counts`, an `.ibin` of points per shape, under `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`.
-
-Each dense search binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript; the `nvme` one prints a `Storage` block in place of `Insertions`.
-The `Insertions` block reports the wall time, the throughput in IPS, the distances computed with the shares spent in refinement, the visited members and the restarts.
-The `Queries` block reports the throughput in QPS, the latency, the distances and members per query, and the judgment.
+A bad value prints one line, like `--top-k="0" does not parse, expected a positive count` or `RETRIEVAL_TOP_K="0" does not parse, expected a positive count`, and exits with status 1.
+Every run reports the build, the index's entries, bytes, shards and classes from `describe`, and per breadth the recall at one and at `--top-k`, the nDCG, the throughput, and the distances, visited members and restarts per query from the traversal stats.
+A hit counts when its distance is within the exact k-th, so ties the oracle broke arbitrarily are not undercounted; against `--query-neighbors` a hit counts by key.
+A ground truth is computed for the whole file, so `--first-vector` or `--max-base-vectors` reshapes the graph it describes and the harness drops it, printing a notice; `--self-search` judges connectivity instead and needs no ground truth at all.
 
 ### Building
 
-Every number below comes from a Release build: the `host_release` preset for the CPU binaries, and `cuda_release` for the CUDA ones, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
-The CUDA bench compiles a generation's kits only when every listed architecture runs them, so the preset's own list measures the Ampere kits alone, whatever the GPU.
-The `host_profile` preset keeps the same optimization and adds the symbols `perf` needs; `cuda_relwithdebinfo` is the `-O2` iteration tree and measures nothing.
-The per-dtype benchmark units follow `USEARCH_DENSE_DTYPES`, so these presets measure `bf16`, `u1`, `i8` and `e4m3` alone; add `-DUSEARCH_DENSE_DTYPES=11` to measure the rest.
+Every number below comes from a Release build: the `host_release` preset for CPU runs, and `cuda_release` for GPU ones, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
+The library compiles the first `USEARCH_DENSE_DTYPES` stored dtypes, so these presets measure `bf16`, `u1`, `i8` and `e4m3` alone; add `-DUSEARCH_DENSE_DTYPES=11` to measure the rest.
 
 ```sh
-cmake --preset host_release && cmake --build --preset host_release --target usearch_bench_dense_ram_index_search usearch_bench_dense_ram_indexes_search usearch_bench_dense_ram_index_algebra usearch_bench_dense_ram_indexes_algebra usearch_bench_dense_nvme_indexes_search usearch_bench_dense_nvme_indexes_algebra usearch_bench_dense_ram_metric
-cmake --preset cuda_release -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_cuda_release --target usearch_bench_dense_vram_index_search usearch_bench_dense_vram_indexes_search usearch_bench_dense_vram_index_algebra usearch_bench_dense_vram_indexes_algebra
+cmake --preset host_release && cmake --build --preset host_release --target usearch_bench_dense_index_search usearch_bench_dense_index_algebra usearch_bench_dense_ram_index_search usearch_bench_dense_ram_metric
+cmake --preset cuda_release -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_cuda_release --target usearch_bench_dense_index_search usearch_bench_dense_index_algebra
 ```
 
-Every binary lands at the top of its build tree, so the CPU ones are in `build_host_release/` and the CUDA ones in `build_cuda_release/`.
+Every binary lands at the top of its build tree.
 Every benchmark is memory-hungry at 100M and above, so run it under a cgroup cap rather than trusting it to refuse.
 
 ```sh
-systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_host_release/usearch_bench_dense_ram_indexes_search ...
+systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_host_release/usearch_bench_dense_index_search ...
 ```
 
 ### Running
 
-The search binaries share one dataset triple and one tuning vocabulary, and the algebra binaries take the same build flags; `--help` prints the full list for each.
-Flags share RetriEval's names, and each one defaults to the environment variable RetriEval reads for it, `--top-k` to `RETRIEVAL_TOP_K`, so one environment drives both harnesses and the command line overrides it.
+Flags share RetriEval's names, and each one defaults to the environment variable RetriEval reads for it, `--top-k` to `RETRIEVAL_TOP_K`, so one environment drives both harnesses and the command line overrides it; `--help` prints the full list for each binary.
 
 ```sh
-build_host_release/usearch_bench_dense_ram_indexes_search \
+build_host_release/usearch_bench_dense_index_search \
     --base-vectors data/sift-10m/base.10M.u8bin \
     --query-vectors data/sift-10m/query.public.10K.u8bin \
     --query-neighbors data/sift-10m/groundtruth.public.10K.ibin \
-    --stored-dtype u8 --metric euclidean --connectivity 32 --expansion-add 256 --expansion-search 96
+    --stored-dtype u8 --metric euclidean --expansion-search 32,64,128
 ```
 
-- `--base-vectors` is required: base vectors in the RetriEval layout, one of `.fbin`, `.bf16bin`, `.f16bin`, `.i8bin`, `.u8bin`, `.u1x8bin`.
-- `--query-vectors` defaults to the first 1000 base vectors: query vectors of the same dtype.
-- `--query-neighbors` defaults to none: ground truth, `.ibin`; recall is skipped without it.
-- `--stored-dtype` defaults to the file's dtype: `f32`, `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4`, `u8`, `u4` or `u1`, cast on ingest; `f32` skips, as no CPU kit takes it yet.
-- `--metric` defaults to `angular`: `dot`, `angular`, `euclidean`, `hamming` or `jaccard`; the last two for `u1`.
-- `--connectivity` defaults to `32`: the graph degree, 16, 32 or 128.
-- `--expansion-add` defaults to `256`: candidates kept while inserting.
-- `--expansion-search` defaults to `96`: candidates kept while searching.
-- `--max-refines` defaults to `0`: upper bound on refinement passes after ingestion.
-- `--expansion-refine` defaults to `--expansion-add`: candidates kept while refining.
-- `--top-k` defaults to `10`: matches judged per query.
-- `--max-base-vectors` defaults to the whole file: cap on ingested rows.
-- `--self-search` defaults to off: judge every stored vector as its own query; its variable takes `1`, `0`, `true` or `false`.
-- `--save` defaults to none: checkpoint name to write after ingestion.
-- `--load` defaults to none: checkpoint name to restore, then insert only the rows past `--skip-vectors`.
-- `--checkpoints-dir` defaults to the temporary directory, which follows `TMPDIR`: directory for checkpoint blobs.
-- `--skip-vectors` defaults to `0`: rows the loaded checkpoint already covers.
-- `--inserts-per-core` defaults to `2048`: rows each insert call takes per CPU thread or GPU multiprocessor.
-- `--queries-per-core` defaults to `2048`: queries each search call takes per CPU thread or GPU multiprocessor.
-- `--max-compute` defaults to the newest detected: kernel kit ceiling by microarchitecture, or `serial`; on the GPU by generation, or `ampere`.
-- `--max-schedule` defaults to the newest offered: wait instruction ceiling, or `standard`; CPU only.
-- `--threads` defaults to 7/8 of the logical cores: executor threads; CPU only.
-- `--memory-domain` defaults to the heap: NUMA domain to pin, or `all` on the multi-index; CPU only.
-- `--first-vector` defaults to `0`: first dataset row viewed, keyed by its row, to slice one file across runs; recall against `--query-neighbors` is judged only over the whole file.
-- `--huge-pages` defaults to `0`: huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only.
-- `USEARCH_DEVICES` - an environment variable, not a flag - names USearch device ordinals, positions in `usearch_gpu_devices`, like `0` or `0,1`; the single-device binaries take the first, the sharded ones place one shard per ordinal, and unset takes the first NVIDIA device; GPU only.
-- `--merge` defaults to off: the inserted rows' second half builds as an index of its own, absorbed into the first half's before refinement and search, and the merge reports its wall time, distances and visits; `usearch_bench_dense_vram_indexes_search` only.
-- `--expansion-merge` defaults to `--expansion-add`: candidates kept by the absorbing refine, whose rows walk across the appended part; only with `--merge`.
-- `--managed-memory` defaults to off: managed-memory flat matrices oversubscribing VRAM; GPU only, refused by both `vram_indexes` binaries.
+Every binary over the C interface reads the same placement flags.
 
-A bad value prints one line, like `--top-k="0" does not parse, expected a positive count` or `RETRIEVAL_TOP_K="0" does not parse, expected a positive count`, and exits with status 1.
+-   `--residency` defaults to `ram`: `ram`, `vram` over the `USEARCH_DEVICES` ordinals, or `nvme`, which builds in RAM, saves and searches a view.
+-   `--cpu-class` defaults to the CPU's own: the class to dispatch as, like `intel-icelake` or `serial`, admitting every rung whose features it holds.
+-   `--gpu-class` defaults to the devices' own: the GPU class to dispatch as, like `nvidia-ampere`.
+-   `--nvme-class` is derived by default: the NVMe class, `posix`, `linux-aio`, `linux-uring`, `linux-uring-passthrough`, `linux-spdk` or `windows-ioring`.
+-   `--threads` defaults to the executor's own: the threads of a RAM or NVMe executor.
+-   `--shards` defaults to one per memory domain or device: shards each index opens on, repeating the domains or devices named.
+-   `--shard-capacity` defaults to unbounded: entries one shard holds before another shard generation opens.
+-   `--checkpoint` defaults to none: a path to save the built index under and reopen it from in its residency; an NVMe run without one saves to the temporary directory.
+-   `USEARCH_DEVICES` and `USEARCH_NVME_PATHS` - environment variables, not flags - name the USearch device ordinals a VRAM index places shards on and the namespaces an NVMe view serves from.
 
-Recall is judged against `--query-neighbors` as recall@1, recall@k, overlap@k and ndcg@k.
-A hit counts by its exact distance, computed from the dataset files, against the expected row's, so ties the ground truth broke arbitrarily are not undercounted.
-A ground truth is computed for the whole file, so `--max-base-vectors` reshapes the graph it describes and the harness drops it, printing a notice; `--self-search` judges connectivity instead and needs no ground truth at all.
-Judge GPU builds through a reload: a search issued right after a bulk build runs against a device still settling, and the checkpoint path is exactly what the C interface exposes.
+The dense binaries add their dataset and graph flags.
+
+-   `--base-vectors` is required: base vectors in the RetriEval layout, one of `.fbin`, `.bf16bin`, `.f16bin`, `.i8bin`, `.u8bin`, `.u1x8bin`, `.b1bin`.
+    A glob pattern like `base.part_*.b1bin` names a set RetriEval split into parts, read as one file in the glob's sorted order, so keys stay global rows past 2^32.
+-   `--query-vectors` defaults to the first 1000 base vectors: query vectors of the same dimensions.
+-   `--query-neighbors` defaults to none: ground truth, `.ibin`, of global base rows per query.
+-   `--stored-dtype` defaults to the file's dtype, or `bf16` for an `.fbin`: the stored scalar, cast on ingest.
+-   `--metric` defaults to `angular`: `inner`, `angular`, `euclidean`, `hamming` or `jaccard`; the last two for `u1`.
+-   `--connectivity` and `--expansion-add` default to the library's derivations: the graph degree and the candidates kept while inserting.
+-   `--expansion-search` defaults to `96`: the search breadths, like `32,64,128`, each judged over the one graph the run builds.
+-   `--max-refines` defaults to `0`: refinement passes after ingestion, stopping once one changes nothing.
+-   `--compact-capacity` defaults to none: entries per shard after compacting the built index in place, reported with the distances it computed.
+-   `--top-k` defaults to `10`: matches judged per query.
+-   `--first-vector` defaults to `0`: first dataset row viewed, keyed by its global row, to slice one file across runs.
+    Over a glob the viewed rows must lie inside one part, so `--first-vector 4608000000 --max-base-vectors 512000000` builds the tenth 512M-row part keyed by its global rows.
+-   `--max-base-vectors` defaults to the whole file: cap on ingested rows.
+-   `--self-search` defaults to off: judge every stored vector as its own query; its variable takes `1`, `0`, `true` or `false`.
+-   `--oracle-queries` defaults to `256`: queries the exact scan judges without `--query-neighbors`.
+-   `--batch` defaults to `65536`: rows each insert or search call takes.
+
+The sparse probe keeps the C++ harness's own flags, `--max-compute serial` choosing the serial class over the host's newest, and `--save`, `--load`, `--checkpoints-dir` and `--skip-vectors` naming its SafeGraphs monolith.
 
 ### Indexer Heads
 
-Every search binary can rank its searches by a lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a key scores `Σₕ wₕ·ReLU(qₕ·k)` and sits at distance `1 − score`.
+The sparse probe can rank its searches by a lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a key scores `Σₕ wₕ·ReLU(qₕ·k)` and sits at distance `1 − score`.
 The indexer ranks floating-point keys under the dot kernel, and its walks navigate by the `--query-vectors` rows when given, or by `Σₕ wₕ·qₕ` otherwise.
 
-- `--heads` defaults to none: every query's heads as consecutive rows of any `.fbin`-family file, cast to the stored dtype; needs `--weights`.
-- `--weights` defaults to none: one row of signed head weights per query in any `.fbin`-family file, with the model's scale folded in.
-- `--oracle-queries` defaults to `16`: queries an exact `f64` oracle judges when no `--query-neighbors` gives their truth.
-
-An indexer's selection is judged against the exact scan's top rows, saved once as `--query-neighbors`:
+-   `--heads` defaults to none: every query's heads as consecutive rows of any `.fbin`-family file, cast to the stored dtype; needs `--weights`.
+-   `--weights` defaults to none: one row of signed head weights per query in any `.fbin`-family file, with the model's scale folded in.
+-   `--oracle-queries` defaults to `16`: queries an exact `f64` oracle judges when no `--query-neighbors` gives their truth.
 
 ```sh
 build_host_release/usearch_bench_dense_ram_index_search --base-vectors keys.bf16bin --heads queries.bf16bin \
@@ -127,88 +102,46 @@ build_host_release/usearch_bench_dense_ram_index_search --base-vectors keys.bf16
 
 ### Checkpoints
 
-Every `ram` and `vram` binary, single or sharded, saves its index with `--save` as SafeGraphs, so any residency loads it with `--load` and the `nvme` binaries view it in place.
-The name lands under `--checkpoints-dir`, stamped with the stored dtype, the metric and the connectivity, like `sift90m-u8-euclidean-c32.safegraphs`.
-A single index writes that one monolith; a sharded one writes a monolith per shard and commits a `.safegraphs.json` manifest beside them last.
-Keys are dataset rows, stored as `u32`, and widen on the way into a collection keyed `u64` or `uuid`, so the C interface opens a benchmark's checkpoint too.
-The header names the metric, the value column's dtype names the stored scalar, and a `scale` entry records the factor a downcast rescaled the rows by.
-
-The GPU builds a base an order of magnitude faster than the CPU, so the fast way to a large CPU graph is a GPU base topped up on the CPU: build the first rows on the device, save, then reload on the CPU and insert the rest.
+`--checkpoint` saves the built index as SafeGraphs and reopens it in the run's residency, so every search after it runs against what the C interface loads.
+An index of one live shard saves one monolith; one of several saves a part per shard and commits a manifest at the path last, and a load opens one shard per part.
+An NVMe run views the checkpoint it saved, and `--nvme-class` picks the class its rings submit through.
+Judge GPU builds through a reload: a search issued right after a bulk build runs against a device still settling, and the checkpoint path is exactly what users reach.
 
 ```sh
-build_cuda_release/usearch_bench_dense_vram_index_search --base-vectors data/sift-100m/base.100M.u8bin --metric euclidean --max-base-vectors 90000000 --save sift90m
-build_host_release/usearch_bench_dense_ram_index_search --base-vectors data/sift-100m/base.100M.u8bin --query-vectors ... --query-neighbors ... --metric euclidean --load sift90m --skip-vectors 90000000
-```
-
-The second run reports `topping: 90000000 loaded rows`, inserts the remaining ten million, and judges the full graph against the 100M ground truth.
-A single index also loads a sharded checkpoint, its parts appended in order, while a sharded index restores one only when it covers every row of the view.
-
-Both `nvme_indexes` binaries build nothing: they view a checkpoint and take only the flags a view and its queries need.
-The first part's header names the metric they dispatch on and the stored dtype, and its `scale` is what the queries are staged under.
-The search judges its hits against `--query-neighbors`, scoring them exactly over `--base-vectors`, and refuses a ground truth that names a row past the ones the parts hold, or base vectors holding fewer.
-Every query is answered from storage in one batched call, which primes as many rows per thread as the queue depth holds, and the verb times each query from its first primed walk to its final write.
-The `Storage` block names the parts and the transport the engines opened, then each phase reports reads and kilobytes per query by purpose, the round trips, the IOPS and bandwidth it sustained, and the latency percentiles.
-
-- `--view` is required: the monolith, or the manifest of the parts.
-- `USEARCH_NVME_PATHS`, an environment variable like `USEARCH_DEVICES`, defaults to beside the manifest: one directory, file or device per part, comma-separated, to serve parts copied elsewhere.
-- `--query-vectors` is required: query vectors in the RetriEval layout, cast to the parts' stored dtype.
-- `--query-neighbors` is required by the search binary: ground truth, `.ibin`, over the rows the parts hold.
-- `--base-vectors` is required by the search binary: the base file the keys index, whose rows score the judged hits.
-- `--transport` defaults to `auto`: `blocking`, `linux-aio` or `linux-uring`; `auto` takes io_uring, then AIO, then blocking reads, whichever the host admits first.
-- `--queue-depth` defaults to `512`: reads each thread's engine keeps outstanding, which bounds the rows and the hops it overlaps.
-- `--expansion-search`, `--top-k`, `--threads`, `--max-compute`, `--heads` and `--weights` read as in [Running](#running) and [Indexer Heads](#indexer-heads).
-
-The algebra binary views only parts built for `dot`, looks the `--values` rows up by key, and runs its oracle over `--base-vectors`, the base file the keys index, which it needs only without a `--reference`.
-
-```sh
-cmake --preset host_release && cmake --build --preset host_release --target usearch_bench_dense_ram_indexes_search usearch_bench_dense_nvme_indexes_search usearch_bench_dense_nvme_indexes_algebra
-build_host_release/usearch_bench_dense_ram_indexes_search --base-vectors data/sift-10m/base.10M.u8bin \
-    --metric euclidean --save sift10m --checkpoints-dir /mnt/nvme0
-build_host_release/usearch_bench_dense_nvme_indexes_search --view /mnt/nvme0/sift10m-u8-euclidean-c32.safegraphs.json \
-    --base-vectors data/sift-10m/base.10M.u8bin --query-vectors data/sift-10m/query.public.10K.u8bin \
-    --query-neighbors data/sift-10m/groundtruth.public.10K.ibin --transport linux-uring --queue-depth 512
+build_host_release/usearch_bench_dense_index_search --base-vectors data/sift-10m/base.10M.u8bin \
+    --query-vectors data/sift-10m/query.public.10K.u8bin --query-neighbors data/sift-10m/groundtruth.public.10K.ibin \
+    --metric euclidean --residency nvme --checkpoint /mnt/nvme0/sift10m.safegraphs --nvme-class linux-uring
 ```
 
 ### Refinement
 
 `--max-refines` inserts a refinement phase between ingestion and search: each pass re-selects every node's neighbors against the finished graph, and the phase stops early once a pass re-wires nothing.
-A heal follows, re-linking whatever no search can reach, and the report ends with the reachable population so a build that stranded nodes is visible rather than merely slow.
-
-This is what a cheap ingestion pays for - a narrow `--expansion-add` topped with one or two wide passes, rather than one expensive build:
-
-```sh
-build_cuda_release/usearch_bench_dense_vram_index_search \
-    --base-vectors data/sift-10m/base.10M.u8bin --query-vectors data/sift-10m/query.public.10K.u8bin \
-    --query-neighbors data/sift-10m/groundtruth.public.10K.ibin --stored-dtype u8 --metric euclidean \
-    --connectivity 16 --expansion-add 32 --expansion-search 64 --max-refines 2 --expansion-refine 128
-```
-
+This is what a cheap ingestion pays for - a narrow `--expansion-add` topped with one or two wide passes, rather than one expensive build.
 Judge the two builds at matched distance computations rather than matched knobs; the report prints the count for every phase.
 
 ### Algebra
 
-The algebra binaries build the index exactly as the search binaries do, from the same dataset, dtype, executor, graph, refinement and checkpoint flags, and then run `multiply` and `attend` instead of the search phase.
-They pin the dot kernel, the only one both verbs are defined over, so `--metric` takes only `dot` and no ground truth is judged.
-They store only the dot kernel's dtypes, `bf16` through `u1`, so an `.fbin` file needs a `--stored-dtype`.
+`usearch_bench_dense_index_algebra` builds the index from the same dataset, residency and class flags as the search binary, then runs `multiply` and `attend` instead of searching.
+It pins the inner product, the only kind both verbs are defined over, and judges no ground truth.
 
 ```sh
-build_host_release/usearch_bench_dense_ram_index_algebra \
+build_host_release/usearch_bench_dense_index_algebra \
     --base-vectors data/wiki-1m/base.1M.fbin \
     --query-vectors data/wiki-1m/query.public.100K.fbin \
     --stored-dtype bf16 --oracle-queries 16
 ```
 
 Every query row runs one `multiply`, reported as rows per second and scored pairs per row.
-Every `--head-count` consecutive rows then form one query's heads, which share one `attend` walk per shard, every key it scores entering each head's softmax, FlashAttention-style.
-Attend reports queries per second beside the keys scored per query, so runs compare at matched cost.
+Every `--head-count` consecutive rows then form one token's heads, which share one `attend` walk, every key it scores entering each head's softmax, FlashAttention-style.
+Attend reports tokens per second beside the keys scored per token, so runs compare at matched cost; it looks values up on the host, so it runs on RAM and NVMe.
 The first `--oracle-queries` rows are then judged head by head: the relative L2 error of each attended row against exact `f64` attention over every viewed row.
 
-- `--values` defaults to a synthetic table: the `.bf16bin` value rows `attend` looks up by node or key, as wide as the keys.
-- `--head-count` defaults to `1`: the grouped-query heads per query; a trailing partial group is left out.
-- `--attend-scale` defaults to one over the root of the dimensions: the dot-to-logit factor.
-- `--oracle-queries` defaults to `16`: the queries judged against the exact oracle.
-- `--reference` defaults to none: `.f64bin` exact attention rows of the judged queries, skipping the host oracle's full pass.
-- `--pairs` defaults to none: a dump of every pair each judged query's `multiply` scored; CPU only.
+-   `--values` defaults to a synthetic table: the `.bf16bin` value rows `attend` looks up by key, as wide as the keys.
+-   `--head-count` defaults to `1`: the grouped-query heads per token; a trailing partial group is left out.
+-   `--attend-scale` defaults to one over the root of the dimensions: the dot-to-logit factor.
+-   `--oracle-queries` defaults to `16`: the queries judged against the exact oracle.
+-   `--reference` defaults to none: `.f64bin` exact attention rows of the judged queries, skipping the host oracle's full pass.
+-   `--pairs` defaults to none: a dump of every pair each judged query's `multiply` scored, per query a `u32` count and that many `u64` global rows beside their `f64` dots.
 
 ### Kernels
 
@@ -220,10 +153,10 @@ Rows are named `kernel/scalar/caps/shape/dimensions`, like `dot/bf16/neon/1to4/7
 build_host_release/usearch_bench_dense_ram_metric --filter 'dot/bf16/.*/1to[14]/768d' --time-limit 2s
 ```
 
-- `--seed` defaults to `42`: seed the row picks and the adjacency noise derive from, or `random`.
-- `--filter` defaults to none: rows to run, as an ECMAScript regex or else a substring.
-- `--warmup` defaults to `1s`: untimed run ahead of each row, like `200ms`.
-- `--time-limit` defaults to `10s`: timed run of each row, like `200ms`.
+-   `--seed` defaults to `42`: seed the row picks and the adjacency noise derive from, or `random`.
+-   `--filter` defaults to none: rows to run, as an ECMAScript regex or else a substring.
+-   `--warmup` defaults to `1s`: untimed run ahead of each row, like `200ms`.
+-   `--time-limit` defaults to `10s`: timed run of each row, like `200ms`.
 
 ## Datasets
 
@@ -268,12 +201,17 @@ The other modalities keep their own entries, judged by the exact scan each binar
 | `fineweb-sentences-*`, FineWeb      | English web sentences, deduplicated         | `levenshtein-utf8`     | 100M, 1B      |
 | `hg002-reads-*`, GIAB HG002         | 150-nt Illumina reads                       | `levenshtein`          | 10M, 100M, 1B |
 | `pubchem-conformers-*`, PubChem 3D  | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff` | 10M, 100M     |
-| `gdb13-conformers-1b`, GDB-13 3D    | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff` | 1B            |
+| `gdb13-conformers-*`, GDB-13 3D     | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff` | 10M, 100M, 1B |
+| `real-conformers-*`, Enamine REAL   | `f16` atoms, one conformer per molecule     | `chamfer`, `hausdorff` | 10M, 100M     |
+| `alphafold-ca-*`, AlphaFold DB      | `f16` Cα atoms, one backbone per protein    | `chamfer`, `hausdorff` | 10M, 100M     |
 | `panoramax-*`, Panoramax            | street-level observations, 11 `f64` columns | near, sees, seen       | 10M, 100M     |
 
 Sequence sets are text files with one entry per line, which `--base-texts` reads.
 Leipzig publishes at most 1M sentences per corpus, so `leipzig-news-10m` joins ten yearly English news corpora.
 Shape sets are one `.f16bin` of 3 columns with every cloud's points end to end and an `.ibin` of points per cloud, which `--base-points` and `--base-counts` read.
+The conformer sets take conformer 0 of every embedded molecule, hydrogens included and centered, from the `.3D.parquet` shards under `pubchem/`, `gdb13/` and `real/` in the USearchMolecules bucket.
+The AlphaFold sets keep each predicted structure's Cα atoms, centered, from AlphaFold DB.
+A `.f16bin` header counts points in `u32`, at most 4,294,967,295 per file, so the larger shape sets are sharded as `base.shard_*.f16bin` beside `counts.shard_*.ibin`, natural-sorted, as RetriEval reads sharded inputs.
 Geospatial sets keep each observation in the field order of `usearch_geospatial_observation_t`, one `.f64bin` row of 11 values with NaN wherever the source recorded nothing, beside a `.u64bin` of each row's source picture ID.
 Panoramax publishes every picture's metadata across its federated instances as one weekly GeoParquet file, `https://api.panoramax.xyz/data/geoparquet/panoramax.parquet`, so its sets are a filter and a column mapping away.
 
@@ -281,7 +219,8 @@ Panoramax publishes every picture's metadata across its federated instances as o
 
 Every table below holds one row per machine and core class, so a new machine is a new row and nothing else moves.
 Every row is connectivity 32 and top-10 over the whole file ingested in one run.
-Expansion lists the insertion and search expansions: the smallest pair reaching 99% recall@10, or the defaults of 256 and 96 on rows measured before that rule.
+Expansion lists the insertion and search expansions: the smallest pair reaching 99% recall@10 or more, or the defaults of 256 and 96 on rows measured before that rule.
+A row never inserts faster than it searches: when insertions outpace queries, the insertion expansion rises and the search expansion falls until the row searches at least as fast at 99% recall@10.
 
 ### 10M
 
@@ -295,13 +234,13 @@ SIFT, `u8`, euclidean, 10,000,000 rows of 128 dimensions.
 | Apple M5 Pro, 20 GPU cores, 64 GiB shared memory   | `metal`     |  256 / 96 |  72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
 | NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB     | `blackwell` |  256 / 96 |  59.89 k IPS | 235.81 k QPS |   97.726% | 2026-10-14 |
 | NVIDIA B200, 148 SMs, 178.35 GB                    | `blackwell` |  256 / 96 | 522.31 k IPS | 512.23 k QPS |   97.630% | 2026-10-15 |
-| NVIDIA B300 SXM6, 148 SMs, 267.68 GB               | `blackwell` |  256 / 96 | 646.25 k IPS | 894.72 k QPS |   99.110% | 2026-10-21 |
+| NVIDIA B300 SXM6, 148 SMs, 267.68 GB               | `blackwell` | 256 / 128 | 558.51 k IPS |   1.04 M QPS |   99.110% | 2026-10-21 |
 
 PubChem MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, the first 10,000,000 molecules, of 166 and 2048 bits.
 
 | Machine | Class | Dataset | Expansion | Insertions | Queries | Recall@10 | Date |
-| :------ | :---- | :------ | ---: | ---------: | ------: | --------: | :--- |
-| - | - | - | - | - | - | - | - |
+| :------ | :---- | :------ | --------: | ---------: | ------: | --------: | :--- |
+| -       | -     | -       |         - |          - |       - |         - | -    |
 
 ### 100M
 
@@ -313,28 +252,28 @@ SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, and SpaceV, `i8`, euc
 | Apple M5 Pro, 20 GPU cores, 64 GiB shared memory  | `metal`     | SIFT    |  256 / 96 |  61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
 | NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB    | `blackwell` | SIFT    |  256 / 96 |  56.52 k IPS | 214.77 k QPS |   95.190% | 2026-10-14 |
 | NVIDIA B200, 148 SMs, 178.35 GB                   | `blackwell` | SIFT    |  256 / 96 | 342.23 k IPS | 483.06 k QPS |   95.160% | 2026-10-15 |
-| NVIDIA B300 SXM6, 148 SMs, 267.68 GB              | `blackwell` | SIFT    |  256 / 96 | 488.71 k IPS | 858.57 k QPS |   97.660% | 2026-10-21 |
+| NVIDIA B300 SXM6, 148 SMs, 267.68 GB              | `blackwell` | SIFT    | 256 / 256 | 431.52 k IPS | 604.49 k QPS |   99.130% | 2026-10-21 |
 
 PubChem MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, all 115,627,267 molecules, of 166 and 2048 bits.
 
 | Machine                              | Class       | Dataset | Expansion |   Insertions |      Queries | Recall@10 | Date       |
 | :----------------------------------- | :---------- | :------ | --------: | -----------: | -----------: | --------: | :--------- |
-| NVIDIA B300 SXM6, 148 SMs, 267.68 GB | `blackwell` | MACCS   |  256 / 96 | 604.41 k IPS |   1.12 M QPS |   97.090% | 2026-10-21 |
-| NVIDIA B300 SXM6, 148 SMs, 267.68 GB | `blackwell` | ECFP4   |  256 / 96 | 335.83 k IPS | 745.29 k QPS |   93.450% | 2026-10-21 |
+| NVIDIA B300 SXM6, 148 SMs, 267.68 GB | `blackwell` | MACCS   |  256 / 64 | 559.14 k IPS |   1.46 M QPS |   99.070% | 2026-10-21 |
+| NVIDIA B300 SXM6, 148 SMs, 267.68 GB | `blackwell` | ECFP4   | 512 / 512 | 146.81 k IPS | 285.23 k QPS |   99.060% | 2026-10-21 |
 
 ### 1B
 
 SIFT, `u8`, euclidean, 1,000,000,000 rows of 128 dimensions, and Deep, `f32` stored as `bf16`, euclidean, 1,000,000,000 rows of 96 dimensions, the goal being one hour of build on a dual-socket CPU.
 
 | Machine | Class | Dataset | Expansion | Insertions | Queries | Recall@10 | Date |
-| :------ | :---- | :------ | ---: | ---------: | ------: | --------: | :--- |
-| - | - | - | - | - | - | - | - |
+| :------ | :---- | :------ | --------: | ---------: | ------: | --------: | :--- |
+| -       | -     | -       |         - |          - |       - |         - | -    |
 
 GDB-13 MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, all 977 million molecules, of 166 and 2048 bits.
 
 | Machine | Class | Dataset | Expansion | Insertions | Queries | Recall@10 | Date |
-| :------ | :---- | :------ | ---: | ---------: | ------: | --------: | :--- |
-| - | - | - | - | - | - | - | - |
+| :------ | :---- | :------ | --------: | ---------: | ------: | --------: | :--- |
+| -       | -     | -       |         - |          - |       - |         - | -    |
 
 ### Multiply
 
@@ -342,7 +281,7 @@ Wiki, `f32` stored as `bf16`, dot, 1,000,000 rows of 256 dimensions, every one o
 
 | Machine | Class | Rows | Pairs per row | Date |
 | :------ | :---- | ---: | ------------: | :--- |
-| - | - | - | - | - |
+| -       | -     |    - |             - | -    |
 
 ### Attend
 
@@ -350,7 +289,7 @@ The same index, every query row running one `attend` as a single head, judged on
 
 | Machine | Class | Queries | Keys per query | Relative L2 error | Date |
 | :------ | :---- | ------: | -------------: | ----------------: | :--- |
-| - | - | - | - | - | - |
+| -       | -     |       - |              - |                 - | -    |
 
 ## Hyper-Parameters
 
@@ -369,7 +308,7 @@ Provision them before launch and declare them with `--huge-pages`, so a run that
 
 ```sh
 sudo sysctl -w vm.nr_hugepages=16384
-build_host_release/usearch_bench_dense_ram_indexes_search --huge-pages 16384 ...
+build_host_release/usearch_bench_dense_ram_index_search --huge-pages 16384 ...
 ```
 
 The pool splits per NUMA domain, so a single-domain run must fit its domain's share.

@@ -317,7 +317,20 @@ usearch_mood_t usearch_mood_from_name(usearch_bytes_view_t name) {
 }
 
 char const* usearch_cpu_class_name(usearch_cpu_class_t) { return "serial"; }
+
+usearch_cpu_class_t usearch_cpu_class_from_name(usearch_bytes_view_t name) {
+    return named(name, "serial") ? usearch_cpu_class_serial_k : usearch_cpu_class_unknown_k;
+}
+
 char const* usearch_gpu_class_name(usearch_gpu_class_t) { return "none"; }
+
+usearch_gpu_class_t usearch_gpu_class_from_name(usearch_bytes_view_t) { return usearch_gpu_class_unknown_k; }
+
+char const* usearch_nvme_class_name(usearch_nvme_class_t) { return "posix"; }
+
+usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_view_t name) {
+    return named(name, "posix") ? usearch_nvme_class_posix_k : usearch_nvme_class_unknown_k;
+}
 
 #pragma endregion Vocabulary
 

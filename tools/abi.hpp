@@ -3,12 +3,13 @@
  *  @author Ash Vardanian
  *  @date October 25, 2026
  *  @brief What the suites, benchmarks and tools share over the C interface: flags and settings,
- *      integer rows as keys, sessions of executors and arenas, owned index handles, checkpoint
+ *      keys minted from rows, sessions of executors and arenas, owned index handles, checkpoint
  *      round trips, mapped datasets, and recall against an exact scan.
  *
- *  Every helper reaches the library through its C verbs alone, so a suite or a benchmark built on
- *  this header exercises exactly what a binding does. Integer rows travel as keys big-endian in the
- *  trailing eight bytes, and come back as rows, or as @ref missing_row_k for a key no row renders.
+ *  Every helper reaches the library through its C verbs alone, and reads GPU outputs back through
+ *  the vendor's runtime, so a suite or a benchmark built on this header exercises exactly what a
+ *  binding does. Rows travel as opaque version-4 UUIDs minted from the seed by @ref key_of_row, and
+ *  come back through @ref row_of_key, which refuses a key it never minted.
  *
  *  Settings come from the environment first and the command line second:
  *
@@ -18,6 +19,7 @@
  *  USEARCH_FILTER      none             Checks to run, by name, as an ECMAScript regex or else as a substring
  *  USEARCH_DEVICES     first of each    Comma-separated USearch device ordinals the GPU work runs on
  *  USEARCH_NVME_PATHS  none             Comma-separated files, block devices or transport IDs NVMe serves from
+ *  --filter            none             Checks to run, overriding USEARCH_FILTER
  *  --residency         ram              Where an index lives: ram, vram or nvme
  *  --cpu-class         derived          The CPU class to dispatch as, like intel-icelake or serial
  *  --gpu-class         derived          The GPU class to dispatch as, like nvidia-ampere
@@ -67,12 +69,12 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h> // `fmt::join` - the devices, the shard sizes
 
-#include <forkunion.h> // `fu_topology_new`, `fu_memory_domain_id_at_index` - the domain shards repeat on
+#include <forkunion.h> // `fu_topology_new`, `fu_memory_domain_id_at_index` - the domains shards repeat over
 
 #include "usearch/usearch.h"
 #include "usearch/utilities/blocking_files.hpp" // `mapped_file_t` - the dataset parts, the compared checkpoints
-#include "usearch/utilities/types.hpp"          // `uuid_of`, `identity_of`, `u64_t`
-#include "usearch/utilities/vram_device.hpp"    // `cuda_copy`, `hip_api` - device outputs read back
+#include "usearch/utilities/types.hpp"          // `uuid_t`, `u64_t`
+#include "usearch/utilities/vram_device.hpp"    // `cuda_device_of`, `hip_device_of` - device outputs read back
 
 namespace unum::usearch::tools {
 using namespace unum::usearch::utilities;
@@ -108,6 +110,9 @@ enum class argument_status_t {
 
     /** A list holds fewer items than it requires. */
     too_few_items_k,
+
+    /** The value names no enumerator of its destination. */
+    unknown_name_k,
 };
 
 /** A plain non-negative integer, accepted only within @b [minimum,maximum]. */
@@ -137,13 +142,44 @@ enum class switch_t : bool {
     present_k,
 };
 
+/** Which named checks run: every one for an empty pattern, else those the pattern finds as an
+ *  ECMAScript regex, or as a substring when it is no valid regex. */
+struct filter_t {
+    std::string_view pattern;
+    std::optional<std::regex> regex;
+
+    /** Whether @p name passes the filter. */
+    bool selects(std::string_view name) const noexcept {
+        if (pattern.empty()) return true;
+        if (regex) return std::regex_search(name.begin(), name.end(), *regex);
+        return name.find(pattern) != std::string_view::npos;
+    }
+};
+
+/** The filter @p pattern spells, compiled once. */
+inline filter_t filter_of(std::string_view pattern) {
+    filter_t filter {pattern, std::nullopt};
+    if (pattern.empty()) return filter;
+#if defined(__cpp_exceptions) && __cpp_exceptions
+    try {
+        filter.regex.emplace(pattern.begin(), pattern.end());
+    }
+    catch (std::regex_error const&) {
+    }
+#else
+    filter.regex.emplace(pattern.begin(), pattern.end());
+#endif
+    return filter;
+}
+
 /** One flag: its name with both dashes, the usage placeholder, one help line, and the value it
  *  writes. */
 struct flag_t {
     std::string_view name;
     std::string_view placeholder;
     std::string_view help;
-    std::variant<std::string_view*, count_t*, counts_t*, switch_t*, std::chrono::milliseconds*, std::uint32_t*, double*>
+    std::variant<std::string_view*, count_t*, counts_t*, switch_t*, std::chrono::milliseconds*, std::uint32_t*, double*,
+                 filter_t*, usearch_residency_t*, usearch_cpu_class_t*, usearch_gpu_class_t*, usearch_nvme_class_t*>
         destination;
 };
 
@@ -228,6 +264,23 @@ inline std::optional<double> parse_real(std::string_view text) noexcept {
     return real;
 }
 
+/** The bytes of @p text as the C interface borrows a path or a name. */
+inline usearch_bytes_view_t bytes_view(std::string_view text) noexcept {
+    return {reinterpret_cast<usearch_byte_t const*>(text.data()), text.size()};
+}
+
+/** Writes the enumerator @p value spells into @p destination, read back by @p from_name and
+ *  accepted only when @p name spells it the same way. */
+template <typename enumeration_type_>
+[[nodiscard]] argument_status_t assign_named_(std::string_view value, enumeration_type_& destination,
+                                              enumeration_type_ (*from_name)(usearch_bytes_view_t),
+                                              char const* (*name)(enumeration_type_)) noexcept {
+    enumeration_type_ const parsed = from_name(bytes_view(value));
+    if (value != name(parsed)) return argument_status_t::unknown_name_k;
+    destination = parsed;
+    return argument_status_t::parsed_k;
+}
+
 [[nodiscard]] inline argument_status_t assign_(flag_t const& flag, std::string_view value) noexcept {
     if (std::string_view* const* text = std::get_if<std::string_view*>(&flag.destination)) {
         **text = value;
@@ -253,6 +306,18 @@ inline std::optional<double> parse_real(std::string_view text) noexcept {
         **real = *parsed;
         return argument_status_t::parsed_k;
     }
+    if (filter_t* const* filter = std::get_if<filter_t*>(&flag.destination)) {
+        **filter = filter_of(value);
+        return argument_status_t::parsed_k;
+    }
+    if (usearch_residency_t* const* residency = std::get_if<usearch_residency_t*>(&flag.destination))
+        return assign_named_(value, **residency, usearch_residency_from_name, usearch_residency_name);
+    if (usearch_cpu_class_t* const* cpu_class = std::get_if<usearch_cpu_class_t*>(&flag.destination))
+        return assign_named_(value, **cpu_class, usearch_cpu_class_from_name, usearch_cpu_class_name);
+    if (usearch_gpu_class_t* const* gpu_class = std::get_if<usearch_gpu_class_t*>(&flag.destination))
+        return assign_named_(value, **gpu_class, usearch_gpu_class_from_name, usearch_gpu_class_name);
+    if (usearch_nvme_class_t* const* nvme_class = std::get_if<usearch_nvme_class_t*>(&flag.destination))
+        return assign_named_(value, **nvme_class, usearch_nvme_class_from_name, usearch_nvme_class_name);
     return argument_status_t::unexpected_value_k;
 }
 
@@ -329,6 +394,13 @@ inline std::optional<double> parse_real(std::string_view text) noexcept {
     if (std::holds_alternative<std::chrono::milliseconds*>(flag.destination)) return "a duration like 200ms or 10s";
     if (std::holds_alternative<std::uint32_t*>(flag.destination)) return "an unsigned integer or random";
     if (std::holds_alternative<double*>(flag.destination)) return "a non-negative real";
+    if (std::holds_alternative<filter_t*>(flag.destination)) return "an ECMAScript regex or a substring";
+    if (std::holds_alternative<usearch_residency_t*>(flag.destination)) return "ram, vram or nvme";
+    if (std::holds_alternative<usearch_cpu_class_t*>(flag.destination))
+        return "a CPU class like intel-icelake or serial";
+    if (std::holds_alternative<usearch_gpu_class_t*>(flag.destination)) return "a GPU class like nvidia-ampere";
+    if (std::holds_alternative<usearch_nvme_class_t*>(flag.destination))
+        return "an NVMe class like posix or linux-uring";
     if (std::holds_alternative<switch_t*>(flag.destination)) return "no value";
     return "a value";
 }
@@ -396,32 +468,70 @@ inline void parse_or_exit(int argc, char const* const* argv, std::string_view sy
     std::exit(1);
 }
 
-/** The row a key outside @c uuid_of 's range lands as: no integer row renders as it. */
-inline constexpr u64_t missing_row_k = std::numeric_limits<u64_t>::max();
+/** Rows below this bound get keys: a version-4 UUID leaves 62 bits beside its variant. */
+inline constexpr u64_t key_rows_k = u64_t {1} << 62;
 
-/** Fills @p keys with the keys of the rows from @p first_row on, big-endian in the trailing eight
- *  bytes. */
-inline void keys_of_rows(std::size_t first_row, std::span<usearch_key_t> keys) noexcept {
-    for (std::size_t row = 0; row != keys.size(); ++row) {
-        keys[row] = std::bit_cast<usearch_key_t>(uuid_of(static_cast<u64_t>(first_row + row)));
-    }
+/** The odd multipliers of the row mix, SplitMix64's. */
+inline constexpr u64_t key_multipliers_k[2] = {0xbf58476d1ce4e5b9ull, 0x94d049bb133111ebull};
+
+/** The inverse of the odd @p multiplier modulo 2^64, by Newton's iteration. */
+constexpr u64_t inverse_of_(u64_t multiplier) noexcept {
+    u64_t inverse = multiplier;
+    for (int step = 0; step != 5; ++step) inverse *= 2 - multiplier * inverse;
+    return inverse;
 }
 
-/** Fills @p rows with the rows @p keys render, or @ref missing_row_k for a key no row renders. */
-inline void rows_of_keys(std::span<usearch_key_t const> keys, std::span<u64_t> rows) noexcept {
-    for (std::size_t position = 0; position != keys.size(); ++position) {
-        rows[position] = identity_of(std::bit_cast<uuid_t>(keys[position])).value_or(missing_row_k);
+/** SplitMix64's finalizer. */
+constexpr u64_t mix_(u64_t word) noexcept {
+    word = (word ^ word >> 30) * key_multipliers_k[0];
+    word = (word ^ word >> 27) * key_multipliers_k[1];
+    return word ^ word >> 31;
+}
+
+/** The leading eight bytes of a key whose trailing eight are @p trailing : a version-4 tag over a
+ *  mix of those and @p seed, which @ref row_of_key checks. */
+constexpr u64_t leading_word_(u64_t seed, u64_t trailing) noexcept {
+    return (mix_(trailing ^ mix_(seed)) & ~u64_t {0xF000}) | 0x4000;
+}
+
+/**
+ *  @brief The key the harness mints for @p row under @p seed : a random-looking version-4 UUID with
+ *      no table behind it.
+ *
+ *  The trailing eight bytes hold the variant over an invertible mix of the row within 62 bits, and
+ *  the leading eight a mix of them, so @ref row_of_key inverts the first and checks the second.
+ */
+inline usearch_key_t key_of_row(u64_t seed, u64_t row) noexcept {
+    u64_t mixed = (row ^ mix_(seed)) & (key_rows_k - 1);
+    for (u64_t const multiplier : key_multipliers_k) mixed = (mixed ^ mixed >> 31) * multiplier & (key_rows_k - 1);
+    u64_t const trailing = u64_t {2} << 62 | (mixed ^ mixed >> 31);
+    u64_t const leading = leading_word_(seed, trailing);
+    usearch_key_t key;
+    for (std::size_t byte = 0; byte != 8; ++byte) {
+        key.bytes[7 - byte] = static_cast<usearch_byte_t>(leading >> (byte * 8));
+        key.bytes[15 - byte] = static_cast<usearch_byte_t>(trailing >> (byte * 8));
     }
+    return key;
+}
+
+/** The row @ref key_of_row minted @p key for under @p seed , or none for a key it never minted. */
+inline std::optional<u64_t> row_of_key(u64_t seed, usearch_key_t const& key) noexcept {
+    u64_t leading = 0, trailing = 0;
+    for (std::size_t byte = 0; byte != 8; ++byte)
+        leading = leading << 8 | key.bytes[byte], trailing = trailing << 8 | key.bytes[8 + byte];
+    if (trailing >> 62 != 2 || leading != leading_word_(seed, trailing)) return std::nullopt;
+    u64_t mixed = trailing & (key_rows_k - 1);
+    mixed ^= mixed >> 31;
+    for (std::size_t round = std::size(key_multipliers_k); round--;) {
+        mixed = mixed * inverse_of_(key_multipliers_k[round]) & (key_rows_k - 1);
+        mixed ^= mixed >> 31;
+    }
+    return (mixed ^ mix_(seed)) & (key_rows_k - 1);
 }
 
 /** The packed run of @p keys as a batch names its identities. */
 inline usearch_keys_view_t keys_view(std::span<usearch_key_t const> keys) noexcept {
     return {keys.data(), sizeof(usearch_key_t)};
-}
-
-/** The bytes of @p text as the C interface borrows a path or a name. */
-inline usearch_bytes_view_t bytes_view(std::string_view text) noexcept {
-    return {reinterpret_cast<usearch_byte_t const*>(text.data()), text.size()};
 }
 
 #pragma endregion Flags
@@ -473,54 +583,6 @@ inline std::vector<std::int32_t> devices_from_environment() {
     return devices;
 }
 
-/** Which named checks run: every one for an empty pattern, else those the pattern finds as an
- *  ECMAScript regex, or as a substring when it is no valid regex. */
-struct filter_t {
-    std::string_view pattern;
-    std::optional<std::regex> regex;
-
-    /** Whether @p name passes the filter. */
-    bool selects(std::string_view name) const noexcept {
-        if (pattern.empty()) return true;
-        if (regex) return std::regex_search(name.begin(), name.end(), *regex);
-        return name.find(pattern) != std::string_view::npos;
-    }
-};
-
-/** The filter @p pattern spells, compiled once. */
-inline filter_t filter_of(std::string_view pattern) {
-    filter_t filter {pattern, std::nullopt};
-    if (pattern.empty()) return filter;
-#if defined(__cpp_exceptions) && __cpp_exceptions
-    try {
-        filter.regex.emplace(pattern.begin(), pattern.end());
-    }
-    catch (std::regex_error const&) {
-    }
-#else
-    filter.regex.emplace(pattern.begin(), pattern.end());
-#endif
-    return filter;
-}
-
-/** Every CPU class the enumeration names, from the portable floor up. */
-inline constexpr usearch_cpu_class_t cpu_classes_k[] = {
-    usearch_cpu_class_serial_k,         usearch_cpu_class_intel_haswell_k,   usearch_cpu_class_intel_sierra_k,
-    usearch_cpu_class_intel_skylake_k,  usearch_cpu_class_intel_icelake_k,   usearch_cpu_class_amd_genoa_k,
-    usearch_cpu_class_intel_sapphire_k, usearch_cpu_class_intel_granite_k,   usearch_cpu_class_intel_diamond_k,
-    usearch_cpu_class_aws_g2_k,         usearch_cpu_class_apple_m2_k,        usearch_cpu_class_apple_m4_k,
-    usearch_cpu_class_aws_g5_k,         usearch_cpu_class_nvidia_vera_k,     usearch_cpu_class_alibaba_c930_k,
-    usearch_cpu_class_wasm32_v128_k,    usearch_cpu_class_wasm64_extended_k,
-};
-
-/** Every GPU class the enumeration names, vendor by vendor. */
-inline constexpr usearch_gpu_class_t gpu_classes_k[] = {
-    usearch_gpu_class_nvidia_ampere_k,    usearch_gpu_class_nvidia_ada_k,          usearch_gpu_class_nvidia_hopper_k,
-    usearch_gpu_class_nvidia_blackwell_k, usearch_gpu_class_nvidia_blackwellrtx_k, usearch_gpu_class_nvidia_rubin_k,
-    usearch_gpu_class_amd_cdna3_k,        usearch_gpu_class_amd_cdna4_k,           usearch_gpu_class_amd_cdna5_k,
-    usearch_gpu_class_apple_metal7_k,     usearch_gpu_class_apple_metal9_k,        usearch_gpu_class_apple_metal10_k,
-};
-
 /**
  *  @brief Every setting the suites, the benchmarks and the tools share, its default as the
  *      initializer, filled once by @ref read_settings.
@@ -529,14 +591,13 @@ inline constexpr usearch_gpu_class_t gpu_classes_k[] = {
  */
 struct settings_t {
 
-    /** Seed every scenario family derives its streams from. Override: @c USEARCH_SEED. */
-    u64_t seed = 42;
+    /** Seed every scenario family and every minted key derives from. Override: @c USEARCH_SEED. */
+    std::uint32_t seed = 42;
 
     /** Checks to run. Override: @c USEARCH_FILTER. */
     filter_t filter;
 
-    /** Where an index lives, as `--residency` names it. */
-    std::string_view residency_name;
+    /** Where an index lives. */
     usearch_residency_t residency = usearch_residency_ram_k;
 
     /** USearch device ordinals the GPU work runs on; none takes device zero, or every vendor's
@@ -547,16 +608,13 @@ struct settings_t {
      *  serves every shard where its checkpoint points. Override: @c USEARCH_NVME_PATHS. */
     std::vector<std::string_view> nvme_paths;
 
-    /** The CPU class to dispatch as, as `--cpu-class` names it; unknown derives the CPU's own. */
-    std::string_view cpu_class_name;
+    /** The CPU class to dispatch as; unknown derives the CPU's own. */
     usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
 
-    /** The GPU class to dispatch as, as `--gpu-class` names it; unknown derives the devices'. */
-    std::string_view gpu_class_name;
+    /** The GPU class to dispatch as; unknown derives the devices'. */
     usearch_gpu_class_t gpu_class = usearch_gpu_class_unknown_k;
 
-    /** The NVMe class to submit through, as `--nvme-class` names it; unknown derives it. */
-    std::string_view nvme_class_name;
+    /** The NVMe class to submit through; unknown derives it. */
     usearch_nvme_class_t nvme_class = usearch_nvme_class_unknown_k;
 
     /** Worker threads of a RAM or NVMe executor; absent derives from the domains or devices. */
@@ -578,16 +636,17 @@ struct settings_t {
 };
 
 /** The flags every binary reading a @ref settings_t takes. */
-inline std::array<flag_t, 8> settings_flags(settings_t& settings) noexcept {
+inline std::array<flag_t, 9> settings_flags(settings_t& settings) noexcept {
     return {{
-        {"--residency", "name", "where an index lives: ram, vram or nvme; ram by default", &settings.residency_name},
+        {"--filter", "pattern", "checks to run, as a regex or a substring; every one by default", &settings.filter},
+        {"--residency", "name", "where an index lives: ram, vram or nvme; ram by default", &settings.residency},
         {"--cpu-class", "name", "CPU class to dispatch as, like intel-icelake or serial; derived by default",
-         &settings.cpu_class_name},
+         &settings.cpu_class},
         {"--gpu-class", "name", "GPU class to dispatch as, like nvidia-ampere; derived by default",
-         &settings.gpu_class_name},
+         &settings.gpu_class},
         {"--nvme-class", "name",
          "NVMe class to submit through, like posix, linux-uring or linux-spdk; derived by default",
-         &settings.nvme_class_name},
+         &settings.nvme_class},
         {"--threads", "count", "worker threads; derived from the domains or devices by default", &settings.threads},
         {"--shards", "count", "shards per index; one per memory domain or device by default", &settings.shards},
         {"--shard-capacity", "entries",
@@ -595,36 +654,6 @@ inline std::array<flag_t, 8> settings_flags(settings_t& settings) noexcept {
          &settings.shard_capacity},
         {"--checkpoint", "path", "path to save the built index under and reopen it from", &settings.checkpoint},
     }};
-}
-
-/** Resolves every name @p settings holds into its enumerator, exiting with status 1 on the first
- *  that names nothing. */
-inline void resolve_names(settings_t& settings) {
-    if (!settings.residency_name.empty()) {
-        usearch_residency_t const named = usearch_residency_from_name(bytes_view(settings.residency_name));
-        if (settings.residency_name != usearch_residency_name(named))
-            exit_unparsed("--residency", settings.residency_name, "ram, vram or nvme");
-        settings.residency = named;
-    }
-    if (!settings.cpu_class_name.empty()) {
-        for (usearch_cpu_class_t const cpu_class : cpu_classes_k)
-            if (settings.cpu_class_name == usearch_cpu_class_name(cpu_class)) settings.cpu_class = cpu_class;
-        if (settings.cpu_class == usearch_cpu_class_unknown_k)
-            exit_unparsed("--cpu-class", settings.cpu_class_name, "a CPU class like intel-icelake or serial");
-    }
-    if (!settings.gpu_class_name.empty()) {
-        for (usearch_gpu_class_t const gpu_class : gpu_classes_k)
-            if (settings.gpu_class_name == usearch_gpu_class_name(gpu_class)) settings.gpu_class = gpu_class;
-        if (settings.gpu_class == usearch_gpu_class_unknown_k)
-            exit_unparsed("--gpu-class", settings.gpu_class_name, "a GPU class like nvidia-ampere");
-    }
-    if (!settings.nvme_class_name.empty()) {
-        for (int value = usearch_nvme_class_posix_k; value <= usearch_nvme_class_windows_ioring_k; ++value)
-            if (settings.nvme_class_name == usearch_nvme_class_name(static_cast<usearch_nvme_class_t>(value)))
-                settings.nvme_class = static_cast<usearch_nvme_class_t>(value);
-        if (settings.nvme_class == usearch_nvme_class_unknown_k)
-            exit_unparsed("--nvme-class", settings.nvme_class_name, "an NVMe class like posix or linux-uring");
-    }
 }
 
 /** Reads the settings the environment holds, exiting with status 1 on the first that does not
@@ -650,35 +679,37 @@ inline settings_t read_environment() {
     return settings;
 }
 
-/** Reads the environment, then parses @p argv against the shared flags and @p binary_flags,
- *  resolving every name. On `--help` prints the usage and exits with status 0; on a setting that
- *  does not parse prints one line and exits with status 1. */
+/** Reads the environment, then parses @p argv against the shared flags and @p binary_flags. On
+ *  `--help` prints the usage and exits with status 0; on a setting that does not parse prints one
+ *  line and exits with status 1. */
 inline settings_t read_settings(int argc, char const* const* argv, std::string_view synopsis,
                                 std::span<flag_t const> binary_flags = {}) {
     settings_t settings = read_environment();
     std::vector<flag_t> flags(binary_flags.begin(), binary_flags.end());
-    std::array<flag_t, 8> const shared = settings_flags(settings);
+    std::array<flag_t, 9> const shared = settings_flags(settings);
     flags.insert(flags.end(), shared.begin(), shared.end());
     parse_or_exit(argc, argv, synopsis, flags);
-    resolve_names(settings);
     return settings;
 }
 
-/** Prints each setting as "- Name: value", in the grammar it parses from. */
-inline void print(settings_t const& settings) {
-    auto const or_else = [](std::string_view given, std::string_view fallback) noexcept {
-        return given.empty() ? fallback : given;
-    };
+/** Prints each setting @ref read_environment reads as "- Name: value", in the grammar it parses
+ *  from; calls nothing of the library, so header-only suites print it too. */
+inline void print_environment(settings_t const& settings) {
     fmt::println("- Seed: {}", settings.seed);
-    fmt::println("- Filter: {}", or_else(settings.filter.pattern, "none"));
-    fmt::println("- Residency: {}", or_else(settings.residency_name, "ram"));
+    fmt::println("- Filter: {}", settings.filter.pattern.empty() ? "none" : settings.filter.pattern);
     if (settings.devices.empty()) fmt::println("- Devices: derived");
     else fmt::println("- Devices: {}", fmt::join(settings.devices, ","));
     if (settings.nvme_paths.empty()) fmt::println("- NVMe paths: none");
     else fmt::println("- NVMe paths: {}", fmt::join(settings.nvme_paths, ","));
-    fmt::println("- CPU class: {}", or_else(settings.cpu_class_name, "derived"));
-    fmt::println("- GPU class: {}", or_else(settings.gpu_class_name, "derived"));
-    fmt::println("- NVMe class: {}", or_else(settings.nvme_class_name, "derived"));
+}
+
+/** Prints each setting as "- Name: value", in the grammar it parses from. */
+inline void print(settings_t const& settings) {
+    print_environment(settings);
+    fmt::println("- Residency: {}", usearch_residency_name(settings.residency));
+    fmt::println("- CPU class: {}", usearch_cpu_class_name(settings.cpu_class));
+    fmt::println("- GPU class: {}", usearch_gpu_class_name(settings.gpu_class));
+    fmt::println("- NVMe class: {}", usearch_nvme_class_name(settings.nvme_class));
 }
 
 #pragma endregion Settings
@@ -712,16 +743,6 @@ inline std::vector<usearch_gpu_device_t> listed_devices() {
     return devices;
 }
 
-/** The first memory domain the process may allocate on, which repeated shards share. */
-inline std::int32_t first_memory_domain() noexcept {
-    fu_topology_t topology = nullptr;
-    fu_memory_domain_id_t found = 0;
-    if (fu_topology_new(&topology) == fu_success_k && fu_memory_domain_id_at_index(topology, 0, &found) != fu_success_k)
-        found = 0;
-    if (topology) fu_topology_delete(topology);
-    return static_cast<std::int32_t>(found);
-}
-
 /**
  *  @brief The executors and the arena one residency's calls run on, freed together.
  *
@@ -733,6 +754,9 @@ inline std::int32_t first_memory_domain() noexcept {
 struct session_t {
     usearch_residency_t residency = usearch_residency_ram_k;
 
+    /** The seed every key this session's entries take is minted under, by @ref key_of_row. */
+    std::uint32_t seed = 0;
+
     /** The class every index this session opens dispatches as. */
     usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
     usearch_gpu_class_t gpu_class = usearch_gpu_class_unknown_k;
@@ -740,14 +764,11 @@ struct session_t {
     /** The USearch device ordinals a VRAM index places shards on, in turn. */
     std::vector<std::int32_t> devices;
 
-    /** The vendor of the first of @c devices, whose runtime reads the arena's outputs back. */
-    usearch_gpu_vendor_t vendor = usearch_gpu_vendor_unknown_k;
-
     /** The NVMe namespaces views serve from, borrowed from the settings. */
     std::vector<usearch_bytes_view_t> paths;
 
-    /** The memory domain RAM shards repeat on. */
-    std::int32_t memory_domain = 0;
+    /** The memory domains RAM shards repeat over, in turn. */
+    std::vector<std::int32_t> memory_domains;
 
     /** Entries one shard holds before another shard generation opens; zero leaves it unbounded. */
     std::size_t shard_capacity = 0;
@@ -773,9 +794,9 @@ struct session_t {
     }
 
     void swap(session_t& other) noexcept {
-        std::swap(residency, other.residency), std::swap(cpu_class, other.cpu_class);
-        std::swap(gpu_class, other.gpu_class), std::swap(devices, other.devices), std::swap(vendor, other.vendor);
-        std::swap(paths, other.paths), std::swap(memory_domain, other.memory_domain);
+        std::swap(residency, other.residency), std::swap(seed, other.seed), std::swap(cpu_class, other.cpu_class);
+        std::swap(gpu_class, other.gpu_class), std::swap(devices, other.devices);
+        std::swap(paths, other.paths), std::swap(memory_domains, other.memory_domains);
         std::swap(shard_capacity, other.shard_capacity), std::swap(executor, other.executor);
         std::swap(storage, other.storage), std::swap(arena, other.arena);
     }
@@ -792,10 +813,12 @@ struct session_t {
         return index_residency == usearch_residency_ram_k && residency == usearch_residency_vram_k ? nullptr : executor;
     }
 
-    /** The RAM placement of @p shards shards on the session's domain, backed by @p domains; zero
-     *  shards derives one per domain. */
+    /** The RAM placement of @p shards shards over the session's memory domains in turn, backed by
+     *  @p domains; zero shards names no domains, so the library derives one shard per domain. */
     usearch_ram_options_t ram_options(std::size_t shards, std::vector<std::int32_t>& domains) const {
-        domains.assign(shards, memory_domain);
+        domains.resize(shards);
+        for (std::size_t shard = 0; shard != shards; ++shard)
+            domains[shard] = memory_domains[shard % memory_domains.size()];
         return {domains.empty() ? nullptr : domains.data(), domains.size(), shard_capacity, cpu_class};
     }
 
@@ -820,10 +843,20 @@ struct session_t {
 inline session_t open_session(settings_t const& settings, usearch_cpu_class_t pinned) {
     session_t session;
     session.residency = settings.residency;
+    session.seed = settings.seed;
     session.cpu_class = pinned;
     session.gpu_class = settings.gpu_class;
     session.shard_capacity = settings.shard_capacity.value;
-    session.memory_domain = first_memory_domain();
+    fu_topology_t topology = nullptr;
+    std::size_t domains_count = 0;
+    if (fu_topology_new(&topology) == fu_success_k && fu_memory_domains_count(topology, &domains_count) == fu_success_k)
+        for (std::size_t index = 0; index != domains_count; ++index) {
+            fu_memory_domain_id_t domain = 0;
+            if (fu_memory_domain_id_at_index(topology, index, &domain) == fu_success_k)
+                session.memory_domains.push_back(domain);
+        }
+    if (topology) fu_topology_delete(topology);
+    if (session.memory_domains.empty()) session.memory_domains.push_back(0);
     for (std::string_view const path : settings.nvme_paths) session.paths.push_back(bytes_view(path));
     usearch_outcome_t outcome {};
     if (session.residency == usearch_residency_vram_k) {
@@ -834,7 +867,6 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t pi
                 fmt::println(stderr, "Device {} is past the {} listed", ordinal, listed.size());
                 return session;
             }
-        session.vendor = listed[static_cast<std::size_t>(session.devices.front())].vendor;
         std::vector<std::int32_t> ordinals;
         usearch_executor_for_vram_t placement {.executor = &session.executor,
                                                .outcome = &outcome,
@@ -869,17 +901,16 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t pi
     return session;
 }
 
-/** Copies @p bytes of a call's output at @p source into @p destination, through the vendor's
- *  runtime when @p session lands outputs on a device; false when the copy failed. */
-inline bool download(session_t const& session, void* destination, void const* source, std::size_t bytes) noexcept {
+/** Copies @p bytes of a call's output at @p source into @p destination: through the runtime of the
+ *  vendor whose device memory holds it, else directly, as host memory, pinned or not, reads; false
+ *  when the copy failed. */
+inline bool download(void* destination, void const* source, std::size_t bytes) noexcept {
     if (!bytes) return true;
-    if (session.residency != usearch_residency_vram_k || session.vendor == usearch_gpu_vendor_apple_k) {
-        std::memcpy(destination, source, bytes);
-        return true;
-    }
-    if (session.vendor == usearch_gpu_vendor_nvidia_k) return cuda_copy(destination, source, bytes) == cuda_success_k;
-    hip_api_t const& runtime = hip_api();
-    return runtime && runtime.copy(destination, source, bytes, hip_copy_device_to_host_k) == hip_success_k;
+    if (cuda_device_of(source) >= 0) return cuda_copy(destination, source, bytes) == cuda_success_k;
+    if (hip_device_of(source) >= 0)
+        return hip_api().copy(destination, source, bytes, hip_copy_device_to_host_k) == hip_success_k;
+    std::memcpy(destination, source, bytes);
+    return true;
 }
 
 #pragma endregion Sessions
@@ -1455,12 +1486,12 @@ handle<verbs_type_> open_index(session_t& session, typename verbs_type_::geometr
 }
 
 /** Reserves room for @p count more entries, then inserts @p count entries of @p inputs into
- *  @p index in batches of @p batch, keyed by their rows from @p first_row on, summing every batch's
- *  telemetry into @p totals and reporting each landed count to @p progress. */
+ *  @p index in batches of @p batch, keyed by @ref key_of_row from row @p first_row on, summing
+ *  every batch's telemetry into @p totals and reporting each landed count to @p progress. */
 template <typename verbs_type_, typename progress_type_ = dummy_progress_t>
-usearch_outcome_t insert_rows(handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs, std::size_t count,
-                              std::size_t first_row, std::size_t batch, std::size_t expansion,
-                              usearch_traversal_stats_t& totals, progress_type_&& progress = {}) {
+usearch_outcome_t insert_entries(handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs, std::size_t count,
+                                 std::size_t first_row, std::size_t batch, std::size_t expansion,
+                                 usearch_traversal_stats_t& totals, progress_type_&& progress = {}) {
     usearch_outcome_t outcome {};
     typename verbs_type_::description_t described {};
     verbs_type_::describe(index.get(), index.executor(), &described, &outcome);
@@ -1472,7 +1503,8 @@ usearch_outcome_t insert_rows(handle<verbs_type_>& index, typename verbs_type_::
     for (std::size_t first = 0; first < count; first += batch_rows) {
         std::size_t const rows = std::min(batch_rows, count - first);
         std::span<usearch_key_t> const batch_keys = std::span {keys}.first(rows);
-        keys_of_rows(first_row + first, batch_keys);
+        for (std::size_t row = 0; row != rows; ++row)
+            batch_keys[row] = key_of_row(index.session->seed, first_row + first + row);
         usearch_traversal_stats_t stats {};
         verbs_type_::insert(index.get(), index.executor(), rows, keys_view(batch_keys),
                             verbs_type_::slice(inputs, first), expansion, &stats, &outcome);
@@ -1484,31 +1516,24 @@ usearch_outcome_t insert_rows(handle<verbs_type_>& index, typename verbs_type_::
     return outcome;
 }
 
-/** The size, the shards and the classes of @p index, as its description reports them. */
-template <typename verbs_type_>
-struct description {
-    typename verbs_type_::description_t reported {};
-};
-
 /** Describes @p index; prints what failed and answers an empty description. */
 template <typename verbs_type_>
-description<verbs_type_> describe(handle<verbs_type_> const& index) {
-    description<verbs_type_> described;
+typename verbs_type_::description_t describe(handle<verbs_type_> const& index) {
+    typename verbs_type_::description_t described {};
     usearch_outcome_t outcome {};
-    verbs_type_::describe(index.get(), index.executor(), &described.reported, &outcome);
+    verbs_type_::describe(index.get(), index.executor(), &described, &outcome);
     report_failure(outcome, "Describing");
     return described;
 }
 
-/** Prints the rows, the bytes, the shards and the classes @p index reports, as one "- Index:"
+/** Prints the entries, the bytes, the shards and the classes @p index reports, as one "- Index:"
  *  line. */
 template <typename verbs_type_>
 void print_fill(handle<verbs_type_> const& index) {
-    description<verbs_type_> const described = describe(index);
-    fmt::println("- Index: {} rows · {} bytes · {} shards · {} · {}", described.reported.size,
-                 described.reported.memory_usage, described.reported.shards_count,
-                 usearch_cpu_class_name(described.reported.cpu_class),
-                 usearch_gpu_class_name(described.reported.gpu_class));
+    typename verbs_type_::description_t const described = describe(index);
+    fmt::println("- Index: {} entries · {} bytes · {} shards · {} · {}", described.size, described.memory_usage,
+                 described.shards_count, usearch_cpu_class_name(described.cpu_class),
+                 usearch_gpu_class_name(described.gpu_class));
 }
 
 /** Saves @p index under @p path and reopens it in @p residency on the same session: loaded into RAM
@@ -1521,7 +1546,7 @@ handle<verbs_type_> save_and_reopen(handle<verbs_type_>&& index, std::string_vie
     usearch_outcome_t outcome {};
     verbs_type_::save(index.get(), index.executor(), bytes_view(path), &outcome);
     if (report_failure(outcome, fmt::format("Saving {}", path))) return {};
-    std::size_t const shards = describe(index).reported.shards_count;
+    std::size_t const shards = describe(index).shards_count;
     index = {};
     typename verbs_type_::index_t reopened = nullptr;
     std::vector<std::int32_t> placement;
@@ -1693,15 +1718,14 @@ struct landed_matches_t {
 };
 
 /** Appends the matches each of the @p queries rows of @p matches holds to @p landed, read back from
- *  @p session 's arena; false when the copy failed. */
-inline bool append_landed(session_t const& session, usearch_matches_view_t const& matches, std::size_t queries,
-                          landed_matches_t& landed) {
+ *  wherever the arena placed them; false when the copy failed. */
+inline bool append_landed(usearch_matches_view_t const& matches, std::size_t queries, landed_matches_t& landed) {
     std::vector<usearch_key_t> keys(queries * matches.columns);
     std::vector<usearch_distance_t> scores(queries * matches.columns);
     std::vector<std::size_t> counts(queries);
-    if (!download(session, keys.data(), matches.keys, keys.size() * sizeof(usearch_key_t)) ||
-        !download(session, scores.data(), matches.scores, scores.size() * sizeof(usearch_distance_t)) ||
-        !download(session, counts.data(), matches.counts, counts.size() * sizeof(std::size_t)))
+    if (!download(keys.data(), matches.keys, keys.size() * sizeof(usearch_key_t)) ||
+        !download(scores.data(), matches.scores, scores.size() * sizeof(usearch_distance_t)) ||
+        !download(counts.data(), matches.counts, counts.size() * sizeof(std::size_t)))
         return false;
     for (std::size_t row = 0; row != queries; ++row) {
         landed.counts.push_back(counts[row]);
@@ -1727,10 +1751,10 @@ inline landed_matches_t landed_matches(usearch_matches_view_t const& matches, st
 /** Searches @p count queries of @p queries in batches of @p batch, landing every match in @p landed
  *  and summing the telemetry into @p totals. */
 template <typename verbs_type_>
-usearch_outcome_t search_rows(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
-                              std::size_t batch, std::size_t wanted, std::size_t expansion,
-                              usearch_traversal_t traversal, usearch_traversal_stats_t& totals,
-                              landed_matches_t& landed) {
+usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
+                                 std::size_t batch, std::size_t wanted, std::size_t expansion,
+                                 usearch_traversal_t traversal, usearch_traversal_stats_t& totals,
+                                 landed_matches_t& landed) {
     usearch_outcome_t outcome {};
     std::size_t const batch_rows = std::max<std::size_t>(1, std::min(batch, count));
     for (std::size_t first = 0; first < count; first += batch_rows) {
@@ -1741,7 +1765,7 @@ usearch_outcome_t search_rows(handle<verbs_type_>& index, typename verbs_type_::
                             verbs_type_::slice(queries, first), wanted, expansion, traversal, &matches, &stats,
                             &outcome);
         if (outcome.status != usearch_status_success_k) return outcome;
-        if (!append_landed(*index.session, matches, rows, landed))
+        if (!append_landed(matches, rows, landed))
             return {usearch_status_device_k, "The matches could not be read back"};
         totals.visited_members += stats.visited_members, totals.computed_distances += stats.computed_distances;
         totals.restarts += stats.restarts;
@@ -1755,16 +1779,17 @@ template <typename verbs_type_>
 usearch_outcome_t scan_oracle(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t judged,
                               std::size_t wanted, std::size_t batch, landed_matches_t& oracle) {
     usearch_traversal_stats_t stats {};
-    return search_rows(index, queries, judged, batch, wanted, 0, usearch_traversal_scan_k, stats, oracle);
+    return search_queries(index, queries, judged, batch, wanted, 0, usearch_traversal_scan_k, stats, oracle);
 }
 
-/** The truth a ground-truth file lists: @p depth rows per query, each keyed as @ref keys_of_rows
- *  does, without distances. */
-inline landed_matches_t truth_oracle(std::span<std::uint32_t const> rows, std::size_t depth) {
+/** The truth a ground-truth file lists: @p depth rows per query, each keyed by @ref key_of_row
+ *  under @p seed, without distances. */
+inline landed_matches_t truth_oracle(u64_t seed, std::span<std::uint32_t const> rows, std::size_t depth) {
     landed_matches_t oracle;
     std::size_t const queries = depth ? rows.size() / depth : 0;
     oracle.counts.assign(queries, depth);
-    for (std::uint32_t const row : rows.first(queries * depth)) oracle.keys.push_back(uuid_of(row));
+    for (std::uint32_t const row : rows.first(queries * depth))
+        oracle.keys.push_back(std::bit_cast<uuid_t>(key_of_row(seed, row)));
     return oracle;
 }
 
@@ -1854,7 +1879,8 @@ usearch_outcome_t sweep_recall(handle<verbs_type_>& index, typename verbs_type_:
         landed_matches_t found;
         usearch_traversal_stats_t stats {};
         std::chrono::steady_clock::time_point const started = std::chrono::steady_clock::now();
-        outcome = search_rows(index, queries, count, batch, wanted, expansion, usearch_traversal_walk_k, stats, found);
+        outcome = search_queries(index, queries, count, batch, wanted, expansion, usearch_traversal_walk_k, stats,
+                                 found);
         double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
         if (outcome.status != usearch_status_success_k) return outcome;
         fmt::println("- Expansion {}: recall@1 {:.4f} · recall@{} {:.4f} · nDCG@{} {:.4f} over {} judged", expansion,
@@ -1872,13 +1898,6 @@ usearch_outcome_t sweep_recall(handle<verbs_type_>& index, typename verbs_type_:
 #pragma endregion Recall
 
 #pragma region Sweeps
-
-/** The dense storage scalars in the library's ladder order. */
-inline constexpr usearch_scalar_t dense_scalars_k[] = {
-    usearch_scalar_bf16_k, usearch_scalar_u1x8_k, usearch_scalar_i8_k,   usearch_scalar_e4m3_k,
-    usearch_scalar_f16_k,  usearch_scalar_u8_k,   usearch_scalar_e5m2_k, usearch_scalar_i4x2_k,
-    usearch_scalar_u4x2_k, usearch_scalar_e3m2_k, usearch_scalar_e2m3_k,
-};
 
 /** Whether a dense index of @p scalar opens in @p residency, pinned to @p cpu_class, on device zero
  *  for VRAM; a probe of what the library compiled and this machine admits. */
@@ -1904,21 +1923,25 @@ inline std::vector<usearch_residency_t> compiled_residencies() {
     return residencies;
 }
 
-/** The dense scalars @p residency opens, in the ladder's order; an NVMe index serves what RAM
+/** The dense scalars @p residency opens, in the enumeration's order; an NVMe index serves what RAM
  *  built. */
 inline std::vector<usearch_scalar_t> compiled_scalars(usearch_residency_t residency) {
     std::vector<usearch_scalar_t> scalars;
-    for (usearch_scalar_t const scalar : dense_scalars_k)
+    for (int code = usearch_scalar_f64_k; code <= usearch_scalar_u1x8_k; ++code) {
+        usearch_scalar_t const scalar = static_cast<usearch_scalar_t>(code);
         if (dense_opens(residency == usearch_residency_vram_k ? residency : usearch_residency_ram_k, scalar, {}))
             scalars.push_back(scalar);
+    }
     return scalars;
 }
 
 /** The CPU classes the library accepts as pins on this machine, from the portable floor up. */
 inline std::vector<usearch_cpu_class_t> admitted_classes() {
     std::vector<usearch_cpu_class_t> classes;
-    for (usearch_cpu_class_t const cpu_class : cpu_classes_k)
+    for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_wasm64_extended_k; ++code) {
+        usearch_cpu_class_t const cpu_class = static_cast<usearch_cpu_class_t>(code);
         if (dense_opens(usearch_residency_ram_k, usearch_scalar_bf16_k, cpu_class)) classes.push_back(cpu_class);
+    }
     return classes;
 }
 
@@ -2040,7 +2063,7 @@ std::size_t check_checkpoint_round_trip(handle<verbs_type_>& index, std::string 
     verbs_type_::save(index.get(), index.executor(), bytes_view(path), &outcome);
     failures += check(outcome);
     if (failures) return failures;
-    failures += check(describe(index).reported.shards_count == parts);
+    failures += check(describe(index).shards_count == parts);
     std::vector<std::string> const saved = files_starting_with(stem);
     failures += check(saved.size() == (parts == 1 ? 1 : parts + 1));
     landed_matches_t const original_matches = search(index);
@@ -2215,7 +2238,7 @@ int run_search_bench(settings_t const& settings, search_bench_settings_t const& 
     usearch_traversal_stats_t built {};
     std::chrono::steady_clock::time_point const build_start = std::chrono::steady_clock::now();
     if (report_failure(
-            insert_rows(index, entries, base_count, 0, search.batch.value, search.expansion_add.value, built),
+            insert_entries(index, entries, base_count, 0, search.batch.value, search.expansion_add.value, built),
             "Inserting"))
         return 1;
     double const build_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count();

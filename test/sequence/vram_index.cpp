@@ -338,7 +338,7 @@ static std::size_t check_sequence_vram_plural(u64_t seed, cuda_executor_t& execu
     typename index_t::search_config_t const search_config {expansion_k, wanted_k};
     failures += expect_eq(indexes
                               .search(queries, executor, search_config, {found_keys.data(), {queries_k, wanted_k}},
-                                      {found_distances.data(), {queries_k, wanted_k}}, counts)
+                                      nk::matrix_span<f32_t> {found_distances.data(), {queries_k, wanted_k}}, counts)
                               .status,
                           status_t::success_k);
     std::size_t plural_matched = 0;

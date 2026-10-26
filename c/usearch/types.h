@@ -1261,11 +1261,20 @@ USEARCH_EXPORT usearch_mood_t usearch_mood_from_name(usearch_bytes_view_t name);
 /** The canonical spelling of a CPU class, as the dispatch ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class);
 
+/** Reads a CPU class back; @c usearch_cpu_class_unknown_k when unrecognized. */
+USEARCH_EXPORT usearch_cpu_class_t usearch_cpu_class_from_name(usearch_bytes_view_t name);
+
 /** The canonical spelling of a GPU class, as the dispatch ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class);
 
+/** Reads a GPU class back; @c usearch_gpu_class_unknown_k when unrecognized. */
+USEARCH_EXPORT usearch_gpu_class_t usearch_gpu_class_from_name(usearch_bytes_view_t name);
+
 /** The canonical spelling of an NVMe class, as the I/O engine ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class);
+
+/** Reads an NVMe class back; @c usearch_nvme_class_unknown_k when unrecognized. */
+USEARCH_EXPORT usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_view_t name);
 
 /**
  *  @brief Reports the version of the library this process linked, which may differ from the

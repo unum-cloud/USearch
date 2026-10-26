@@ -3,18 +3,18 @@
  *  @author Ash Vardanian
  *  @date July 17, 2026
  *  @brief Profiling harness for searching the CPU-resident @c dense::ram_index over real persisted
- *      datasets, shared by the per-dtype benchmark shards.
+ *      datasets: the sparse single-shard probe beside the benchmarks over the C interface.
  *
  *  The backend-neutral surface - settings, checkpoints, dataset streaming and the process setup -
  *  lives in @c dense.cuh, the telemetry and result judgment in @c dense_search.cuh; this header owns
  *  everything CPU: the ForkUnion run loops streaming one row or query per task, the NUMA-domain
- *  placement, the waiter dispatch, and the compile-time cascade resolving the CLI into one concrete
- *  @c dense::ram_index instantiation, sharded per stored dtype. The cascade ends in the workload
- *  its entry hop names, the timed search for this binary.
+ *  placement, and the compile-time cascade resolving the CLI into one concrete @c dense::ram_index
+ *  instantiation, at the serial class or at the newest one its host compiled. The cascade ends in
+ *  the workload its entry hop names, the timed search for this binary.
  *
  *  This binary holds exactly one index; plurality belongs to the operating system or to the
- *  sharded sibling. N independent builds, one per memory domain over its own slice of one
- *  dataset, is an invocation rather than a code path:
+ *  benchmarks over the C interface. N independent builds, one per memory domain over its own slice
+ *  of one dataset, is an invocation rather than a code path:
  *
  *  @code{.sh}
  *  for domain in 0 1; do
@@ -28,7 +28,6 @@
 #include <algorithm> // `std::min`
 #include <chrono>    // `std::chrono::steady_clock`
 #include <memory>    // `std::unique_ptr`
-#include <tuple>     // `std::tuple`, `std::tuple_element_t` for the schedule waiter list
 #include <vector>    // `std::vector`
 
 #include <fmt/format.h>
@@ -37,16 +36,12 @@
 #include "usearch/utilities/ram_device.hpp"
 
 #include "dense_search.cuh"
-#include "utilities/persisted_dataset.hpp"
 
 namespace unum::usearch::bench::dense {
 
 #pragma region Pipeline
 
-/** The STL floor below the schedule table, correct on every machine. */
-using yield_waiter_t = fu::standard_yield_t;
-
-/** The spin hint every core of this architecture runs. */
+/** The spin hint every core of this architecture runs, which every probed index waits with. */
 #if FORKUNION_ARCH_X86_64_
 using hint_waiter_t = fu::x86_pause_t;
 #elif FORKUNION_ARCH_ARM64_
@@ -56,22 +51,6 @@ using hint_waiter_t = fu::risc5_pause_t;
 #else
 using hint_waiter_t = fu::standard_yield_t;
 #endif
-
-/** The monitored wait this unit compiles, admitted against @c fu_runtime_capabilities before its
- *  row runs; with none compiled the row collapses onto the hint. */
-#if FORKUNION_TARGET_X86_TPAUSE
-using monitor_waiter_t = fu::x86_tpause_t;
-#elif FORKUNION_TARGET_ARM64_WFET
-using monitor_waiter_t = fu::arm64_wfet_t;
-#elif FORKUNION_TARGET_RISC5_WRS
-using monitor_waiter_t = fu::risc5_wrs_t;
-#else
-using monitor_waiter_t = hint_waiter_t;
-#endif
-
-/** The waiter type each schedule table row instantiates, positionally; on the fallback arch both
- *  entries collapse onto the yield floor, so only row 0 is reachable. */
-using schedule_waiters_t = std::tuple<hint_waiter_t, monitor_waiter_t>;
 
 /**
  *  @brief The CPU-side state one fully-typed benchmark run shares between its phases: the one
@@ -229,7 +208,7 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     lane.computed_distances_in_reverse_refines += result.computed_distances_in_reverse_refines;
     lane.restarts += result.restarts;
     lane.saturated_walks += result.saturated_walks;
-    streamed.id_to_row[local_id] = static_cast<u32_t>(bench.settings.first_vector.value + row);
+    streamed.id_to_row[local_id] = bench.settings.first_vector.value + row;
 }
 
 template <typename streamed_dataset_type_>
@@ -388,7 +367,7 @@ bool save_index(streamed_dataset_type_& streamed) {
     auto& bench = streamed.bench;
     auto started = steady_clock_t::now();
     std::size_t const checkpoint_bytes = save_checkpoint(bench.settings, *bench.index,
-                                                         std::span<u32_t const> {streamed.id_to_row}, streamed.scale);
+                                                         std::span<u64_t const> {streamed.id_to_row}, streamed.scale);
     if (!checkpoint_bytes) return false;
     double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     fmt::println("Saved the index: {:.2f} GB in {:.2f} s", gigabytes(checkpoint_bytes), seconds);
@@ -426,12 +405,12 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
         query_vector = searched_rows(streamed).row(query).as_vector();
     else query_vector = streamed.stage(searched_rows(streamed).row(query).as_vector(), thread, query);
 
-    u32_t* const merged_rows = bench.results.hit_rows.row(query).data();
+    u64_t* const merged_rows = bench.results.hit_rows.row(query).data();
     auto* const merged_distances = bench.results.hit_distances.row(query).data();
 
     // The index stores no keys, so matches translate through the ID → row map on the way out.
     typename bench_t::traversal_t& traversal = *bench.traversals[thread];
-    std::span<u32_t> const rows_span {merged_rows, bench.settings.top_k.value};
+    std::span<u64_t> const rows_span {merged_rows, bench.settings.top_k.value};
     std::span<distance_t> const distances_span {merged_distances, bench.settings.top_k.value};
     auto search = [&]() noexcept {
         if constexpr (!nk::is_integral_dtype<typename index_t::scalar_t>())
@@ -530,9 +509,9 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
     using scalar_t = typename bench_context_type_::scalar_t;
 
-    utilities::persisted_dataset<dataset_scalar_type_> const& dataset = launch.dataset;
+    mapped_dataset<dataset_scalar_type_> const& dataset = launch.dataset;
     std::size_t const dimensions = dataset.dimensions();
-    std::size_t const total_rows = dataset.vectors().extent(0);
+    std::size_t const total_rows = dataset.rows();
     std::size_t const first_row = launch.settings.first_vector.value;
     if (first_row >= total_rows) {
         fmt::println("--first-vector {} exceeds the {} dataset rows", first_row, total_rows);
@@ -540,9 +519,9 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
     }
     std::size_t rows = total_rows - first_row;
     if (launch.settings.max_base_vectors.value) rows = std::min(rows, launch.settings.max_base_vectors.value);
-    nk::matrix_view<dataset_scalar_type_> const dataset_vectors = dataset.vectors();
-    nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset_vectors(nk::range(first_row, first_row + rows),
-                                                                                 nk::slice);
+    nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset.vectors(first_row, rows);
+    if (sliced_vectors.empty())
+        return fmt::println("--first-vector {} and --max-base-vectors {} span two parts", first_row, rows), 1;
 
     // Self-queries keep the harness usable on a lone vectors file, without recall.
     nk::matrix_view<dataset_scalar_type_> const source_queries =
@@ -616,41 +595,16 @@ int run_with_metric(bench_launch<dataset_scalar_type_> const& launch, workload_t
             });
 }
 
-/** Schedule axis: the newest schedule row the allow-mask admits, intersected with what this
- *  machine offers, picks the waiter from @ref schedule_waiters_t; past the tail sits the yield
- *  floor. The same mask already reached @c fu_pool_new, so the pool waits the same way. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
-int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
-    return dispatch_index<std::size(schedule_choices_k)>(
-        highest_index(schedule_choices_k, effective_schedule(launch.settings.max_schedule)),
-        [&](auto row) {
-            using wait_type_ = std::tuple_element_t<row.value, schedule_waiters_t>;
-            return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, wait_type_>(launch, workload);
-        },
-        [&] {
-            return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, yield_waiter_t>(launch, workload);
-        });
-}
-
-/** Compute axis: the allow-mask intersected with the runtime detection picks the newest table
- *  row, whose @ref prefix_mask ceiling instantiates @ref run_with_schedule; past the tail sit the
- *  serial kernels every machine owns. */
+/** Class axis: the serial kernels every machine owns under `--max-compute serial`, else the newest
+ *  kits this unit compiled for its host, which it runs on. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename workload_type_>
 int run_with_compute(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-    nk_capability_t const effective = launch.settings.max_compute & available;
-    return dispatch_index<std::size(compute_choices_k)>(
-        highest_index(compute_choices_k, effective),
-        [&](auto row) {
-            return run_with_schedule<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_choices_k, row.value)>(
-                launch, workload);
-        },
-        [&] { return run_with_schedule<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch, workload); });
+    if (launch.settings.max_compute == nk_cap_serial_k)
+        return run_with_metric<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k, hint_waiter_t>(launch, workload);
+    return run_with_metric<dataset_scalar_type_, stored_dtype_, nk_cap_any_k, hint_waiter_t>(launch, workload);
 }
 
-/** The shard hop: everything below one stored dtype, so a per-dtype shard translation unit
- *  carries the whole instantiation grid of its dtype. */
+/** Everything below one stored dtype: the two classes the probe compares. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_stored_dtype(bench_launch<dataset_scalar_type_> const& launch) {
     return run_with_compute<dataset_scalar_type_, stored_dtype_>(launch, search_workload_t {});

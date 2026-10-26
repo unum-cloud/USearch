@@ -476,7 +476,9 @@ void usearch_shapes_describe(usearch_shapes_describe_t* arguments) {
         index.entries.capacity(),
         total_points,
         payload_extent(index, index.entries.size()),
-        "serial",
+        usearch_cpu_class_serial_k,
+        usearch_gpu_class_unknown_k,
+        1,
     };
 }
 
