@@ -741,6 +741,7 @@ func (index *Index) Search(query []float32, limit uint) (keys []Key, distances [
 //   - query: Must have exactly Dimensions() elements
 //   - limit: Maximum number of results to return
 //   - handler: Filter callback that returns non-zero to accept a candidate, zero to reject
+//   - exact: Skip the graph and measure only the vectors the handler accepts; exact, and faster when few are accepted
 //
 // Returns:
 //   - keys: IDs of the nearest vectors that passed the filter (up to limit)
@@ -748,7 +749,7 @@ func (index *Index) Search(query []float32, limit uint) (keys []Key, distances [
 //   - err: Error if query is invalid, handler is nil, or search fails
 //
 // The actual number of results may be less than limit if fewer vectors pass the filter.
-func (index *Index) FilteredSearch(query []float32, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
+func (index *Index) FilteredSearch(query []float32, limit uint, handler *FilteredSearchHandler, exact bool) (keys []Key, distances []float32, err error) {
 	if index.handle == nil {
 		panic("index is uninitialized")
 	}
@@ -772,7 +773,7 @@ func (index *Index) FilteredSearch(query []float32, limit uint, handler *Filtere
 	defer filterHandle.Delete()
 	var errorMessage *C.char
 	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_f32_k, (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(&filterHandle),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(&filterHandle), C.bool(exact),
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
@@ -831,13 +832,14 @@ func goFilteredSearchCallback(key C.usearch_key_t, ptr unsafe.Pointer) C.int {
 }
 
 // FilteredSearchUnsafe performs filtered k-ANN search using an unsafe pointer.
+// With exact set, it skips the graph and measures only the vectors the handler accepts.
 //
 // SAFETY REQUIREMENTS:
 //   - query must not be nil
 //   - Memory at query must contain exactly Dimensions() scalars
 //   - Scalar type must match index.config.Quantization
 //   - Memory must remain valid for the duration of the call
-func (index *Index) FilteredSearchUnsafe(query unsafe.Pointer, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
+func (index *Index) FilteredSearchUnsafe(query unsafe.Pointer, limit uint, handler *FilteredSearchHandler, exact bool) (keys []Key, distances []float32, err error) {
 	if index.handle == nil {
 		panic("index is uninitialized")
 	}
@@ -860,7 +862,7 @@ func (index *Index) FilteredSearchUnsafe(query unsafe.Pointer, limit uint, handl
 	defer filterHandle.Delete()
 	var errorMessage *C.char
 	resultCount := uint(C.usearch_filtered_search(index.handle, query, index.config.Quantization.CValue(), (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(&filterHandle),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(&filterHandle), C.bool(exact),
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
@@ -1022,7 +1024,7 @@ func (index *Index) SearchI8(query []int8, limit uint) (keys []Key, distances []
 	return keys, distances, nil
 }
 
-func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
+func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *FilteredSearchHandler, exact bool) (keys []Key, distances []float32, err error) {
 	if index.handle == nil {
 		panic("index is uninitialized")
 	}
@@ -1046,7 +1048,7 @@ func (index *Index) FilteredSearchI8(query []int8, limit uint, handler *Filtered
 	defer filterHandle.Delete()
 	var errorMessage *C.char
 	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_i8_k, (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(&filterHandle),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(&filterHandle), C.bool(exact),
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
@@ -1116,7 +1118,8 @@ func (index *Index) SearchU8(query []uint8, limit uint) (keys []Key, distances [
 }
 
 // FilteredSearchU8 searches for nearest neighbors using a uint8 query vector with filtering.
-func (index *Index) FilteredSearchU8(query []uint8, limit uint, handler *FilteredSearchHandler) (keys []Key, distances []float32, err error) {
+// With exact set, it skips the graph and measures only the vectors the handler accepts.
+func (index *Index) FilteredSearchU8(query []uint8, limit uint, handler *FilteredSearchHandler, exact bool) (keys []Key, distances []float32, err error) {
 	if index.handle == nil {
 		panic("index is uninitialized")
 	}
@@ -1140,7 +1143,7 @@ func (index *Index) FilteredSearchU8(query []uint8, limit uint, handler *Filtere
 	defer filterHandle.Delete()
 	var errorMessage *C.char
 	resultCount := uint(C.usearch_filtered_search(index.handle, unsafe.Pointer(&query[0]), C.usearch_scalar_u8_k, (C.size_t)(limit),
-		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(&filterHandle),
+		(C.usearch_filtered_search_callback_t)(C.goFilteredSearchCallback), unsafe.Pointer(&filterHandle), C.bool(exact),
 		(*C.usearch_key_t)(&keys[0]), (*C.usearch_distance_t)(&distances[0]), (*C.usearch_error_t)(&errorMessage)))
 	runtime.KeepAlive(query)
 	runtime.KeepAlive(keys)
