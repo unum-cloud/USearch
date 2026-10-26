@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"runtime"
+	"sort"
 	"sync"
 	"testing"
 	"unsafe"
@@ -560,7 +561,7 @@ func TestQuantizationTypes(t *testing.T) {
 			Data: map[Key]bool{1: true},
 		}
 
-		keys, _, err = index.FilteredSearch(vector, 1, handler)
+		keys, _, err = index.FilteredSearch(vector, 1, handler, false)
 		if err != nil {
 			t.Fatalf("F32 FilteredSearch failed: %v", err)
 		}
@@ -612,7 +613,7 @@ func TestQuantizationTypes(t *testing.T) {
 			Data: map[Key]bool{1: true},
 		}
 
-		keys, _, err = index.FilteredSearchUnsafe(unsafe.Pointer(&vector[0]), 5, handler)
+		keys, _, err = index.FilteredSearchUnsafe(unsafe.Pointer(&vector[0]), 5, handler, false)
 		if err != nil {
 			t.Fatalf("F64 FilteredSearchUnsafe failed: %v", err)
 		}
@@ -660,7 +661,7 @@ func TestQuantizationTypes(t *testing.T) {
 			Data: map[Key]bool{1: true},
 		}
 
-		keys, _, err = index.FilteredSearchI8(vector, 1, handler)
+		keys, _, err = index.FilteredSearchI8(vector, 1, handler, false)
 		if err != nil {
 			t.Fatalf("FilteredSearchI8 failed: %v", err)
 		}
@@ -708,7 +709,7 @@ func TestQuantizationTypes(t *testing.T) {
 			Data: map[Key]bool{1: true},
 		}
 
-		keys, _, err = index.FilteredSearchU8(vector, 1, handler)
+		keys, _, err = index.FilteredSearchU8(vector, 1, handler, false)
 		if err != nil {
 			t.Fatalf("FilteredSearchU8 failed: %v", err)
 		}
@@ -816,7 +817,7 @@ func TestUnsafeOperations(t *testing.T) {
 			Data: map[Key]bool{1: true},
 		}
 
-		keys, _, err = index.FilteredSearchUnsafe(ptr, 5, handler)
+		keys, _, err = index.FilteredSearchUnsafe(ptr, 5, handler, false)
 		if err != nil {
 			t.Fatalf("FilteredSearchUnsafe failed: %v", err)
 		}
@@ -1271,5 +1272,92 @@ func TestRename(t *testing.T) {
 	}
 	if len(keys) != 1 || keys[0] != Key(2) {
 		t.Fatalf("Expected to find key 2, got %v", keys)
+	}
+}
+
+// TestFilteredSearchExact checks that an exact filtered search returns the same distances as a brute-force
+// scan of the accepted vectors, in ascending order, and only keys the handler accepts.
+func TestFilteredSearchExact(t *testing.T) {
+	const dimensions = 32
+	const vectorCount = 1000
+	const limit = 10
+
+	// A sparse graph makes the approximate search miss neighbors, so only an exact search matches brute force.
+	conf := DefaultConfig(dimensions)
+	conf.Metric = L2sq
+	conf.Connectivity = 2
+	conf.ExpansionAdd = 4
+	index, err := NewIndex(conf)
+	if err != nil {
+		t.Fatalf("Failed to create index: %v", err)
+	}
+	defer index.Destroy()
+	if err := index.Reserve(vectorCount); err != nil {
+		t.Fatalf("Failed to reserve: %v", err)
+	}
+
+	vectors := make([][]float32, vectorCount)
+	state := uint32(1)
+	for i := range vectors {
+		vectors[i] = make([]float32, dimensions)
+		for d := range vectors[i] {
+			state = state*1664525 + 1013904223
+			vectors[i][d] = float32(state>>8) / float32(1<<24)
+		}
+		if err := index.Add(Key(i), vectors[i]); err != nil {
+			t.Fatalf("Failed to add vector %d: %v", i, err)
+		}
+	}
+
+	handler := &FilteredSearchHandler{
+		Callback: func(key Key, handler *FilteredSearchHandler) int {
+			if key%7 == 0 {
+				return 1
+			}
+			return 0
+		},
+	}
+
+	for q := 0; q < vectorCount; q += 97 {
+		query := vectors[q]
+		keys, distances, err := index.FilteredSearch(query, limit, handler, true)
+		if err != nil {
+			t.Fatalf("Exact FilteredSearch failed: %v", err)
+		}
+		if len(keys) != limit {
+			t.Fatalf("Exact FilteredSearch returned %d keys, expected %d", len(keys), limit)
+		}
+
+		scan := make([]float32, 0, vectorCount/7+1)
+		for i := 0; i < vectorCount; i += 7 {
+			distance, err := Distance(query, vectors[i], dimensions, L2sq)
+			if err != nil {
+				t.Fatalf("Distance failed: %v", err)
+			}
+			scan = append(scan, distance)
+		}
+		sort.Slice(scan, func(a, b int) bool { return scan[a] < scan[b] })
+
+		for j, key := range keys {
+			if key%7 != 0 {
+				t.Fatalf("Exact FilteredSearch returned key %d, which the handler rejects", key)
+			}
+			if math.Abs(float64(distances[j]-scan[j])) > distanceTolerance {
+				t.Fatalf("Exact FilteredSearch distance %d is %f, brute force is %f", j, distances[j], scan[j])
+			}
+		}
+
+		unsafeKeys, _, err := index.FilteredSearchUnsafe(unsafe.Pointer(&query[0]), limit, handler, true)
+		if err != nil {
+			t.Fatalf("Exact FilteredSearchUnsafe failed: %v", err)
+		}
+		if len(unsafeKeys) != len(keys) {
+			t.Fatalf("Exact FilteredSearchUnsafe returned %d keys, FilteredSearch returned %d", len(unsafeKeys), len(keys))
+		}
+		for j := range keys {
+			if unsafeKeys[j] != keys[j] {
+				t.Fatalf("Exact FilteredSearchUnsafe and FilteredSearch differ at %d", j)
+			}
+		}
 	}
 }
