@@ -424,10 +424,10 @@ class BatchMatches(Sequence):
             count = self.keys.shape[1]
 
         if count == 1:
-            recall = np.sum(self.keys[:, 0] == expected)
+            recall = np.sum((self.counts > 0) & (self.keys[:, 0] == expected))
         else:
             for i in range(len(self)):
-                recall += expected[i] in self.keys[i, :count]
+                recall += expected[i] in self.keys[i, : self.counts[i]][:count]
         return recall
 
     def __repr__(self) -> str:
