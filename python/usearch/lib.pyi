@@ -430,9 +430,33 @@ class On[IndexT]:
         """Names the index the receiver addresses, as `On[DenseIndex]`."""
         ...
 
-    def describe(self: On[DenseIndex]) -> DenseIndexDescription: ...
-    def reserve(self: On[DenseIndex], capacity: int, /) -> None: ...
-    def clear(self: On[DenseIndex]) -> None: ...
+    def describe(self: On[DenseIndex]) -> DenseIndexDescription:
+        """The frozen metadata and the current counters, read in one call. Each counter is read
+        once, so under concurrent insertions they may come from slightly different moments.
+        Calls `usearch_dense_describe`.
+
+        Example:
+          >>> usearch.DenseIndex.init_ram(256).describe().metadata.dimensions
+          256
+        """
+        ...
+
+    def reserve(self: On[DenseIndex], capacity: int, /) -> None:
+        """Grows the index to host at least `capacity` entries, a hint,
+        since insertions grow the index on demand.
+        Calls `usearch_dense_reserve`.
+
+        Args:
+          capacity (int): Entries the index must accept without growing again.
+        """
+        ...
+
+    def clear(self: On[DenseIndex]) -> None:
+        """Drops every entry, keeping the capacity and the frozen geometry.
+        Calls `usearch_dense_clear`.
+        """
+        ...
+
     def insert(
         self: On[DenseIndex],
         keys: Sequence[_KeyLike] | _Tensor,
@@ -444,7 +468,35 @@ class On[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> None: ...
+    ) -> None:
+        """Inserts a batch of vectors under a batch of keys; one vector is a one-row matrix.
+        Keys need not be unique: inserting one twice stores two entries, and `count`
+        reports both. A batch is all-or-nothing and becomes visible at once, so a rejected
+        batch leaves the index untouched and a concurrent search sees all of it or none.
+        Calls `usearch_dense_insert`.
+
+        Args:
+          keys (Sequence[Key | int] | buffer): One key per row, or an (N, 16) buffer.
+          vectors (buffer): An (N, dimensions) matrix; only the row stride may vary.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
+          dtype (Scalar, optional): Names the input scalar type when the buffer cannot; it
+            must be as wide as the buffer's items.
+          progress (callable, optional): Called with (completed, total) rows. It reports and
+            cannot stop the batch, every row being claimed before the first report; what it
+            raises surfaces once the batch has landed. Reports are serialized.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=4)
+          >>> index.reserve(1)
+          >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))
+          >>> len(index)
+          1
+        """
+        ...
+
     def refine(
         self: On[DenseIndex],
         *,
@@ -452,8 +504,57 @@ class On[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> int: ...
-    def health(self: On[DenseIndex]) -> DenseReachability: ...
+    ) -> int:
+        """Re-selects the neighbors of every stored entry against the finished graph, improving
+        edges that were chosen when the graph around them was still incomplete.
+
+        A build step rather than a repair: a cheap insertion pass followed by one refinement
+        reaches a better graph, in less total time, than one expensive insertion pass - so a
+        wide `expansion_factor` belongs here rather than in `insert`. Searches may run
+        throughout on a RAM handle but not on a VRAM one, and a caller loops until the
+        return falls below whatever change rate they consider settled.
+
+        Stopping is not an error here and raises nothing: re-selecting edges claims no
+        identity, so a stopped sweep leaves the graph correct and merely less improved. A
+        handler is therefore how a sweep is put under a time budget.
+        Calls `usearch_dense_refine`.
+
+        Args:
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
+          progress (callable, optional): Called with (completed, total) nodes; returning
+            False ends the sweep, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          int: Nodes whose edges changed; zero means the graph has settled.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=4)
+          >>> index.reserve(1)
+          >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))
+          >>> index.refine()
+          0
+        """
+        ...
+
+    def health(self: On[DenseIndex]) -> DenseReachability:
+        """Audits how much of the graph a search can reach, sweeping forward reachability from as
+        many landmarks as one search draws. Read-only.
+        Calls `usearch_dense_health`.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=4)
+          >>> index.reserve(1)
+          >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))
+          >>> health = index.health()
+          >>> health.reachable == health.audited == 1
+          True
+        """
+        ...
+
     def search(
         self: On[DenseIndex],
         queries: _Tensor,
@@ -468,9 +569,79 @@ class On[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Matches: ...
-    def count(self: On[DenseIndex], key: _KeyLike, /) -> int: ...
-    def get(self: On[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> DenseVectors: ...
+    ) -> Matches:
+        """Finds the `wanted` nearest entries for every query row; one query is a one-row matrix.
+        Never writes to the graph, so any number of searches may overlap with insertions.
+        Calls `usearch_dense_search`.
+
+        Args:
+          queries (buffer): A (Q, dimensions) matrix of query rows.
+          wanted (int): Upper bound on matches per query - the 'k' in 'kANN'.
+          arena (Arena): Where the matches land, rewound by the call.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
+          traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;
+            `Traversal.SCAN` scores every row exactly, on RAM and NVMe handles.
+          dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
+          predicate (callable, optional): Admits a Key when it returns truthy. Non-matching
+            entries still route the traversal, so recall survives low selectivity. The
+            callback re-enters Python, so it runs under the GIL and serializes the walk.
+          progress (callable, optional): Called with (completed, total) queries; returning
+            False stops the batch and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          Matches: (Q, columns) runs in the arena, columns at most `wanted`, each count
+            bounding its own row.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=4)
+          >>> index.reserve(1)
+          >>> query = array('d', [0.1, 0.2, 0.3, 0.4])
+          >>> index.insert([7], query)
+          >>> key, distance = index.search(query, 1, usearch.Arena())[0][0]
+          >>> int(key)
+          7
+        """
+        ...
+
+    def count(self: On[DenseIndex], key: _KeyLike, /) -> int:
+        """How many entries share `key`; zero means the index holds none.
+        Calls `usearch_dense_count`.
+
+        Args:
+          key (Key | int | str): The identity to count.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=2)
+          >>> index.reserve(2)
+          >>> row = array('d', [0.1, 0.2])
+          >>> index.insert([7], row)
+          >>> index.insert([7], row)
+          >>> index.count(7)
+          2
+        """
+        ...
+
+    def get(self: On[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> DenseVectors:
+        """Every vector stored under `key`, in insertion order, and none when the key is absent.
+        Calls `usearch_dense_get`.
+
+        Args:
+          key (Key | int | str): The identity to retrieve.
+          arena (Arena): Where the rows land, rewound by the call.
+          outputs_dtype (Scalar, optional): The scalar type to export as; converted from storage.
+
+        Returns:
+          DenseVectors: A writable (count, dimensions) matrix in the arena, for the kinds
+            `memoryview` can format - f64, f32, f16, i8, u8. Sub-byte and mini-float kinds,
+            `bf16` among them, leave as a (count, row_bytes) run of 'B' instead. Empty, so falsy,
+            when the index holds no entry under `key`.
+        """
+        ...
+
     def multiply(
         self: On[DenseIndex],
         rows: _Tensor,
@@ -483,7 +654,34 @@ class On[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> DenseProducts: ...
+    ) -> DenseProducts:
+        """Approximate sparse product of a matrix against the indexed rows - the linear algebra
+        sibling of `search`, reporting every pair the traversal scored rather than only the
+        nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.
+        How many a walk scores is known only once it ends, so the pairs come back ragged.
+        Calls `usearch_dense_multiply`.
+
+        Args:
+          rows (buffer): An (R, dimensions) matrix of left-hand rows.
+          wanted (int): Upper bound on pairs kept per row, the first ones its walk scored;
+            0 keeps every pair.
+          arena (Arena): Where the pairs and their offsets land, rewound by the call.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it. A wider
+            factor widens the emitted pattern, being what the walk's breadth decides.
+          dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.
+          progress (callable, optional): Called with (completed, total) rows; returning False
+            stops the batch and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          DenseProducts: `offsets`, (R + 1,) Apache Arrow offsets, row `i` spanning pairs
+            `offsets[i]` up to `offsets[i + 1]`; `keys`, a (pairs, 16) run naming each pair's
+            indexed row; `scores`, the (pairs,) float64 products; and `required`, the pairs
+            scored before `wanted` cut any. All of them live in the arena.
+        """
+        ...
+
     def attend(
         self: On[DenseIndex],
         queries: _Tensor,
@@ -502,7 +700,53 @@ class On[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> DenseVectors: ...
+    ) -> DenseVectors:
+        """Softmax attention of every query row over every indexed key its walk scores, folded
+        online as Flash Attention folds key tiles, with no top-k cut. Never writes to the
+        graph, so a growing context may stream through this while insertions continue.
+
+        The index holds one layer's keys for one key-value head and no values: `row_of` names
+        the row of `values` each scored key reads, so only keys a walk scores are ever resolved.
+        Calls `usearch_dense_attend`.
+
+        Args:
+          queries (buffer): A (Q, dimensions) matrix; row `t * head_count + h` is head `h`
+            of token `t`.
+          values (buffer): An (N, dimensions) matrix of value rows, as wide as the keys and
+            stored in the index's quantization, borrowed until the call is final.
+          row_of (callable): Called with each scored Key, answers its row of `values`. None, or
+            a row outside them, refuses the call with `ShapeMismatchError`, as do values of
+            another width or scalar type. It re-enters Python from the library's threads, so it
+            runs under the GIL and serializes the walk. A VRAM walk resolves values on the
+            device, where no Python callable runs, so a VRAM arena raises `DeviceError`.
+          arena (Arena): Where the attended rows land, rewound by the call.
+          head_count (int, optional): The query heads sharing the index's key-value head, and
+            with it one walk per token; it must divide Q.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Wider
+            candidates walk further, folding more of the tail.
+          score_scale (float, optional): The logit scale, conventionally the inverse square
+            root of the head dimensionality; 0.0 derives it from the frozen geometry.
+          dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
+          values_dtype (Scalar, optional): Names the values' scalar type when the buffer cannot.
+          outputs_dtype (Scalar, optional): The scalar type to write the outputs as; defaults
+            to the queries' own.
+          carry (buffer, optional): A writable (Q, 2) buffer of float32, holding each query's
+            largest logit and the softmax denominator taken against it. The pair recombines
+            this branch with another over the same queries - attention sinks, a dense recent
+            window, or a second index of one context - by partial-softmax rescaling; a maximum
+            without its partition is a number nothing can rescale, which is why they travel as
+            one row.
+          progress (callable, optional): Called with (completed, total) tokens; returning
+            False stops the batch and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          DenseVectors: The (Q, dimensions) attended rows in the arena, already divided by the
+            partition; kinds `memoryview` cannot format leave as a (Q, row_bytes) run of 'B'.
+        """
+        ...
+
     def maxsim(
         self: On[DenseIndex],
         queries: _Tensor,
@@ -518,23 +762,138 @@ class On[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> DenseProducts: ...
+    ) -> DenseProducts:
+        """Late-interaction scoring of multi-row queries against multi-row entries: every query
+        row takes its best match within a key, and those maxima sum to that key's score.
+
+        A document is one key holding its token rows, which is what `values_per_key` above one
+        exists for, and the walk stays over individual tokens under a plain inner product - so
+        an entry's rows need no ordering and two documents need not share a row count. The
+        result is sized over documents rather than over rows.
+        Calls `usearch_dense_maxsim`.
+
+        Args:
+          queries (buffer): The token rows of every query laid end to end, an (Q * R,
+            dimensions) matrix.
+          rows_per_query (int): Rows every query occupies; uniform, so ColBERT's padding
+            applies as is. The query row count must be a whole multiple of it.
+          wanted (int): Upper bound on matches per query - the 'k' over documents, not rows;
+            0 keeps every document the query scored.
+          arena (Arena): Where the scored documents land, rewound by the call.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Widening it
+            nominates more documents, each still scored exactly.
+          traversal (Traversal, optional): `Traversal.WALK`, the default, nominates documents by
+            walking the graph; `Traversal.SCAN` nominates every document, on RAM and NVMe.
+          dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
+          predicate (callable, optional): Admits a Key when it returns truthy, asked before any
+            of its rows are scored, so a rejected document never scores.
+          progress (callable, optional): Called with (completed, total) queries; returning
+            False stops the batch and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          DenseProducts: `offsets`, (Q + 1,) Apache Arrow offsets, query `i` spanning documents
+            `offsets[i]` up to `offsets[i + 1]`, largest first; `keys`, a (documents, 16) run of
+            identities; `scores`, their (documents,) summed maxima; and `required`, the
+            documents scored before `wanted` cut any. All of them live in the arena.
+        """
+        ...
+
     def absorb(
         self: On[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0
-    ) -> None: ...
+    ) -> None:
+        """Absorbs every donor into this index, one after another, keeping their graphs rather
+        than re-inserting their vectors, and linking each in by walks across the appended
+        part. Each donor handle is consumed and every verb on it afterwards raises. Readers
+        of a RAM index may keep searching throughout, while a VRAM one admits no overlapping
+        search.
+
+        Cancellation stops between donors, so a donor already absorbed stays absorbed and one
+        not yet reached stays a live handle its caller still owns. A donor whose absorption
+        fails stays usable too, though its rows may already have landed in this index.
+        Calls `usearch_dense_absorb`.
+
+        Args:
+          donors (DenseIndex): The indexes to absorb.
+          progress (callable, optional): Called with (completed, total) donors; returning
+            False stops the absorb and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+        """
+        ...
+
     def save(
         self: On[DenseIndex], path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0
-    ) -> None: ...
+    ) -> None:
+        """Writes the index under `path`, in the layout its extension picks: one `.safegraphs`
+        monolith, or a `.safegraphs.json` manifest beside one part per shard. Demands a
+        mutation-free window; concurrent readers keep searching throughout.
+        Calls `usearch_dense_save`.
+
+        Args:
+          path (str | bytes | os.PathLike): Where the checkpoint goes.
+          progress (callable, optional): Called with (completed, total) shards; returning
+            False stops the write and raises `CancelledError`, leaving a checkpoint no
+            reader accepts and whatever parts it already wrote for the caller to remove.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+        """
+        ...
+
     def save_buffer(
         self: On[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
-    ) -> Monolith: ...
+    ) -> Monolith:
+        """Serializes the index as one monolith of every shard, the very bytes `save` writes to
+        a `.safegraphs` path.
+        Calls `usearch_dense_save_buffer`.
+
+        Args:
+          arena (Arena): Where the monolith lands, rewound by the call.
+          progress (callable, optional): Called with (completed, total) bytes; returning
+            False stops the write and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+
+        Returns:
+          Monolith: The monolith's bytes, in place in the arena.
+
+        Example:
+          >>> index = usearch.DenseIndex.init_ram(dimensions=4)
+          >>> index.reserve(1)
+          >>> checkpoint = index.save_buffer(usearch.Arena())
+          >>> usearch.DenseIndex.metadata_read_buffer(checkpoint).dimensions
+          4
+        """
+        ...
+
     def cursor(self: On[DenseIndex], starts: Sequence[_KeyLike] | _Tensor | None = None) -> DenseCursor:
         """Calls `usearch_dense_cursor_init`."""
         ...
 
     def search_stream(
         self: On[DenseIndex], query: _Tensor, /, *, expansion_factor: int = 0, dtype: Scalar | None = None
-    ) -> DenseSearchStream: ...
+    ) -> DenseSearchStream:
+        """Opens a resumable nearest-neighbor stream for one query, which `next` pulls for as
+        long as the caller wants more, each pull into the arena it names. Every pull blocks,
+        on the receiver's executor, which the stream keeps alive, or on the calling thread.
+        Calls `usearch_dense_search_stream_init`.
+
+        Args:
+          query (buffer): One vector of `dimensions` scalars.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
+          dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=2)
+          >>> index.reserve(1)
+          >>> index.insert([5], array('d', [0.1, 0.2]))
+          >>> stream, arena = index.search_stream(array('d', [0.1, 0.2])), usearch.Arena()
+          >>> [int(match.key) for match in stream.next(4, arena)[0]]
+          [5]
+          >>> len(stream.next(4, arena)[0])
+          0
+        """
+        ...
+
     def __repr__(self) -> str: ...
 
 @final
@@ -546,9 +905,33 @@ class DeferredOn[IndexT]:
         """Names the index the receiver addresses, as `DeferredOn[DenseIndex]`."""
         ...
 
-    def describe(self: DeferredOn[DenseIndex]) -> Deferred[DenseIndexDescription]: ...
-    def reserve(self: DeferredOn[DenseIndex], capacity: int, /) -> Deferred[None]: ...
-    def clear(self: DeferredOn[DenseIndex]) -> Deferred[None]: ...
+    def describe(self: DeferredOn[DenseIndex]) -> Deferred[DenseIndexDescription]:
+        """The frozen metadata and the current counters, read in one call. Each counter is read
+        once, so under concurrent insertions they may come from slightly different moments.
+        Calls `usearch_dense_describe`.
+
+        Example:
+          >>> usearch.DenseIndex.init_ram(256).describe().metadata.dimensions
+          256
+        """
+        ...
+
+    def reserve(self: DeferredOn[DenseIndex], capacity: int, /) -> Deferred[None]:
+        """Grows the index to host at least `capacity` entries, a hint,
+        since insertions grow the index on demand.
+        Calls `usearch_dense_reserve`.
+
+        Args:
+          capacity (int): Entries the index must accept without growing again.
+        """
+        ...
+
+    def clear(self: DeferredOn[DenseIndex]) -> Deferred[None]:
+        """Drops every entry, keeping the capacity and the frozen geometry.
+        Calls `usearch_dense_clear`.
+        """
+        ...
+
     def insert(
         self: DeferredOn[DenseIndex],
         keys: Sequence[_KeyLike] | _Tensor,
@@ -560,7 +943,35 @@ class DeferredOn[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Deferred[None]: ...
+    ) -> Deferred[None]:
+        """Inserts a batch of vectors under a batch of keys; one vector is a one-row matrix.
+        Keys need not be unique: inserting one twice stores two entries, and `count`
+        reports both. A batch is all-or-nothing and becomes visible at once, so a rejected
+        batch leaves the index untouched and a concurrent search sees all of it or none.
+        Calls `usearch_dense_insert`.
+
+        Args:
+          keys (Sequence[Key | int] | buffer): One key per row, or an (N, 16) buffer.
+          vectors (buffer): An (N, dimensions) matrix; only the row stride may vary.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
+          dtype (Scalar, optional): Names the input scalar type when the buffer cannot; it
+            must be as wide as the buffer's items.
+          progress (callable, optional): Called with (completed, total) rows. It reports and
+            cannot stop the batch, every row being claimed before the first report; what it
+            raises surfaces once the batch has landed. Reports are serialized.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=4)
+          >>> index.reserve(1)
+          >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))
+          >>> len(index)
+          1
+        """
+        ...
+
     def refine(
         self: DeferredOn[DenseIndex],
         *,
@@ -568,8 +979,57 @@ class DeferredOn[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Deferred[int]: ...
-    def health(self: DeferredOn[DenseIndex]) -> Deferred[DenseReachability]: ...
+    ) -> Deferred[int]:
+        """Re-selects the neighbors of every stored entry against the finished graph, improving
+        edges that were chosen when the graph around them was still incomplete.
+
+        A build step rather than a repair: a cheap insertion pass followed by one refinement
+        reaches a better graph, in less total time, than one expensive insertion pass - so a
+        wide `expansion_factor` belongs here rather than in `insert`. Searches may run
+        throughout on a RAM handle but not on a VRAM one, and a caller loops until the
+        return falls below whatever change rate they consider settled.
+
+        Stopping is not an error here and raises nothing: re-selecting edges claims no
+        identity, so a stopped sweep leaves the graph correct and merely less improved. A
+        handler is therefore how a sweep is put under a time budget.
+        Calls `usearch_dense_refine`.
+
+        Args:
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
+          progress (callable, optional): Called with (completed, total) nodes; returning
+            False ends the sweep, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          int: Nodes whose edges changed; zero means the graph has settled.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=4)
+          >>> index.reserve(1)
+          >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))
+          >>> index.refine()
+          0
+        """
+        ...
+
+    def health(self: DeferredOn[DenseIndex]) -> Deferred[DenseReachability]:
+        """Audits how much of the graph a search can reach, sweeping forward reachability from as
+        many landmarks as one search draws. Read-only.
+        Calls `usearch_dense_health`.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=4)
+          >>> index.reserve(1)
+          >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))
+          >>> health = index.health()
+          >>> health.reachable == health.audited == 1
+          True
+        """
+        ...
+
     def search(
         self: DeferredOn[DenseIndex],
         queries: _Tensor,
@@ -584,11 +1044,81 @@ class DeferredOn[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Deferred[Matches]: ...
-    def count(self: DeferredOn[DenseIndex], key: _KeyLike, /) -> Deferred[int]: ...
+    ) -> Deferred[Matches]:
+        """Finds the `wanted` nearest entries for every query row; one query is a one-row matrix.
+        Never writes to the graph, so any number of searches may overlap with insertions.
+        Calls `usearch_dense_search`.
+
+        Args:
+          queries (buffer): A (Q, dimensions) matrix of query rows.
+          wanted (int): Upper bound on matches per query - the 'k' in 'kANN'.
+          arena (Arena): Where the matches land, rewound by the call.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
+          traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;
+            `Traversal.SCAN` scores every row exactly, on RAM and NVMe handles.
+          dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
+          predicate (callable, optional): Admits a Key when it returns truthy. Non-matching
+            entries still route the traversal, so recall survives low selectivity. The
+            callback re-enters Python, so it runs under the GIL and serializes the walk.
+          progress (callable, optional): Called with (completed, total) queries; returning
+            False stops the batch and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          Matches: (Q, columns) runs in the arena, columns at most `wanted`, each count
+            bounding its own row.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=4)
+          >>> index.reserve(1)
+          >>> query = array('d', [0.1, 0.2, 0.3, 0.4])
+          >>> index.insert([7], query)
+          >>> key, distance = index.search(query, 1, usearch.Arena())[0][0]
+          >>> int(key)
+          7
+        """
+        ...
+
+    def count(self: DeferredOn[DenseIndex], key: _KeyLike, /) -> Deferred[int]:
+        """How many entries share `key`; zero means the index holds none.
+        Calls `usearch_dense_count`.
+
+        Args:
+          key (Key | int | str): The identity to count.
+
+        Example:
+          >>> from array import array
+          >>> index = usearch.DenseIndex.init_ram(dimensions=2)
+          >>> index.reserve(2)
+          >>> row = array('d', [0.1, 0.2])
+          >>> index.insert([7], row)
+          >>> index.insert([7], row)
+          >>> index.count(7)
+          2
+        """
+        ...
+
     def get(
         self: DeferredOn[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...
-    ) -> Deferred[DenseVectors]: ...
+    ) -> Deferred[DenseVectors]:
+        """Every vector stored under `key`, in insertion order, and none when the key is absent.
+        Calls `usearch_dense_get`.
+
+        Args:
+          key (Key | int | str): The identity to retrieve.
+          arena (Arena): Where the rows land, rewound by the call.
+          outputs_dtype (Scalar, optional): The scalar type to export as; converted from storage.
+
+        Returns:
+          DenseVectors: A writable (count, dimensions) matrix in the arena, for the kinds
+            `memoryview` can format - f64, f32, f16, i8, u8. Sub-byte and mini-float kinds,
+            `bf16` among them, leave as a (count, row_bytes) run of 'B' instead. Empty, so falsy,
+            when the index holds no entry under `key`.
+        """
+        ...
+
     def multiply(
         self: DeferredOn[DenseIndex],
         rows: _Tensor,
@@ -601,7 +1131,34 @@ class DeferredOn[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Deferred[DenseProducts]: ...
+    ) -> Deferred[DenseProducts]:
+        """Approximate sparse product of a matrix against the indexed rows - the linear algebra
+        sibling of `search`, reporting every pair the traversal scored rather than only the
+        nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.
+        How many a walk scores is known only once it ends, so the pairs come back ragged.
+        Calls `usearch_dense_multiply`.
+
+        Args:
+          rows (buffer): An (R, dimensions) matrix of left-hand rows.
+          wanted (int): Upper bound on pairs kept per row, the first ones its walk scored;
+            0 keeps every pair.
+          arena (Arena): Where the pairs and their offsets land, rewound by the call.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it. A wider
+            factor widens the emitted pattern, being what the walk's breadth decides.
+          dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.
+          progress (callable, optional): Called with (completed, total) rows; returning False
+            stops the batch and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          DenseProducts: `offsets`, (R + 1,) Apache Arrow offsets, row `i` spanning pairs
+            `offsets[i]` up to `offsets[i + 1]`; `keys`, a (pairs, 16) run naming each pair's
+            indexed row; `scores`, the (pairs,) float64 products; and `required`, the pairs
+            scored before `wanted` cut any. All of them live in the arena.
+        """
+        ...
+
     def attend(
         self: DeferredOn[DenseIndex],
         queries: _Tensor,
@@ -620,7 +1177,53 @@ class DeferredOn[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Deferred[DenseVectors]: ...
+    ) -> Deferred[DenseVectors]:
+        """Softmax attention of every query row over every indexed key its walk scores, folded
+        online as Flash Attention folds key tiles, with no top-k cut. Never writes to the
+        graph, so a growing context may stream through this while insertions continue.
+
+        The index holds one layer's keys for one key-value head and no values: `row_of` names
+        the row of `values` each scored key reads, so only keys a walk scores are ever resolved.
+        Calls `usearch_dense_attend`.
+
+        Args:
+          queries (buffer): A (Q, dimensions) matrix; row `t * head_count + h` is head `h`
+            of token `t`.
+          values (buffer): An (N, dimensions) matrix of value rows, as wide as the keys and
+            stored in the index's quantization, borrowed until the call is final.
+          row_of (callable): Called with each scored Key, answers its row of `values`. None, or
+            a row outside them, refuses the call with `ShapeMismatchError`, as do values of
+            another width or scalar type. It re-enters Python from the library's threads, so it
+            runs under the GIL and serializes the walk. A VRAM walk resolves values on the
+            device, where no Python callable runs, so a VRAM arena raises `DeviceError`.
+          arena (Arena): Where the attended rows land, rewound by the call.
+          head_count (int, optional): The query heads sharing the index's key-value head, and
+            with it one walk per token; it must divide Q.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Wider
+            candidates walk further, folding more of the tail.
+          score_scale (float, optional): The logit scale, conventionally the inverse square
+            root of the head dimensionality; 0.0 derives it from the frozen geometry.
+          dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
+          values_dtype (Scalar, optional): Names the values' scalar type when the buffer cannot.
+          outputs_dtype (Scalar, optional): The scalar type to write the outputs as; defaults
+            to the queries' own.
+          carry (buffer, optional): A writable (Q, 2) buffer of float32, holding each query's
+            largest logit and the softmax denominator taken against it. The pair recombines
+            this branch with another over the same queries - attention sinks, a dense recent
+            window, or a second index of one context - by partial-softmax rescaling; a maximum
+            without its partition is a number nothing can rescale, which is why they travel as
+            one row.
+          progress (callable, optional): Called with (completed, total) tokens; returning
+            False stops the batch and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          DenseVectors: The (Q, dimensions) attended rows in the arena, already divided by the
+            partition; kinds `memoryview` cannot format leave as a (Q, row_bytes) run of 'B'.
+        """
+        ...
+
     def maxsim(
         self: DeferredOn[DenseIndex],
         queries: _Tensor,
@@ -636,16 +1239,108 @@ class DeferredOn[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Deferred[DenseProducts]: ...
+    ) -> Deferred[DenseProducts]:
+        """Late-interaction scoring of multi-row queries against multi-row entries: every query
+        row takes its best match within a key, and those maxima sum to that key's score.
+
+        A document is one key holding its token rows, which is what `values_per_key` above one
+        exists for, and the walk stays over individual tokens under a plain inner product - so
+        an entry's rows need no ordering and two documents need not share a row count. The
+        result is sized over documents rather than over rows.
+        Calls `usearch_dense_maxsim`.
+
+        Args:
+          queries (buffer): The token rows of every query laid end to end, an (Q * R,
+            dimensions) matrix.
+          rows_per_query (int): Rows every query occupies; uniform, so ColBERT's padding
+            applies as is. The query row count must be a whole multiple of it.
+          wanted (int): Upper bound on matches per query - the 'k' over documents, not rows;
+            0 keeps every document the query scored.
+          arena (Arena): Where the scored documents land, rewound by the call.
+          expansion_factor (int, optional): Breadth of the candidates; 0 derives it. Widening it
+            nominates more documents, each still scored exactly.
+          traversal (Traversal, optional): `Traversal.WALK`, the default, nominates documents by
+            walking the graph; `Traversal.SCAN` nominates every document, on RAM and NVMe.
+          dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
+          predicate (callable, optional): Admits a Key when it returns truthy, asked before any
+            of its rows are scored, so a rejected document never scores.
+          progress (callable, optional): Called with (completed, total) queries; returning
+            False stops the batch and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          DenseProducts: `offsets`, (Q + 1,) Apache Arrow offsets, query `i` spanning documents
+            `offsets[i]` up to `offsets[i + 1]`, largest first; `keys`, a (documents, 16) run of
+            identities; `scores`, their (documents,) summed maxima; and `required`, the
+            documents scored before `wanted` cut any. All of them live in the arena.
+        """
+        ...
+
     def absorb(
         self: DeferredOn[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0
-    ) -> Deferred[None]: ...
+    ) -> Deferred[None]:
+        """Absorbs every donor into this index, one after another, keeping their graphs rather
+        than re-inserting their vectors, and linking each in by walks across the appended
+        part. Each donor handle is consumed and every verb on it afterwards raises. Readers
+        of a RAM index may keep searching throughout, while a VRAM one admits no overlapping
+        search.
+
+        Cancellation stops between donors, so a donor already absorbed stays absorbed and one
+        not yet reached stays a live handle its caller still owns. A donor whose absorption
+        fails stays usable too, though its rows may already have landed in this index.
+        Calls `usearch_dense_absorb`.
+
+        Args:
+          donors (DenseIndex): The indexes to absorb.
+          progress (callable, optional): Called with (completed, total) donors; returning
+            False stops the absorb and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+        """
+        ...
+
     def save(
         self: DeferredOn[DenseIndex], path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0
-    ) -> Deferred[None]: ...
+    ) -> Deferred[None]:
+        """Writes the index under `path`, in the layout its extension picks: one `.safegraphs`
+        monolith, or a `.safegraphs.json` manifest beside one part per shard. Demands a
+        mutation-free window; concurrent readers keep searching throughout.
+        Calls `usearch_dense_save`.
+
+        Args:
+          path (str | bytes | os.PathLike): Where the checkpoint goes.
+          progress (callable, optional): Called with (completed, total) shards; returning
+            False stops the write and raises `CancelledError`, leaving a checkpoint no
+            reader accepts and whatever parts it already wrote for the caller to remove.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+        """
+        ...
+
     def save_buffer(
         self: DeferredOn[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
-    ) -> Deferred[Monolith]: ...
+    ) -> Deferred[Monolith]:
+        """Serializes the index as one monolith of every shard, the very bytes `save` writes to
+        a `.safegraphs` path.
+        Calls `usearch_dense_save_buffer`.
+
+        Args:
+          arena (Arena): Where the monolith lands, rewound by the call.
+          progress (callable, optional): Called with (completed, total) bytes; returning
+            False stops the write and raises `CancelledError`, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+
+        Returns:
+          Monolith: The monolith's bytes, in place in the arena.
+
+        Example:
+          >>> index = usearch.DenseIndex.init_ram(dimensions=4)
+          >>> index.reserve(1)
+          >>> checkpoint = index.save_buffer(usearch.Arena())
+          >>> usearch.DenseIndex.metadata_read_buffer(checkpoint).dimensions
+          4
+        """
+        ...
+
     def __repr__(self) -> str: ...
 
 # endregion: Shared Vocabulary
@@ -768,11 +1463,20 @@ class DenseTraversalStats:
 
     def __init__(self) -> None: ...
     @property
-    def visited_members(self) -> int: ...
+    def visited_members(self) -> int:
+        """Entries whose neighborhoods the walk expanded."""
+        ...
+
     @property
-    def computed_distances(self) -> int: ...
+    def computed_distances(self) -> int:
+        """Distance evaluations the walk paid for."""
+        ...
+
     @property
-    def restarts(self) -> int: ...
+    def restarts(self) -> int:
+        """Times the walk fell back to a fresh entry point."""
+        ...
+
     def __iadd__(self, other: DenseTraversalStats, /) -> Self:
         """Python-only."""
         ...

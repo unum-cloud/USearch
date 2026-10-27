@@ -47,23 +47,50 @@ namespace unum::usearch::dense {
  *
  *  @param[in] sources The device indexes giving their rows up, on the devices @p device_executor
  *      drives.
- *  @param[inout] target The host index receiving them; one never reserved takes the sources'
+ *  @param[in,out] target The host index receiving them; one never reserved takes the sources'
  *      geometry.
- *  @param[inout] device_executor The streams every source shard folds and saves through.
- *  @param[inout] host_executor The threads every target shard loads and heals on.
- *  @retval config_mismatch_k A null or repeated source, another metric or geometry, or a source
- *      device @p device_executor drives no stream on.
- *  @retval contended_k A call or batch in flight on the target or a source, or another refine,
- *      absorb, split, compaction, save or load holding either.
- *  @retval unsupported_k A source shard past the capacity, which would have to be cut first.
+ *  @param[in,out] device_executor The streams every source shard folds and saves through.
+ *  @param[in,out] host_executor The threads every target shard loads and heals on.
+ *  @param[in] config The shard capacity every target shard holds to.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No source is named, the target has no shards, or @p host_executor has no
+ *    threads; or a source keeps it, as its @c status says.
+ *  - @c config_mismatch_k A null or repeated source, another metric or geometry, a source device
+ *    @p device_executor drives no stream on, or a bin's device that cannot reach another
+ *    member's storage; or a source keeps it.
+ *  - @c contended_k A call or batch in flight on the target or a source, or another refine,
+ *    absorb, split, compaction, save or load holding either.
+ *  - @c unsupported_k A source shard past the capacity, which would have to be cut first, or a
+ *    source keeps it.
+ *  - @c overflow_k A fresh target shard generation still has no room for a source shard, or a
+ *    source keeps it.
+ *  - @c cancelled_k or @c unsupported_layout_k A source keeps it, as its @c status says.
  */
 template <typename vram_indexes_type_, typename ram_indexes_type_>
 expected<vram_nvidia_compact_plan<vram_indexes_type_, ram_indexes_type_>> plan_compact(
     std::span<vram_indexes_type_* const> sources, ram_indexes_type_& target, cuda_executor_t& device_executor,
     typename ram_indexes_type_::executor_t& host_executor, compact_config_t const& config = {}) noexcept;
 
-/** The one-shot @ref plan_compact, run and finished on contexts carved for the call; @p on_visited
- *  reports and cancels the fold alone, as in @c vram_nvidia_compact_plan::run. */
+/**
+ *  The one-shot @c plan_compact, run and finished on contexts carved for the call; @p on_visited
+ *  reports and cancels the fold alone, as in @c vram_nvidia_compact_plan::run.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No source is named, the target has no shards, or @p host_executor has no
+ *    threads; or a source keeps it, as its @c status says.
+ *  - @c config_mismatch_k A null or repeated source, another metric or geometry, a source device
+ *    @p device_executor drives no stream on, a bin's device that cannot reach another member's
+ *    storage, or a source's rows that never land; or a source keeps it.
+ *  - @c contended_k A call or batch in flight on the target or a source, another refine, absorb,
+ *    split, compaction, save or load holding either, or another call holding an executor.
+ *  - @c unsupported_k A source shard past the capacity, which would have to be cut first, or a
+ *    source keeps it.
+ *  - @c overflow_k A fresh target shard generation still has no room for a source shard, the
+ *    landed rows pass a target shard's ceiling or key column or the locator chunks, or a source
+ *    keeps it.
+ *  - @c unsupported_layout_k A source keeps it, as its @c status says.
+ */
 template <typename vram_indexes_type_, typename ram_indexes_type_, typename progress_type_ = dummy_progress_t>
 expected<compact_result_t> compact(std::span<vram_indexes_type_* const> sources, ram_indexes_type_& target,
                                    cuda_executor_t& device_executor,
@@ -122,12 +149,21 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
      *
      *  A source failing to land stays pending and closed, with every later one, for the next call.
      *
-     *  @param[inout] device_executor The streams the plan was opened over.
-     *  @param[inout] host_executor The threads the plan was opened over.
-     *  @param[inout] traversals The caller's context of every host thread, which @ref finish heals
+     *  @param[in,out] device_executor The streams the plan was opened over.
+     *  @param[in,out] host_executor The threads the plan was opened over.
+     *  @param[in,out] traversals The caller's context of every host thread, which @ref finish heals
      *      on; the call checks their count.
      *  @param[in] on_visited Fires once the re-selection and once the merge landed, with the rows
      *      folded so far and the rows moving; a @c cancel_k answer stops before the next phase.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan is empty or finished.
+     *  - @c config_mismatch_k The @p traversals are not one per host thread, or a source's rows
+     *    never land.
+     *  - @c contended_k Another call holds either executor or a source's gate, or a target shard
+     *    has a batch or load in flight.
+     *  - @c overflow_k The landed rows pass a target shard's ceiling or key column, or the locator
+     *    chunks.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t run(device_executor_t& device_executor, host_executor_t& host_executor,
@@ -147,8 +183,17 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         return status_t::success_k;
     }
 
-    /** Heals on the caller's @p traversals, one per host thread, reopens the target and reports. A
-     *  plan whose sources have not all landed heals nothing. */
+    /**
+     *  Heals on the caller's @p traversals, one per host thread, reopens the target and reports. A
+     *  plan whose sources have not all landed heals nothing.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan is empty or finished, or @p host_executor holds no pool or no
+     *    workers.
+     *  - @c config_mismatch_k The @p traversals hold other than one context per thread.
+     *  - @c contended_k Another call holds @p host_executor, or its pool runs another dispatch.
+     *  - @c overflow_k A queue capacity wraps when rounded.
+     */
     expected<result_t> finish(host_executor_t& host_executor, std::span<traversal_context_t> traversals) noexcept {
         result_t result;
         ram_indexes_t* const target = refining_.owner_;
@@ -190,8 +235,8 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         bool operator()(vram_shard_t const&) const noexcept { return true; }
     };
 
-    /** One bin: the run of @ref members_ from @c first, shards of one source landing side by side
-     *  in one target shard in their landing order, and the first of its members' fold states, which
+    /** One bin: the run of @c members_ from @c first, shards of one source landing side by side in
+     *  one target shard in their landing order, and the first of its members' fold states, which
      *  only a folding bin holds. */
     struct bin_t {
         std::size_t first = 0;
@@ -217,7 +262,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
     static u32_t row_bits_(std::size_t shards) noexcept { return 32u - static_cast<u32_t>(std::bit_width(shards - 1)); }
 
     /** Matches a row of a bin of @p shards shards holds from each other shard: a row of
-     *  @p connectivity newcomers split evenly, which @ref cut_bins_ keeps at one at least, so the
+     *  @p connectivity newcomers split evenly, which @c cut_bins_ keeps at one at least, so the
      *  cross results fit a row and a fold warp caches what a re-selection does. */
     static u32_t cross_count_(std::size_t shards, std::size_t connectivity) noexcept {
         return static_cast<u32_t>(connectivity / (shards - 1));
@@ -381,7 +426,8 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
      *  rows, its picks and its links, @b [rows,connectivity] each, then the heads of its chains
      *  onto every other member, one run per member in bin order.
      *
-     *  @retval config_mismatch_k A device of a bin that cannot reach another member's storage.
+     *  @par Statuses:
+     *  - @c config_mismatch_k A device of a bin that cannot reach another member's storage.
      */
     status_t open_folds_(device_executor_t& device_executor, vram_indexes_t const& shaped) noexcept {
         std::size_t states = 0;
@@ -760,7 +806,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
     /** Every non-empty source shard, numbered across the sources, in bin order. */
     growing_buffer<std::size_t, forkunion_allocator_t> members_ {forkunion_allocator_t {}};
 
-    /** The bins, each a run of @ref members_; one of a single member folds nothing and holds no
+    /** The bins, each a run of @c members_; one of a single member folds nothing and holds no
      *  fold state. */
     growing_buffer<bin_t, forkunion_allocator_t> bins_ {forkunion_allocator_t {}};
 

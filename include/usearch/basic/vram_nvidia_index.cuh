@@ -8,9 +8,9 @@
  *  The kernel side of the basic index: the body every modality's kernel runs, over the kernel, the
  *  kit, its rung, the register rung and the node-ID type. Only the modalities' NVIDIA metrics
  *  include it, whose @c cuda_kernel templates take their ladders' inputs and hand the kit their
- *  ladder picks to @ref cuda_kernel_body, which turns the plain records of @c vram_nvidia_index.hpp
- *  into the shared views of @c vram_index.cuh; the host finds each kernel by the symbol
- *  @c vram_kernel_symbol spells.
+ *  ladder picks to @ref unum::usearch::basic::cuda_kernel_body, which turns the plain records of
+ *  @c vram_nvidia_index.hpp into the shared views of @c vram_index.cuh; the host finds each kernel
+ *  by the symbol @c vram_kernel_symbol spells.
  *
  *  A kit whose lane scores a row alone walks a query or a node per warp. A kit splitting a row over
  *  several lanes walks one per block: warp zero owns the frontier and the visited set and posts

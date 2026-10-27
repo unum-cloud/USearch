@@ -3,7 +3,7 @@
 Everything dense, one level deep: equidimensional vectors whose most common similarity measures - Inner-Product, Angular, Euclidean, Hamming, Jaccard - derive from a single inner product of two vectors, so pre-computed per-vector norms cut the arithmetic intensity of the composite metrics by 3×.
 The RAM residency is the portable default every platform owns; the VRAM and NVMe siblings stay opt-in through their own extensions, so neither belongs in a portable include.
 
-## Residencies
+## Residency
 
 - `ram_metric.hpp` + `ram_index.hpp` - the CPU baseline: compile-time-dispatched NumKong kernel kits chained per capability tier, and the concurrent, watermark-published in-memory index over them.
 - `vram_index.hpp` - the host half the NVIDIA and AMD siblings share: the kernels' argument records and the machinery that fills them, claims rows, publishes them and moves checkpoints.

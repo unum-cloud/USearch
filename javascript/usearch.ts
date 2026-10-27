@@ -1,8 +1,11 @@
 /**
- * Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices, for Node.
+ *  @file javascript/usearch.ts
+ *  @author Ash Vardanian
+ *  @date March 30, 2024
+ *  @brief Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices, for Node.
  *
- * The package entry point: one module per C header underneath, re-exported here so a caller
- * imports `usearch` and nothing deeper.
+ *  The package entry point: one module per C header underneath, re-exported here so a caller
+ *  imports `usearch` and nothing deeper.
  */
 export {
   Arena,

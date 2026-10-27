@@ -1,5 +1,7 @@
 /**
  *  @file explorer/worker.js
+ *  @author Ash Vardanian
+ *  @date October 17, 2026
  *  @brief The one place that touches the C ABI. It loads the Emscripten factory at `moduleUrl`, lays out every argument
  *      structure from the headers that module was built from, calls the verbs blocking, and copies their outputs out of
  *      the arena before the next call rewinds it.

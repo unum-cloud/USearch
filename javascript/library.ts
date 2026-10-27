@@ -1,10 +1,13 @@
 /**
- * The native boundary: the search that locates the prebuilt addon, and the shapes it publishes.
+ *  @file javascript/library.ts
+ *  @author Ash Vardanian
+ *  @date September 9, 2026
+ *  @brief The native boundary: the search that locates the prebuilt addon, and the shapes it publishes.
  *
- * Every signature here is positional and takes no defaults, so the wrapper classes decide what
- * an omitted argument means rather than the addon guessing. Every instance verb opens with the
- * executor and the C `completion`, and answers its result when blocking or a `CompiledDeferred`
- * when deferred.
+ *  Every signature here is positional and takes no defaults, so the wrapper classes decide what
+ *  an omitted argument means rather than the addon guessing. Every instance verb opens with the
+ *  executor and the C `completion`, and answers its result when blocking or a `CompiledDeferred`
+ *  when deferred.
  */
 import build from "node-gyp-build";
 import * as path from "path";

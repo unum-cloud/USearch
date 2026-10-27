@@ -19,7 +19,7 @@ export LC_ALL=C # Byte-wise regexes, immune to the committer's locale
 rejection_count=0
 project_include_prefix="usearch"
 sibling_projects='numkong|stringzilla|forkunion|smashtable|ucall|ustore|uform'
-cmake_published_variables="USEARCH_PUNNED_LIBRARIES USEARCH_PUNNED_OBJECTS USEARCH_IS_MAIN_PROJECT"
+cmake_published_variables="USEARCH_PUNNED_LIBRARIES USEARCH_PUNNED_OBJECTS"
 cmake_third_party_variables="YYJSON_INSTALL THREADS_PREFER_PTHREAD_FLAG WASI_SDK_PATH WASI_SDK_PREFIX EMSCRIPTEN_SYSTEM_PROCESSOR"
 
 # Prints the reason and the first offending lines, and counts the rejection.
@@ -498,15 +498,15 @@ check_copydoc_in_backend() {
         "            and leave this one a note on what this backend does differently, or nothing:"
 }
 
-# Every @param declares its direction - [in]/[out]/[inout] - so a reader knows whether the callee
-# reads, writes, or mutates the argument. A bare @param and the comma form @param[in,out] are both
-# rejected; the one spelling for a mutated argument is @param[inout].
+# Every @param declares its direction - [in]/[out]/[in,out] - so a reader knows whether the callee
+# reads, writes, or mutates the argument. A bare @param and the [inout] spelling are both
+# rejected; the one spelling for a mutated argument is @param[in,out].
 check_param_directions() {
     local bare
-    bare=$(printf '%s\n' "$added" | grep -E '@param' | grep -vE '@param\[(in|out|inout)\]' || true)
+    bare=$(printf '%s\n' "$added" | grep -E '@param' | grep -vE '@param\[(in|out|in,out)\]' || true)
     [ -z "$bare" ] || fail "$bare" \
-        "$file has a @param without an [in]/[out]/[inout] direction - never a bare @param" \
-        "            nor the comma form @param[in,out] (write @param[inout]):"
+        "$file has a @param without an [in], [out] or [in,out] direction, or writes [inout]," \
+        "            which Clang rejects:"
 }
 
 # Doxygen renders @b / @c, not Markdown: `__bold__` / `**bold**` in a `/** */` or `//` comment print
@@ -535,6 +535,20 @@ check_doxygen_glued() {
         "            never \`(@c foo)\`; a highlighter only sees a command that follows whitespace:"
 }
 
+# Clang hovers print the backticks of a docblock literally, so a docblock names code with @c, @p or <tt>
+# by token class; backticks stay in `//` comments, and code samples inside @code are exempt.
+check_docblock_code_spans_not_backticked() {
+    local spans
+    spans=$(printf '%s\n' "$added" | awk '
+        /@endcode/ { code = 0; next }
+        /@code/ { code = 1; next }
+        code { next }
+        /^\+[[:space:]]*(\/\*\*|\*|\/\/\/)/ && /`/ { print }')
+    [ -z "$spans" ] || fail "$spans" \
+        "$file has a backtick span in a docblock - write @c name, @p parameter or <tt>punctuated token</tt>;" \
+        "            backticks stay in // comments:"
+}
+
 # Doxygen never parses a `//` comment, so a command there - `@p count`, `@c select_diverse` - prints literally and
 # reads as noise. Plain comments name code in backticks, or in prose; the commands belong in `/** */` docblocks.
 check_doxygen_in_line_comments() {
@@ -556,23 +570,31 @@ check_doxygen_trailers() {
 
 # An `@section` line reads as a heading only when air surrounds it: the comment lines directly
 # above and below must be empty (`*` alone). Spacing is context, not a line, so this reads the
-# whole staged file and reports only the headings the commit itself added.
+# whole staged file and reports only the headings the commit itself added. A `@par` section reads the
+# same way: an empty comment line above it, and below it unless it ends the docblock.
 check_section_spacing() {
-    grep -q '@section' "$staged_blob" || return 0
+    grep -q '@section\|@par' "$staged_blob" || return 0
     local cramped
     cramped=$(awk '
         NR == FNR { added[$1 + 0]; next }
         { lines[FNR] = $0; last = FNR }
         END {
-            for (i = 1; i <= last; ++i)
+            for (i = 1; i <= last; ++i) {
                 if (lines[i] ~ /@section/ && (i in added)) {
                     if (lines[i - 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line above the @section\n", i
                     if (lines[i + 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line below the @section\n", i
                 }
+                if (lines[i] ~ /^[[:space:]]*\*[[:space:]]*@par([^a-z]|$)/ && (i in added)) {
+                    if (lines[i - 1] !~ /^[[:space:]]*\*[[:space:]]*$/ && lines[i - 1] !~ /^[[:space:]]*\/\*\*[[:space:]]*$/) printf "line %d: no empty comment line above the @par\n", i
+                    for (j = i + 1; j <= last; ++j)
+                        if (lines[j] ~ /^[[:space:]]*\*[[:space:]]*$/ || lines[j] ~ /\*\// || lines[j] ~ /^[[:space:]]*\*[[:space:]]*@(brief|param|tparam|return|returns|retval|note|warning|sa|see|throws|pre|post|par|section|code)([^a-z]|$)/) break
+                    if (lines[j] !~ /^[[:space:]]*\*[[:space:]]*$/ && lines[j] !~ /\*\//) printf "line %d: no empty comment line below the @par section\n", i
+                }
+            }
         }' "$staged_lines_path" "$staged_blob")
     [ -z "$cramped" ] || fail "$cramped" \
-        "$file crams an @section against its neighbors - keep one empty comment line" \
-        "            above and below every @section heading:"
+        "$file crams an @section or @par against its neighbors - keep one empty comment line" \
+        "            above and below every @section heading, and around every @par section that does not end the docblock:"
 }
 
 # A docblock reads as the start of something only when air sits above it, with no exception: an opening
@@ -609,7 +631,7 @@ check_lone_brief() {
                 for (j = i; j <= last; ++j) {
                     if (j in added) touched = 1
                     if (lines[j] ~ /@brief/) brief = 1
-                    if (lines[j] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(param|tparam|return|retval|sa|see|note|file|author|date|section|code)([^a-z]|$)/) section = 1
+                    if (lines[j] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(param|tparam|return|retval|par|sa|see|note|file|author|date|section|code)([^a-z]|$)/) section = 1
                     if (lines[j] ~ /^[[:space:]]*\*[[:space:]]*$/) blank = 1
                     if (lines[j] ~ /\*\//) break
                 }
@@ -636,7 +658,7 @@ check_brief_length() {
                 span = 1
                 for (j = i + 1; j <= last; ++j) {
                     if (lines[j] !~ /^[[:space:]]*\*[[:space:]]{5,}[^[:space:]]/) break
-                    if (lines[j] ~ /^[[:space:]]*\*[[:space:]]*@(param|tparam|return|retval|sa|see|note|file|author|date|section|code)([^a-z]|$)/) break
+                    if (lines[j] ~ /^[[:space:]]*\*[[:space:]]*@(param|tparam|return|retval|par|sa|see|note|file|author|date|section|code)([^a-z]|$)/) break
                     ++span
                 }
                 if (span > 3 && (i in added)) printf "line %d: @brief runs %d lines\n", i, span
@@ -699,7 +721,7 @@ check_docblock_brackets() {
                 tagged = 0; touched = 0; single = (lines[i] ~ /\*\//)
                 for (j = i; j <= last; ++j) {
                     if (j in added) touched = 1
-                    if (lines[j] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(brief|param|tparam|return|retval|sa|see|note|file|author|date|section|code)([^a-z]|$)/) tagged = 1
+                    if (lines[j] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(brief|param|tparam|return|retval|par|sa|see|note|file|author|date|section|code)([^a-z]|$)/) tagged = 1
                     if (lines[j] ~ /\*\//) break
                 }
                 bare_open = (lines[i] ~ /^[[:space:]]*\/\*\*[[:space:]]*$/)
@@ -1171,6 +1193,17 @@ check_ranges_templates() {
     [ -z "$hits" ] || fail "$hits" \
         "$file pulls the std::ranges templates into the library - copy with std::memcpy, fill with a loop" \
         "            or std::memset, and include neither <algorithm> nor <ranges>:"
+}
+
+# `std::filesystem` throws, allocates paths behind the caller's back, and is missing or partial on several
+# targets the bindings ship to. The library and its bindings reach files through the C library and mmap views;
+# only the test, benchmark and tool harnesses may include `<filesystem>`.
+check_filesystem_in_library() {
+    local hits
+    hits=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/\*|\*( |/|$))' |
+        grep -E '\bstd::filesystem\b|#[[:space:]]*include[[:space:]]*<filesystem>' || true)
+    [ -z "$hits" ] || fail "$hits" \
+        "$file uses std::filesystem in library code - it is allowed only in test/, bench/ and tools/ harnesses:"
 }
 
 # `std::deque` - a chunked indirection-heavy container with unpredictable locality. Address
@@ -1861,6 +1894,13 @@ judge_path() {
     include/usearch/utilities/*) check_utilities_layering ;;
     esac
     case "$file" in
+    include/* | src/* | c/* | cpp/* | python/* | javascript/* | swift/* | golang/* | java/* | csharp/*)
+        case "$file" in
+        *.c | *.h | *.cpp | *.hpp | *.cu | *.cuh | *.hip | *.cc | *.cxx | *.mm) check_filesystem_in_library ;;
+        esac
+        ;;
+    esac
+    case "$file" in
     # Every C and C++ source, wherever it lives: prose, Doxygen and the shared vocabulary.
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
         check_ascii_arrows
@@ -1876,6 +1916,7 @@ judge_path() {
         check_copydoc_in_backend
         check_markdown_doxygen
         check_doxygen_glued
+        check_docblock_code_spans_not_backticked
         check_doxygen_in_line_comments
         check_doxygen_trailers
         check_section_spacing

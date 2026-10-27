@@ -136,8 +136,14 @@ struct forkunion_executor_t {
         std::swap(topology_, other.topology_);
     }
 
-    /** Takes over @p pool, owned and deleted here from now on - even on failure. Colocates
-     *  one arena with each thread's memory domain. */
+    /**
+     *  Takes over @p pool, owned and deleted here from now on - even on failure. Colocates
+     *  one arena with each thread's memory domain.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The pool has no workers.
+     *  - @c contended_k The pool is running another dispatch.
+     */
     static expected<forkunion_executor_t> acquire(fu_topology_t topology, fu_pool_t pool) noexcept {
         forkunion_executor_t executor;
         executor.pool_ = pool;
@@ -173,8 +179,8 @@ struct forkunion_executor_t {
         return std::exchange(pool_, nullptr);
     }
 
-    /** The thread count a zero ask means: every core but one in @ref idle_cores_denominator_k, or the
-     *  caller alone in a build without OS threads. */
+    /** The thread count a zero ask means: every core but one in @ref idle_cores_denominator_k, or
+     *  the caller alone in a build without OS threads. */
     static expected<std::size_t> default_threads(fu_topology_t topology) noexcept {
         if (!(fu_comptime_capabilities() & fu_capability_os_threads_k)) return {1, status_t::success_k};
         std::size_t cores = 0;
@@ -182,8 +188,13 @@ struct forkunion_executor_t {
         return {cores - cores / idle_cores_denominator_k, status_t::success_k};
     }
 
-    /** Spawns @p threads over @p topology and takes the pool; zero means @ref default_threads. One
-     *  thread, or a build without OS threads, is the caller itself. */
+    /**
+     *  Spawns @p threads over @p topology and takes the pool; zero means @ref default_threads. One
+     *  thread, or a build without OS threads, is the caller itself.
+     *
+     *  @par Statuses:
+     *  - @c contended_k The fresh pool is running another dispatch.
+     */
     static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads) noexcept {
         auto const [count, status] = threads ? expected<std::size_t> {threads, status_t::success_k}
                                              : default_threads(topology);
@@ -192,8 +203,13 @@ struct forkunion_executor_t {
         return spawn(topology, count, count != 1 && os_threads ? fu_caller_exclusive_k : fu_caller_inclusive_k);
     }
 
-    /** Spawns @p threads over @p topology with the caller inside the pool or outside it, as @p exclusivity says;
-     *  zero means @ref default_threads. */
+    /**
+     *  Spawns @p threads over @p topology with the caller inside the pool or outside it, as
+     *  @p exclusivity says; zero means @ref default_threads.
+     *
+     *  @par Statuses:
+     *  - @c contended_k The fresh pool is running another dispatch.
+     */
     static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads,
                                                 fu_caller_exclusivity_t exclusivity) noexcept {
         if (!threads) {
@@ -213,7 +229,12 @@ struct forkunion_executor_t {
         return acquire(topology, pool);
     }
 
-    /** Claims the executor for one call; a second concurrent caller gets @c contended_k. */
+    /**
+     *  Claims the executor for one call; a second concurrent caller gets @c contended_k.
+     *
+     *  @par Statuses:
+     *  - @c contended_k Another call holds the executor.
+     */
     expected<claim_t> claim() noexcept {
         if (!held_.lock_if_free()) return {{}, status_t::contended_k};
         return {claim_t {held_, std::adopt_lock}, status_t::success_k};
@@ -221,7 +242,11 @@ struct forkunion_executor_t {
 
     /** Rewinds every thread's arena and seeds it at @p bytes_per_thread, the first chunk's
      *  width; the widest chunk an earlier call opened stays, so the next call starts at its
-     *  high-water mark. */
+     *  high-water mark.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The executor holds no arenas.
+     */
     status_t reserve(std::size_t bytes_per_thread) noexcept {
         if (arenas_per_thread_.empty()) return status_t::uninitialized_k;
         for (arena_t& arena : arenas_per_thread_) {
@@ -249,8 +274,14 @@ struct forkunion_executor_t {
     /** Nothing is ever pending: every fan-out blocks inside, so a drain is a no-op. */
     status_t wait() noexcept { return status_t::success_k; }
 
-    /** Runs @p callback on every thread with the thread index and its compute domain; must be
-     *  @c noexcept. A pool running another dispatch answers @c contended_k, and nothing ran. */
+    /**
+     *  Runs @p callback on every thread with the thread index and its compute domain; must be
+     *  @c noexcept. A pool running another dispatch answers @c contended_k, and nothing ran.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The executor holds no pool, or the pool has no workers.
+     *  - @c contended_k The pool is running another dispatch.
+     */
     template <typename callback_type_>
     status_t for_threads(callback_type_&& callback) noexcept {
         if (!pool_) return status_t::uninitialized_k;
@@ -263,7 +294,12 @@ struct forkunion_executor_t {
 
     /** Runs @p callback over @p tasks items, stolen dynamically, with the task index, the thread
      *  index and its compute domain; must be @c noexcept. A pool running another dispatch answers
-     *  @c contended_k, and nothing ran. */
+     *  @c contended_k, and nothing ran.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The executor holds no pool, or the pool has no workers.
+     *  - @c contended_k The pool is running another dispatch.
+     */
     template <typename callback_type_>
     status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
         if (!pool_) return status_t::uninitialized_k;

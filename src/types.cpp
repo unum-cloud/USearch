@@ -10,7 +10,7 @@
  *  directions never disagree. They live apart from any modality because every modality reports
  *  the same answer.
  *
- *  A handle's own `capabilities` is a narrower question - what dispatch picked for the geometry
+ *  A handle's own @c capabilities is a narrower question - what dispatch picked for the geometry
  *  that handle froze - and each modality answers that one for itself.
  */
 #include <cstdio> // `std::snprintf`

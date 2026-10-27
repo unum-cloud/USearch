@@ -1,20 +1,19 @@
 /**
- *  Storage capacity in the dense index from `include/usearch/dense/ram_index.hpp`: the ceiling is
- *  gone, every index grows on demand, and `create_next_chunk` adds chunks until the deficit is
- *  covered.
+ *  @file verification/dense_ram_index_capacity/protocol.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
+ *  @brief Storage capacity in the dense index: every index grows on demand, and `create_next_chunk`
+ *      adds chunks until the deficit is covered.
  *
- *  `claim_capacity` is one unconditional subtract on `remaining_capacity_` whose sign says what
- *  happened: the thread that took it from non-negative to negative is elected to grow alone, takes
- *  its rows from `last_allocated_id_` with an `acq_rel`, and only then releases the fresh rows; a
- *  thread that stayed non-negative takes its rows at once; a thread that found a deficit releases
- *  its subtract and waits for the counter to move. `release_capacity` returns rows no ID was
- *  dispensed against: a release no-return subtract on `last_allocated_id_`, a wait while
- *  `remaining_capacity_` reads negative, then a release `fetch_add_if_at_least(count, count)`, which
- *  adds only where the sum stays at least the count, so only onto a non-negative counter. Every
- *  scenario beside this file checks the election, one thread growing at a time, and existence,
- *  the rows a claim returns lying inside the chunks the claimer can see.
+ *  From `include/usearch/dense/ram_index.hpp`. `claim_capacity` is one unconditional subtract on
+ *  `remaining_capacity_` whose sign says what happened: the thread that took it from non-negative
+ *  to negative is elected to grow alone. `release_capacity` returns rows no ID was dispensed
+ *  against.
+ *
+ *  - The election, one thread growing at a time.
+ *  - Existence, the rows a claim returns lying inside the chunks the claimer can see.
  */
-#include "../weak_memory.pml"
+#include <weak_memory.pml>
 
 // The words, by the index member each stands for; the frozen geometry comes last.
 #define remaining_capacity 0

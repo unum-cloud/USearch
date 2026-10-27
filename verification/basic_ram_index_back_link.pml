@@ -1,35 +1,32 @@
 /**
+ *  @file verification/basic_ram_index_back_link.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief The basic index's back-link re-selection on one full row, against `link` and `unlink`.
- *      A second back-link races it too.
  *
  *  `back_link_` from `include/usearch/basic/ram_index.hpp`, on a row of two edges, to nodes `a` and
  *  `b`, at a budget of two. Two inserters back-link their newcomers `N1` and `N2` into it, each
  *  before its batch's turn: a row with room takes an append, and a full one is copied, unlocked,
  *  re-selected off-lock from the copy and the newcomer, relocked, revalidated slot by slot against
- *  the copy, and rewritten only when unchanged; a changed row goes round again from the lock. The
- *  selector keeps any one or two of the pool. Every append and the full-row pass re-check that the
- *  row does not hold the newcomer already. A linker runs `link(row, N1)` once the watermark covers
- *  `N1`, appending past the budget when the row lacks it; an unlinker runs `unlink(row, a)`, moving
- *  the last slot into `a`'s. The row mutex is the header's: a peek at the flag, the acquire
- *  exchange, the release store.
+ *  the copy, and rewritten only when unchanged. A linker runs `link(row, N1)` once the watermark
+ *  covers `N1`; an unlinker runs `unlink(row, a)`, moving the last slot into `a`'s.
  *
- *  Invariants, at every unlock: the row holds no edge twice, and no edge `unlink` removed comes back.
+ *  - At every unlock: the row holds no edge twice.
+ *  - No edge `unlink` removed comes back.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc revalidate=false: the relock re-reads the row and rewrites it only when it is
- *      still the copy; unchecked, a re-selection copied before `unlink(row, a)` writes `a` back
- *  @verify fail sc compare_slots=false: the revalidation compares every slot, not just the size;
- *      size alone misses an `unlink` followed by an append, which restore the size with other
- *      edges, and the stale re-selection writes `a` back
- *  @verify fail sc back_link_before_turn=false: `back_link_` runs before its batch's turn, while no
- *      `link` can name the newcomer, so it appends without scanning the row; run after the turn, it
- *      races a `link` naming the newcomer, and the row holds `N1` twice
+ *  @verify fail sc revalidate=false: unchecked, a re-selection copied before `unlink(row, a)` writes
+ *      `a` back
+ *  @verify fail sc compare_slots=false: size alone misses an `unlink` followed by an append, which
+ *      restore the size with other edges, and the stale re-selection writes `a` back
+ *  @verify fail sc back_link_before_turn=false: run after the turn, it races a `link` naming the
+ *      newcomer, and the row holds `N1` twice
  */
 #define thread_count 4
 #define location_count 6
 #define history_depth 25
-#include "weak_memory.pml"
-#include "watermark_turn.pml"
+#include <weak_memory.pml>
+#include <watermark_turn.pml>
 
 // The words, by the index member each stands for: the row's mutex flag, its size and three slots,
 // one past the budget for `link`'s growth, and the watermark.

@@ -24,16 +24,16 @@
  *  Checkpoints ride the SafeGraphs interchange format, and the shard count picks the layout. A
  *  handle holding one shard writes one monolith at the path: a self-describing file holding its
  *  vectors, neighbor lists and keys. A handle holding several writes a manifest at the path, a
- *  small JSON catalog of one monolith per shard named @c <stem>-00001-of-0000S.safegraphs beside
- *  it, each with its shard's own node IDs, so neighbors never cross files. Only compaction merges
- *  graphs. Loading reads the content, never the extension, and opens one shard per part: part @c p
- *  lands whole on shard @c p, beside any placed shards the parts leave empty, and the shards past
- *  the placed ones open over the call's memory domains or devices in turn. A manifest records where
- *  its parts were written, never where a reader must keep them, so a checkpoint written from a
- *  mounted bucket lands across a handle's own memory domains as it loads. An in-memory buffer of
- *  several shards leads with the same manifest, listing each part by its offset inside the buffer.
- *  A cancelled or failed save leaves a file without its header, which every reader rejects, and a
- *  cancelled or failed load creates no handle.
+ *  small JSON catalog of one monolith per shard named by the stem and @c -00001-of-0000S.safegraphs
+ *  beside it, each with its shard's own node IDs, so neighbors never cross files. Only compaction
+ *  merges graphs. Loading reads the content, never the extension, and opens one shard per part:
+ *  part @c p lands whole on shard @c p, beside any placed shards the parts leave empty, and the
+ *  shards past the placed ones open over the call's memory domains or devices in turn. A manifest
+ *  records where its parts were written, never where a reader must keep them, so a checkpoint
+ *  written from a mounted bucket lands across a handle's own memory domains as it loads. An
+ *  in-memory buffer of several shards leads with the same manifest, listing each part by its offset
+ *  inside the buffer. A cancelled or failed save leaves a file without its header, which every
+ *  reader rejects, and a cancelled or failed load creates no handle.
  *
  *  A file is read through a memory mapping, so a path and a buffer are the same bytes reached two
  *  ways. Loading copies them into the handle's own shards; viewing serves the mapping itself, so a
@@ -146,11 +146,11 @@
  *  @c usearch_dense_attend an online softmax over them, and @c usearch_dense_maxsim each row's
  *  best score, summed per key.
  *
- *  @c usearch_dense_multiply is an approximate A × Bᵀ in the shape of BLAS' `?GEMM`,
- *  with the indexed rows as B, and a sparse output: every pair the traversal scored, not only
- *  the nearest. Unlike a sparse `?GEMM`, the output pattern is not implied by the operands' own
- *  pattern - it is whatever the walk touched - so the product is dense-in, sparse-out, and its
- *  sparsity follows the dots: the walk ranks by 1 − dot, so it skips the low and negative ones.
+ *  @c usearch_dense_multiply is an approximate A × Bᵀ in the shape of BLAS' @c ?GEMM, with the
+ *  indexed rows as B, and a sparse output: every pair the traversal scored, not only the nearest.
+ *  Unlike a sparse @c ?GEMM, the output pattern is not implied by the operands' own pattern - it
+ *  is whatever the walk touched - so the product is dense-in, sparse-out, and its sparsity
+ *  follows the dots: the walk ranks by 1 − dot, so it skips the low and negative ones.
  *
  *  @c usearch_dense_attend folds a softmax over that same walk. A running maximum, partition,
  *  and weighted value sum update per scored batch and rescale whenever the maximum moves - the
@@ -180,9 +180,9 @@ extern "C" {
 /**
  *  @brief Vector Search Index over equidimensional dense representations.
  *
- *  @see usearch_dense_init_ram
- *  @see usearch_dense_insert
- *  @see usearch_dense_search
+ *  @sa usearch_dense_init_ram
+ *  @sa usearch_dense_insert
+ *  @sa usearch_dense_search
  */
 typedef struct usearch_dense_index_handle_t* usearch_dense_index_t;
 
@@ -276,7 +276,7 @@ typedef struct usearch_dense_init_ram_t {
     usearch_dense_metric_t metric;
 
     /** The scalar type vectors are stored & quantized into. A build compiles the first
-     *  `USEARCH_DENSE_DTYPES` of bf16, u1x8, i8, e4m3, f16, u8, e5m2, i4x2, u4x2, e3m2 and e2m3,
+     *  @c USEARCH_DENSE_DTYPES of bf16, u1x8, i8, e4m3, f16, u8, e5m2, i4x2, u4x2, e3m2 and e2m3,
      *  four by default and all eleven in the prebuilt packages, and refuses the rest with
      *  @c usearch_status_unsupported_k. */
     usearch_scalar_t quantization;
@@ -298,9 +298,10 @@ typedef struct usearch_dense_init_ram_t {
  *  @brief Creates an empty, mutable index in host memory, its geometry frozen, so it takes rows
  *      without a reservation.
  *
- *  @retval usearch_status_config_mismatch_k Zero @c dimensions, @c dimensions a packed
- *      quantization like @c usearch_scalar_u1x8_k leaves a storage value partly filled by, or a
- *      @c connectivity that is not a power of two.
+ *  @par Statuses:
+ *  - @c usearch_status_config_mismatch_k Zero @c dimensions, @c dimensions a packed
+ *    quantization like @c usearch_scalar_u1x8_k leaves a storage value partly filled by, or a
+ *    @c connectivity that is not a power of two.
  */
 USEARCH_EXPORT void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments);
 
@@ -337,9 +338,10 @@ typedef struct usearch_dense_init_vram_t {
  *  @brief Creates an empty, mutable index in device memory, its geometry frozen, so it takes rows
  *      without a reservation. @ref dense_index_gpu_acceleration
  *
- *  @retval usearch_status_config_mismatch_k Zero @c dimensions, a @c connectivity that is not a
- *      power of two, or on NVIDIA and AMD a geometry whose walks cannot fit the device's shared
- *      memory.
+ *  @par Statuses:
+ *  - @c usearch_status_config_mismatch_k Zero @c dimensions, a @c connectivity that is not a
+ *    power of two, or on NVIDIA and AMD a geometry whose walks cannot fit the device's shared
+ *    memory.
  */
 USEARCH_EXPORT void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments);
 
@@ -387,6 +389,24 @@ typedef struct usearch_dense_load_ram_t {
  *  checkpoint of eight parts loaded naming four domains places two parts on each.
  *
  *  A cancelled or failed load reports its status and creates no handle.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c path, or a checkpoint or part path that
+ *    does not parse.
+ *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header or its key
+ *    column does not parse, or its connectivity or dimensions are unusable.
+ *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
+ *    score, or a kernel a shard cannot finalize.
+ *  - @c usearch_status_unsupported_k A quantization this build leaves out, or a pinned class the
+ *    CPU does not admit.
+ *  - @c usearch_status_uninitialized_k No memory domain to place a shard on, or the executor holds
+ *    no pool workers.
+ *  - @c usearch_status_config_mismatch_k A memory domain refusing a shard, or the checkpoint's
+ *    geometry, dtypes or metric differ from the shards'.
+ *  - @c usearch_status_device_k The executor is not a RAM executor.
+ *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
+ *    dispatch.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
  */
 USEARCH_EXPORT void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments);
 
@@ -419,8 +439,27 @@ typedef struct usearch_dense_load_vram_t {
     usearch_progress_t progress;
 } usearch_dense_load_vram_t;
 
-/** Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
- *  @c usearch_dense_load_ram. @ref dense_index_serialization */
+/**
+ *  Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
+ *  @c usearch_dense_load_ram. @ref dense_index_serialization
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c path, or a checkpoint or part path that
+ *    does not parse.
+ *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header or its key
+ *    column does not parse, or its connectivity or dimensions are unusable.
+ *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
+ *    score, or a kernel a shard cannot finalize.
+ *  - @c usearch_status_unsupported_k A quantization this build leaves out, or devices that do not
+ *    run the pinned class.
+ *  - @c usearch_status_config_mismatch_k Devices of more than one vendor or generation, the
+ *    executor driving no stream on some shard's device, or the checkpoint's geometry, dtypes or
+ *    metric differing from the shards'.
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *    for, or an executor that is not a VRAM executor.
+ *  - @c usearch_status_contended_k Another call holds the executor.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
+ */
 USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments);
 
 /** The arguments of @c usearch_dense_load_ram_buffer. */
@@ -457,6 +496,23 @@ typedef struct usearch_dense_load_ram_buffer_t {
  *  This reports and cancels like its path-taking sibling and creates no handle when stopped. That
  *  sibling reaches the same bytes through a mapping, so @c buffer needs no file behind it and a
  *  mapped file needs no copy into one.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer.
+ *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header or its key
+ *    column does not parse, or its connectivity or dimensions are unusable.
+ *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
+ *    score, or a kernel a shard cannot finalize.
+ *  - @c usearch_status_unsupported_k A quantization this build leaves out, or a pinned class the
+ *    CPU does not admit.
+ *  - @c usearch_status_uninitialized_k No memory domain to place a shard on, or the executor holds
+ *    no pool workers.
+ *  - @c usearch_status_config_mismatch_k A memory domain refusing a shard, or the checkpoint's
+ *    geometry, dtypes or metric differ from the shards'.
+ *  - @c usearch_status_device_k The executor is not a RAM executor.
+ *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
+ *    dispatch.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
  */
 USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments);
 
@@ -490,8 +546,26 @@ typedef struct usearch_dense_load_vram_buffer_t {
     usearch_progress_t progress;
 } usearch_dense_load_vram_buffer_t;
 
-/** Copies a checkpoint from a memory buffer into a new, mutable index in device memory, reporting
- *  and cancelling like @c usearch_dense_load_ram_buffer. */
+/**
+ *  Copies a checkpoint from a memory buffer into a new, mutable index in device memory, reporting
+ *  and cancelling like @c usearch_dense_load_ram_buffer.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer.
+ *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header or its key
+ *    column does not parse, or its connectivity or dimensions are unusable.
+ *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
+ *    score, or a kernel a shard cannot finalize.
+ *  - @c usearch_status_unsupported_k A quantization this build leaves out, or devices that do not
+ *    run the pinned class.
+ *  - @c usearch_status_config_mismatch_k Devices of more than one vendor or generation, the
+ *    executor driving no stream on some shard's device, or the checkpoint's geometry, dtypes or
+ *    metric differing from the shards'.
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *    for, or an executor that is not a VRAM executor.
+ *  - @c usearch_status_contended_k Another call holds the executor.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
+ */
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments);
 
 /** The arguments of @c usearch_dense_view_ram. */
@@ -514,6 +588,9 @@ typedef struct usearch_dense_view_ram_t {
  *  Nothing is copied, so opening costs the headers alone and a traversal pays only for the pages
  *  it touches. Every mutating verb on the handle reports @c usearch_status_read_only_k, and the
  *  files must stay unmodified until the handle is freed.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unsupported_k Always, as RAM shards cannot serve a mapping in place yet.
  */
 USEARCH_EXPORT void usearch_dense_view_ram(usearch_dense_view_ram_t* arguments);
 
@@ -545,13 +622,26 @@ typedef struct usearch_dense_view_nvme_t {
  *
  *  Opening reads the headers alone. Every mutating verb on the handle reports
  *  @c usearch_status_read_only_k, and the parts must stay unmodified until the handle is freed.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_device_k @c executor is not an NVMe executor.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, @c NULL paths for a nonzero count,
+ *    or a path that does not parse or names a base off its medium's block.
+ *  - @c usearch_status_config_mismatch_k Parts disagreeing with each other, with the scalar or
+ *    with @c nvme.
+ *  - @c usearch_status_unsupported_k A transport identifier in a build without SPDK, a
+ *    quantization this build leaves out, or a pinned class the CPU does not admit.
+ *  - @c usearch_status_malformed_k The manifest names no part, or a manifest or header does not
+ *    parse.
+ *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
+ *    score, or a kernel the stored scalar's kits cannot finalize.
  */
 USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments);
 
 /**
  *  @brief Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so
  *      takes no outcome.
- *  @param[inout] index The handle to be freed; invalid afterwards.
+ *  @param[in,out] index The handle to be freed; invalid afterwards.
  *
  *  Waits until every deferred call naming the handle is final.
  */
@@ -576,8 +666,19 @@ typedef struct usearch_dense_reserve_t {
     size_t capacity;
 } usearch_dense_reserve_t;
 
-/** Grows the shards ahead of a number of incoming vectors - a capacity hint, since insertions grow
- *  them on demand and init froze the geometry already. */
+/**
+ *  Grows the shards ahead of a number of incoming vectors - a capacity hint, since insertions grow
+ *  them on demand and init froze the geometry already.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k The handle is an NVMe view.
+ *  - @c usearch_status_uninitialized_k No shard is placed.
+ *  - @c usearch_status_unknown_kind_k The stored scalar's kits cannot finalize the metric.
+ *  - @c usearch_status_config_mismatch_k The frozen geometry differs from a shard's, or on VRAM a
+ *    shard's neighbors live on another device or no walk fits the device.
+ *  - @c usearch_status_overflow_k @c capacity passes a shard's ceiling, its ID space, its chunk
+ *    directory or its key column.
+ */
 USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_reserve_t* arguments);
 
 /** The arguments of @c usearch_dense_clear. */
@@ -596,9 +697,16 @@ typedef struct usearch_dense_clear_t {
     usearch_completion_t completion;
 } usearch_dense_clear_t;
 
-/** Erases all entries, keeping the reserved capacity and frozen geometry. An insertion in flight,
+/**
+ *  Erases all entries, keeping the reserved capacity and frozen geometry. An insertion in flight,
  *  or a refinement, absorb, compaction, split or load holding the handle, refuses it with
- *  @c usearch_status_contended_k; a search it lands under repeats or reports the same. */
+ *  @c usearch_status_contended_k; a search it lands under repeats or reports the same.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k The handle is an NVMe view.
+ *  - @c usearch_status_contended_k A call in flight, a batch or load holding claims, or a plan
+ *    holding the handle closed.
+ */
 USEARCH_EXPORT void usearch_dense_clear(usearch_dense_clear_t* arguments);
 
 /** The arguments of @c usearch_dense_insert. */
@@ -639,9 +747,6 @@ typedef struct usearch_dense_insert_t {
  *  @brief Adds a run of vectors under their keys - the native batch operation; a single vector is
  *      a count of one. Overlaps safely with concurrent searches on the same handle.
  *  @ref dense_index_concurrency
- *  @retval usearch_status_read_only_k The handle is a view.
- *  @retval usearch_status_contended_k A refinement, absorption or clear holds the handle, or on
- *      VRAM a save or another insertion does; nothing landed.
  *
  *  An insertion is all-or-nothing per call, with or without a handler, and its rows become visible
  *  at once on RAM and VRAM handles alike, so a concurrent search sees every row of the call or none
@@ -662,6 +767,11 @@ typedef struct usearch_dense_insert_t {
  *      .vectors = {rows_base, 128 * sizeof(float), 128, usearch_scalar_f32_k}});
  *  if (outcome.status != usearch_status_success_k) report(outcome.message);
  *  @endcode
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k The handle is a view.
+ *  - @c usearch_status_contended_k A refinement, absorption or clear holds the handle, or on
+ *    VRAM a save or another insertion does; nothing landed.
  */
 USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments);
 
@@ -725,6 +835,20 @@ typedef struct usearch_dense_refine_t {
  *  overlap: one in flight refuses the call with @c usearch_status_contended_k, and one arriving
  *  meanwhile is refused the same way, as is a VRAM save. A viewed handle refuses with
  *  @c usearch_status_read_only_k, like every other mutating verb.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_device_k The executor's kind does not match the residency.
+ *  - @c usearch_status_read_only_k The handle is an NVMe view.
+ *  - @c usearch_status_uninitialized_k No shard is placed or froze its geometry, the executor
+ *    holds no threads, or a VRAM handle keeps such an earlier failure.
+ *  - @c usearch_status_contended_k An insertion, load, save, refinement or absorption holds the
+ *    handle, or another call holds the executor or its pool.
+ *  - @c usearch_status_config_mismatch_k The executor drives no stream on some VRAM shard's
+ *    device, or a VRAM handle keeps such an earlier failure.
+ *  - @c usearch_status_overflow_k A queue capacity wraps when rounded, or a VRAM handle keeps an
+ *    earlier overflow.
+ *  - @c usearch_status_unsupported_k or @c usearch_status_unsupported_layout_k A VRAM handle
+ *    keeps such an earlier failure.
  */
 USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments);
 
@@ -747,9 +871,24 @@ typedef struct usearch_dense_health_t {
     usearch_reachability_t* reachability;
 } usearch_dense_health_t;
 
-/** Audits how much of the graph a search can reach: forward reachability from as many landmarks
+/**
+ *  Audits how much of the graph a search can reach: forward reachability from as many landmarks
  *  as one search draws, swept level by level. Read-only, so concurrent insertions merely leave
- *  fresh entries unaudited. */
+ *  fresh entries unaudited.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_device_k The executor's kind does not match the residency.
+ *  - @c usearch_status_uninitialized_k No shard is placed, the executor holds no pool workers or
+ *    streams, or a VRAM handle keeps such an earlier failure.
+ *  - @c usearch_status_contended_k Another call holds the executor or its pool, or a destructive
+ *    window overlapped the audit twice.
+ *  - @c usearch_status_config_mismatch_k The executor drives no stream on some VRAM shard's
+ *    device, an NVMe medium the engines cannot read, or a VRAM handle keeps such an earlier
+ *    failure.
+ *  - @c usearch_status_overflow_k A VRAM handle keeps an earlier overflow.
+ *  - @c usearch_status_unsupported_k or @c usearch_status_unsupported_layout_k A VRAM handle
+ *    keeps such an earlier failure.
+ */
 USEARCH_EXPORT void usearch_dense_health(usearch_dense_health_t* arguments);
 
 /** The arguments of @c usearch_dense_search. */
@@ -803,9 +942,6 @@ typedef struct usearch_dense_search_t {
 /**
  *  @brief Performs k-Nearest Neighbors Search for a run of queries, approximate by walking the
  *      graph or exact by scanning every row - the native batch operation, parallelized internally.
- *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
- *  @retval usearch_status_unsupported_k A scan of an AMD or Apple VRAM handle, or a @c predicate on
- *      any VRAM handle.
  *
  *  One query is a count of one. Never writes to the index, so any number may overlap with
  *  insertions. @ref dense_index_concurrency
@@ -849,6 +985,11 @@ typedef struct usearch_dense_search_t {
  *  // Row 3's nearest key, valid until the next call given `arena`.
  *  usearch_key_t nearest = matches.keys[3 * matches.columns];
  *  @endcode
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
+ *  - @c usearch_status_unsupported_k A scan of an AMD or Apple VRAM handle, or a @c predicate on
+ *    any VRAM handle.
  */
 USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments);
 
@@ -880,6 +1021,13 @@ typedef struct usearch_dense_count_t {
  *  Every entry is one row of @c dimensions, so the count is the whole extent and there is nothing
  *  further to report - the sibling modalities report stats here only because their entries vary
  *  in size.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_device_k The executor's kind does not match the residency.
+ *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
+ *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
+ *    dispatch.
+ *  - @c usearch_status_config_mismatch_k An NVMe medium the engines cannot read.
  */
 USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments);
 
@@ -919,6 +1067,18 @@ typedef struct usearch_dense_get_t {
  *      key, shard by shard and in insertion order within each - one call, however many there are.
  *
  *  The rows span @c written entries; an absent key leaves @c vectors->data @c NULL.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unknown_kind_k An unknown @c outputs_scalar.
+ *  - @c usearch_status_shape_mismatch_k Sub-byte rows ending inside a byte.
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c arena.
+ *  - @c usearch_status_device_k An arena or an executor on another residency or device.
+ *  - @c usearch_status_contended_k The arena serves another call, another call holds the
+ *    executor or its pool, or a destructive window overlapped the read twice.
+ *  - @c usearch_status_uninitialized_k The executor holds no pool workers, or a VRAM index has no
+ *    shards.
+ *  - @c usearch_status_config_mismatch_k The executor drives no stream on some shard's device,
+ *    or an NVMe medium the engines cannot read.
  */
 USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments);
 
@@ -964,13 +1124,6 @@ typedef struct usearch_dense_absorb_t {
  *  @brief Absorbs every handle in @c donors into @c index, one after another, keeping their graphs
  *      rather than re-inserting their vectors and linking each in by walks across. Donor handles
  *      are consumed and must not be used afterwards, not even for @c usearch_dense_free.
- *  @retval usearch_status_read_only_k @c index is an NVMe view.
- *  @retval usearch_status_invalid_argument_k A @c NULL slot in @c donors, or @c NULL @c donors
- *      for a nonzero @c count.
- *  @retval usearch_status_config_mismatch_k A donor of another residency, scalar, class, metric or
- *      geometry, a donor on a device the executor does not drive, or @c index itself.
- *  @retval usearch_status_contended_k An insertion in flight on @c index or on the next donor, or
- *      on VRAM a save of either; that donor and every later one stay live handles.
  *
  *  The donors land one after another, each all-or-nothing: its rows append to @c index shard by
  *  shard with their edges rebased, publish at once, and the donor is consumed, so at most one
@@ -996,6 +1149,15 @@ typedef struct usearch_dense_absorb_t {
  *      .progress = {report_to_terminal, &ui, 4}});
  *  // Every entry of `shards` is consumed here; none of them may be freed afterwards.
  *  @endcode
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k @c index is an NVMe view.
+ *  - @c usearch_status_invalid_argument_k A @c NULL slot in @c donors, or @c NULL @c donors
+ *    for a nonzero @c count.
+ *  - @c usearch_status_config_mismatch_k A donor of another residency, scalar, class, metric or
+ *    geometry, a donor on a device the executor does not drive, or @c index itself.
+ *  - @c usearch_status_contended_k An insertion in flight on @c index or on the next donor, or
+ *    on VRAM a save of either; that donor and every later one stay live handles.
  */
 USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments);
 
@@ -1046,15 +1208,6 @@ typedef struct usearch_dense_compact_t {
  *  @brief Compacts every shard of the handles in @c sources into @c target under @c shard_capacity
  *      rows per shard, largest first, each into the first shard with room, so it ends with as few
  *      shards as fit; in place when @c target is among @c sources.
- *  @retval usearch_status_read_only_k @c target is an NVMe view.
- *  @retval usearch_status_invalid_argument_k A @c NULL slot in @c sources, or @c NULL @c sources
- *      for a nonzero @c count.
- *  @retval usearch_status_config_mismatch_k A repeated source, or one of another residency, scalar,
- *      class, metric or geometry.
- *  @retval usearch_status_contended_k An insertion in flight on @c target or a source, or another
- *      call holding either; nothing moves.
- *  @retval usearch_status_unsupported_k A source shard past @c shard_capacity, which would have to
- *      be cut first, or a target outside RAM.
  *
  *  The shard a bin keeps stays resident with its IDs, every other source shard lands after it with
  *  its edges rebased and its keys beside it, and only the appended rows walk the target across the
@@ -1064,6 +1217,17 @@ typedef struct usearch_dense_compact_t {
  *  call landed every source, each one but @c target is freed and nulled, as @c usearch_dense_absorb
  *  frees its donors; a failure frees none, those it consumed left empty and refusing insertions, so
  *  every handle in @c sources stays the caller's to free.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k @c target is an NVMe view.
+ *  - @c usearch_status_invalid_argument_k A @c NULL slot in @c sources, or @c NULL @c sources
+ *    for a nonzero @c count.
+ *  - @c usearch_status_config_mismatch_k A repeated source, or one of another residency, scalar,
+ *    class, metric or geometry.
+ *  - @c usearch_status_contended_k An insertion in flight on @c target or a source, or another
+ *    call holding either; nothing moves.
+ *  - @c usearch_status_unsupported_k A source shard past @c shard_capacity, which would have to
+ *    be cut first, or a target outside RAM.
  */
 USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments);
 
@@ -1113,14 +1277,6 @@ typedef struct usearch_dense_split_t {
  *  @brief Splits @c index into the handles in @c receivers, the inverse of @c usearch_dense_absorb:
  *      graph-local parts keeping their edges rather than re-inserting their vectors, one part per
  *      receiver, and @c index left empty but live.
- *  @retval usearch_status_read_only_k @c index is an NVMe view.
- *  @retval usearch_status_invalid_argument_k Fewer than two receivers, @c NULL @c receivers, or a
- *      @c NULL slot in them.
- *  @retval usearch_status_config_mismatch_k A receiver of another residency, scalar, class, metric,
- *      geometry or shard count, one holding rows, one on a device the executor does not drive, one
- *      named twice, or @c index itself.
- *  @retval usearch_status_contended_k An insertion in flight on @c index or on a receiver, or on
- *      VRAM a save of either; nothing moves.
  *
  *  Every receiver is checked and held before the first part lands, so a refusal moves nothing.
  *  The part roots are drawn from @c seed without a scan, and each part grows breadth-first over the
@@ -1137,6 +1293,16 @@ typedef struct usearch_dense_split_t {
  *  @c usearch_dense_refine: a cancel skips the rest of the re-selection, still re-links, and
  *  answers @c usearch_status_cancelled_k with every part landed. A caller wanting to continue that
  *  re-selection later holds a @c usearch_dense_refinement_t opened with @c receivers instead.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k @c index is an NVMe view.
+ *  - @c usearch_status_invalid_argument_k Fewer than two receivers, @c NULL @c receivers, or a
+ *    @c NULL slot in them.
+ *  - @c usearch_status_config_mismatch_k A receiver of another residency, scalar, class, metric,
+ *    geometry or shard count, one holding rows, one on a device the executor does not drive, one
+ *    named twice, or @c index itself.
+ *  - @c usearch_status_contended_k An insertion in flight on @c index or on a receiver, or on
+ *    VRAM a save of either; nothing moves.
  */
 USEARCH_EXPORT void usearch_dense_split(usearch_dense_split_t* arguments);
 
@@ -1185,13 +1351,15 @@ typedef struct usearch_dense_refinement_init_t {
  *      @c usearch_dense_absorb lands them, or splitting it into @c receivers, as
  *      @c usearch_dense_split lands them. Every allocation the refinement needs happens here or in
  *      a landing, never in a step.
- *  @retval usearch_status_read_only_k @c index is an NVMe view.
- *  @retval usearch_status_invalid_argument_k A @c NULL slot in @c donors or @c receivers, @c NULL
- *      @c donors for a nonzero @c count, one receiver alone, or donors and receivers both named.
- *  @retval usearch_status_config_mismatch_k A donor or receiver of another residency, scalar,
- *      class, metric or geometry, a receiver holding rows, or @c index itself.
- *  @retval usearch_status_contended_k An insertion, save or another refinement in flight on
- *      @c index.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k @c index is an NVMe view.
+ *  - @c usearch_status_invalid_argument_k A @c NULL slot in @c donors or @c receivers, @c NULL
+ *    @c donors for a nonzero @c count, one receiver alone, or donors and receivers both named.
+ *  - @c usearch_status_config_mismatch_k A donor or receiver of another residency, scalar,
+ *    class, metric or geometry, a receiver holding rows, or @c index itself.
+ *  - @c usearch_status_contended_k An insertion, save or another refinement in flight on
+ *    @c index.
  */
 USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_t* arguments);
 
@@ -1234,10 +1402,12 @@ typedef struct usearch_dense_refinement_next_t {
  *  Every call reaching the refinement writes the running totals, a cancelled or failed one too, so
  *  they only grow from one call to the next and @c changed never exceeds @c visited; all stay zero
  *  while donors are pending.
- *  @retval usearch_status_invalid_argument_k @c index is not the handle the refinement was opened
- *      on.
- *  @retval usearch_status_contended_k An insertion in flight on the next donor; that donor and
- *      every later one stay live handles, and a later call retries them.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c index is not the handle the refinement was opened
+ *    on.
+ *  - @c usearch_status_contended_k An insertion in flight on the next donor; that donor and
+ *    every later one stay live handles, and a later call retries them.
  */
 USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments);
 
@@ -1274,8 +1444,10 @@ typedef struct usearch_dense_refinement_finish_t {
  *  @brief Skips whatever re-selection a stopped refinement left, re-links what it strands as
  *      @c usearch_dense_refine does, reports, reopens the index, and frees the handle. A
  *      refinement whose donors have not all landed re-links nothing and reports zeros.
- *  @retval usearch_status_invalid_argument_k @c index is not the handle the refinement was opened
- *      on; the handle is still freed.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c index is not the handle the refinement was opened
+ *    on; the handle is still freed.
  */
 USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_finish_t* arguments);
 
@@ -1300,12 +1472,14 @@ typedef struct usearch_dense_cursor_init_t {
 
 /**
  *  @brief Opens a walk over the current contents; see @c usearch_dense_cursor_t.
- *  @retval usearch_status_invalid_argument_k @c NULL @c starts for a nonzero @c starts_count.
  *
  *  Without @c starts the cursor yields every row as stored. With them it yields the start keys'
  *  own rows first, in the order given, then the rows those link to, breadth-first, each row once,
  *  so a caller wanting only the starts' immediate links reads the rows of the first pulled
  *  entries. A key the index lacks starts nothing.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c NULL @c starts for a nonzero @c starts_count.
  */
 USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments);
 
@@ -1348,11 +1522,13 @@ typedef struct usearch_dense_cursor_next_t {
  *  @brief Copies the next batch of entries out of the cursor into @c arena, each with the keys it
  *      links to, in the order @c usearch_dense_cursor_init describes; the vectors themselves come
  *      from @c usearch_dense_get.
- *  @retval usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  *
  *  Links name only rows published when the pull ran, as the graph stored them then. The keys are
  *  copied rather than borrowed from the index, so the batch stays valid until the next call given
  *  the same arena, however the cursor moves meanwhile.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  */
 USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments);
 
@@ -1425,6 +1601,9 @@ typedef struct usearch_dense_sample_t {
  *
  *  Links name earlier draws of the same sequence, a later call's reaching an earlier call's. They
  *  are exact in a scan and approximate as any walk otherwise.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unsupported_k Always, as no residency samples yet.
  */
 USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments);
 
@@ -1450,7 +1629,9 @@ typedef struct usearch_dense_search_stream_init_t {
 
 /**
  *  @brief Opens a resumable search for one query; see @c usearch_dense_search_stream_t.
- *  @retval usearch_status_unsupported_k No residency implements the stream yet.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unsupported_k No residency implements the stream yet.
  */
 USEARCH_EXPORT void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments);
 
@@ -1485,11 +1666,13 @@ typedef struct usearch_dense_search_stream_next_t {
 
 /**
  *  @brief Pulls the next-nearest matches from the stream.
- *  @retval usearch_status_invalid_argument_k @c index is not the handle the stream was opened on.
  *
  *  Ordering beyond the expansion horizon is best-effort nearest rather than globally exact, so a
  *  caller pulling far past the breadth it configured sees the ranking degrade rather than the
  *  stream end.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c index is not the handle the stream was opened on.
  */
 USEARCH_EXPORT void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* arguments);
 
@@ -1523,13 +1706,15 @@ typedef struct usearch_dense_save_t {
  *  @brief Saves a mutable index under @c path in the layout its shard count picks - one monolith,
  *      or a manifest beside its shards; concurrent readers keep searching throughout.
  *      @ref dense_index_serialization
- *  @retval usearch_status_contended_k A RAM save meeting an insertion in flight or one publishing
- *      under it, or a VRAM save meeting an insertion, refinement, absorption or another save in
- *      flight; an insertion arriving while a VRAM save runs is refused the same way.
  *
  *  A cancelled or failed monolith save leaves a file without its header, which every reader
  *  rejects; a cancelled manifest save leaves the parts it already wrote and no manifest, so the
  *  checkpoint reads as absent rather than half-valid. Those leftovers are the caller's to remove.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_contended_k A RAM save meeting an insertion in flight or one publishing
+ *    under it, or a VRAM save meeting an insertion, refinement, absorption or another save in
+ *    flight; an insertion arriving while a VRAM save runs is refused the same way.
  */
 USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments);
 
@@ -1572,6 +1757,19 @@ typedef struct usearch_dense_save_buffer_t {
  *  Writing to memory is not writing quickly. A terabyte checkpoint on a handful of cores runs for
  *  minutes, so this reports and cancels like its path-taking sibling, and a cancelled call leaves
  *  @c monolith->data @c NULL.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c arena.
+ *  - @c usearch_status_device_k An arena or an executor on another residency or device.
+ *  - @c usearch_status_contended_k The arena serves another call, another call holds the
+ *    executor or its pool, a dispensed batch has yet to publish, or a call, batch, load or plan
+ *    holds the handle.
+ *  - @c usearch_status_unsupported_k The handle is an NVMe view, which already is its checkpoint.
+ *  - @c usearch_status_uninitialized_k No shard is placed or froze its geometry, or the executor
+ *    holds no pool workers.
+ *  - @c usearch_status_unknown_kind_k The stored scalar has no interchange dtype.
+ *  - @c usearch_status_config_mismatch_k The executor drives no stream on some VRAM shard's
+ *    device.
  */
 USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments);
 
@@ -1623,6 +1821,10 @@ typedef struct usearch_dense_metadata_read_t {
  *
  *  A manifest answers from its summary and its first part's header, so the cost does not grow with
  *  the index.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c path, or a path that does not parse.
+ *  - @c usearch_status_malformed_k The file is empty, or its manifest or header does not parse.
  */
 USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* arguments);
 
@@ -1645,7 +1847,13 @@ typedef struct usearch_dense_metadata_read_buffer_t {
     usearch_dense_metadata_t* metadata;
 } usearch_dense_metadata_read_buffer_t;
 
-/** Reads geometry & metric from a serialized checkpoint buffer. */
+/**
+ *  Reads geometry & metric from a serialized checkpoint buffer.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer.
+ *  - @c usearch_status_malformed_k The manifest or the header does not parse.
+ */
 USEARCH_EXPORT void usearch_dense_metadata_read_buffer(usearch_dense_metadata_read_buffer_t* arguments);
 
 /** A live index's state. Each counter is read once, so under concurrent insertions they may come
@@ -1758,8 +1966,6 @@ typedef struct usearch_dense_multiply_t {
  *  @brief Approximate sparse product of a run of rows against the indexed rows - the linear
  *      algebra sibling of @c usearch_dense_search, reporting @b every pair the traversal scored
  *      instead of only the nearest. @ref dense_index_linear_algebra
- *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
- *  @retval usearch_status_unsupported_k A scan, or a @c predicate on a VRAM handle.
  *
  *  A walk scores many times the pairs a search reports, and each of them is an exact product the
  *  caller would otherwise recompute - this verb hands them all back. Pairs arrive in traversal
@@ -1780,7 +1986,7 @@ typedef struct usearch_dense_multiply_t {
  *  frozen under a distance kind scored a different quantity, so the products it would report are
  *  not the ones asked for, and the call refuses with @c usearch_status_config_mismatch_k.
  *
- *  @sa https://netlib.org/blas - `?GEMM` is the dense counterpart this is shaped after.
+ *  @see BLAS, whose @c ?GEMM is the dense counterpart this is shaped after: https://netlib.org/blas
  *
  *  @code{.c}
  *  // BLAS: B is an operand, C is dense m × n, and every pair is computed.
@@ -1805,7 +2011,11 @@ typedef struct usearch_dense_multiply_t {
  *  @endcode
  *
  *  What the comparison leaves out is the whole of BLAS' tuning surface: no transpose flags, no
- *  `alpha` and `beta`, no leading-dimension triple, and nothing accumulating into `C`.
+ *  @c alpha and @c beta, no leading-dimension triple, and nothing accumulating into @c C.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
+ *  - @c usearch_status_unsupported_k A scan, or a @c predicate on a VRAM handle.
  */
 USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments);
 
@@ -1902,11 +2112,6 @@ typedef struct usearch_dense_attend_t {
 /**
  *  @brief Softmax attention of a run of query heads over every indexed key their graph walks score,
  *      folded as Flash Attention folds key tiles. @ref dense_index_linear_algebra
- *  @retval usearch_status_invalid_argument_k @c value_lookup is NULL.
- *  @retval usearch_status_shape_mismatch_k @c head_count does not divide @c count, or a lookup yields
- *      a NULL row.
- *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
- *  @retval usearch_status_unsupported_k A scan, or a @c predicate on a VRAM handle.
  *
  *  One walk per token runs by a search's own frontier and stopping rule, ranking a key by the best
  *  of the token's heads, so every head's own region is explored. Every key the walk scores folds into
@@ -1928,14 +2133,14 @@ typedef struct usearch_dense_attend_t {
  *  not a smaller one.
  *
  *  Keep the recent window out of the index, inserting a token once it leaves the window, so the dense
- *  window and the graph never share a key. @c carry holds the softmax's `m` and `l`, which is what
- *  merges this branch with another over the same queries - the recent window, attention sinks, or a
- *  second index of one context. The two travel in one element because a maximum without its partition
- *  is a number nothing can rescale. Two branches over the same queries merge as:
+ *  window and the graph never share a key. @c carry holds the softmax's @c m and @c l, which is
+ *  what merges this branch with another over the same queries - the recent window, attention sinks,
+ *  or a second index of one context. The two travel in one element because a maximum without its
+ *  partition is a number nothing can rescale. Two branches over the same queries merge as:
  *
  *  m = max(m₁, m₂),  aᵢ = lᵢ · e^(mᵢ − m),  l = a₁ + a₂,  o = (a₁ · o₁ + a₂ · o₂) / l
  *
- *  @sa https://arxiv.org/abs/2205.14135 - Flash Attention, whose recurrence this reuses.
+ *  @see Flash Attention, whose recurrence this reuses: https://arxiv.org/abs/2205.14135
  *
  *  Runs on the inner-product kinds, since a softmax needs logits and only those kinds score one.
  *  A graph frozen under a distance kind refuses with @c usearch_status_config_mismatch_k.
@@ -1957,6 +2162,13 @@ typedef struct usearch_dense_attend_t {
  *  // The recent window never entered the index, so it merges in by the same rule, counting no key twice.
  *  merge_recent_window(attended.data, attended.stride, carry, tokens * 8, dimensions);
  *  @endcode
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c value_lookup is NULL.
+ *  - @c usearch_status_shape_mismatch_k @c head_count does not divide @c count, or a lookup yields
+ *    a NULL row.
+ *  - @c usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
+ *  - @c usearch_status_unsupported_k A scan, or a @c predicate on a VRAM handle.
  */
 USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments);
 
@@ -2030,10 +2242,6 @@ typedef struct usearch_dense_maxsim_t {
  *  @brief Late-interaction scoring of multi-row queries against multi-row entries: every query row
  *      takes its best match within a key, and those maxima sum to that key's score.
  *  @ref dense_index_linear_algebra
- *  @retval usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
- *  @retval usearch_status_shape_mismatch_k A query without rows, or @c query_offsets decreasing.
- *  @retval usearch_status_unsupported_k A scan, a @c predicate, ragged @c query_offsets or a zero
- *      @c wanted on a VRAM handle.
  *
  *  This is what @c values_per_key above one exists for. A document is one key holding its token
  *  rows, and the walk stays over individual tokens under a plain inner product - no set-to-set
@@ -2048,7 +2256,7 @@ typedef struct usearch_dense_maxsim_t {
  *  Runs on the inner-product kinds, since a maximum over logits is what late interaction sums.
  *  A graph frozen under a distance kind refuses with @c usearch_status_config_mismatch_k.
  *
- *  @sa https://arxiv.org/abs/2004.12832 - ColBERT, which introduced this scoring.
+ *  @see ColBERT, which introduced this scoring: https://arxiv.org/abs/2004.12832
  *
  *  @code{.c}
  *  // 4 queries of 32 padded token rows each, scored against documents of any length.
@@ -2059,6 +2267,12 @@ typedef struct usearch_dense_maxsim_t {
  *      .count = 4, .queries = {query_tokens, 128 * sizeof(float), 128, usearch_scalar_f32_k}, .rows_per_query = 32,
  *      .matches = &documents, .arena = arena, .wanted = 10});
  *  @endcode
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
+ *  - @c usearch_status_shape_mismatch_k A query without rows, or @c query_offsets decreasing.
+ *  - @c usearch_status_unsupported_k A scan, a @c predicate, ragged @c query_offsets or a zero
+ *    @c wanted on a VRAM handle.
  */
 USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments);
 

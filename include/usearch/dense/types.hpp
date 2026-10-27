@@ -229,9 +229,9 @@ static_assert(sizeof(index_header_t) == 32 && std::is_trivially_copyable_v<index
 template <typename scalar_type_>
 concept floating_scalar = !nk::is_integral_dtype<scalar_type_>();
 
-/** A lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a node scores `Σₕ wₕ·ReLU(qₕ·k)`
- *  against these heads, and its distance is `1 − score`, while the walk navigates by the query rows,
- *  conventionally `Σₕ wₕ·qₕ`. */
+/** A lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a node scores <tt>Σₕ
+ *  wₕ·ReLU(qₕ·k)</tt> against these heads, and its distance is <tt>1 − score</tt>, while the walk
+ *  navigates by the query rows, conventionally <tt>Σₕ wₕ·qₕ</tt>. */
 template <typename scalar_type_>
 struct indexer_heads {
 
@@ -263,9 +263,9 @@ struct dummy_heads_t {
 };
 
 /** Runs @p window over every @p window_rows rows of a batch of @p rows in order, as
- *  `window(first, taking)`, summing what each reports; each window writes its own rows' counts,
- *  wherever they live, and the first refusal stops the batch, keeping every window already landed
- *  and leaving the rows past it unwritten. */
+ *  <tt>window(first, taking)</tt>, summing what each reports; each window writes its own rows'
+ *  counts, wherever they live, and the first refusal stops the batch, keeping every window already
+ *  landed and leaving the rows past it unwritten. */
 template <typename search_result_type_, typename window_type_>
 expected<search_result_type_> for_each_window(std::size_t rows, std::size_t window_rows,
                                               window_type_&& window) noexcept {
@@ -284,8 +284,14 @@ expected<search_result_type_> for_each_window(std::size_t rows, std::size_t wind
     return {total, status_t::success_k};
 }
 
-/** Why @p span cannot take @p rows copied rows of @p columns values each, packed within a row, or
- *  success; rows may stride past @p columns, and wider rows keep their tails. */
+/**
+ *  Why @p span cannot take @p rows copied rows of @p columns values each, packed within a row; rows
+ *  may stride past @p columns, and wider rows keep their tails.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k The span's rows are not @p rows, or are narrower than @p columns.
+ *  - @c unsupported_layout_k The values of a row are not packed.
+ */
 template <typename value_type_>
 status_t rows_refusal(std::size_t rows, nk::matrix_span<value_type_> span, std::size_t columns) noexcept {
     if (span.extent(0) != rows || (rows && span.extent(1) < columns)) return status_t::config_mismatch_k;
@@ -457,8 +463,13 @@ class maxsim_reducer {
 
     explicit maxsim_reducer(allocator_type_ allocator) noexcept : staged_(allocator), row_best_(allocator) {}
 
-    /** Sizes the staging for queries of @p rows_per_query rankings, each @p width hits wide; a
-     *  query wider than @c u32_t hits refuses with @c config_mismatch_k. */
+    /**
+     *  Sizes the staging for queries of @p rows_per_query rankings, each @p width hits wide; a
+     *  query wider than @c u32_t hits refuses with @c config_mismatch_k.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k A query holds more hits than @c u32_t counts.
+     */
     status_t reserve(std::size_t rows_per_query, std::size_t width) noexcept {
         std::size_t const hits = rows_per_query * width;
         if (hits > (std::numeric_limits<u32_t>::max)()) return status_t::config_mismatch_k;

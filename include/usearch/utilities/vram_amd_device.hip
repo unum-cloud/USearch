@@ -126,7 +126,7 @@ struct hip_warp {
     static __device__ __forceinline__ void fence_release() noexcept { __threadfence(); }
 
     /** Copies @p bytes from @p source into @p target on the calling lane, one at a time, since
-     *  `std::memcpy` names the host function under HIP. */
+     *  @c std::memcpy names the host function under HIP. */
     static __device__ __forceinline__ void copy_bytes(void* target, void const* source, std::size_t bytes) noexcept {
         for (std::size_t offset = 0; offset != bytes; ++offset)
             static_cast<byte_t*>(target)[offset] = static_cast<byte_t const*>(source)[offset];

@@ -2,6 +2,11 @@ C API Reference
 ===============
 
 ========================
+usearch/usearch.h
+========================
+.. doxygenfile:: usearch.h
+
+========================
 usearch/types.h
 ========================
 .. doxygenfile:: types.h

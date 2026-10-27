@@ -234,6 +234,9 @@ class chord_metric {
      *  @brief Sizes the staging.
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at
      *      least the index's round capacity, or rounds saturate rather than fail.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k A zero @p staging_limit.
      */
     status_t init(std::size_t staging_limit) noexcept {
         if (!staging_limit) return status_t::config_mismatch_k;

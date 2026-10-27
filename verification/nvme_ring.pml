@@ -1,59 +1,31 @@
 /**
+ *  @file verification/nvme_ring.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief The io_uring words of `linux_uring_ring_t` behind the ring engines: the engine and the
  *      kernel over both rings, with every completion posted as soon as its entry is consumed.
  *
  *  From `include/usearch/utilities/nvme_device.hpp`: the submission ring's head and tail, the
  *  completion ring's head and tail, and the entries between them, shared with the kernel through
- *  the orders the ring documentation asks for.
+ *  the orders the ring documentation asks for. An engine and a kernel over two rings of depth two,
+ *  and three requests, so each ring wraps once. The kernel refuses at most two calls.
  *
- *  An engine and a kernel over two rings of depth two, and three requests, so each ring wraps
- *  once. `next_submission` claims a slot after an acquire load of the submission head, and the
- *  entry is written relaxed in place; `enter_` publishes the tail with a release and calls
- *  `io_uring_enter`; a blocking `submit` then waits for a completion; `poll_completions` loads the
- *  completion tail with acquire, reads each entry relaxed, and publishes the head with a release.
- *  The kernel is the mirror image: inside the call, an acquire load of the submission tail, relaxed
- *  reads of the entries, a release store of the submission head; at any step, an acquire load of
- *  the completion head for room, a relaxed write of the entry, a release store of the completion
- *  tail. Without `IORING_SETUP_SQPOLL` the kernel's side of the call runs on the engine's thread,
- *  so the kernel reads the newest submission tail inside it and `abandon_` reads the newest
- *  submission head after it, while the entries reach the kernel only through the tail's release,
- *  as they would on another core.
- *
- *  The kernel refuses at most two calls. A refused call makes `submit` run `abandon_`: it loads
- *  the submission head and withdraws every entry past it by storing the head as the tail; then each
- *  round loads the completion tail, takes the completions up to it out of the outstanding count,
- *  stores the tail as the head, dropping them, and returns once nothing is outstanding or the
- *  kernel refuses the call that waits for the rest, whose reads stay outstanding.
- *
- *  Every entry the kernel reads carries the request claimed at that index, never the initial
- *  value, a stale one from the previous lap, or a withdrawn one. Every request ends reaped,
- *  withdrawn or dropped, each once; the outstanding count equals the requests not yet ended; an
- *  abandon the kernel waited out leaves nothing in flight; and a head never passes its tail.
- *
- *  Under `IORING_SETUP_DEFER_TASKRUN` the kernel posts completions only while the engine is inside
- *  its blocking enter, which narrows when they land and changes nothing about what is seen, so a
- *  kernel that posts at any step covers it.
- *
- *  The acquire on the submission head and the release on the completion head guard the shape
- *  where a slot is reused before its reader is done, which RC11 forbids by construction, so no knob
- *  can fail on them here: with no eventual visibility in the model either, a relaxed head read can
- *  stay stale forever, and the run ends with a stuck engine rather than a failed assertion. They
- *  stay in the header, since the kernel is not a C++ thread.
+ *  - Every entry the kernel reads carries the request claimed at that index.
+ *  - Every request ends reaped, withdrawn or dropped, each once.
+ *  - The outstanding count equals the requests not yet ended.
+ *  - An abandon the kernel waited out leaves nothing in flight, and a head never passes its tail.
  *
  *  @verify pass sc,rc11
- *  @verify fail rc11 sq_tail_order=order_relaxed: `enter_` publishes the submission tail with a
- *      release that carries the entries; relaxed, the kernel consumes an entry before its payload
- *      landed
- *  @verify fail rc11 cq_tail_order=order_relaxed: `poll_completions` acquires the completion tail,
- *      which carries the kernel's entries; relaxed, the engine reaps a completion stale
- *  @verify fail sc abandon_waits=false: `abandon_` waits out the reads the kernel consumed before
- *      it drops the completions; dropping at once, a read of the abandoned batch is still in flight
- *      when `submit` returns, and the engine polls it later
+ *  @verify fail rc11 sq_tail_order=order_relaxed: relaxed, the kernel consumes an entry before its
+ *      payload landed
+ *  @verify fail rc11 cq_tail_order=order_relaxed: relaxed, the engine reaps a completion stale
+ *  @verify fail sc abandon_waits=false: dropping at once, a read of the abandoned batch is still in
+ *      flight when `submit` returns, and the engine polls it later
  */
 #define thread_count 2
 #define location_count 8
 #define history_depth 6
-#include "weak_memory.pml"
+#include <weak_memory.pml>
 
 // The words: the four ring words, then the entries of each ring.
 #define sq_head 0

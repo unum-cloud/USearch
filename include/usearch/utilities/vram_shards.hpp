@@ -55,8 +55,14 @@ struct vram_shard_fanout {
 
 #pragma region Pairing
 
-    /** Whether @p executor drives a stream on every shard's device - shards sharing a device share
-     *  its stream, and queue on it in order. */
+    /**
+     *  Whether @p executor drives a stream on every shard's device - shards sharing a device share
+     *  its stream, and queue on it in order.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The tower has no shards.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device.
+     */
     static status_t pairs_with(shards_t const& shards, executor_t const& executor) noexcept {
         if (shards.empty()) return status_t::uninitialized_k;
         for (std::size_t shard = 0; shard != shards.size(); ++shard)
@@ -78,10 +84,15 @@ struct vram_shard_fanout {
         return vendor_t::select(shards[shard].index->device_specs().ordinal);
     }
 
-    /** Builds one traversal context per shard over its device's stream and run, so a fan-out never
+    /**
+     *  Builds one traversal context per shard over its device's stream and run, so a fan-out never
      *  allocates and never shares scratch; @p usage, the arguments of a shard's
      *  @c traversal_memory_usage, sizes them for the widest shard, and every stream holds a context
-     *  for each shard it serves. */
+     *  for each shard it serves.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The @p executor has no streams.
+     */
     template <typename... usage_types_>
     static status_t reserve_traversals(shards_t const& shards, traversals_t& traversals, executor_t& executor,
                                        usage_types_ const&... usage) noexcept {
@@ -107,8 +118,16 @@ struct vram_shard_fanout {
         return status_t::success_k;
     }
 
-    /** Why a batch of @p rows cannot rank into @p keys, @p scores and @p counts on @p executor: the
-     *  checks every window repeats, run once over the whole batch before any window slices it. */
+    /**
+     *  Why a batch of @p rows cannot rank into @p keys, @p scores and @p counts on @p executor: the
+     *  checks every window repeats, run once over the whole batch before any window slices it.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The tower has no shards.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, @p counts is
+     *    not @p rows long, or the row counts or widths of @p keys and @p scores disagree.
+     *  - @c unsupported_layout_k A row of @p keys or @p scores is not contiguous.
+     */
     template <typename score_type_>
     static status_t refusal(shards_t const& shards, executor_t const& executor, std::size_t rows,
                             nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> scores,
@@ -129,9 +148,15 @@ struct vram_shard_fanout {
      *  no part. */
     std::size_t shards() const noexcept { return visible_.size(); }
 
-    /** Claims the executor, snapshots the shards' visible nodes and reserves every shard's traversals
-     *  for @p usage, the arguments of a shard's @c traversal_memory_usage, sizing again for a shard
-     *  generation opened meanwhile. */
+    /**
+     *  Claims the executor, snapshots the shards' visible nodes and reserves every shard's
+     *  traversals for @p usage, the arguments of a shard's @c traversal_memory_usage, sizing again
+     *  for a shard generation opened meanwhile.
+     *
+     *  @par Statuses:
+     *  - @c contended_k Another call holds the executor.
+     *  - @c uninitialized_k The executor has no streams.
+     */
     template <typename... usage_types_>
     status_t begin(usage_types_ const&... usage) noexcept {
         // The executor serializes, never the index: a second caller with its own executor searches
@@ -157,8 +182,8 @@ struct vram_shard_fanout {
      *
      *  Whichever shard lands first merges first, so one merge overlaps the other walks. The
      *  telemetry and the rows' @p counts sum, and the first refusal is the one kept. @p submit is
-     *  called as `submit(shard, traversal, visible) → status_t`, and @p merge as
-     *  `merge(shard, traversal)`.
+     *  called as <tt>submit(shard, traversal, visible) → status_t</tt>, and @p merge as
+     *  <tt>merge(shard, traversal)</tt>.
      */
     template <typename submit_type_, typename merge_type_>
     expected<search_result_t> for_each_shard(submit_type_&& submit, merge_type_&& merge,
@@ -222,15 +247,15 @@ struct vram_shard_fanout {
 
     /**
      *  @brief Runs @p search_shard on every live shard's own stream, each landing up to @p wanted
-     *      node IDs and @ref landed_score_t scores for each of @p queries_count queries, then
+     *      node IDs and @c landed_score_t scores for each of @p queries_count queries, then
      *      merges them by score into @p keys, @p scores and @p counts, resolving node IDs through
      *      each shard's host keys.
      *
-     *  @p search_shard is called as `search_shard(shard, node_ids, scores, counts, traversal,
-     *  visible) → status_t` with that shard's own block of the landing: a row ends at its count,
-     *  which starts at @p wanted for a search that reports none, or at its first sentinel ID. A
-     *  shard with no visible node walks nothing and merges nothing. The landing is never zeroed and
-     *  grows to the widest window, which every later one reuses.
+     *  @p search_shard is called as <tt>search_shard(shard, node_ids, scores, counts, traversal,
+     *  visible) → status_t</tt> with that shard's own block of the landing: a row ends at its
+     *  count, which starts at @p wanted for a search that reports none, or at its first sentinel
+     *  ID. A shard with no visible node walks nothing and merges nothing. The landing is never
+     *  zeroed and grows to the widest window, which every later one reuses.
      */
     template <typename search_shard_type_, typename score_type_>
     expected<search_result_t> search_every_shard(std::size_t queries_count, std::size_t wanted,

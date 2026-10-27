@@ -1,40 +1,38 @@
 /**
+ *  @file verification/dense_ram_indexes_generations/crossing.pml
+ *  @author Ash Vardanian
+ *  @date October 22, 2026
  *  @brief A one-row planned batch and a single-row insert crossing the bound at once, the insert's
  *      build free to fail, beside a reader touching every shard the count publishes.
  *
  *  The first generation's shard is full, so the planner's `room()` is zero and the insert's probe
  *  is refused, and both open the next generation from the same count. One takes the opening bit and
- *  builds; the other waits on the count, then claims in the new shard: the insert after re-reading
- *  `size()`, the planner straight away. When the insert's build fails, it puts the count back and
- *  the insert is refused, and the planner takes the bit and builds instead. Every insert not refused
- *  lands its row, and the count ends past the new generation.
+ *  builds; the other waits on the count, then claims in the new shard. When the insert's build
+ *  fails, it puts the count back and the insert is refused, and the planner takes the bit and
+ *  builds instead.
+ *
+ *  - Every insert not refused lands its row, and the count ends past the new generation.
  *
  *  @verify pass sc,rc11
  *  @verify pass sc,rc11 opening_cap=false: the cap is not what ends the wait: a monitored waiter
  *      re-checks the count after arming and wakes on the store that publishes or restores it
- *  @verify fail sc opening_bit=false: the compare-exchange to the opening bit elects one builder;
- *      with a plain load of the count instead, both adders read the generation unopened and both
- *      construct its shard
- *  @verify fail rc11 publish_order=order_relaxed: the count's release store carries the new shard's
- *      construction to every `size()`; relaxed, the waiter or the reader acquires the new count and
- *      touches a shard whose construction it has not seen
- *  @verify fail rc11 failure_order=order_relaxed: `plan_insert` claims on the fresh shard right after
- *      `open_generation_` answers, with no `size()` between, so the refused exchange that finds the
- *      generation opened by the insert acquires its store; relaxed, the planner claims on a shard
- *      whose construction it has not seen
- *  @verify stuck sc restore_count=false: a failed build stores the count back without the bit;
- *      leaving the bit set, the waiter re-reads the same word forever and no generation opens
+ *  @verify fail sc opening_bit=false: with a plain load of the count instead, both adders read the
+ *      generation unopened and both construct its shard
+ *  @verify fail rc11 publish_order=order_relaxed: relaxed, the waiter or the reader acquires the new
+ *      count and touches a shard whose construction it has not seen
+ *  @verify fail rc11 failure_order=order_relaxed: relaxed, the planner claims on a shard whose
+ *      construction it has not seen
+ *  @verify stuck sc restore_count=false: leaving the bit set, the waiter re-reads the same word
+ *      forever and no generation opens
  *  @verify stuck sc opening_cap=false count_wakes=false: an uncapped wait that no store to the count
- *      wakes, a futex with no notify after the publishing store, leaves the waiter armed after the
- *      generation opened
+ *      wakes leaves the waiter armed after the generation opened
  *  @verify stuck sc opening_cap=false recheck=false: an uncapped wait that arms without re-reading
- *      the count misses a failed build's restoring store landing between the waiter's refused
- *      exchange and its arming, and waits for a store that already happened
+ *      the count waits for a store that already happened
  */
 #define thread_count 3
 #define location_count 6
 #define history_depth 5
-#include "protocol.pml"
+#include <dense_ram_indexes_generations/protocol.pml>
 
 proctype planner(byte t) {
     int count, seen, watermark, sequence;

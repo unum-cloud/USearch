@@ -4,23 +4,24 @@
  *  @date September 3, 2026
  *  @brief Similarity Search over observations on and above the WGS-84 ellipsoid.
  *
- *  A stored value is one @ref earth_observation_t of 32 bytes: a position as three
- *  Earth-centred, Earth-fixed integers in centimetres, altitude included, beside the rest of the
- *  observation quantized so that every rounding only widens a test. Every difference of
- *  positions is exact, and the squared chord between two of them is three subtractions and three
- *  wide multiply-adds. The chord orders identically to the great-circle arc, so the graph never
- *  evaluates a transcendental, and it is the distance every search reports.
+ *  A stored value is one @ref unum::usearch::geospatial::earth_observation_t of 32 bytes: a
+ *  position as three Earth-centred, Earth-fixed integers in centimetres, altitude included, beside
+ *  the rest of the observation quantized so that every rounding only widens a test. Every
+ *  difference of positions is exact, and the squared chord between two of them is three
+ *  subtractions and three wide multiply-adds. The chord orders identically to the great-circle arc,
+ *  so the graph never evaluates a transcendental, and it is the distance every search reports.
  *
  *  One node is one observation, and a key may hold several through the index's key multimap.
- *  Every question is a walk around the query position followed by @ref admits, which tests time,
+ *  Every question is a walk around the query position followed by @c admits, which tests time,
  *  nearness widened by both positions' uncertainty, and view cones on what the walk found.
  *
- *  The surface is a two-dimensional manifold, and that is what the @ref surface_keep_octants_t
- *  selector exploits: the nearest neighbor in each of eight 45° tangent-plane cones contains
- *  the minimum spanning tree and routes to any node without evaluating the metric between
- *  candidates. Long-range structure comes from @ref draw_long_links, which wires four edges
- *  per node with lengths falling as the inverse square of distance, the exponent that makes
- *  greedy descent polylogarithmic on a surface.
+ *  The surface is a two-dimensional manifold, and that is what the
+ *  @ref unum::usearch::geospatial::surface_keep_octants_t selector exploits: the nearest neighbor
+ *  in each of eight 45° tangent-plane cones contains the minimum spanning tree and routes to any
+ *  node without evaluating the metric between candidates. Long-range structure comes from
+ *  @ref unum::usearch::geospatial::draw_long_links, which wires four edges per node with lengths
+ *  falling as the inverse square of distance, the exponent that makes greedy descent
+ *  polylogarithmic on a surface.
  */
 #pragma once
 
@@ -613,12 +614,24 @@ struct earth_observation_codec_t {
 
     std::size_t storage_requirements(earth_observation_t const&) const noexcept { return sizeof(earth_observation_t); }
 
+    /**
+     *  Writes @p value as its 32 bytes at the front of @p output.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k @p output is shorter than one observation.
+     */
     status_t save(earth_observation_t const& value, bytes_span_t output) const noexcept {
         if (output.size() < sizeof(earth_observation_t)) return status_t::overflow_k;
         bytes_image_t const image = std::bit_cast<bytes_image_t>(value);
         return copy_bytes(output.first(image.size()), image);
     }
 
+    /**
+     *  Reads @p value back from the 32 bytes of @p input.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k @p input is not exactly one observation long.
+     */
     status_t load(bytes_view_t input, earth_observation_t& value) const noexcept {
         if (input.size() != sizeof(earth_observation_t)) return status_t::malformed_k;
         bytes_image_t image;
@@ -669,12 +682,16 @@ f64_t uniform_unit(generator_type_& generator) noexcept {
  *  Costs one walk to measure the spacing and one per draw. A draw that lands back on the
  *  node, or on a neighbor it already links to, wires nothing and is not retried.
  *
- *  @param[inout] index The index holding @p node, published.
+ *  @param[in,out] index The index holding @p node, published.
  *  @param[in] node The node whose row receives the links.
  *  @param[in] draws How many links to draw; four is the design's budget.
- *  @param[inout] metric This thread's scoring instance.
- *  @param[inout] context The calling thread's scratch, over any allocator.
- *  @param[inout] generator The thread's random generator; seed distinctly per thread.
+ *  @param[in,out] metric This thread's scoring instance.
+ *  @param[in,out] context The calling thread's scratch, over any allocator.
+ *  @param[in,out] generator The thread's random generator; seed distinctly per thread.
+ *
+ *  @par Statuses:
+ *  - @c overflow_k A scratch capacity of @p context, or the grown row, wraps when rounded.
+ *  - @c malformed_k @p node is unpublished.
  */
 template <typename index_type_, typename metric_type_, typename context_type_, typename generator_type_>
 status_t draw_long_links(index_type_& index, typename index_type_::node_id_t node, std::size_t draws,
@@ -752,8 +769,15 @@ struct [[nodiscard]] radius_result_t {
  *  walk's candidates, and a staging that fills ends a round early; a staging under one row reports
  *  @c config_mismatch_k.
  *
+ *  @param[in,out] index The index to search.
+ *  @param[in] query The position to search around.
+ *  @param[in] radius_centimetres The radius the matches lie within.
+ *  @param[in] margin Whether the candidates widen by the cone graph's stretch, @c spanner_k, or
+ *      stop at the radius.
  *  @param[in] widest_row The most neighbors any row holds: the selector's budget plus the long
  *      links drawn past it.
+ *  @param[in,out] metric The metric the candidates are scored with.
+ *  @param[in,out] context The traversal context the walks draw their buffers from.
  */
 template <typename index_type_, typename metric_type_, typename query_type_, typename context_type_>
 radius_result_t within(index_type_& index, query_type_ const& query, i64_t radius_centimetres, radius_margin_t margin,

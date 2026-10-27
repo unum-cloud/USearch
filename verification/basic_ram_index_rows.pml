@@ -1,57 +1,37 @@
 /**
+ *  @file verification/basic_ram_index_rows.pml
+ *  @author Ash Vardanian
+ *  @date September 11, 2026
  *  @brief The basic index's rows under their lock word, behind the gate's shared and unique sides.
  *
  *  One neighbor row from `include/usearch/basic/ram_index.hpp` under its node's `state` word,
  *  edited by the manual `link` and `unlink` and by an insert's `back_link_` behind the shared side
  *  of `basic::shared_mutex`, copied by the traversal's `copy_row_`, the cursor's `seek` and
  *  `degree_of` under the row lock alone, and read plain by `health` and `plan_save` on the unique
- *  side. The gate inlines are the header's lines: the acquire add and the release fence of
- *  `lock_shared`, the release subtract of `unlock_shared`, the acquire compare-exchange from a free
- *  word of `try_lock`, and the release clear of `unlock`. The row lock is the header's `held_k` bit
- *  beside `wired_k` in that word: a relaxed peek, the acquire `fetch_test_and_set_bit`, a
- *  `fetch_or` claiming the row when the value it replaced lacked the bit, and the release
- *  `clear_bits`.
- *  `basic_ram_index_steps.pml` covers the load path.
+ *  side. `basic_ram_index_steps.pml` covers the load path.
  *
- *  Row 0 holds two edges at most, the model's bound rather than `link`'s, which grows a row past
- *  any extent, and starts with one, to node 0; node 1 is the newcomer. A linker links node 1 into
- *  the row, which `link` allows once the watermark covers it, or unlinks the edge to node 0, moving
- *  the last slot into its place. The inserter stores node 1's key and back-links before its batch's
- *  turn: an append when the row has room, else the re-selection that clears the row and writes it
- *  anew; then it moves the watermark to 2 with a release. A reader acquires the watermark, reads
- *  `key_of` for node 1 when it is published, copies the row under its lock, and follows every
- *  copied edge below its snapshot to that node's key. A unique taker reads the row plain. The
- *  idempotence re-checks of `link` and `back_link_`, and the re-selection's off-lock scoring with
- *  its relock and revalidation, are `basic_ram_index_back_link.pml`'s: no ordering claim rests on
- *  them.
+ *  - A copied row holds no unwritten slot, under the row lock or the unique side.
+ *  - A reader that acquired the watermark reads the published key.
+ *  - Under `sc` the ghost adds that the record was published before the reader's snapshot.
  *
- *  Invariants:
- *  - a copied row holds no unwritten slot, under the row lock or the unique side;
- *  - a reader that acquired the watermark reads the published key, for `key_of` and for every edge
- *    it follows; under `sc` the ghost adds that the record was published before the reader's
- *    snapshot, which is why the traversal skips IDs at or above it.
- *
+ *  @budget 2048
  *  @verify pass sc,rc11
- *  @verify fail rc11 watermark_order=order_relaxed: the watermark's release carries the newcomer's
- *      key; without it, `key_of` below the watermark reads no key
- *  @verify fail rc11 row_lock_order=order_relaxed: the row lock's `fetch_or` acquires the previous
- *      holder's edit; without it, a copy taken under the lock holds the new size beside an
- *      unwritten slot
- *  @verify fail rc11 row_unlock_order=order_relaxed: the row unlock's `clear_bits` releases the
- *      edit to the next holder; without it, the next holder copies the same torn row
- *  @verify fail rc11 unlock_shared_order=order_relaxed: `unlock_shared`'s release carries the
- *      shared side's edits through the gate; without it, the unique side reads the row torn
- *  @verify fail sc watermark_filter=false: the frontier is a protocol claim, not an ordering one:
- *      the back-link lands before the newcomer's turn and the lock carries its record, so under
- *      `rc11` following its edge reads the key just fine, and the filter keeps that every record a
- *      walk reads was published before the walk's snapshot; without it, the reader follows an edge
- *      to an ID at or above its snapshot
+ *  @verify fail rc11 watermark_order=order_relaxed: without it, `key_of` below the watermark reads
+ *      no key
+ *  @verify fail rc11 row_lock_order=order_relaxed: without it, a copy taken under the lock holds the
+ *      new size beside an unwritten slot
+ *  @verify fail rc11 row_unlock_order=order_relaxed: without it, the next holder copies the same
+ *      torn row
+ *  @verify fail rc11 unlock_shared_order=order_relaxed: without it, the unique side reads the row
+ *      torn
+ *  @verify fail sc watermark_filter=false: without it, the reader follows an edge to an ID at or
+ *      above its snapshot
  */
 #define thread_count 4
 #define location_count 7
 #define history_depth 11
-#include "weak_memory.pml"
-#include "basic_gate.pml"
+#include <weak_memory.pml>
+#include <basic_gate.pml>
 
 // The words, by the index member each stands for; only the newcomer's key is ever read.
 #define shared_mutex 0

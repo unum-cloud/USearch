@@ -16,9 +16,6 @@ import (
 
 func TestPublicSurfaceNamesTheLinkedBuild(t *testing.T) {
 	t.Parallel()
-	if usearch.Version() == "" {
-		t.Error("the linked library must name its version")
-	}
 	if usearch.CapabilitiesCompiled() == "" {
 		t.Error("the build must name the kernels it compiled")
 	}

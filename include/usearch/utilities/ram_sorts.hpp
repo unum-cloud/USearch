@@ -100,8 +100,13 @@ void partial_sort(std::span<value_type_> values, std::size_t count, comparator_t
     }
 }
 
-/** Why @p keys and @p scores cannot hold @p rows rankings side by side with contiguous rows, or
- *  success. */
+/**
+ *  Why @p keys and @p scores cannot hold @p rows rankings side by side with contiguous rows.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k The row counts are not @p rows, or the widths differ.
+ *  - @c unsupported_layout_k A row of keys or scores is not contiguous.
+ */
 template <typename key_type_, typename score_type_>
 status_t rankings_refusal(std::size_t rows, nk::matrix_span<key_type_> keys,
                           nk::matrix_span<score_type_> scores) noexcept {

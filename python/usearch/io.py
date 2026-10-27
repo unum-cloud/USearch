@@ -2,6 +2,10 @@
 
 A `.u128bin` holds 128-bit little-endian integers, which NumPy has no scalar for, so its elements read
 and write as opaque 16-byte `V16` values; a `[rows, 16]` array of `uint8` bytes saves as one column.
+
+File: python/usearch/io.py
+Author: Ash Vardanian
+Date: May 4, 2023
 """
 
 from __future__ import annotations
@@ -39,9 +43,7 @@ def load_matrix(
     view: bool = False,
     dtype: npt.DTypeLike | None = None,
 ) -> npt.NDArray[np.generic]:
-    """Reads a matrix from an ``.fbin``, ``.f32bin``, ``.dbin``, ``.hbin``, ``.ibin``, ``.i32bin``, ``.bbin``,
-    ``.i8bin``, ``.u64bin`` or ``.u128bin`` file, in the scalar type its extension or *dtype* names, hence the
-    generic dtype; ``.u128bin`` elements come back as ``V16``, and ``.view(np.uint8)`` exposes their bytes.
+    """Reads a matrix from an ``.fbin``, ``.f32bin``, ``.dbin``, ``.hbin``, ``.ibin``, ``.i32bin``, ``.bbin``, ``.i8bin``, ``.u64bin`` or ``.u128bin`` file, in the scalar type its extension or *dtype* names, hence the generic dtype; ``.u128bin`` elements come back as ``V16``, and ``.view(np.uint8)`` exposes their bytes.
 
     Reads *count_rows* rows starting at *start_row*, or every row when *count_rows* is None. Setting
     *view* memory-maps the file rather than loading it into RAM, which is how a dataset larger than
@@ -70,8 +72,7 @@ def load_matrix(
 
 
 def save_matrix(vectors: npt.NDArray[np.generic], filename: str) -> None:
-    """Writes a matrix to an ``.fbin``, ``.f32bin``, ``.dbin``, ``.hbin``, ``.ibin``, ``.i32bin``, ``.bbin``,
-    ``.i8bin``, ``.u64bin`` or ``.u128bin`` file.
+    """Writes a matrix to an ``.fbin``, ``.f32bin``, ``.dbin``, ``.hbin``, ``.ibin``, ``.i32bin``, ``.bbin``, ``.i8bin``, ``.u64bin`` or ``.u128bin`` file.
 
     An extension naming a scalar type converts the rows into it; any other keeps the matrix's own,
     so *vectors* may hold any scalar type. A ``.u128bin`` takes ``V16`` elements, or a ``[rows, 16]``

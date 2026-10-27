@@ -26,7 +26,7 @@
  *  @b Ladders - one @c quads_ladder<scalar,caps> per supported scalar. A linear list of kits fed
  *  to @c highest_kit picks the first one this build compiled, by its @c compiled_k, whose
  *  @c capability_k the caps admit, else falls back to serial. A kit the build cannot carry is a
- *  stub in the @c #else of its @c NUMKONG_TARGET_* guard, stating only those two facts.
+ *  stub in the @c \#else of its @c NUMKONG_TARGET_* guard, stating only those two facts.
  *  Unsupported scalars simply have no specialization. Adding an ISA tier is one row and one stub.
  *  @c src/ climbs every ladder once per dtype and CPU class and hands each dense engine the kits
  *  they pick, so no engine derives a pick from a capability mask.

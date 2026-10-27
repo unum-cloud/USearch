@@ -971,7 +971,10 @@ struct vram_amd_index {
         : core_(kernel, vectors_allocator, neighbors_allocator) {}
 
     std::size_t size() const noexcept { return core_.size(); }
+
+    /** The first failure that left claimed rows unpublished, as the core's @c status keeps it. */
     status_t status() const noexcept { return core_.status(); }
+
     std::size_t capacity() const noexcept { return core_.capacity(); }
     std::size_t connectivity() const noexcept { return core_.connectivity(); }
     std::size_t dimensions() const noexcept { return core_.dimensions(); }
@@ -995,10 +998,29 @@ struct vram_amd_index {
         return core_.kernels().build_scratch_fits(core_, scratch_bytes_per_warp);
     }
 
+    /**
+     *  Queues the copy of the stored row of @p node into @p destination on @p stream.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p node is not visible, or @p destination is not as wide as a
+     *    row.
+     *  - @c unsupported_layout_k The @p destination is not contiguous.
+     */
     status_t vector(node_id_t node, nk::vector_span<scalar_t> destination, stream_handle_t stream) const noexcept {
         return core_.vector(node, destination, stream);
     }
 
+    /**
+     *  Ensures the index can host at least @p config.capacity entries, freezing the geometry on
+     *  the first success.
+     *
+     *  @par Statuses:
+     *  - @c unknown_kind_k The metric is not one the kits score for this scalar.
+     *  - @c config_mismatch_k The neighbors live on another device, the dimensions are zero, the
+     *    connectivity is not a power of two, the geometry differs from the frozen one, or no walk
+     *    fits the geometry.
+     *  - @c overflow_k The capacity passes the ID space or the reserved range.
+     */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return core_.reserve(config); }
 
     std::size_t traversal_memory_usage(std::size_t rows, insert_config_t config = {}) const noexcept {
@@ -1023,11 +1045,39 @@ struct vram_amd_index {
         return core_.traversal_memory_usage(config, walks);
     }
 
+    /**
+     *  Inserts @p new_rows under contiguous IDs claimed from the watermark, as the core's
+     *  @c insert does.
+     *
+     *  @par Statuses:
+     *  - @c cancelled_k The index keeps it, as @c status says.
+     *  - @c overflow_k The rows pass the ceiling or the reserved range, or @c status keeps it.
+     *  - @c contended_k Another batch or load is in flight, or the claim word is closed.
+     *  - @c uninitialized_k The index was never reserved, or @c status keeps it.
+     *  - @c config_mismatch_k The rows are not as wide as the index, @p assigned_ids are not one
+     *    per row, @p context rides another device or cannot walk, or @c status keeps it.
+     *  - @c unsupported_k The rows' scalar has no device cast into the stored one, or @c status
+     *    keeps it.
+     *  - @c unsupported_layout_k Rows sit closer than one packed row apart, or @c status keeps it.
+     */
     expected<insert_result_t> insert(rows_view_t new_rows, node_ids_span_t assigned_ids, traversal_context_t& context,
                                      insert_config_t config = {}) noexcept {
         return core_.insert(new_rows, assigned_ids, context, config);
     }
 
+    /**
+     *  Finds the nearest published neighbors of every query row, as the core's @c search does.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k A scan is asked, which this vendor has none of, or the queries' scalar
+     *    has no device cast into the stored one.
+     *  - @c config_mismatch_k The outputs hold other than one row per query or fewer than
+     *    @c count columns, the queries are not as wide as the index, or @p context rides another
+     *    device or cannot walk.
+     *  - @c unsupported_layout_k An output's rows stride closer than @c count values, or query
+     *    rows sit closer than one packed row apart.
+     *  - @c uninitialized_k The index was never reserved.
+     */
     expected<search_result_t> search(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                      search_config_t config = {},
@@ -1035,6 +1085,21 @@ struct vram_amd_index {
         return core_.search(queries, result_ids, result_distances, context, config, completion);
     }
 
+    /**
+     *  The batched @c search ranked by a lightning indexer over @p heads, as the core's does. A
+     *  dot verb.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index scores by another metric than dot, the outputs hold other
+     *    than one row per query or fewer than @c count columns, the heads or weights disagree with
+     *    the queries, rows are not as wide as the index, or @p context rides another device or
+     *    cannot walk.
+     *  - @c unsupported_k A scan is asked, which this vendor has none of, or the queries' or heads'
+     *    scalar has no device cast into the stored one.
+     *  - @c unsupported_layout_k An output's rows stride closer than @c count values, or query or
+     *    head rows sit closer than one packed row apart.
+     *  - @c uninitialized_k The index was never reserved.
+     */
     expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads,
                                      nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
@@ -1045,17 +1110,46 @@ struct vram_amd_index {
         return core_.search(queries, heads, result_ids, result_distances, context, config, completion);
     }
 
+    /**
+     *  One query in, the nearest matches ascending in @c context.results, as the core's @c search
+     *  does.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k A scan is asked, which this vendor has none of.
+     *  - @c config_mismatch_k The query is not as wide as the index, or @p context rides another
+     *    device or cannot walk.
+     *  - @c uninitialized_k The index was never reserved.
+     */
     expected<search_result_t> search(vector_view_t query_vector, traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
         return core_.search(query_vector, context, config);
     }
 
+    /**
+     *  Filtered search, refused since a host predicate cannot run inside the walk.
+     *
+     *  @par Statuses:
+     *  - @c device_error_k Every call.
+     */
     template <typename predicate_type_>
     expected<search_result_t> search_if(vector_view_t query_vector, predicate_type_&& predicate,
                                         traversal_context_t& context, search_config_t config = {}) noexcept {
         return core_.search_if(query_vector, std::forward<predicate_type_>(predicate), context, config);
     }
 
+    /**
+     *  Graph products of every left-hand row, as the core's @c multiply keeps them. A dot verb.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index scores by another metric than dot, the outputs or
+     *    @p counts disagree with the rows, the rows are not as wide as the index, or @p context
+     *    rides another device or cannot walk.
+     *  - @c unsupported_k A scan is asked, which this vendor has none of, or the rows' scalar has
+     *    no device cast into the stored one.
+     *  - @c unsupported_layout_k An output's rows stride closer than its width, or rows sit closer
+     *    than one packed row apart.
+     *  - @c uninitialized_k The index was never reserved.
+     */
     expected<search_result_t> multiply(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
                                        nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
                                        traversal_context_t& context, search_config_t config = {},
@@ -1063,6 +1157,21 @@ struct vram_amd_index {
         return core_.multiply(left, node_ids, products, counts, context, config, completion);
     }
 
+    /**
+     *  Grouped-query attention of every token over the published nodes, as the core's @c attend
+     *  folds it.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index scores by another metric than dot, @p outputs or
+     *    @p carry disagree with the rows, the queries are not as wide as the index, the heads'
+     *    scratch fits no walk, or @p context rides another device or cannot walk.
+     *  - @c unsupported_k A scan is asked, which this vendor has none of, or the queries' or
+     *    outputs' scalar has no device cast.
+     *  - @c unsupported_layout_k Output or query rows sit closer than one packed row apart.
+     *  - @c shape_mismatch_k The @p head_count is zero or does not divide the rows, or a walk met
+     *    a node with no value row.
+     *  - @c uninitialized_k The index was never reserved.
+     */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
                                      f32_t score_scale, rows_span_t outputs, std::span<softmax_state_t> carry,
@@ -1072,39 +1181,114 @@ struct vram_amd_index {
                             carry, context, config, completion);
     }
 
+    /**
+     *  Opens a refinement of the nodes in @p nodes on @p context 's stream, as the core's
+     *  @c plan_refine does.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index was never reserved.
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     */
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                         refine_config_t config = {},
                                         std::span<node_id_t const> part_bases = {}) noexcept {
         return core_.plan_refine(nodes, context, config, part_bases);
     }
 
+    /**
+     *  One refinement of the nodes in @p nodes driven to its end on the calling thread.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index was never reserved, or @c status keeps it.
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk, or @c status
+     *    keeps it.
+     *  - @c cancelled_k, @c unsupported_k, @c unsupported_layout_k or @c overflow_k The index
+     *    keeps it, as @c status says.
+     */
     expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                      refine_config_t config = {}, std::span<node_id_t const> part_bases = {}) noexcept {
         return core_.refine(nodes, context, config, part_bases);
     }
 
+    /**
+     *  A split of this index into @p receivers, which no dense GPU face serves yet.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k Always, as no dense GPU face splits.
+     */
     expected<refine_plan_t> plan_split(std::span<vram_amd_index*> receivers, traversal_context_t& context,
                                        refine_config_t config = {}, u64_t seed = 0) noexcept {
         return core_.plan_split(receivers, context, config, seed);
     }
 
+    /**
+     *  Opens a reachability audit of the rows published now on @p context 's stream.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p context rides another device.
+     */
     expected<health_plan_t> plan_health(traversal_context_t& context) noexcept { return core_.plan_health(context); }
+
+    /**
+     *  Measures forward reachability from the landmarks one search draws, on the calling thread.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p context rides another device.
+     */
     expected<health_result_t> health(traversal_context_t& context) noexcept { return core_.health(context); }
 
+    /**
+     *  Opens a save into @p columns under @p synchronization on @p stream.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p synchronization is @c concurrent_k, or @p columns are too
+     *    short for the rows.
+     *  - @c uninitialized_k The index was never reserved.
+     */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
                                     typename executor_t::stream_t const& stream) const noexcept {
         return core_.plan_save(columns, synchronization, stream);
     }
 
+    /**
+     *  Serializes every row under the watermark into @p columns on the calling thread.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p synchronization is @c concurrent_k, or @p columns are too
+     *    short for the rows.
+     *  - @c uninitialized_k The index was never reserved.
+     */
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
                   typename executor_t::stream_t const& stream) const noexcept {
         return core_.save(columns, synchronization, scratch, stream);
     }
 
+    /**
+     *  Opens a load of @p rows at the watermark on @p stream, as the core's @c plan_load does.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index was never reserved, or @c status keeps it.
+     *  - @c overflow_k The rows pass the ceiling or the reserved range, or @c status keeps it.
+     *  - @c contended_k A batch or load is in flight.
+     *  - @c cancelled_k, @c config_mismatch_k, @c unsupported_k or @c unsupported_layout_k
+     *    The index keeps it, as @c status says.
+     */
     expected<load_plan_t> plan_load(std::size_t rows, typename executor_t::stream_t const& stream) noexcept {
         return core_.plan_load(rows, stream);
     }
 
+    /**
+     *  Appends the whole source on the calling thread, as the core's one-shot @c load does.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index was never reserved, or @c status keeps it.
+     *  - @c config_mismatch_k The @p columns are shorter than @p rows, refused before a row is
+     *    claimed, or @c status keeps it.
+     *  - @c overflow_k The rows pass the ceiling or the reserved range, or @c status keeps it.
+     *  - @c contended_k A batch or load is in flight.
+     *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it,
+     *    as @c status says.
+     */
     status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
                   typename executor_t::stream_t const& stream) noexcept {
         return core_.load(columns, rows, source_range, stream);

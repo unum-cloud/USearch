@@ -3,19 +3,17 @@
  *  @author Ash Vardanian
  *  @date September 9, 2026
  *  @brief GenMC client for `basic::shared_mutex` from `include/usearch/utilities/ram_device.hpp`,
- *      the real header: one mutator takes the shared side and writes a pair of rows inside it, one
- *      prober brackets its reads with the wait-free snapshots.
+ *      the real header: one mutator takes the shared side and writes a pair of rows inside it.
  *
- *  A certified prober must not see the pair torn. The mutant spells `lock_shared`'s acquisition
- *  over the gate's own word, without the release fence the header ends it in. The same scenario
- *  with a second mutator and a unique taker is `basic_shared_mutex.pml`.
+ *  One prober brackets its reads with the wait-free snapshots. The mutant spells @c lock_shared's
+ *  acquisition over the gate's own word, without the release fence the header ends it in. The same
+ *  scenario with a second mutator and a unique taker is @c basic_shared_mutex.pml.
+ *
+ *  - A certified prober must not see the pair torn.
  *
  *  @verify pass sc,rc11,imm basic_shared_mutex
- *  @verify fail rc11,imm basic_shared_mutex_lock_shared_fence_false: `lock_shared` is an acquire
- *      read-modify-write that releases nothing before the row stores, so its closing release fence
- *      is what pairs with the probe's acquire fence; without it, the exit snapshot reads the
- *      untouched word while a row read returned a store made under the lock, in compiled code on
- *      Arm and POWER too, since the acquire orders the add's read and not its write
+ *  @verify fail rc11,imm basic_shared_mutex_lock_shared_fence_false: without it, the exit snapshot
+ *      reads the untouched word while a row read returned a store made under the lock
  *  @verify pass sc,tso basic_shared_mutex_lock_shared_fence_false: x86's locked add orders the row
  *      stores after its write on its own
  */

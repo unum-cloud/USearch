@@ -92,10 +92,9 @@ inline std::size_t rank_fewest_entries(std::size_t entries, placement_match_t ma
  *  It owns its shards outright, so a tower's destructor, consuming merge and clear are expressible.
  *  Shards arrive one at a time through @ref emplace, so a tower grows as its placements are engaged
  *  rather than being declared whole. Those placements are the first shard generation; once its
- *  shards reach @ref shard_capacity, @ref open_shard_generation_ appends another shard per
- *  placement, and only the newest shard generation takes insertions. A tower whose readers may hold
- *  a shard's values retires its shards rather than emptying them, through
- *  @ref retire_older_shard_generations_:
+ *  shards reach @ref shard_capacity, @c open_shard_generation_ appends another shard per placement,
+ *  and only the newest shard generation takes insertions. A tower whose readers may hold a shard's
+ *  values retires its shards rather than emptying them, through @c retire_older_shard_generations_:
  *  they stay in place, closed and empty to every reader, until the set dies. The set reads no
  *  shard's shape: the tower checks it on @ref emplace and reserves every shard a new shard
  *  generation opens with.
@@ -280,7 +279,7 @@ struct shard_set {
     }
     bool empty() const noexcept { return !size(); }
 
-    /** Shards @ref retire_older_shard_generations_ retired, the first ones in placement order: each
+    /** Shards @c retire_older_shard_generations_ retired, the first ones in placement order: each
      *  counts no entries and stays closed for good. Iteration starts past them, while positions
      *  keep counting them. */
     std::size_t retired_shards() const noexcept {
@@ -359,7 +358,13 @@ struct shard_set {
     /** Appends one shard the caller already built beside its empty key storage @p keys; refuses a
      *  null one and one already reserved, the tower having checked its shape. Several shards may
      *  share a placement, each a slice of the graph rather than a copy. @ref reserve closes the
-     *  set. */
+     *  set.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p shard is null or already reserved.
+     *  - @c config_mismatch_k The set is reserved, retired shards, or has a shard generation in
+     *    flight.
+     */
     status_t emplace(std::unique_ptr<index_t>&& shard, shard_keys_type_&& keys) noexcept {
         if (!shard || shard->capacity()) return status_t::config_mismatch_k;
         if (capacity() || retired_shards() || built_shards_ != size()) return status_t::config_mismatch_k;
@@ -380,6 +385,15 @@ struct shard_set {
      *  Callable alongside insertions and searches on the host residency: nothing it grows ever
      *  moves. The locator map grows as entries claim their keys, so a set nobody looks keys up in
      *  never allocates one.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard is placed.
+     *  - @c unknown_kind_k A dense shard's kits cannot score its metric.
+     *  - @c config_mismatch_k A shard's geometry is malformed or differs from the one it froze, or
+     *    on NVIDIA its neighbors live on another device.
+     *  - @c overflow_k A shard's share passes its ID space, its ceiling, its chunk directory or its
+     *    key column.
+     *  - @c unsupported_k On Apple, a pipeline is narrower than the kernels need.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         if (empty()) return {0, status_t::uninitialized_k};
@@ -404,6 +418,9 @@ struct shard_set {
      *  The caller holds the tower's unique side, so no claim starts or moves meanwhile. A batch
      *  claims in the same order, so one refused by a closed shard has claimed nothing on the shards
      *  before it.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A shard has a batch or load in flight, or holds claims it never dispensed.
      */
     status_t close(std::size_t first = 0) noexcept {
         std::size_t const live = max_of(first, retired_shards());
@@ -457,11 +474,15 @@ struct shard_set {
     /**
      *  @brief Splits a batch of @p entries across the open shard generation's shards, opening
      *      through @p build as many fresh shard generations as the entries past the bound fill, as
-     *      @ref open_shard_generation_ does.
+     *      @c open_shard_generation_ does.
      *
      *  The starting shard comes from the entries routed so far, which keeps a stream of small
      *  batches from drifting onto shard zero; a racing batch taking the same room first leaves this
      *  one's claims refused with @c overflow_k, and a failed shard generation answers its status.
+     *
+     *  @par Statuses:
+     *  - @c contended_k The set is sealed while a fresh shard generation must open.
+     *  - @c bad_alloc_k @p build answers a null index.
      */
     template <typename build_type_>
     expected<batch_split_t> split_batch_into_shards(std::size_t entries, build_type_&& build) noexcept {
@@ -489,9 +510,9 @@ struct shard_set {
      *  One caller opens it while the others wait on the count word, and a caller finding it opened
      *  already answers success untouched; a sealed set answers @c contended_k, since only its
      *  closer may grow it. The new shards stay invisible to every reader until the release store
-     *  that counts them, and a failed build publishes none. @p build is called as
-     *  `build(like) → shard_t`, its index reserved with @ref shard_capacity as the ceiling, a null
-     *  index refusing with @c bad_alloc_k.
+     *  that counts them, and a failed build publishes none. @p build is called as <tt>build(like) →
+     *  shard_t</tt>, its index reserved with @ref shard_capacity as the ceiling, a null index
+     *  refusing with @c bad_alloc_k.
      */
     template <typename build_type_>
     status_t open_shard_generation_(shard_generation_t full, build_type_&& build) noexcept {
@@ -516,7 +537,7 @@ struct shard_set {
     locators_map_t const& locators() const noexcept { return locators_of_key_; }
 
     /** Drops every key's locators, keeps every shard generation past the first as idle shards for
-     *  the next @ref open_shard_generation_ to reuse, and restarts the routing; inside the tower's
+     *  the next @c open_shard_generation_ to reuse, and restarts the routing; inside the tower's
      *  window, once every shard forgot its entries in place, so a reader still holding one reads
      *  retained memory and retries on the epoch. Idle shards keep their capacity and stay closed. A
      *  set that retires its shards never forgets them. */
@@ -535,7 +556,7 @@ struct shard_set {
      *
      *  The count of published shards stays, so a reader that entered a retired shard keeps walking
      *  memory nothing frees until its epoch fails, and no shard generation ever refills one. Drops
-     *  every key's locators and restarts the routing. Each shard answers `retire_()`.
+     *  every key's locators and restarts the routing. Each shard answers <tt>retire_()</tt>.
      */
     void retire_older_shard_generations_() noexcept {
         std::size_t const first = open_shard_generation().first;
@@ -588,14 +609,20 @@ struct shard_set {
      *  shards; otherwise the entries already here count against the bound.
      *
      *  @param[out] landings One per source shard, @c from naming it in landing order.
-     *  @param[in] source_shard Called as `source_shard(from) → shard_t const&`.
-     *  @param[in] placement_of Called as `placement_of(shard) → placement`, compared for equality.
-     *  @param[in] rank Called as `rank(entries, match) → std::size_t` for a shard with room holding
-     *      @c entries, @c match telling whether it shares the source shard's placement:
+     *  @param[in] own How many shards of this set are sources themselves, packing in place.
+     *  @param[in] bound The most entries a shard may hold.
+     *  @param[in] source_shard Called as <tt>source_shard(from) → shard_t const&amp;</tt>.
+     *  @param[in] placement_of Called as <tt>placement_of(shard) → placement</tt>, compared for
+     *      equality.
+     *  @param[in] rank Called as <tt>rank(entries, match) → std::size_t</tt> for a shard with room
+     *      holding @c entries, @c match telling whether it shares the source shard's placement:
      *      @ref rank_first_fit or @ref rank_fewest_entries.
-     *  @param[in] open Called as `open() → status_t`, appending a shard generation closed like the
-     *      rest.
-     *  @retval unsupported_k A source shard past @p bound, which would have to be cut first.
+     *  @param[in] open Called as <tt>open() → status_t</tt>, appending a shard generation
+     *      closed like the rest.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k A source shard past @p bound, which would have to be cut first.
+     *  - @c overflow_k A freshly opened shard generation still has no room for a source shard.
      */
     template <typename source_shard_type_, typename placement_type_, typename rank_type_, typename open_type_>
     status_t pack(std::span<landing_t> landings, std::size_t own, std::size_t bound, source_shard_type_&& source_shard,
@@ -708,7 +735,11 @@ struct shard_set {
      *  commit spanning shards publishes through, so a walk of each shard below its own sees every
      *  batch whole or not at all; answers their sum. A non-empty @p watermarks holds one per shard,
      *  and a shard generation opened since it was sized answers @c shape_mismatch_k, to size it
-     *  again. */
+     *  again.
+     *
+     *  @par Statuses:
+     *  - @c shape_mismatch_k A non-empty @p watermarks holds other than one slot per shard.
+     */
     expected<std::size_t> snapshot(std::span<node_id_t> watermarks) const noexcept {
         atomic_ref<u64_t const> const sequence {commit_sequence_};
         while (true) {
@@ -798,10 +829,10 @@ struct shard_set {
      *  count. */
     inline static constexpr std::size_t opening_k = std::size_t {1} << (std::numeric_limits<std::size_t>::digits - 1);
 
-    /** The bit below @ref opening_k, set while @ref close holds the set closed. */
+    /** The bit below @c opening_k, set while @ref close holds the set closed. */
     inline static constexpr std::size_t sealed_k = opening_k >> 1;
 
-    /** The one body of @ref open_shard_generation_ and @ref open_shard_generation_past_seal_:
+    /** The one body of @ref open_shard_generation_ and @c open_shard_generation_past_seal_:
      *  @p seal is the seal bit the caller expects on the count word, and the one every new shard is
      *  born under. */
     template <typename build_type_>
@@ -881,7 +912,7 @@ struct shard_set {
     std::size_t built_shards_ = 0;
 
     /** Shards @ref retire_older_shard_generations_ retired, a prefix of the published ones; read
-     *  with acquire by @ref retired. */
+     *  with acquire by @c retired. */
     std::size_t retired_shards_ = 0;
 
     /** Placements of the first shard generation, which every later one repeats. */

@@ -134,15 +134,27 @@ struct ram_indexes {
      *  exists. */
     void bound_shards(std::size_t rows) noexcept { shards_.bound_shards(rows); }
 
-    /** Appends one empty shard placed on @p memory_domain; refused once storage exists. */
+    /**
+     *  Appends one empty shard placed on @p memory_domain; refused once storage exists.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index already holds storage, or has a shard generation in
+     *    flight.
+     */
     status_t emplace(fu_memory_domain_id_t memory_domain) noexcept {
         std::unique_ptr<index_t> shard = build_(allocator_t {memory_domain});
         if (!shard) return status_t::bad_alloc_k;
         return shards_.emplace(std::move(shard), record_keys_t {});
     }
 
-    /** Covers @p capacity rows split evenly over the shards, each under the bound - a hint, since
-     *  the shards grow on demand; callable alongside every other verb. */
+    /**
+     *  Covers @p capacity rows split evenly over the shards, each under the bound - a hint, since
+     *  the shards grow on demand; callable alongside every other verb.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard is placed yet.
+     *  - @c overflow_k A shard's share passes its node IDs or its key multimap's seats.
+     */
     expected<std::size_t> reserve(std::size_t capacity) noexcept { return shards_.reserve({capacity}); }
 
     /** Entries across every shard: the watermarks of one consistent snapshot, summed, so a batch
@@ -174,7 +186,11 @@ struct ram_indexes {
 
     /** One consistent watermark per shard into @p watermarks, the caller's buffer, so the searches
      *  below it see every batch whole or not at all; answers their sum. A buffer sized before a
-     *  shard generation opened answers @c shape_mismatch_k, to be sized again. */
+     *  shard generation opened answers @c shape_mismatch_k, to be sized again.
+     *
+     *  @par Statuses:
+     *  - @c shape_mismatch_k A non-empty @p watermarks holds other than one slot per shard.
+     */
     expected<std::size_t> snapshot(std::span<node_id_t> watermarks) const noexcept {
         return shards_.snapshot(watermarks);
     }
@@ -189,6 +205,9 @@ struct ram_indexes {
      *  no rows stays as it is. The fresh shards open before any retires, so a refused build answers
      *  @c bad_alloc_k with every row in place. A search it lands under reads values nothing frees,
      *  and retries.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A call holds the gate, or a batch, refine or absorb holds a shard's claims.
      */
     status_t clear() noexcept {
         unique_lock_t const held {gate_, std::try_to_lock};
@@ -213,7 +232,7 @@ struct ram_indexes {
 #pragma region Checkpoints
 
     /** What a checkpoint does on these shards' memory domains, for @ref save_shards and
-     *  @ref load_shards: every shard's own plans on the calling thread, its keys in its records,
+     *  @c load_shards: every shard's own plans on the calling thread, its keys in its records,
      *  which those plans write and read, so no key column or locator lands beside them, and a
      *  load's parts past the placed shards on shard generations built like them. */
     struct checkpoint_residency_t {
@@ -221,21 +240,59 @@ struct ram_indexes {
 
         ram_indexes* owner = nullptr;
 
+        /**
+         *  The counts a save of shard @p shard needs, as the shard's own @c columns_extents takes
+         *  them.
+         *
+         *  @par Statuses:
+         *  - @c contended_k A mutator or an open plan holds the shard, or a dispensed batch has yet
+         *    to publish.
+         */
         template <typename codec_type_>
         static expected<columns_extents_t> columns_extents(shards_t& shards, std::size_t shard,
                                                            codec_type_ const& codec) noexcept {
             return shards[shard].index->columns_extents(codec);
         }
+
+        /**
+         *  Opens the save plan of shard @p shard into @p columns, the shard's own @c plan_save.
+         *
+         *  @par Statuses:
+         *  - @c contended_k A mutator or an open plan holds the shard, or a dispensed batch has yet
+         *    to publish.
+         *  - @c overflow_k The key or a prefix-sum column is shorter than its count, or the
+         *    neighbor IDs or value bytes are shorter than the sums need.
+         *  - @c config_mismatch_k The key or a prefix-sum column is longer than its count.
+         */
         template <typename codec_type_>
         static expected<typename index_t::save_plan_t> open_shard_save(shards_t& shards, std::size_t shard,
                                                                        typename index_t::columns_t columns,
                                                                        codec_type_ const& codec) noexcept {
             return shards[shard].index->plan_save(columns, codec);
         }
+
+        /**
+         *  Opens the load plan of shard @p shard from @p columns, the shard's own @c plan_load.
+         *
+         *  @par Statuses:
+         *  - @c contended_k A mutator or an open plan holds the shard.
+         *  - @c config_mismatch_k The shard already publishes rows.
+         *  - @c malformed_k A prefix-sum column is not one longer than the keys, does not rise from
+         *    zero to its element column's length, or a neighbor ID names no row.
+         *  - @c overflow_k The rows pass the shard's node IDs or key multimap seats, or a row's
+         *    capacity wraps.
+         */
         static expected<typename index_t::load_plan_t> open_shard_load(
             shards_t& shards, std::size_t shard, typename index_t::columns_view_t columns) noexcept {
             return shards[shard].index->plan_load(columns);
         }
+
+        /**
+         *  Covers @p rows in shard @p shard under the set's shard bound.
+         *
+         *  @par Statuses:
+         *  - @c overflow_k @p rows passes the shard's node IDs or its key multimap's seats.
+         */
         static expected<std::size_t> reserve(shards_t& shards, std::size_t shard, std::size_t rows) noexcept {
             return shards[shard].index->reserve({rows, shards.shard_capacity()});
         }
@@ -249,8 +306,13 @@ struct ram_indexes {
             return status_t::success_k;
         }
 
-        /** Leaves part @p part the live shard it names, a placed one, or opens shard generations on
-         *  the placed shards' memory domains until it exists. */
+        /**
+         *  Leaves part @p part the live shard it names, a placed one, or opens shard generations on
+         *  the placed shards' memory domains until it exists.
+         *
+         *  @par Statuses:
+         *  - @c contended_k The set is sealed while a shard generation must open.
+         */
         status_t open_shard_for_part(shards_t& shards, std::size_t part) noexcept {
             while (shards.size() <= shards.retired_shards() + part)
                 if (status_t const opened = shards.open_shard_generation_(
@@ -262,9 +324,21 @@ struct ram_indexes {
         }
     };
 
-    /** Writes the live shards under @p path through @ref save_shards: a lone live shard's monolith,
+    /** Writes the live shards under @p path through @c save_shards: a lone live shard's monolith,
      *  or one part per live shard beside the manifest @p path names. Takes the gate alone, so a
-     *  call in flight refuses it with @c contended_k. */
+     *  call in flight refuses it with @c contended_k. A refusal of @p codec passes through.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A call holds the gate, a mutator or an open plan holds a shard, or the
+     *    pool of @p executor runs another dispatch.
+     *  - @c uninitialized_k No shard is live, or the pool of @p executor has no workers.
+     *  - @c config_mismatch_k @p config does not validate, an element has no interchange dtype, a
+     *    value disagrees with its shape, or a segment is misaligned.
+     *  - @c invalid_argument_k A part or manifest path does not parse.
+     *  - @c overflow_k A device ends before a part or the manifest, or a column is shorter than
+     *    the layout needs.
+     *  - @c malformed_k A written part's header does not parse back.
+     */
     template <typename codec_type_, typename executor_type_, typename progress_type_ = dummy_progress_t>
     status_t save(std::string_view path, codec_type_ const& codec, executor_type_& executor,
                   save_config_t const& config, std::string_view metric, progress_type_&& progress = {}) noexcept {
@@ -276,7 +350,19 @@ struct ram_indexes {
 
     /** Reads the monolith or manifest at @p path into the placed, empty shards, part @c p into live
      *  shard @c p, opened past the placed ones over their memory domains in turn. Takes the gate
-     *  alone, as @ref save does. */
+     *  alone, as @ref save does. A refusal of @p codec passes through.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A call holds the gate, the set is sealed while a shard generation must
+     *    open, a mutator or plan holds a shard, or the pool of @p executor runs another dispatch.
+     *  - @c uninitialized_k No shard is placed, or the pool of @p executor has no workers.
+     *  - @c config_mismatch_k The shards hold entries, a column's dtype, shape or key width
+     *    differs from what the shards and @p codec take, or a segment is misaligned.
+     *  - @c invalid_argument_k The checkpoint or a part path does not parse.
+     *  - @c malformed_k The checkpoint lists no part, or a part, its header, columns or sums do
+     *    not parse.
+     *  - @c overflow_k The rows pass a shard's node IDs or key multimap.
+     */
     template <typename codec_type_, typename executor_type_, typename progress_type_ = dummy_progress_t>
     status_t load(std::string_view path, codec_type_ const& codec, executor_type_& executor,
                   load_config_t const& config, progress_type_&& progress = {}) noexcept {
@@ -344,7 +430,12 @@ struct ram_indexes {
          *  the plan whole; then every shard's turn inside one commit, so a snapshot sees the batch
          *  whole or not at all. The plan is spent either way, a shard refusing its turn answering
          *  the first refusal after every other shard published, so a second call answers
-         *  @c uninitialized_k. */
+         *  @c uninitialized_k.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already spent.
+         *  - @c config_mismatch_k A row has yet to land.
+         */
         status_t finish() noexcept {
             if (!owner_) return status_t::uninitialized_k;
             std::size_t touched = 0;
@@ -368,9 +459,9 @@ struct ram_indexes {
             return status;
         }
 
-        /** Invokes @p callback as `callback(shard, range)` for every shard the plan lands rows in,
-         *  with the IDs dispensed there, in placement order; before @ref finish, so a caller can
-         *  keep what it follows the published rows up with, as long links. */
+        /** Invokes @p callback as <tt>callback(shard, range)</tt> for every shard the plan lands
+         *  rows in, with the IDs dispensed there, in placement order; before @ref finish, so a
+         *  caller can keep what it follows the published rows up with, as long links. */
         template <typename callback_type_>
         void for_each_range(callback_type_&& callback) const noexcept {
             if (!owner_) return;
@@ -407,9 +498,10 @@ struct ram_indexes {
      *  before this call, as for a shard's own plan: building the values and sizing each stepping
      *  thread's context.
      *
-     *  @retval uninitialized_k No shard placed yet.
-     *  @retval contended_k An absorb holds the index closed.
-     *  @retval overflow_k A racing batch took the room this one was routed into.
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard placed yet.
+     *  - @c contended_k An absorb holds the index closed.
+     *  - @c overflow_k A racing batch took the room this one was routed into.
      */
     expected<insert_plan_t> plan_insert(std::size_t count) noexcept {
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
@@ -456,18 +548,21 @@ struct ram_indexes {
      *      @p distances.
      *
      *  @param[in] query The similarity target, alive for the whole call.
-     *  @param[inout] metric This thread's scoring instance.
+     *  @param[in,out] metric This thread's scoring instance.
      *  @param[in] relate Builds the engine's own filter over one shard's node IDs, called as
-     *      `relate(shard) → relation`, answering @c dummy_predicate_t where it filters nothing.
-     *  @param[inout] predicate The caller's filter over keys, asked about each shard's walked nodes
-     *      through their records, or @c dummy_predicate_t for an unfiltered walk.
-     *  @param[inout] context The calling thread's scratch & telemetry over any allocator.
+     *      <tt>relate(shard) → relation</tt>, answering @c dummy_predicate_t where it filters
+     *      nothing.
+     *  @param[in,out] predicate The caller's filter over keys, asked about each shard's walked
+     *      nodes through their records, or @c dummy_predicate_t for an unfiltered walk.
+     *  @param[in,out] context The calling thread's scratch & telemetry over any allocator.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from each shard's connectivity".
      *  @param[in] watermarks One per shard from @ref snapshot.
      *  @param[out] keys The merged ranking's keys, as many as it holds.
      *  @param[out] distances The same ranking's distances, parallel to @p keys.
-     *  @return The matches merged, or @c contended_k when two windows overlapped the call or one
-     *      outran the snapshot.
+     *  @return The matches merged.
+     *
+     *  @par Statuses:
+     *  - @c contended_k Two windows overlapped the call or one outran the snapshot.
      */
     template <typename query_type_, typename metric_type_, typename relate_type_, typename predicate_type_,
               typename context_allocator_type_>
@@ -501,7 +596,13 @@ struct ram_indexes {
             });
     }
 
-    /** @ref search_if with no engine filter of its own. */
+    /**
+     *  @ref search_if with no engine filter of its own.
+     *
+     *  @par Statuses:
+     *  - @c contended_k Two windows overlapped the call or one outran the snapshot.
+     *  - @c overflow_k A scratch capacity of @p context wraps when rounded.
+     */
     template <typename query_type_, typename metric_type_, typename predicate_type_, typename context_allocator_type_>
     expected<std::size_t> search_if(query_type_ const& query, metric_type_& metric, predicate_type_& predicate,
                                     traversal_context_over<context_allocator_type_>& context, search_config_t config,
@@ -510,10 +611,14 @@ struct ram_indexes {
         return search_if(query, metric, unrelated_t {}, predicate, context, config, watermarks, keys, distances);
     }
 
-    /** The exact sibling of @ref search_if: every row below each shard's watermark scored as
+    /** The exact sibling of @c search_if: every row below each shard's watermark scored as
      *  @c index_t::scan scores, the nearest @p keys can hold kept, as @p relate and @p predicate
      *  admit them. Each shard's rounds drain within the merged ranking's worst match once it is
-     *  full, so later shards score fewer rows. */
+     *  full, so later shards score fewer rows.
+     *
+     *  @par Statuses:
+     *  - @c contended_k Two windows overlapped the call or one outran the snapshot.
+     */
     template <typename query_type_, typename metric_type_, typename relate_type_, typename predicate_type_,
               typename context_allocator_type_>
     expected<std::size_t> scan(query_type_ const& query, metric_type_& metric, relate_type_ const& relate,
@@ -543,7 +648,12 @@ struct ram_indexes {
                              });
     }
 
-    /** @ref scan with no engine filter of its own. */
+    /**
+     *  @ref scan with no engine filter of its own.
+     *
+     *  @par Statuses:
+     *  - @c contended_k Two windows overlapped the call or one outran the snapshot.
+     */
     template <typename query_type_, typename metric_type_, typename predicate_type_, typename context_allocator_type_>
     expected<std::size_t> scan(query_type_ const& query, metric_type_& metric, predicate_type_& predicate,
                                traversal_context_over<context_allocator_type_>& context,
@@ -561,9 +671,9 @@ struct ram_indexes {
         });
     }
 
-    /** Invokes @p callback as `callback(shard, node_id)` for every published entry under @p key in
-     *  every live shard; an ID a clear retired meanwhile is refused by every accessor of its
-     *  shard. */
+    /** Invokes @p callback as <tt>callback(shard, node_id)</tt> for every published entry under
+     *  @p key in every live shard; an ID a clear retired meanwhile is refused by every accessor of
+     *  its shard. */
     template <typename callback_type_>
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
         for (shard_t const& one : shards_) {
@@ -642,8 +752,13 @@ struct ram_indexes {
             return {this, total};
         }
 
-        /** Runs @p step on the calling thread through its shard's plan, as that plan's own
-         *  @c run does; a step past the end runs nothing. */
+        /**
+         *  Runs @p step on the calling thread through its shard's plan, as that plan's own
+         *  @c run does; a step past the end runs nothing.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The step's shard plan is bound to no index.
+         */
         template <typename metric_type_, typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
         status_t run(step_t const& step, metric_type_& metric, traversal_context_over<context_allocator_type_>& context,
                      selector_type_ const& selector = {}) noexcept {
@@ -722,8 +837,8 @@ struct ram_indexes {
         bool consumed(std::size_t donor) const noexcept { return donor < donors_.size() && !donors_[donor]; }
 
         /**
-         *  @brief Invokes @p visit as `visit(shard, rows)` for every row range the plan rewrote:
-         *      every row of every shard a shard plan refined.
+         *  @brief Invokes @p visit as <tt>visit(shard, rows)</tt> for every row range the plan
+         *      rewrote: every row of every shard a shard plan refined.
          *
          *  Called once the plan finished and before it dies, while the index stays sealed, so a
          *  rule the re-selection skips, like a modality's long links, is drawn again over them.
@@ -739,8 +854,14 @@ struct ram_indexes {
             }
         }
 
-        /** The pass so far, summed over the shard plans: complete once @ref advance answered false,
-         *  otherwise @c cancelled_k. */
+        /**
+         *  The pass so far, summed over the shard plans: complete once @ref advance answered false,
+         *  otherwise @c cancelled_k.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is bound to no index.
+         *  - @c cancelled_k A shard plan stopped before @ref advance answered false.
+         */
         expected<refine_result_t> finish() const noexcept {
             refine_result_t total;
             status_t status = owner_ ? status_t::success_k : status_t::uninitialized_k;
@@ -843,13 +964,16 @@ struct ram_indexes {
      *  stays closed and sealed once the plan dies, refusing insertions and clears with
      *  @c contended_k.
      *
-     *  @param[inout] donors The indexes giving their rows up; the slots must outlive the plan.
-     *  @param[inout] context The planning thread's scratch, whose allocator places the shard plans.
+     *  @param[in,out] donors The indexes giving their rows up; the slots must outlive the plan.
+     *  @param[in,out] context The planning thread's scratch, whose allocator places the shard
+     *      plans.
      *  @param[in] selector Carries the budget every row is reserved for.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from the selector's budget".
-     *  @retval config_mismatch_k A null donor, or this index itself.
-     *  @retval contended_k A call or batch in flight on this index or a donor, or a repeated donor.
-     *  @retval unsupported_k A donor shard past the bound, which would have to be cut first.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k A null donor, or this index itself.
+     *  - @c contended_k A call or batch in flight on this index or a donor, or a repeated donor.
+     *  - @c unsupported_k A donor shard past the bound, which would have to be cut first.
      */
     template <typename selector_type_ = keep_diverse_t>
     expected<refine_plan_t> plan_absorb(std::span<ram_indexes*> donors, traversal_context_t& context,
@@ -923,10 +1047,13 @@ struct ram_indexes {
      *  Closes this index under its unique side and keeps it sealed for the plan's life, as an
      *  absorb does, while searches run throughout.
      *
-     *  @param[inout] context The planning thread's scratch, whose allocator places the shard plans.
+     *  @param[in,out] context The planning thread's scratch, whose allocator places the shard
+     *      plans.
      *  @param[in] selector Carries the budget every row is reserved for.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from the selector's budget".
-     *  @retval contended_k A call or batch in flight on this index.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A call or batch in flight on this index.
      */
     template <typename selector_type_ = keep_diverse_t>
     expected<refine_plan_t> plan_refine(traversal_context_t& context, selector_type_ const& selector = {},
@@ -971,8 +1098,8 @@ struct ram_indexes {
      *
      *  The whole merge runs again once if a destructive window overlapped it, then answers
      *  @c contended_k; watermarks a window outran since their snapshot answer @c contended_k, so
-     *  the caller snapshots again. @p walk_shard is called as
-     *  `walk_shard(shard, watermark, merged) → expected<std::span<scored_node_t const>>`.
+     *  the caller snapshots again. @p walk_shard is called as <tt>walk_shard(shard, watermark,
+     *  merged) → expected<std::span<scored_node_t const>></tt>.
      */
     template <typename walk_shard_type_>
     expected<std::size_t> merge_shards_(std::span<node_id_t const> watermarks, std::span<key_t> keys,
@@ -1038,7 +1165,11 @@ struct ram_indexes_cursor {
     /** Copies the keys of up to @p keys.size() rows of @p indexes into @p keys, advancing past them
      *  and answering the rows written. A destructive window since the cursor opened answers zero
      *  rows with @c contended_k: retired shards keep their records, so a read that ran past one
-     *  touched nothing freed, and the check at its end discards it. */
+     *  touched nothing freed, and the check at its end discards it.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A destructive window opened since the cursor did.
+     */
     expected<std::size_t> read(indexes_t const& indexes, std::span<key_t> keys) noexcept {
         std::size_t written = 0;
         for (; written != keys.size() && !position_.exhausted(indexes.shards_); ++written) {

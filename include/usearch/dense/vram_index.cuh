@@ -408,14 +408,14 @@ __device__ __forceinline__ vram_scored_node<node_id_t> vram_score_batch( //
 
 /** What a vendor's schedule binds for one kit: how a walk scores its gathered batch, and how one
  *  warp's candidate rows reach its vector cache in shared memory, a by-reference cache staging
- *  none, apart from the kit's arithmetic. @c score_batch lands what @ref vram_score_batch lands
- *  for the batch's IDs, its load window sized for @c resident_blocks_ blocks per multiprocessor.
- *  @c stage_rows queues the rows an ID span names into the cache's leading rows over @c stages_k
- *  stages, and @c await_rows lands at least that many leading rows for every lane; every staged
- *  row lands before the next staging. @c keep_diverse runs the greedy diversity prefix
- *  @ref vram_keep_diverse runs, on the kit's tensor-core tiles where the vendor has them. A
- *  schedule is one warp's state over its @c shared_t in static shared memory, picked by the class
- *  like the kit. */
+ *  none, apart from the kit's arithmetic. @c score_batch lands what
+ *  @ref unum::usearch::dense::vram_score_batch lands for the batch's IDs, its load window sized for
+ *  @c resident_blocks_ blocks per multiprocessor. @c stage_rows queues the rows an ID span names
+ *  into the cache's leading rows over @c stages_k stages, and @c await_rows lands at least that
+ *  many leading rows for every lane; every staged row lands before the next staging.
+ *  @c keep_diverse runs the greedy diversity prefix @ref unum::usearch::dense::vram_keep_diverse
+ *  runs, on the kit's tensor-core tiles where the vendor has them. A schedule is one warp's state
+ *  over its @c shared_t in static shared memory, picked by the class like the kit. */
 template <typename schedule_, typename kit_>
 concept vram_schedule = requires(
     schedule_& schedule, u32_t rows, vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
@@ -560,8 +560,15 @@ __device__ __forceinline__ walk_demand_t vram_score_into_frontier( //
  *  is published with probability at least a half, and a lane meeting a visited row steps forward,
  *  for one lap of the range at most.
  *
+ *  @param[in] storage The graph's rows.
+ *  @param[in] sampling_first The first row of the range sampled.
+ *  @param[in] sampling_bound One past the last row of the range sampled.
+ *  @param[in,out] visited The rows this walk has scored already.
  *  @param[in] frontier The walk's frontier, asked whether it holds a draw once a saturated visited
  *      set re-scores it.
+ *  @param[in,out] random_generator The draw state of this lane.
+ *  @param[out] candidate_ids Receives the staged landmarks.
+ *  @param[in] lane This lane's index in its warp.
  *  @return The number of staged landmarks; zero once every published row of the range is
  *      visited, or the visited set saturated.
  */
@@ -1306,10 +1313,10 @@ __device__ __forceinline__ bool vram_reselect_staged( //
  *  @p query_row - a refinement's @p forward_picks first, a row whose unknown slots stand for none,
  *  then the chain from the node's @p link_head through @p link_next - skipping any the round
  *  already holds, appends them into the free slots when they all fit, and otherwise re-selects over
- *  both through @ref vram_reselect_staged; the next round starts from the row the last one wrote.
- *  An insertion's chain links picks, pick @b p naming newcomer @b first_id+p/connectivity; a
- *  refinement's links walkers, each found beside its pick in @p walker_rows, so the chain spans any
- *  row count.
+ *  both through @ref unum::usearch::dense::vram_reselect_staged; the next round starts from the row
+ *  the last one wrote. An insertion's chain links picks, pick @b p naming newcomer
+ *  @b first_id+p/connectivity; a refinement's links walkers, each found beside its pick in
+ *  @p walker_rows, so the chain spans any row count.
  *
  *  @return Whether a round kept a member its live row lacked.
  */
@@ -1437,10 +1444,10 @@ struct vram_fold_view {
  *      tagged into bin IDs, freezes the picks for the merge, and chains the row onto every pick in
  *      another shard.
  *
- *  The members lead the candidates, so @ref vram_reselect_staged tells a gained member apart; the
- *  cross results follow, @c cross_count of every other shard in bin order, the sentinel past what
- *  a shard returned. The shards' live rows stay as they were, and every chain head this row moves
- *  belongs to its own shard, so no other device contends for it.
+ *  The members lead the candidates, so @ref unum::usearch::dense::vram_reselect_staged tells a
+ *  gained member apart; the cross results follow, @c cross_count of every other shard in bin order,
+ *  the sentinel past what a shard returned. The shards' live rows stay as they were, and every
+ *  chain head this row moves belongs to its own shard, so no other device contends for it.
  */
 template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
 __device__ __forceinline__ void vram_fold_reselect_one( //
@@ -1501,8 +1508,8 @@ __device__ __forceinline__ void vram_fold_reselect_one( //
 
 /**
  *  @brief Merges into the fold row of @p node_id the rows of the bin's other shards that picked it,
- *      a row of them at a time through @ref vram_back_link_one, then rewrites its bin IDs into the
- *      bin's dense ID space.
+ *      a row of them at a time through @ref unum::usearch::dense::vram_back_link_one, then rewrites
+ *      its bin IDs into the bin's dense ID space.
  *
  *  Each other shard threads its own chain onto the row; a walker is found beside its frozen pick of
  *  the row, as a refinement's merge finds one, and joins the inbox, which a round folds in once it
@@ -1976,10 +1983,11 @@ __device__ __forceinline__ vram_ranking_view vram_view(vram_ranking_t const& ran
  *  probes past unpublished hits, so out-of-order publication costs retries, never correctness. The
  *  host launches a batch in admission waves, each no wider than the rows already published nor
  *  narrower than 32, so no walk waits on its graph while the graph is small. A newcomer only
- *  threads its picks onto their chains; the wave's @ref vram_back_link launch links them back, so
- *  newcomers of one wave reach each other only through their own picks. Searches see a batch only
- *  once the host has drained it and turned the watermark past it, a whole batch at a time and in
- *  claim order, and follow no neighbor at or past the watermark they launched under.
+ *  threads its picks onto their chains; the wave's @ref unum::usearch::dense::vram_back_link launch
+ *  links them back, so newcomers of one wave reach each other only through their own picks.
+ *  Searches see a batch only once the host has drained it and turned the watermark past it, a whole
+ *  batch at a time and in claim order, and follow no neighbor at or past the watermark they
+ *  launched under.
  */
 template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t candidate_slots_, u32_t resident_blocks_>
 __device__ __forceinline__ void vram_insert(vram_build_view<kit_> const& view) {
@@ -2111,8 +2119,8 @@ __device__ __forceinline__ void vram_refine(vram_refine_view<kit_> const& view) 
 }
 
 /** One warp folds one node's forward picks and the walkers chained onto it into its live row
- *  through @ref vram_back_link_one, assigning itself node IDs from the pass counter; only a walked
- *  row that gained a member counts as changed. */
+ *  through @ref unum::usearch::dense::vram_back_link_one, assigning itself node IDs from the pass
+ *  counter; only a walked row that gained a member counts as changed. */
 template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
 __device__ __forceinline__ void vram_merge_back_links(vram_refine_view<kit_> const& view) {
     using warp_t = typename schedule_::warp_t;
@@ -2243,9 +2251,10 @@ struct vram_heads_rescoring {
         return narrowed;
     }
 
-    /** Scores the batch against every head past the first as @ref vram_score_batch scores it
-     *  against the query: a sub-warp of @c lanes_per_row lanes owns one row, and each key fragment
-     *  it loads meets every head, so no load window reads @p resident_blocks_. */
+    /** Scores the batch against every head past the first as
+     *  @ref unum::usearch::dense::vram_score_batch scores it against the query: a sub-warp of
+     *  @c lanes_per_row lanes owns one row, and each key fragment it loads meets every head, so no
+     *  load window reads @p resident_blocks_. */
     template <u32_t resident_blocks_>
     __device__ __forceinline__ vram_scored_node<node_id_t> rescore(vram_flat_view<kit_> const& storage,
                                                                    vram_gathered<kit_, warp_t>& gathered,
@@ -2774,7 +2783,7 @@ __device__ __forceinline__ void vram_partition_tally(u32_t const* labels, u32_t 
 
 /** A growth round's third pass, one lane per row: places every row proposed to a part with room for
  *  the round's whole tally, in @p next_frontier, counting them in @p placed. The rows a tally would
- *  overflow stay proposed for @ref vram_partition_fill. */
+ *  overflow stay proposed for @ref unum::usearch::dense::vram_partition_fill. */
 template <typename warp_type_>
 __device__ __forceinline__ void vram_partition_accept(u32_t* labels, u32_t* proposals, u32_t rows_count,
                                                       vram_bitset_t next_frontier, u32_t const* part_sizes,

@@ -256,7 +256,16 @@ typedef struct usearch_geospatial_init_ram_t {
     usearch_ram_options_t ram;
 } usearch_geospatial_init_ram_t;
 
-/** Creates an empty, mutable geospatial index in host memory. */
+/**
+ *  Creates an empty, mutable geospatial index in host memory.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A terrain both borrowing @c heights and naming a
+ *    @c callback.
+ *  - @c usearch_status_unsupported_k A terrain @c path, which no residency reads yet, or a pinned
+ *    class the CPU does not admit.
+ *  - @c usearch_status_config_mismatch_k A terrain whose row or column step is not positive.
+ */
 USEARCH_EXPORT void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments);
 
 /** The arguments of @c usearch_geospatial_init_vram, which match
@@ -282,7 +291,19 @@ typedef struct usearch_geospatial_init_vram_t {
     usearch_vram_options_t vram;
 } usearch_geospatial_init_vram_t;
 
-/** Creates an empty, mutable geospatial index in device memory. */
+/**
+ *  Creates an empty, mutable geospatial index in device memory.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A terrain both borrowing @c heights and naming a
+ *    @c callback.
+ *  - @c usearch_status_unsupported_k A terrain @c path or @c callback, a @c values_per_key bound,
+ *    or devices that do not run the pinned class.
+ *  - @c usearch_status_config_mismatch_k Devices of two classes, or a terrain whose row or column
+ *    step is not positive.
+ *  - @c usearch_status_device_k A device past the listing, one this build carries no kernels for,
+ *    or a build without GPU kernels.
+ */
 USEARCH_EXPORT void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments);
 
 /** The arguments of @c usearch_geospatial_load_ram. */
@@ -323,6 +344,20 @@ typedef struct usearch_geospatial_load_ram_t {
  *  Where the parts end up is the call's own memory domains, never the manifest's: part @c p lands
  *  whole on shard @c p, beside any placed shards the parts leave empty, and the shards past the
  *  placed ones open over those domains in turn.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does
+ *    not parse, or a terrain both borrowing @c heights and naming a @c callback.
+ *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns or
+ *    sums do not parse.
+ *  - @c usearch_status_unsupported_k A terrain @c path, or a pinned class the CPU does not admit.
+ *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
+ *  - @c usearch_status_config_mismatch_k A terrain whose row or column step is not positive, or
+ *    the checkpoint's columns differ from the shards' in dtype, shape or key width.
+ *  - @c usearch_status_device_k The executor is not a RAM executor.
+ *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
+ *    dispatch.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
  */
 USEARCH_EXPORT void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments);
 
@@ -357,8 +392,25 @@ typedef struct usearch_geospatial_load_vram_t {
     usearch_progress_t progress;
 } usearch_geospatial_load_vram_t;
 
-/** Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
- *  @c usearch_geospatial_load_ram. */
+/**
+ *  Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
+ *  @c usearch_geospatial_load_ram.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does
+ *    not parse, or a terrain both borrowing @c heights and naming a @c callback.
+ *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part, its header, columns or
+ *    sums do not parse.
+ *  - @c usearch_status_unsupported_k A terrain @c path or @c callback, a @c values_per_key bound,
+ *    or devices that do not run the pinned class.
+ *  - @c usearch_status_config_mismatch_k Devices of two classes, a terrain whose row or column
+ *    step is not positive, the executor driving no stream on some shard's device, or the
+ *    checkpoint's columns differing from the shards' in dtype, shape or key width.
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
+ *  - @c usearch_status_contended_k Another call holds the executor.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
+ */
 USEARCH_EXPORT void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments);
 
 /** The arguments of @c usearch_geospatial_view_ram. */
@@ -377,8 +429,19 @@ typedef struct usearch_geospatial_view_ram_t {
     usearch_geospatial_terrain_t terrain;
 } usearch_geospatial_view_ram_t;
 
-/** Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
- *  verbs report @c usearch_status_read_only_k. */
+/**
+ *  Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
+ *  verbs report @c usearch_status_read_only_k.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does
+ *    not parse, or a terrain both borrowing @c heights and naming a @c callback.
+ *  - @c usearch_status_malformed_k The checkpoint lists no part, or a part or its header does not
+ *    parse.
+ *  - @c usearch_status_config_mismatch_k A terrain whose row or column step is not positive.
+ *  - @c usearch_status_unsupported_k Every other checkpoint, as RAM shards cannot serve a mapping
+ *    in place yet.
+ */
 USEARCH_EXPORT void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments);
 
 /** The arguments of @c usearch_geospatial_view_nvme. */
@@ -412,6 +475,20 @@ typedef struct usearch_geospatial_view_nvme_t {
  *
  *  Opening reads the headers alone. Every mutating verb on the handle reports
  *  @c usearch_status_read_only_k, and the parts must stay unmodified until the handle is freed.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_device_k @c executor is not an NVMe executor.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, @c NULL paths for a nonzero count, a
+ *    path that does not parse or names a base off its medium's block, or a terrain both borrowing
+ *    @c heights and naming a @c callback.
+ *  - @c usearch_status_malformed_k The manifest names no part, or a manifest, header or row
+ *    directory does not parse.
+ *  - @c usearch_status_config_mismatch_k Parts disagreeing with this index's values, keys, node
+ *    IDs or metric, or with @c nvme, or a terrain whose row or column step is not positive.
+ *  - @c usearch_status_unsupported_k A terrain @c path, or a pinned class the CPU does not admit.
+ *  - @c usearch_status_uninitialized_k The executor holds no threads or pool workers.
+ *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
+ *    dispatch.
  */
 USEARCH_EXPORT void usearch_geospatial_view_nvme(usearch_geospatial_view_nvme_t* arguments);
 
@@ -439,8 +516,15 @@ typedef struct usearch_geospatial_reserve_t {
     size_t entries;
 } usearch_geospatial_reserve_t;
 
-/** Grows the shards ahead of incoming entries - a capacity hint, since insertions grow them on
- *  demand. */
+/**
+ *  Grows the shards ahead of incoming entries - a capacity hint, since insertions grow them on
+ *  demand.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k The handle is an NVMe view.
+ *  - @c usearch_status_overflow_k @c entries passes a shard's ceiling, its ID space or its key
+ *    column.
+ */
 USEARCH_EXPORT void usearch_geospatial_reserve(usearch_geospatial_reserve_t* arguments);
 
 /** The arguments of @c usearch_geospatial_clear. */
@@ -459,7 +543,14 @@ typedef struct usearch_geospatial_clear_t {
     usearch_completion_t completion;
 } usearch_geospatial_clear_t;
 
-/** Erases all entries, keeping the reserved capacity. */
+/**
+ *  Erases all entries, keeping the reserved capacity.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k The handle is an NVMe view.
+ *  - @c usearch_status_contended_k A call in flight, a batch or load holding claims, or a plan
+ *    holding the handle closed.
+ */
 USEARCH_EXPORT void usearch_geospatial_clear(usearch_geospatial_clear_t* arguments);
 
 /**
@@ -519,10 +610,6 @@ typedef struct usearch_geospatial_insert_t {
 /**
  *  @brief Adds observations under their keys - the native batch operation; a single observation
  *      is a batch of one.
- *  @retval usearch_status_read_only_k The handle is a view.
- *  @retval usearch_status_overflow_k A key already holds @c values_per_key entries.
- *  @retval usearch_status_invalid_argument_k An observation lacks a latitude or a longitude, or
- *      ends before it begins.
  *
  *  An observation without an altitude is placed on the handle's terrain when it has one, and on
  *  the ellipsoid otherwise.
@@ -534,6 +621,11 @@ typedef struct usearch_geospatial_insert_t {
  *
  *  A key already holding @c values_per_key entries rejects the whole call, since a smaller retry
  *  cannot help.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k The handle is a view.
+ *  - @c usearch_status_invalid_argument_k An observation lacks a latitude or a longitude, or
+ *    ends before it begins.
  */
 USEARCH_EXPORT void usearch_geospatial_insert(usearch_geospatial_insert_t* arguments);
 
@@ -573,9 +665,6 @@ typedef struct usearch_geospatial_refine_t {
 /**
  *  @brief Re-selects the neighbors of every stored entry against the finished graph, improving
  *      neighbors chosen when the graph around them was still incomplete.
- *  @retval usearch_status_read_only_k The handle is an NVMe view.
- *  @retval usearch_status_unsupported_k The handle lives on a GPU, whose index refines nothing yet.
- *  @retval usearch_status_contended_k An insertion or another refinement holds the handle.
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
@@ -599,6 +688,11 @@ typedef struct usearch_geospatial_refine_t {
  *  so a concurrent walk sees either the old neighbors or the new ones. Insertions never overlap:
  *  one in flight refuses the call with @c usearch_status_contended_k, and one arriving meanwhile
  *  is refused the same way, as is a save.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k The handle is an NVMe view.
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU, whose index refines nothing yet.
+ *  - @c usearch_status_contended_k An insertion or another refinement holds the handle.
  */
 USEARCH_EXPORT void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments);
 
@@ -660,9 +754,6 @@ typedef struct usearch_geospatial_search_t {
  *  @brief Finds the nearest entries of each query observation that the relation admits, approximate
  *      by walking the graph or exact by scanning every row - the native batch operation,
  *      parallelized internally; one query is a batch of one.
- *  @retval usearch_status_unknown_kind_k A @c relation or @c traversal this build does not know.
- *  @retval usearch_status_unsupported_k A @c visible relation on a handle without terrain, or a
- *      scan of a VRAM handle, or a @c predicate on one.
  *
  *  Scores are chord metres between the two positions, altitude included. The relation, the time
  *  window and the predicate narrow the walk's candidates, so a selective one wants a wider
@@ -672,6 +763,11 @@ typedef struct usearch_geospatial_search_t {
  *  the traversal, so recall does not collapse at low selectivity.
  *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unknown_kind_k A @c relation or @c traversal this build does not know.
+ *  - @c usearch_status_unsupported_k A @c visible relation on a handle without terrain, or a
+ *    scan of a VRAM handle, or a @c predicate on one.
  */
 USEARCH_EXPORT void usearch_geospatial_search(usearch_geospatial_search_t* arguments);
 
@@ -729,11 +825,6 @@ typedef struct usearch_geospatial_within_t {
 /**
  *  @brief Reports every entry within the radius of each query observation that the relation
  *      admits - the containment counterpart of the ranked search, unbounded in result count.
- *  @retval usearch_status_invalid_argument_k A tolerance of zero metres, since containment needs a
- *      radius.
- *  @retval usearch_status_unknown_kind_k A @c relation or @c traversal this build does not know.
- *  @retval usearch_status_unsupported_k A @c visible relation on a handle without terrain, or a
- *      scan of a VRAM handle, or a @c predicate on one.
  *
  *  Complete on the converged graph: the walk widens its candidates by the cone graph's spanner
  *  bound before trusting it, so every candidate inside the tolerance is enumerated, at about thirty
@@ -744,6 +835,13 @@ typedef struct usearch_geospatial_within_t {
  *  stopping the walk from crossing the entries it rejects.
  *
  *  A cancelled call reports @c usearch_status_cancelled_k and leaves the outputs @c NULL.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A tolerance of zero metres, since containment needs a
+ *    radius.
+ *  - @c usearch_status_unknown_kind_k A @c relation or @c traversal this build does not know.
+ *  - @c usearch_status_unsupported_k A @c visible relation on a handle without terrain, or a
+ *    scan of a VRAM handle, or a @c predicate on one.
  */
 USEARCH_EXPORT void usearch_geospatial_within(usearch_geospatial_within_t* arguments);
 
@@ -776,7 +874,17 @@ typedef struct usearch_geospatial_count_t {
     usearch_geospatial_key_stats_t* key_stats;
 } usearch_geospatial_count_t;
 
-/** Counts the entries stored under one key. */
+/**
+ *  Counts the entries stored under one key.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU, whose index counts nothing yet.
+ *  - @c usearch_status_device_k An NVMe view's executor is not an NVMe executor.
+ *  - @c usearch_status_uninitialized_k An NVMe view's executor holds no pool workers.
+ *  - @c usearch_status_contended_k Another call holds an NVMe view's executor, or its pool runs
+ *    another dispatch.
+ *  - @c usearch_status_config_mismatch_k An NVMe medium the engines cannot read.
+ */
 USEARCH_EXPORT void usearch_geospatial_count(usearch_geospatial_count_t* arguments);
 
 /** The arguments of @c usearch_geospatial_get. */
@@ -813,6 +921,15 @@ typedef struct usearch_geospatial_get_t {
  *      rounding the index stores them at.
  *
  *  An absent key leaves @c observations @c NULL.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c arena.
+ *  - @c usearch_status_device_k An arena or an executor on another residency or device.
+ *  - @c usearch_status_contended_k The arena serves another call, or another call holds an NVMe
+ *    view's executor or its pool.
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU, whose index exports nothing yet.
+ *  - @c usearch_status_uninitialized_k An NVMe view's executor holds no pool workers.
+ *  - @c usearch_status_config_mismatch_k An NVMe medium the engines cannot read.
  */
 USEARCH_EXPORT void usearch_geospatial_get(usearch_geospatial_get_t* arguments);
 
@@ -857,14 +974,6 @@ typedef struct usearch_geospatial_absorb_t {
 /**
  *  @brief Absorbs every handle in @c donors into @c index, one after another, keeping their graphs
  *      rather than re-inserting their observations, and links each in by walks across.
- *  @retval usearch_status_read_only_k @c index is an NVMe view.
- *  @retval usearch_status_unsupported_k @c index lives on a GPU, whose index absorbs nothing yet.
- *  @retval usearch_status_invalid_argument_k A @c NULL slot in @c donors, or @c NULL @c donors
- *      for a nonzero @c count.
- *  @retval usearch_status_config_mismatch_k A donor of another residency, class or connectivity,
- *      or @c index itself.
- *  @retval usearch_status_contended_k An insertion or refinement in flight on @c index or on a
- *      donor; every donor stays a live handle.
  *
  *  A consumed donor handle must not be used afterwards, not even for @c usearch_geospatial_free.
  *
@@ -882,6 +991,16 @@ typedef struct usearch_geospatial_absorb_t {
  *  @c usearch_geospatial_refine: a cancel skips the rest of the walks across, still re-links, and
  *  answers @c usearch_status_cancelled_k with every donor consumed. A caller wanting to continue
  *  those walks later holds a @c usearch_geospatial_refinement_t instead.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k @c index is an NVMe view.
+ *  - @c usearch_status_unsupported_k @c index lives on a GPU, whose index absorbs nothing yet.
+ *  - @c usearch_status_invalid_argument_k A @c NULL slot in @c donors, or @c NULL @c donors
+ *    for a nonzero @c count.
+ *  - @c usearch_status_config_mismatch_k A donor of another residency, class or connectivity,
+ *    or @c index itself.
+ *  - @c usearch_status_contended_k An insertion or refinement in flight on @c index or on a
+ *    donor; every donor stays a live handle.
  */
 USEARCH_EXPORT void usearch_geospatial_absorb(usearch_geospatial_absorb_t* arguments);
 
@@ -931,13 +1050,6 @@ typedef struct usearch_geospatial_split_t {
  *  @brief Splits @c index into the handles in @c receivers, the inverse of
  *      @c usearch_geospatial_absorb: graph-local parts keeping their edges rather than re-inserting
  *      their observations, one part per receiver, and @c index left empty but live.
- *  @retval usearch_status_read_only_k @c index is a view.
- *  @retval usearch_status_invalid_argument_k Fewer than two receivers, @c NULL @c receivers, or a
- *      @c NULL slot in them.
- *  @retval usearch_status_config_mismatch_k A receiver of another residency, class or
- *      connectivity, one holding entries, one named twice, or @c index itself.
- *  @retval usearch_status_contended_k An insertion or refinement in flight on @c index or on a
- *      receiver; nothing moves.
  *
  *  Every receiver is checked and held before the first part lands, so a refusal moves nothing. The
  *  part roots are drawn from @c seed without a scan, and each part grows breadth-first over the
@@ -954,6 +1066,15 @@ typedef struct usearch_geospatial_split_t {
  *  @c usearch_geospatial_refine: a cancel skips the rest of the re-selection, still re-links, and
  *  answers @c usearch_status_cancelled_k with every part landed. A caller wanting to continue that
  *  re-selection later holds a @c usearch_geospatial_refinement_t opened with @c receivers instead.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k @c index is a view.
+ *  - @c usearch_status_invalid_argument_k Fewer than two receivers, @c NULL @c receivers, or a
+ *    @c NULL slot in them.
+ *  - @c usearch_status_config_mismatch_k A receiver of another residency, class or
+ *    connectivity, one holding entries, one named twice, or @c index itself.
+ *  - @c usearch_status_contended_k An insertion or refinement in flight on @c index or on a
+ *    receiver; nothing moves.
  */
 USEARCH_EXPORT void usearch_geospatial_split(usearch_geospatial_split_t* arguments);
 
@@ -1002,15 +1123,17 @@ typedef struct usearch_geospatial_refinement_init_t {
  *      @c usearch_geospatial_absorb lands them, or splitting it into @c receivers, as
  *      @c usearch_geospatial_split lands them. Every allocation the refinement needs in the index
  *      happens here, never in a step.
- *  @retval usearch_status_read_only_k @c index is an NVMe view.
- *  @retval usearch_status_unsupported_k @c index lives on a GPU, whose index refines nothing yet.
- *  @retval usearch_status_invalid_argument_k No executor, a @c NULL slot in @c donors or
- *      @c receivers, @c NULL @c donors for a nonzero @c count, one receiver alone, or donors and
- *      receivers both named.
- *  @retval usearch_status_config_mismatch_k A donor or receiver of another residency, class or
- *      connectivity, a receiver holding entries, or @c index itself.
- *  @retval usearch_status_contended_k An insertion or another refinement in flight on @c index, on
- *      a donor or on a receiver.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_read_only_k @c index is an NVMe view.
+ *  - @c usearch_status_unsupported_k @c index lives on a GPU, whose index refines nothing yet.
+ *  - @c usearch_status_invalid_argument_k No executor, a @c NULL slot in @c donors or
+ *    @c receivers, @c NULL @c donors for a nonzero @c count, one receiver alone, or donors and
+ *    receivers both named.
+ *  - @c usearch_status_config_mismatch_k A donor or receiver of another residency, class or
+ *    connectivity, a receiver holding entries, or @c index itself.
+ *  - @c usearch_status_contended_k An insertion or another refinement in flight on @c index, on
+ *    a donor or on a receiver.
  */
 USEARCH_EXPORT void usearch_geospatial_refinement_init(usearch_geospatial_refinement_init_t* arguments);
 
@@ -1053,8 +1176,10 @@ typedef struct usearch_geospatial_refinement_next_t {
  *  Every call reaching the refinement writes the running totals, a cancelled or failed one too, so
  *  they only grow from one call to the next and @c changed never exceeds @c visited; all stay zero
  *  while donors are pending.
- *  @retval usearch_status_invalid_argument_k @c index or @c executor is not the one the refinement
- *      was opened with.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c index or @c executor is not the one the refinement
+ *    was opened with.
  */
 USEARCH_EXPORT void usearch_geospatial_refinement_next(usearch_geospatial_refinement_next_t* arguments);
 
@@ -1091,8 +1216,10 @@ typedef struct usearch_geospatial_refinement_finish_t {
  *  @brief Skips whatever re-selection a stopped refinement left, re-links what it strands as
  *      @c usearch_geospatial_refine does, reports, reopens the index, and frees the handle. A
  *      refinement whose donors have not all landed re-links nothing and reports zeros.
- *  @retval usearch_status_invalid_argument_k @c index or @c executor is not the one the refinement
- *      was opened with; the handle is still freed.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c index or @c executor is not the one the refinement
+ *    was opened with; the handle is still freed.
  */
 USEARCH_EXPORT void usearch_geospatial_refinement_finish(usearch_geospatial_refinement_finish_t* arguments);
 
@@ -1117,12 +1244,14 @@ typedef struct usearch_geospatial_cursor_init_t {
 
 /**
  *  @brief Opens a snapshot cursor over the current contents; see @c usearch_geospatial_cursor_t.
- *  @retval usearch_status_invalid_argument_k @c NULL @c starts for a nonzero @c starts_count.
  *
  *  Without @c starts the cursor yields every entry as stored. With them it yields the start keys'
  *  own entries first, in the order given, then the entries those link to, breadth-first, each
  *  entry once, so a caller wanting only the starts' immediate links reads the rows of the first
  *  pulled entries. A key the index lacks starts nothing.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c NULL @c starts for a nonzero @c starts_count.
  */
 USEARCH_EXPORT void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments);
 
@@ -1166,11 +1295,13 @@ typedef struct usearch_geospatial_cursor_next_t {
  *  @brief Copies the next batch of entries out of the cursor into @c arena, each with the keys it
  *      links to, in the order @c usearch_geospatial_cursor_init describes; the observations
  *      themselves come from @c usearch_geospatial_get.
- *  @retval usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  *
  *  Links name only entries the snapshot holds, as the graph stored them when the pull ran. The
  *  keys are copied rather than borrowed from the index, so the batch stays valid until the next
  *  call given the same arena, however the cursor moves meanwhile.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  */
 USEARCH_EXPORT void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments);
 
@@ -1243,6 +1374,9 @@ typedef struct usearch_geospatial_sample_t {
  *
  *  Links name earlier draws of the same sequence, a later call's reaching an earlier call's. They
  *  are exact in a scan and approximate as any walk otherwise.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unsupported_k Always, as no residency samples yet.
  */
 USEARCH_EXPORT void usearch_geospatial_sample(usearch_geospatial_sample_t* arguments);
 
@@ -1276,6 +1410,18 @@ typedef struct usearch_geospatial_save_t {
  *  the manifest at @c path beside one part per shard, each with its shard's own node IDs.
  *  A cancelled save leaves the parts it already wrote and no manifest referencing them, so the
  *  checkpoint reads as absent rather than half-valid. Those leftovers are the caller's to remove.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c path, or a part or manifest path that does
+ *    not parse.
+ *  - @c usearch_status_device_k The executor's kind does not match the residency.
+ *  - @c usearch_status_unsupported_k The handle is an NVMe view, which already is its checkpoint.
+ *  - @c usearch_status_contended_k Another call holds the executor or its pool, a dispensed batch
+ *    has yet to publish, or a call, batch, load or plan holds the handle.
+ *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
+ *  - @c usearch_status_config_mismatch_k The executor drives no stream on some VRAM shard's
+ *    device.
+ *  - @c usearch_status_overflow_k @c path names a device that ends before a part or the manifest.
  */
 USEARCH_EXPORT void usearch_geospatial_save(usearch_geospatial_save_t* arguments);
 
@@ -1305,7 +1451,14 @@ typedef struct usearch_geospatial_metadata_read_t {
     usearch_geospatial_metadata_t* metadata;
 } usearch_geospatial_metadata_read_t;
 
-/** Reads a checkpoint's geometry without loading it. */
+/**
+ *  Reads a checkpoint's geometry without loading it.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k The checkpoint or a part path does not parse.
+ *  - @c usearch_status_malformed_k The checkpoint or a part is empty, its manifest lists no part,
+ *    or a header does not parse or spans more bytes than its part.
+ */
 USEARCH_EXPORT void usearch_geospatial_metadata_read(usearch_geospatial_metadata_read_t* arguments);
 
 /** A live index's state. Each counter is read once, so under concurrent insertions they may come

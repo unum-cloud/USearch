@@ -80,7 +80,8 @@ struct usearch_dense_index_handle_t {
     }
 };
 
-/** Applies @p visitor to the variant @p handle picked, as `visitor(punned_dense_index<home>)`. */
+/** Applies @p visitor to the variant @p handle picked, as
+ *  <tt>visitor(punned_dense_index<home>)</tt>. */
 template <typename visitor_type_>
 static void visit_punned(usearch_dense_index_handle_t const& handle, visitor_type_&& visitor) noexcept {
     std::visit(
@@ -454,7 +455,7 @@ static bool accepts_query_offsets(std::span<std::size_t const> query_offsets, us
 /** The late-interaction sink on one serving variant: chunks of whole queries, one per step of the
  *  progress handler, each query's rows cut by @p query_offsets. A chunk's queries rank into one run
  *  per executor thread, and the runs then count, prefix-sum and scatter into @p keys, @p scores and
- *  @p offsets growing in @p arena, as geospatial `within` lands, while @p required sums the keys
+ *  @p offsets growing in @p arena, as geospatial @c within lands, while @p required sums the keys
  *  every query scored; @p predicate narrows the nominations once it names a callback. */
 template <dense_home_t home_>
 static bool maxsim_queries(punned_dense_index<home_> punned, usearch_dense_maxsim_t const& arguments,

@@ -6,19 +6,15 @@
  *      `include/usearch/dense/ram_index.hpp`.
  *
  *  Two commits dispense two IDs each with one add, each spawns a helper for its second row as the
- *  executor's fan-out would, joins it, and takes one watermark turn for the whole range. A row's walk
- *  reads row 0 below its snapshot, and past it the other commit's first row once the dispenser shows
- *  it dispensed and its slot zero shows it published; a leader that reached row 0 back-links into
- *  it, and a walk admits its sibling row only once slot zero shows it published. A searcher acquires
- *  the watermark, which never lies strictly inside a range, and reads every row's payload below it.
- *  The same scenario is `dense_ram_index_batches.pml`.
+ *  executor's fan-out would, joins it, and takes one watermark turn for the whole range. A searcher
+ *  acquires the watermark, which never lies strictly inside a range, and reads every row's payload
+ *  below it. The same scenario is @c dense_ram_index_batches.pml.
  *
  *  @verify pass sc,rc11,imm dense_ram_index_batches
- *  @verify fail sc,rc11,imm dense_ram_index_batches_range_turn_false: one turn per range keeps a
- *      batch whole; a turn per row lets the searcher see half a commit
- *  @verify fail sc,rc11,imm dense_ram_index_batches_own_range_check_false: a walk admits a row of its
- *      own range only once slot zero shows it published; unchecked, it reads the sibling's payload
- *      before its unlock
+ *  @verify fail sc,rc11,imm dense_ram_index_batches_range_turn_false: a turn per row lets the
+ *      searcher see half a commit
+ *  @verify fail sc,rc11,imm dense_ram_index_batches_own_range_check_false: unchecked, it reads the
+ *      sibling's payload before its unlock
  */
 #include <atomic> // `std::memory_order`, `std::atomic_thread_fence`
 

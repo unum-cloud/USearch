@@ -22,7 +22,7 @@
  *    request,
  *  - @c linux_uring_nvme_engine: NVMe passthrough via @c IORING_OP_URING_CMD,
  *  - @c windows_ioring_files_engine: I/O Rings on Windows 11 22H2 & newer,
- *  - @c linux_spdk_engine: the SPDK user-space driver, in builds with @c USEARCH_BUILD_SPDK.
+ *  - @c linux_spdk_engine: the SPDK user-space driver, in builds with @c USEARCH_WITH_SPDK.
  *
  *  Engines own their staging buffers, since buffer registration is an engine-side resource on every
  *  ring API, and requests address buffers and media only by index. Requests carry an offset, a
@@ -133,13 +133,13 @@
 #endif // !defined(USEARCH_WITH_LINUX_AIO)
 
 /** Whether the SPDK engine builds: on Linux, when the build found SPDK and set
- *  @c USEARCH_BUILD_SPDK. */
+ *  @c USEARCH_WITH_SPDK. */
 #if !defined(USEARCH_WITH_LINUX_SPDK)
-#if USEARCH_OS_LINUX_ && USEARCH_BUILD_SPDK
+#if USEARCH_OS_LINUX_ && USEARCH_WITH_SPDK
 #define USEARCH_WITH_LINUX_SPDK 1
 #else
 #define USEARCH_WITH_LINUX_SPDK 0
-#endif // USEARCH_OS_LINUX_ && USEARCH_BUILD_SPDK
+#endif // USEARCH_OS_LINUX_ && USEARCH_WITH_SPDK
 #endif // !defined(USEARCH_WITH_LINUX_SPDK)
 
 /** Whether the I/O Rings engine builds: on Windows, with an SDK that ships @c ioringapi.h. */
@@ -352,9 +352,15 @@ struct file_medium_t {
     file_medium_t& operator=(file_medium_t const&) = delete;
     ~file_medium_t() noexcept;
 
-    /** Opens @p path read-only, a file or a device in any form @ref file_address_t lists, its base
+    /**
+     *  Opens @p path read-only, a file or a device in any form @ref file_address_t lists, its base
      *  a multiple of the block its direct reads need; the NUL terminator the OS demands is one
-     *  transient allocation. */
+     *  transient allocation.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k @p path names no location, or its base or namespace is unreadable.
+     *  - @c invalid_argument_k The base is not a multiple of the medium's block.
+     */
     static expected<file_medium_t> open(std::string_view path) noexcept {
         auto const [parsed, parse_status] = parse_file_address(path);
         if (failed(parse_status)) return {file_medium_t {}, parse_status};
@@ -369,8 +375,14 @@ struct file_medium_t {
         return {std::move(medium), status_t::success_k};
     }
 
-    /** Fills @p bytes from @p offset bytes past the part's start, one block-aligned blocking read
-     *  through a staging buffer of its own, for the headers a view reads once. */
+    /**
+     *  Fills @p bytes from @p offset bytes past the part's start, one block-aligned blocking read
+     *  through a staging buffer of its own, for the headers a view reads once.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The blocks covering @p bytes span more than one read can move.
+     *  - @c io_k The read ended before the last byte of @p bytes.
+     */
     status_t read_at(u64_t offset, bytes_span_t bytes) const noexcept;
 
   private:
@@ -874,8 +886,13 @@ class io_buffers {
     /** Whether @p count buffers of @p bytes each fit the region already held. */
     bool covers(std::size_t count, std::size_t bytes) const noexcept { return count <= capacity_ / stride_of_(bytes); }
 
-    /** Cuts the region into @p count buffers of @p bytes each, regrowing it only when they do not
-     *  fit, which moves every buffer, so nothing may be in flight; empties on failure. */
+    /**
+     *  Cuts the region into @p count buffers of @p bytes each, regrowing it only when they do not
+     *  fit, which moves every buffer, so nothing may be in flight; empties on failure.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The region's byte count overflows.
+     */
     status_t reserve(std::size_t count, std::size_t bytes) noexcept {
         std::size_t const stride = stride_of_(bytes);
         if (covers(count, bytes)) return count_ = count, stride_ = stride, status_t::success_k;
@@ -1050,7 +1067,13 @@ class blocking_files_engine {
     blocking_files_engine(blocking_files_engine&&) noexcept = default;
     blocking_files_engine& operator=(blocking_files_engine&&) noexcept = default;
 
-    /** Sizes the request and completion queues for @p config's depth. */
+    /**
+     *  Sizes the request and completion queues for @p config's depth.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k A zero queue depth.
+     *  - @c unsupported_k @p config names another transport.
+     */
     status_t open(config_t const& config) noexcept {
         if (status_t const vetted = io_engine_vet_(config, transport()); failed(vetted)) return vetted;
         if (failed(pending_.reserve_exactly(config.queue_depth)) ||
@@ -1060,10 +1083,22 @@ class blocking_files_engine {
         return status_t::success_k;
     }
 
+    /**
+     *  Cuts the staging region into @p buffers buffers of @p buffer_bytes each.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The region's byte count overflows.
+     */
     status_t reserve(std::size_t buffers, std::size_t buffer_bytes) noexcept {
         return buffers_.reserve(buffers, buffer_bytes);
     }
 
+    /**
+     *  Takes the descriptors of @p media, which request medium IDs index until @c detach.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k A medium that is not a file.
+     */
     template <typename media_type_>
     status_t attach(std::span<media_type_ const> media) noexcept {
         return copy_descriptors_(descriptors_, media);
@@ -1071,6 +1106,13 @@ class blocking_files_engine {
 
     void detach() noexcept { descriptors_.clear(); }
 
+    /**
+     *  Queues @p request for the next @c submit.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The queue already holds its depth of requests and completions.
+     *  - @c invalid_argument_k A medium never attached, or a length past what a completion counts.
+     */
     status_t enqueue_read(io_request_t request) noexcept {
         if (pending_.size() + completions_.size() == queue_depth_) return status_t::overflow_k;
         if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
@@ -2419,9 +2461,16 @@ class io_engine_variant {
     explicit io_engine_variant(allocator_t const& allocator = {}) noexcept
         : engines_(std::in_place_index<0>, allocator), allocator_(allocator) {}
 
-    /** Opens the newest engine at or below the ceiling @p config names, or under @c automatic_k
+    /**
+     *  Opens the newest engine at or below the ceiling @p config names, or under @c automatic_k
      *  the first kernel files engine whose setup the host admits; a refused setup answers @c io_k
-     *  and passes to the next. */
+     *  and passes to the next.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k No engine of the set at or below the ceiling set up.
+     *  - @c invalid_argument_k A zero queue depth.
+     *  - @c uninitialized_k SPDK named without a driver in @p config.
+     */
     status_t open(config_t const& config) noexcept { return open_<0>(config); }
 
     /** The transport of the engine @c open picked. */
@@ -2429,10 +2478,22 @@ class io_engine_variant {
         return std::visit([](auto const& engine) noexcept { return engine.transport(); }, engines_);
     }
 
+    /**
+     *  Cuts the picked engine's staging region into @p buffers buffers of @p buffer_bytes each.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The region's byte count overflows, or passes what Windows registers.
+     */
     status_t reserve(std::size_t buffers, std::size_t buffer_bytes) noexcept {
         return std::visit([&](auto& engine) noexcept { return engine.reserve(buffers, buffer_bytes); }, engines_);
     }
 
+    /**
+     *  Attaches @p media to the picked engine, which request medium IDs index until @c detach.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k A medium the picked engine cannot read.
+     */
     status_t attach(std::span<medium_t const> media) noexcept {
         return std::visit([&](auto& engine) noexcept { return engine.attach(media); }, engines_);
     }
@@ -2441,10 +2502,18 @@ class io_engine_variant {
         std::visit([](auto& engine) noexcept { engine.detach(); }, engines_);
     }
 
+    /**
+     *  Queues @p request on the picked engine for the next @c submit.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The queue already holds its depth.
+     *  - @c invalid_argument_k A medium never attached, or a length past what a completion counts.
+     */
     status_t enqueue_read(io_request_t request) noexcept {
         return std::visit([&](auto& engine) noexcept { return engine.enqueue_read(request); }, engines_);
     }
 
+    /** Submits every queued request on the picked engine, waiting as @p wait says. */
     status_t submit(io_wait_t wait) noexcept {
         return std::visit([&](auto& engine) noexcept { return engine.submit(wait); }, engines_);
     }
@@ -2577,9 +2646,16 @@ class nvme_executor {
     nvme_executor(nvme_executor&&) noexcept = default;
     nvme_executor& operator=(nvme_executor&&) noexcept = default;
 
-    /** Spawns @p threads over @p topology, zero meaning @c forkunion_executor_t::default_threads,
+    /**
+     *  Spawns @p threads over @p topology, zero meaning @c forkunion_executor_t::default_threads,
      *  then opens each engine with @p config on its own thread, every one on the transport thread
-     *  zero's engine picked. */
+     *  zero's engine picked.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k SPDK is named without a driver.
+     *  - @c unsupported_k No engine at or below @p config's transport set up on a thread.
+     *  - @c invalid_argument_k A zero queue depth.
+     */
     static expected<nvme_executor> spawn(fu_topology_t topology, std::size_t threads, config_t const& config) noexcept {
         nvme_executor executor;
         // The caller never runs a slice, so each thread index stays one OS thread, the single
@@ -2606,20 +2682,39 @@ class nvme_executor {
         return {std::move(executor), opened};
     }
 
-    /** Claims the executor for one call; a second concurrent caller gets @c contended_k. */
+    /**
+     *  Claims the executor for one call.
+     *
+     *  @par Statuses:
+     *  - @c contended_k Another call holds the executor.
+     */
     expected<claim_t> claim() noexcept { return threads_.claim(); }
 
-    /** Rewinds and seeds every thread's arena at @p scratch_bytes_per_thread, and cuts every
+    /**
+     *  Rewinds and seeds every thread's arena at @p scratch_bytes_per_thread, and cuts every
      *  engine's staging region into @p buffers buffers of @p buffer_bytes each, regrowing and
-     *  re-registering it only when they do not fit. */
+     *  re-registering it only when they do not fit.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The executor holds no threads.
+     *  - @c contended_k The pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or passes what Windows registers.
+     */
     status_t reserve(std::size_t scratch_bytes_per_thread, std::size_t buffers, std::size_t buffer_bytes) noexcept {
         if (status_t const reserved = threads_.reserve(scratch_bytes_per_thread); failed(reserved)) return reserved;
         return on_every_thread_(
             [&](std::size_t thread) noexcept { return engines_[thread].reserve(buffers, buffer_bytes); });
     }
 
-    /** Attaches @p media to every engine, so request medium IDs index them until the attachment
-     *  dies; a refusal on any thread detaches them all. */
+    /**
+     *  Attaches @p media to every engine, so request medium IDs index them until the attachment
+     *  dies; a refusal on any thread detaches them all.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The executor holds no pool, or the pool has no workers.
+     *  - @c contended_k The pool is running another dispatch.
+     *  - @c config_mismatch_k A medium the engines cannot read.
+     */
     expected<attachment_t> attach(std::span<medium_t const> media) noexcept {
         status_t const attached = on_every_thread_(
             [&](std::size_t thread) noexcept { return engines_[thread].attach(media); });
@@ -2633,15 +2728,27 @@ class nvme_executor {
     /** Thread @p thread 's arena; no two threads share one. */
     arena_t& arena(std::size_t thread) noexcept { return threads_.arena(thread); }
 
-    /** Runs @p callback on every thread with the thread index and its compute domain; must be
-     *  @c noexcept. */
+    /**
+     *  Runs @p callback on every thread with the thread index and its compute domain; must be
+     *  @c noexcept.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The executor holds no pool, or the pool has no workers.
+     *  - @c contended_k The pool is running another dispatch.
+     */
     template <typename callback_type_>
     status_t for_threads(callback_type_&& callback) noexcept {
         return threads_.for_threads(std::forward<callback_type_>(callback));
     }
 
-    /** Runs @p callback over @p tasks items, stolen dynamically, with the task index, the thread
-     *  index and its compute domain; must be @c noexcept. */
+    /**
+     *  Runs @p callback over @p tasks items, stolen dynamically, with the task index, the thread
+     *  index and its compute domain; must be @c noexcept.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The executor holds no pool, or the pool has no workers.
+     *  - @c contended_k The pool is running another dispatch.
+     */
     template <typename callback_type_>
     status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
         return threads_.for_tasks(tasks, std::forward<callback_type_>(callback));

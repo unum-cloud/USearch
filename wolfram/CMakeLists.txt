@@ -6,14 +6,10 @@ set(USEARCH_WOLFRAM_PATH
     CACHE PATH "Mathematica installation whose LibraryLink headers the Wolfram SDK compiles against"
 )
 
-# The C interface's archive is declared in `c/`, which the root adds after this directory, so the switch decides rather
-# than the target's existence.
-if (USEARCH_BUILD_LIB_C)
-    set(usearch_wolfram_library_ usearch_static)
-elseif (USEARCH_BUILD_LIB_C_STUB)
+if (USEARCH_BUILD_STUB)
     set(usearch_wolfram_library_ usearch_static_stub)
 else ()
-    message(FATAL_ERROR "The Wolfram SDK links the C interface; configure with `-DUSEARCH_BUILD_LIB_C=1`.")
+    set(usearch_wolfram_library_ usearch_static)
 endif ()
 
 # LibraryLink is a C API declared entirely by one header, so the SDK contributes an include directory and no library to

@@ -2,7 +2,7 @@
 #
 # ~~~
 #   sudo apt install crossbuild-essential-ppc64el qemu-user
-#   cmake -B build_ppc64le_gnu -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-ppc64le-gnu.cmake -D USEARCH_BUILD_LIB_C=1
+#   cmake -B build_ppc64le_gnu -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-ppc64le-gnu.cmake
 #   cmake --build build_ppc64le_gnu --target usearch_shared
 # ~~~
 #

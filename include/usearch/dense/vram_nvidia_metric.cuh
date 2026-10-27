@@ -600,7 +600,7 @@ __device__ __forceinline__ float2 cuda_e3m2x2_to_f32x2_ampere(u32_t packed_pair)
     return __half22float2(__hmul2(*reinterpret_cast<__half2 const*>(&unscaled), scale));
 }
 
-/** The @c e2m3 twin of @ref cuda_e3m2x2_to_f32x2_ampere: three mantissa bits, bias 1 against the
+/** The @c e2m3 twin of @c cuda_e3m2x2_to_f32x2_ampere: three mantissa bits, bias 1 against the
  *  half's 15. */
 __device__ __forceinline__ float2 cuda_e2m3x2_to_f32x2_ampere(u32_t packed_pair) noexcept {
     u32_t const magnitudes = ((packed_pair & 0x001Fu) | ((packed_pair & 0x1F00u) << 8)) << (10 - 3);
@@ -1855,14 +1855,15 @@ __device__ __forceinline__ std::array<std::array<typename kit_::dot_t, 4>, 2> cu
 }
 
 /**
- *  @brief The greedy diversity prefix of @ref vram_keep_diverse on the kit's tensor-core tiles.
+ *  @brief The greedy diversity prefix of @ref unum::usearch::dense::vram_keep_diverse on the kit's
+ *      tensor-core tiles.
  *
- *  The sorted candidates run in blocks of @ref cuda_tile_rows_k. Each block first scores against
- *  the kept ones, sixteen columns a pass, each row falling once any of its lanes sees a nearer kept
- *  one, then against itself, and keeps its rows in order by one vote a row. Every pair is scored
- *  once and stays in registers, a row's kept set is the one the serial greedy would test, and the
- *  zero rule and the stop at a full row cut where it would: the verdicts are the serial greedy's
- *  for the distances the tiles give.
+ *  The sorted candidates run in blocks of @ref unum::usearch::dense::cuda_tile_rows_k. Each block
+ *  first scores against the kept ones, sixteen columns a pass, each row falling once any of its
+ *  lanes sees a nearer kept one, then against itself, and keeps its rows in order by one vote a
+ *  row. Every pair is scored once and stays in registers, a row's kept set is the one the serial
+ *  greedy would test, and the zero rule and the stop at a full row cut where it would: the verdicts
+ *  are the serial greedy's for the distances the tiles give.
  */
 template <vram_quads_kit kit_, typename schedule_, typename storage_>
     requires requires(typename kit_::fragment_t a, uint2 b, std::array<typename kit_::dot_t, 4> tile) {

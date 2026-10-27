@@ -234,11 +234,23 @@ struct nvme_index {
     /** The norms of @p row the kernel reads, or none when it reads none. */
     vector_norms_t norms(vector_view_t row) const noexcept { return norms_(kernel_, row); }
 
-    /** Opens the SafeGraphs monolith at @p path, a file, a device or, in SPDK builds, a transport
-     *  ID with optional @c ns:<ID> and @c base:<bytes> keys: its header, vetted against this
-     *  instantiation and its kernel, and its medium for the engines. Refuses with
-     *  @c unknown_kind_k a kernel the dtype's kits cannot finalize. A failed view leaves the index
-     *  empty. */
+    /**
+     *  Opens the SafeGraphs monolith at @p path, a file, a device or, in SPDK builds, a transport
+     *  ID with optional @c ns and @c base keys: its header, vetted against this instantiation and
+     *  its kernel, and its medium for the engines. A failed view leaves the index empty.
+     *
+     *  @par Statuses:
+     *  - @c unknown_kind_k A kernel the dtype's kits cannot finalize.
+     *  - @c unsupported_k A transport ID in a build without SPDK.
+     *  - @c invalid_argument_k @p path names no location, its base or namespace is unreadable, or
+     *    the base is off the medium's block; in SPDK builds also an inactive namespace or an
+     *    unparsable transport ID.
+     *  - @c malformed_k No monolith starts there, its header does not parse or cannot be read, or
+     *    its columns have no width or too many rows.
+     *  - @c config_mismatch_k The engines read no such medium, the header names another metric,
+     *    or its columns are not fixed rows of this scalar with @c u32 neighbors and one key per
+     *    row.
+     */
     status_t view(std::string_view path) noexcept {
         medium_ = medium_t {};
         part_ = {};
@@ -269,7 +281,7 @@ struct nvme_index {
      *      overlapping on every thread of @p executor.
      *
      *  @param[in] queries The batch, one query per row, in the part's stored scalar type.
-     *  @param[inout] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The walk breadth; @c scan_k is refused with @c unsupported_k, as exact
      *      scans run over @c nvme_indexes, which a monolith views as one shard.
      *  @param[out] node_ids Rankings by node ID, one query per row, as many matches as its width.
@@ -278,6 +290,15 @@ struct nvme_index {
      *
      *  A failed read stops the call: the engines drain, every buffer returns, and the call answers
      *  @c io_k.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
+     *  - @c unsupported_k @p config asks for a scan.
+     *  - @c config_mismatch_k @p counts, @p node_ids or @p distances disagree with the batch or
+     *    each other, the queries are not as wide as the rows, or a medium the engines cannot read.
+     *  - @c unsupported_layout_k @p node_ids or @p distances are not packed along their rows.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows.
      */
     expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
                                      nk::matrix_span<node_id_t> node_ids, nk::matrix_span<distance_t> distances,
@@ -289,8 +310,16 @@ struct nvme_index {
      *  @brief The batched @ref search under a lightning indexer, sharing its whole contract: every
      *      distance is 1 − its node's indexer score against the heads of its query row.
      *
+     *  @param[in] queries The batch, as the batched @ref search takes it.
      *  @param[in] heads The indexer heads of every query row.
-     *  @return @c config_mismatch_k unless the part ranks by dot.
+     *  @param[in,out] executor The threads, as the batched @ref search takes them.
+     *  @param[in] config The walk configuration, as the batched @ref search takes it.
+     *  @param[out] node_ids IDs of the matches, as the batched @ref search writes them.
+     *  @param[out] distances The same matches' distances, parallel to @p node_ids.
+     *  @param[out] counts Matches written per query.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The part does not rank by dot.
      */
     expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
                                      search_config_t config, nk::matrix_span<node_id_t> node_ids,
@@ -379,8 +408,8 @@ struct nvme_index {
         }
     }
 
-    /** Reads a part's header through @p source, any reader with `read_at(offset, bytes)`, into
-     *  @p part, vetted as @ref open_part_ promises. */
+    /** Reads a part's header through @p source, any reader with <tt>read_at(offset, bytes)</tt>,
+     *  into @p part, vetted as @c open_part_ promises. */
     template <typename source_type_, typename allocator_type_>
     static status_t read_part_(source_type_ const& source, dtype_t key_dtype, nk_kernel_kind_t& kernel,
                                allocator_type_ allocator, nvme_part_t& part) noexcept {

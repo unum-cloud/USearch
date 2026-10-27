@@ -1,5 +1,7 @@
 /**
  *  @file explorer/projection.js
+ *  @author Ash Vardanian
+ *  @date October 17, 2026
  *  @brief The GPU projection core: a spring-electrical layout of a growing graph, relaxed and drawn every frame.
  *
  *  It knows ordinals, distances, positions, the camera and the style, and nothing about keys, payloads or modalities.

@@ -1,4 +1,7 @@
 /**
+ *  @file verification/dense_vram_index_claims.pml
+ *  @author Ash Vardanian
+ *  @date September 11, 2026
  *  @brief The CUDA index's host side: the claim as one compare-exchange from the watermark, the flat
  *      matrices grown by the claim holder alone, the watermark each batch turns after its drain as a
  *      search's bound, the closed dispenser, and the admission ramp.
@@ -6,65 +9,33 @@
  *  From `include/usearch/dense/vram_nvidia_index.cuh`: `claimed_rows_` holds the rows claimed, or
  *  `node_id_unknown_k` while closed, and a claim is one compare-exchange of it from the watermark
  *  to the watermark past the batch, so it succeeds only when no batch is in flight and the
- *  dispenser is open, and answers `contended_k` otherwise. The holder then grows the flat matrices,
- *  sentinel-filled before any launch, launches, and un-claims a rejected grid by storing the old
- *  claim back with a release. The device's admission ramp counts on `published_rows`, a counter in
- *  device memory no host thread dereferences, and the watermark `last_visible_id_` turns once per
- *  batch.
+ *  dispenser is open. Two inserters each submit one batch of two rows. `far` is not run: the posted
+ *  add is x86's, and the ramp's add runs on the GPU.
  *
- *  Two inserters each submit one batch of two rows: the watermark acquired, the claim, `grow_rows_`
- *  when the flat matrices are short, the launch, which carries the host's view to the device and
- *  is accepted or rejected, the un-claim of a rejected one; then an accepted batch drains and takes
- *  its turn, `publish_`: a wait until the watermark reaches its first ID, then a release store of
- *  its end. The first inserter's drain may fail instead: `fail_` keeps the failure in `status_`
- *  with an `acq_rel` exchange, and its rows stay invisible. A loader runs `plan_load` and `finish`
- *  on a dispenser it finds open, claiming its rows like a batch and holding the claim until the
- *  turn, or as the sharded index drives it, closing the dispenser first and appending at the
- *  watermark, then reopening it; or it dies before `finish`, giving back what it took. A searcher
- *  takes its bound from `size()`, an acquire load of the watermark, reads the flat matrices' extent
- *  the way `submit_search_`'s kernel touches them, reads every row below the bound, and walks row
- *  0's tail. The device serves the accepted batches one row at a time in any order, each row
- *  through the ramp: a relaxed load of `published_rows`, a wait while
- *  `id >= published + max(published, floor)`, one relaxed no-return add, and maybe a back-link
- *  appending the row into row 0's tail slot while it is empty. The flat matrices' extent is
- *  `capacity()`, which the header derives from their committed bytes and reads outside the claim:
- *  the one grower release-stores each flat matrix's extent and `committed_bytes()` acquires it; the
- *  model folds the vectors, norms and neighbors into one word with the same orders.
- *
- *  The bound a searcher acquired lies inside the flat matrices it sees mapped, and so does every ID
- *  the device is assigned. Every row below the bound landed, and a row the walk reads landed in a
- *  batch that turned. One claim holder and so one grower run at a time, every batch and load ends,
- *  the claimed ranges are disjoint, every launch lies inside the flat matrices, and once everyone
- *  is done the claim is open and level with the watermark unless a failure was kept. `far` is not
- *  run: the posted add is x86's, and the ramp's add runs on the GPU.
+ *  - The bound a searcher acquired lies inside the flat matrices it sees mapped.
+ *  - Every row below the bound landed, and a row the walk reads landed in a batch that turned.
+ *  - One claim holder and so one grower run at a time, and the claimed ranges are disjoint.
+ *  - Every batch and load ends, and every launch lies inside the flat matrices.
+ *  - The claim ends open and level with the watermark unless a failure was kept.
  *
  *  @verify pass sc,rc11
- *  @verify fail rc11 watermark_order=order_relaxed: the turn's release store pairs with the acquire
- *      in `size()`, so a search's bound lies inside the flat matrices the claim grew; relaxed, the
- *      searcher reads a bound past their extent
- *  @verify fail rc11 size_order=order_relaxed: `size()` acquires the watermark the turn released;
- *      relaxed, the searcher reads a bound past the flat matrices' extent
- *  @verify fail sc quiescent_claim=false: a claim compares against the watermark, so it succeeds
- *      only with no batch in flight, which leaves the growth to one holder with no mutex; compared
- *      against the claim it last read, two batches claim side by side and grow the flat matrices at
- *      once
- *  @verify fail sc unclaim_on_rejection=false: a rejected grid stores its claim back, since it
- *      publishes nothing; kept, the claim stays past the watermark for good, and every later batch,
- *      load and closer is refused
- *  @verify fail sc unclaim_on_abandon=false: a load plan dying before `finish` gives back the claim
- *      it took on an open dispenser; kept, the claim stays past the watermark for good
- *  @verify fail sc drain_before_turn=false: a batch turns the watermark only after its drain, so
- *      every row under a search's bound landed; turned first, the searcher reads a row still in
- *      flight
- *  @verify fail sc neighbor_filter=false: the walk follows no ID at or past the bound, since an
- *      in-flight batch's back-links name its rows inside visible ones; unfiltered, it reads a row
- *      whose batch has not turned
+ *  @verify fail rc11 watermark_order=order_relaxed: relaxed, the searcher reads a bound past their
+ *      extent
+ *  @verify fail rc11 size_order=order_relaxed: relaxed, the searcher reads a bound past the flat
+ *      matrices' extent
+ *  @verify fail sc quiescent_claim=false: compared against the claim it last read, two batches claim
+ *      side by side and grow the flat matrices at once
+ *  @verify fail sc unclaim_on_rejection=false: kept, the claim stays past the watermark for good,
+ *      and every later batch, load and closer is refused
+ *  @verify fail sc unclaim_on_abandon=false: kept, the claim stays past the watermark for good
+ *  @verify fail sc drain_before_turn=false: turned first, the searcher reads a row still in flight
+ *  @verify fail sc neighbor_filter=false: unfiltered, it reads a row whose batch has not turned
  */
 #define thread_count 5
 #define location_count 6
 #define history_depth 7
 #define device_thread 4 // the thread every launch hands the host's view to
-#include "weak_memory.pml"
+#include <weak_memory.pml>
 
 // The words, by the index member each stands for; the flat matrices' extent stands for `capacity()`, and
 // row 0's tail for the slot a back-link appends into, zero while it names no row.

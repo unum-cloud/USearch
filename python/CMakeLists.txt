@@ -1,12 +1,10 @@
 # The CPython boundary lives in `python/*.c` and instantiates nothing: it links the C interface as an archive, so the
 # wheel carries one shared object. `scikit-build-core` drives this from `pyproject.toml`.
 
-if (TARGET usearch_static)
-    set(usearch_python_library_ usearch_static)
-elseif (TARGET usearch_static_stub)
+if (USEARCH_BUILD_STUB)
     set(usearch_python_library_ usearch_static_stub)
 else ()
-    message(FATAL_ERROR "The Python SDK links the C interface; configure with `-DUSEARCH_BUILD_LIB_C=1`.")
+    set(usearch_python_library_ usearch_static)
 endif ()
 
 find_package(Python 3.12 REQUIRED COMPONENTS Interpreter Development.Module)

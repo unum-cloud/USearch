@@ -25,11 +25,11 @@ A ground truth is computed for the whole file, so `--first-vector` or `--max-bas
 
 ### Building
 
-Every number below comes from a Release build: the `host_release` preset for CPU runs, and `cuda_release` for GPU ones, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
+Every number below comes from a Release build: the `release` preset for CPU runs, and `cuda_release` for GPU ones, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
 The library compiles the first `USEARCH_DENSE_DTYPES` stored dtypes, so these presets measure `bf16`, `u1`, `i8` and `e4m3` alone; add `-DUSEARCH_DENSE_DTYPES=11` to measure the rest.
 
 ```sh
-cmake --preset host_release && cmake --build --preset host_release --target usearch_bench_dense_index_search usearch_bench_dense_index_algebra usearch_bench_dense_ram_index_search usearch_bench_dense_ram_metric
+cmake --preset release && cmake --build --preset release --target usearch_bench_dense_index_search usearch_bench_dense_index_algebra usearch_bench_dense_ram_index_search usearch_bench_dense_ram_metric
 cmake --preset cuda_release -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_cuda_release --target usearch_bench_dense_index_search usearch_bench_dense_index_algebra
 ```
 
@@ -37,7 +37,7 @@ Every binary lands at the top of its build tree.
 Every benchmark is memory-hungry at 100M and above, so run it under a cgroup cap rather than trusting it to refuse.
 
 ```sh
-systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_host_release/usearch_bench_dense_index_search ...
+systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_release/usearch_bench_dense_index_search ...
 ```
 
 ### Running
@@ -45,7 +45,7 @@ systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_host_rel
 Flags share RetriEval's names, and each one defaults to the environment variable RetriEval reads for it, `--top-k` to `RETRIEVAL_TOP_K`, so one environment drives both harnesses and the command line overrides it; `--help` prints the full list for each binary.
 
 ```sh
-build_host_release/usearch_bench_dense_index_search \
+build_release/usearch_bench_dense_index_search \
     --base-vectors data/sift-10m/base.10M.u8bin \
     --query-vectors data/sift-10m/query.public.10K.u8bin \
     --query-neighbors data/sift-10m/groundtruth.public.10K.ibin \
@@ -96,7 +96,7 @@ The indexer ranks floating-point keys under the dot kernel, and its walks naviga
 -   `--oracle-queries` defaults to `16`: queries an exact `f64` oracle judges when no `--query-neighbors` gives their truth.
 
 ```sh
-build_host_release/usearch_bench_dense_ram_index_search --base-vectors keys.bf16bin --heads queries.bf16bin \
+build_release/usearch_bench_dense_ram_index_search --base-vectors keys.bf16bin --heads queries.bf16bin \
     --weights weights.fbin --query-neighbors truth-global.ibin --metric dot
 ```
 
@@ -108,7 +108,7 @@ An NVMe run views the checkpoint it saved, and `--nvme-class` picks the class it
 Judge GPU builds through a reload: a search issued right after a bulk build runs against a device still settling, and the checkpoint path is exactly what users reach.
 
 ```sh
-build_host_release/usearch_bench_dense_index_search --base-vectors data/sift-10m/base.10M.u8bin \
+build_release/usearch_bench_dense_index_search --base-vectors data/sift-10m/base.10M.u8bin \
     --query-vectors data/sift-10m/query.public.10K.u8bin --query-neighbors data/sift-10m/groundtruth.public.10K.ibin \
     --metric euclidean --residency nvme --checkpoint /mnt/nvme0/sift10m.safegraphs --nvme-class linux-uring
 ```
@@ -125,7 +125,7 @@ Judge the two builds at matched distance computations rather than matched knobs;
 It pins the inner product, the only kind both verbs are defined over, and judges no ground truth.
 
 ```sh
-build_host_release/usearch_bench_dense_index_algebra \
+build_release/usearch_bench_dense_index_algebra \
     --base-vectors data/wiki-1m/base.1M.fbin \
     --query-vectors data/wiki-1m/query.public.100K.fbin \
     --stored-dtype bf16 --oracle-queries 16
@@ -150,7 +150,7 @@ Candidates are drawn at random from a 256 MB pool, so they stream from RAM, and 
 Rows are named `kernel/scalar/caps/shape/dimensions`, like `dot/bf16/neon/1to4/768d`, with `numkong` as the baseline's tier.
 
 ```sh
-build_host_release/usearch_bench_dense_ram_metric --filter 'dot/bf16/.*/1to[14]/768d' --time-limit 2s
+build_release/usearch_bench_dense_ram_metric --filter 'dot/bf16/.*/1to[14]/768d' --time-limit 2s
 ```
 
 -   `--seed` defaults to `42`: seed the row picks and the adjacency noise derive from, or `random`.
@@ -308,7 +308,7 @@ Provision them before launch and declare them with `--huge-pages`, so a run that
 
 ```sh
 sudo sysctl -w vm.nr_hugepages=16384
-build_host_release/usearch_bench_dense_ram_index_search --huge-pages 16384 ...
+build_release/usearch_bench_dense_ram_index_search --huge-pages 16384 ...
 ```
 
 The pool splits per NUMA domain, so a single-domain run must fit its domain's share.
@@ -316,11 +316,11 @@ The pool splits per NUMA domain, so a single-domain run must fit its domain's sh
 ## Profiling
 
 ```sh
-sudo -E perf stat -d build_host_profile/usearch_bench_dense_ram_index_search ...
-sudo -E perf mem -d build_host_profile/usearch_bench_dense_ram_index_search ...
-sudo -E perf record -F 1000 build_host_profile/usearch_bench_dense_ram_index_search ...
-perf record -d -e arm_spe// -- build_host_profile/usearch_bench_dense_ram_index_search ...
-sudo perf stat -e 'faults,dTLB-loads,dTLB-load-misses,cache-misses,cache-references' build_host_profile/usearch_bench_dense_ram_index_search ...
+sudo -E perf stat -d build_profile/usearch_bench_dense_ram_index_search ...
+sudo -E perf mem -d build_profile/usearch_bench_dense_ram_index_search ...
+sudo -E perf record -F 1000 build_profile/usearch_bench_dense_ram_index_search ...
+perf record -d -e arm_spe// -- build_profile/usearch_bench_dense_ram_index_search ...
+sudo perf stat -e 'faults,dTLB-loads,dTLB-load-misses,cache-misses,cache-references' build_profile/usearch_bench_dense_ram_index_search ...
 ```
 
 A dTLB miss rate near 3% and a cache-miss rate near 7% are typical of a healthy 1M run; stalls closer to 90% are the signal to provision huge pages and revisit allocation alignment.

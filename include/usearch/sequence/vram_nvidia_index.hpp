@@ -75,12 +75,23 @@ struct vram_nvidia_kits {
     /** Rungs of the kit's kernels, one per entry of @c vram_sequence_rungs. */
     inline static constexpr std::size_t rungs_k = vram_sequence_rungs(metric_).size();
 
-    /** Keeps the window widths the overlap kind hashes, which every other kind refuses. Defined in
-     *  @c vram_nvidia_metric.cuh, as are the members below reading the kit. */
+    /**
+     *  Keeps the window widths the overlap kind hashes. Defined in @c vram_nvidia_metric.cuh, as
+     *  are the members below reading the kit.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The overlap kind gets no @p widths, another kind gets some, or a
+     *    width is zero or past 32 bits.
+     */
     status_t window_widths(std::span<std::size_t const> widths) noexcept;
 
-    /** Keeps the folded costs the Needleman-Wunsch kind scores with, which every other kind refuses
-     *  unless unfolded. */
+    /**
+     *  Keeps the folded costs the Needleman-Wunsch kind scores with.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The Needleman-Wunsch kind gets unfolded @p costs, or another kind
+     *    gets folded ones.
+     */
     status_t costs(needleman_wunsch_costs_t const& costs) noexcept;
 
   private:
@@ -102,7 +113,12 @@ struct vram_nvidia_kits {
         return {stored.size(), status_t::success_k};
     }
 
-    /** Saves the @p stored row into @p saved as it is. */
+    /**
+     *  Saves the @p stored row into @p saved as it is.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The two differ in size.
+     */
     static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept { return copy_bytes(saved, stored); }
 
     /** Bytes the @p saved row stores into: its own. */
@@ -110,11 +126,21 @@ struct vram_nvidia_kits {
         return {saved.size(), status_t::success_k};
     }
 
-    /** Stores the @p saved row into @p stored as it is. */
+    /**
+     *  Stores the @p saved row into @p stored as it is.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The two differ in size.
+     */
     static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept { return copy_bytes(stored, saved); }
 
-    /** Loads the fatbin onto @p device, finds every kernel of every rung by its symbol, and uploads
-     *  the parameters the kits read beside the rows. */
+    /**
+     *  Loads the fatbin onto @p device, finds every kernel of every rung by its symbol, and uploads
+     *  the parameters the kits read beside the rows.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The kind takes parameters, and none were set.
+     */
     status_t load_kernels_(int device) noexcept;
 
     cuda_function_handle_t kernel_function_(std::size_t rung, vram_kernel_t kernel, u32_t slots) const noexcept {
@@ -175,15 +201,27 @@ struct vram_nvidia_index {
     explicit vram_nvidia_index(cuda_virtual_memory_allocator<byte_t> const& allocator = {}) noexcept
         : graph_(nk_kernel_unknown_k, allocator) {}
 
-    /** Keeps the window widths the overlap kind hashes, which every other kind refuses; the first
-     *  @c reserve uploads them, so they freeze before it. */
+    /**
+     *  Keeps the window widths the overlap kind hashes; the first @c reserve uploads them, so they
+     *  freeze before it.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index is reserved already, the overlap kind gets no @p widths,
+     *    another kind gets some, or a width is zero or past 32 bits.
+     */
     status_t window_widths(std::span<std::size_t const> widths) noexcept {
         if (graph_.connectivity()) return status_t::config_mismatch_k;
         return graph_.kits().window_widths(widths);
     }
 
-    /** Keeps the folded costs the Needleman-Wunsch kind scores with, which every other kind refuses
-     *  unless unfolded; the first @c reserve uploads them, so they freeze before it. */
+    /**
+     *  Keeps the folded costs the Needleman-Wunsch kind scores with; the first @c reserve uploads
+     *  them, so they freeze before it.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index is reserved already, the Needleman-Wunsch kind gets
+     *    unfolded @p costs, or another kind gets folded ones.
+     */
     status_t costs(needleman_wunsch_costs_t const& costs) noexcept {
         if (graph_.connectivity()) return status_t::config_mismatch_k;
         return graph_.kits().costs(costs);

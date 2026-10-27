@@ -76,10 +76,7 @@ minimum-version = "build-system.requires"
 wheel.packages = ["python/usearch"]
 
 [tool.scikit-build.cmake.define]
-USEARCH_BUILD_BENCH = "OFF"
-USEARCH_BUILD_LIB_C = "ON"
-USEARCH_BUILD_LIB_PYTHON = "ON"
-USEARCH_BUILD_TEST = "OFF"
+USEARCH_BUILD_PYTHON = "ON"
 USEARCH_DENSE_DTYPES = "11"
 
 # `VERSION` is what every other SDK reads, so the wheel takes its version from the same file rather
@@ -190,6 +187,7 @@ select = [
   "B",   # flake8-bugbear (likely bugs)
   "SIM", # flake8-simplify (needless complexity)
   "TID", # flake8-tidy-imports (relative imports)
+  "D",   # pydocstyle (docstrings)
 ]
 ignore = [
   "E501",  # line too long (handled by formatter)
@@ -203,6 +201,11 @@ ignore = [
   "E402",
 ] # re-exports and conditional imports
 ".cmake-format.py" = ["F821"] # cmake-format defines `section` when it runs the profile
+"!python/**" = ["D"]
+"*.pyi" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

@@ -2,8 +2,8 @@
 #
 # ~~~
 #   export WASI_SDK_PATH=/opt/wasi-sdk
-#   cmake -B build_wasm32_wasi_release -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_LIB_C=1
-#   cmake --build build_wasm32_wasi_release --target usearch_static
+#   cmake -B build_wasm32_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake
+#   cmake --build build_wasm32_wasi --target usearch_static
 # ~~~
 #
 # `wasm32-wasip1`, one thread, the fixed-width `simd128` tier, self-contained memory: the same module runs under

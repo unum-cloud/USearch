@@ -242,7 +242,7 @@ for query in range(len(matches)):
 The breadth of the candidates rides each call as `expansion_factor` rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
 `DenseSearchConfig(traversal=Traversal.SCAN)` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth.
 
-### Filtering & Progress
+### Filtered Search
 
 A `predicate` in the `DenseSearchConfig` admits only the keys it approves, while non-matching entries still route the traversal, so recall does not collapse at low selectivity.
 It is the address of a `usearch_predicate_callback_t` compiled in C, judging a batch of keys per call, and its state crosses beside it as an address.
@@ -254,7 +254,7 @@ var admitted = index.search(queries, 10, arena, DenseSearchConfig(predicate=admi
 The predicate runs on the executor's threads together, so it must be safe for concurrent use.
 This binding installs no progress handler, so an `insert` batch is all-or-nothing: every fallible step runs before the first entry is claimed, and a rejected batch publishes no row.
 
-### Retrieval: Get, Cursors & Streams
+### Retrieval and Streaming
 
 `get` exports every entry stored under one key, one row per entry in insertion order, as `DenseVectors`, whose every row is exactly `columns()` values wide, as the engine reported them, however far apart the engine laid the rows.
 

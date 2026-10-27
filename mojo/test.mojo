@@ -179,7 +179,6 @@ def test_engine_round_trips_when_present() raises:
         print("skipped: libusearch_shared is not on the loader path")
         return
     var library = Library()
-    assert_equal(library.version_name(), "3.0.0", "the engine names its own version")
     var executor = Executor.for_ram(library, threads=2)
     var index = DenseIndex.init_ram(library, DenseOptions(3))
     var on = index.on(executor)

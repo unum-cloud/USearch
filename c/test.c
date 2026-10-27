@@ -5,16 +5,16 @@
  *  @brief Unit tests for the pure-C ABI of USearch.
  *
  *  Exercises the dense surface through the ABI every binding consumes: initialization and
- *  reservation, batch `add`, `search`, `multiply` and `attend`, retrieval by key, the arenas every
- *  output lands in, the contract of `usearch_outcome_t`, and deferred calls on an executor. The
- *  sequence, shapes and geospatial surfaces each get one checkpoint round trip. A blocking call's
- *  outcome is final once it returns; a deferred one is waited on or drained. Scoped to the verbs
- *  `src/` instantiates today - the header runs ahead of the implementation, and a smoke test that
- *  cannot link proves nothing. The harness is intentionally dependency-free so it can run in the
- *  same matrix as the C++ tests and on cross-compilation targets where only the C runtime is
- *  available.
+ *  reservation, batch @c add, @c search, @c multiply and @c attend, retrieval by key, the arenas
+ *  every output lands in, the contract of @c usearch_outcome_t, and deferred calls on an executor.
+ *  The sequence, shapes and geospatial surfaces each get one checkpoint round trip. A blocking
+ *  call's outcome is final once it returns; a deferred one is waited on or drained. Scoped to the
+ *  verbs @c src/ instantiates today - the header runs ahead of the implementation, and a smoke
+ *  test that cannot link proves nothing. The harness is intentionally dependency-free so it can
+ *  run in the same matrix as the C++ tests and on cross-compilation targets where only the C
+ *  runtime is available.
  *
- *  On startup we install a signal handler (see `install_crash_handlers`) that
+ *  On startup we install a signal handler (see @c install_crash_handlers) that
  *  prints a native back-trace before re-raising, so CI logs pinpoint the
  *  faulting frame instead of stopping at a bare exit code.
  */
@@ -97,13 +97,13 @@ void expect(bool must_be_true, char const* message) {
 
 #define expect_eq(a, b, message) expect(a == b, message)
 
-/** A substring of the tests to run, from `USEARCH_FILTER`; `NULL` runs every test. */
+/** A substring of the tests to run, from @c USEARCH_FILTER; @c NULL runs every test. */
 static char const* test_filter = NULL;
 
-/** Whether the test @p name passes `USEARCH_FILTER`. */
+/** Whether the test @p name passes @c USEARCH_FILTER. */
 static bool selected(char const* name) { return !test_filter || strstr(name, test_filter) != NULL; }
 
-/** The seed of `rand`: 42, unless `USEARCH_SEED` names another or is "random", which draws one
+/** The seed of @c rand: 42, unless @c USEARCH_SEED names another or is "random", which draws one
  *  from the clock. */
 static unsigned read_seed(void) {
     char const* const text = getenv("USEARCH_SEED");
@@ -141,7 +141,8 @@ usearch_key_t key_of(uint64_t value) {
     return key;
 }
 
-/** An angular `bf16` RAM index over @p dimensions -wide rows, every other optional field derived. */
+/** An angular @c bf16 RAM index over @p dimensions -wide rows, every other optional field
+ *  derived. */
 usearch_dense_index_t create_index(size_t const dimensions) {
     usearch_outcome_t outcome = {0};
     usearch_dense_index_t index = NULL;
@@ -856,7 +857,7 @@ void test_sequence_absorb(void) {
     printf("Test: Sequence Absorb - PASSED\n");
 }
 
-/** Reads entries back by key. `usearch_dense_get` sizes its own output, landing every row under
+/** Reads entries back by key. @c usearch_dense_get sizes its own output, landing every row under
  *  the key in an arena and reporting how many there were. */
 void test_count_and_get(size_t const dimensions) {
     printf("Test: Count & Get... %zu dimensions\n", dimensions);
@@ -1485,7 +1486,7 @@ void test_cursor_steps(void) {
 }
 
 /** Sequences round-trip through a checkpoint: a stored query finds itself, then its one-edit
- *  neighbor, and `get` hands the bytes back, before the save and after the load alike. The overlap
+ *  neighbor, and @c get hands the bytes back, before the save and after the load alike. The overlap
  *  kind refuses to go without window widths. */
 void test_sequence_round_trip(void) {
     printf("Test: Sequence Round Trip\n");
@@ -1986,9 +1987,9 @@ void test_sequence_vram(void) {
     printf("Test: Sequence VRAM - PASSED\n");
 }
 
-/** Shapes round-trip the same way: a stored pose finds itself at zero, and `get` exports its points
- *  back, before the save and after the load alike. A frozen point count refuses a shape of any
- *  other. */
+/** Shapes round-trip the same way: a stored pose finds itself at zero, and @c get exports its
+ *  points back, before the save and after the load alike. A frozen point count refuses a shape of
+ *  any other. */
 void test_shapes_round_trip(void) {
     printf("Test: Shapes Round Trip\n");
     usearch_outcome_t outcome = {0};
@@ -2286,7 +2287,7 @@ usearch_geospatial_observation_t observed_at(double latitude_degrees, double lon
     return observation;
 }
 
-/** Geospatial round-trips the same way: an observation finds itself at zero metres and `get` hands
+/** Geospatial round-trips the same way: an observation finds itself at zero metres and @c get hands
  *  it back, before the save and after the load alike, while a ridge on the handle's terrain hides
  *  what stands behind it. */
 void test_geospatial_round_trip(void) {
@@ -2835,7 +2836,7 @@ void test_multiply_packed(void) {
     printf("Test: Multiply Packed Rows - PASSED\n");
 }
 
-/** The `int8_t` value table an attend test resolves keys through, its first @c rows resolvable. */
+/** The @c int8_t value table an attend test resolves keys through, its first @c rows resolvable. */
 typedef struct attend_values_t {
     int8_t const* data;
     size_t rows;
@@ -2843,7 +2844,7 @@ typedef struct attend_values_t {
     usearch_scalar_t scalar;
 } attend_values_t;
 
-/** Resolves a key made by `key_of` to its row of the table, NULL past the resolvable rows. */
+/** Resolves a key made by @c key_of to its row of the table, NULL past the resolvable rows. */
 static void attend_value_rows(void* state, usearch_key_t const* keys, size_t count, usearch_scalar_t scalar,
                               size_t columns, void const** rows) {
     attend_values_t const* const values = (attend_values_t const*)state;
@@ -2973,8 +2974,8 @@ void test_attend(void) {
     printf("Test: Attend - PASSED\n");
 }
 
-/** Every landed run of @p matches against @p exact, `[query][document]` totals: as many keys as
- *  @p expected_count per query, largest first, each at its exact total, even keys alone when
+/** Every landed run of @p matches against @p exact, <tt>[query][document]</tt> totals: as many keys
+ *  as @p expected_count per query, largest first, each at its exact total, even keys alone when
  *  @p even_only. */
 static void expect_maxsim_tape(usearch_matches_tape_view_t matches, size_t written, size_t queries, size_t documents,
                                double const* exact, size_t const* expected_count, bool even_only) {
@@ -2994,9 +2995,9 @@ static void expect_maxsim_tape(usearch_matches_tape_view_t matches, size_t writt
     }
 }
 
-/** Documents of 2 to 4 token rows hold small integers, which `bf16` keeps exactly, so every MaxSim
+/** Documents of 2 to 4 token rows hold small integers, which @c bf16 keeps exactly, so every MaxSim
  *  total is exact: queries of 1, 2 and 3 rows land a ragged tape, walks and a scan alike, every
- *  document without a bound, the best one with one while `required` counts them all, and even
+ *  document without a bound, the best one with one while @c required counts them all, and even
  *  documents alone under a predicate. */
 void test_maxsim(void) {
     printf("Test: MaxSim\n");
@@ -3274,7 +3275,7 @@ void test_nvme_view(size_t const dimensions) {
     printf("Test: NVMe View - PASSED\n");
 }
 
-/** A SafeGraphs monolith shaped like a benchmark's save - `u32` keys, `bf16` rows, 16 neighbors
+/** A SafeGraphs monolith shaped like a benchmark's save - @c u32 keys, @c bf16 rows, 16 neighbors
  *  each - framed here by hand, opens through the NVMe view with every key zero-extended into the
  *  16-byte ones the ABI speaks, so it counts and ranks under the identity it was saved with. */
 void test_nvme_view_narrow_keys(void) {
@@ -3387,7 +3388,7 @@ void test_nvme_view_narrow_keys(void) {
 
 /** A message is @c NULL exactly when the status is success, and the outcome a caller reuses is
  *  fully overwritten - the contract every binding branches on. Only the success half is
- *  exercised here; the failing verbs are the ones `src/` has yet to instantiate. */
+ *  exercised here; the failing verbs are the ones @c src/ has yet to instantiate. */
 void test_outcome_contract(size_t const dimensions) {
     printf("Test: Outcome Contract\n");
 
@@ -3429,11 +3430,6 @@ void test_outcome_contract(size_t const dimensions) {
 /** The library-wide probes, which take no handle and cannot fail. */
 void test_library_probes(void) {
     printf("Test: Library Probes\n");
-    int major = -1, minor = -1, patch = -1;
-    usearch_version(&major, &minor, &patch);
-    expect_eq(major, USEARCH_VERSION_MAJOR, "The linked major version must match the header's");
-    expect(minor >= 0 && patch >= 0, "The version must be reported");
-    expect(usearch_version_name() != NULL, "The version must be reported");
     expect(usearch_capabilities_compiled() != NULL, "The compiled capabilities must be reported");
     expect(usearch_capabilities_available() != NULL, "The available capabilities must be reported");
 
@@ -3457,13 +3453,13 @@ void test_library_probes(void) {
     printf("Test: Library Probes - PASSED\n");
 }
 
-/** One enumerator and the spelling its `_name` function answers: a row of the naming contract. */
+/** One enumerator and the spelling its @c _name function answers: a row of the naming contract. */
 typedef struct named_value_t {
     int value;
     char const* spelling;
 } named_value_t;
 
-/** The bytes of @p text, viewed for a `_from_name` function. */
+/** The bytes of @p text, viewed for a @c _from_name function. */
 static usearch_bytes_view_t text_view(char const* text, size_t length) {
     return (usearch_bytes_view_t) {(uint8_t const*)text, length};
 }
@@ -3476,7 +3472,7 @@ static void expect_named(bool holds, char const* what, char const* spelling, cha
 }
 
 /**
- *  @brief Checks one `_name` and `_from_name` pair against @p table, the enumerators it spells.
+ *  @brief Checks one @c _name and @c _from_name pair against @p table, the enumerators it spells.
  *
  *  Every spelling names its value and reads back to it, and no two rows share a spelling. A near
  *  miss of a spelling - upper case, a trailing space or letter, the last letter dropped - and an
@@ -3541,7 +3537,7 @@ static int nvme_class_from_name(usearch_bytes_view_t name) { return (int)usearch
 static char const* dense_metric_name_of(int value) { return usearch_dense_metric_name((usearch_dense_metric_t)value); }
 static int dense_metric_from_name(usearch_bytes_view_t name) { return (int)usearch_dense_metric_from_name(name); }
 
-/** Every `_name` and `_from_name` pair against the spellings its enumerators carry. */
+/** Every @c _name and @c _from_name pair against the spellings its enumerators carry. */
 void test_names(void) {
     printf("Test: Names\n");
     named_value_t const statuses[] = {
@@ -4015,7 +4011,7 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
 }
 
 /** An exact scan on the first GPU scores every row once per query and refuses a predicate as a walk
- *  does where the vendor scans, and refuses with `usearch_status_unsupported_k` elsewhere. */
+ *  does where the vendor scans, and refuses with @c usearch_status_unsupported_k elsewhere. */
 void test_vram_scan(size_t const collection_size, size_t const dimensions) {
     usearch_outcome_t outcome = {0};
     usearch_gpu_device_t device = {0};

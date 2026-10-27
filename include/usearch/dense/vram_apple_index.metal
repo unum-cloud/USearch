@@ -1382,7 +1382,7 @@ template [[host_name("metal_refine_kernel_16")]] kernel void metal_refine_kernel
     device atomic_uint*, device uint*, device uint const*, uint, uint, uint);
 
 /*  Searches and graph products share one entry point per width, plus slot zero's arena frontier past the widest
- *  rung: the word at `metal_keeps_buffer_k` says which the launch lands. */
+ *  rung: the word at @c metal_keeps_buffer_k says which the launch lands. */
 
 template <uint slots_>
 kernel void metal_search_kernel(

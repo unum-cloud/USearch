@@ -9,6 +9,10 @@
 //! index runs it on the calling thread, `index.on(executor)` blocks on an executor, and
 //! `index.deferred(executor, &call)` submits it there into a `Deferred` the caller holds. Optional
 //! knobs, the progress handler and the filtering predicate among them, ride one config struct per verb.
+//!
+//! File: zig/usearch/dense.zig
+//! Author: Ash Vardanian
+//! Date: September 7, 2026
 
 const std = @import("std");
 

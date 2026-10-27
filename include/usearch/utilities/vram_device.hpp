@@ -11,10 +11,10 @@
  *  vendor whose runtime is absent contributes no devices; one whose kernels this build lacks still
  *  lists them, and placing an index there refuses.
  *
- *  Every vendor's device header provides the same surface: @c <vendor>_gpu_devices, an executor
- *  with a static @c spawn over vendor ordinals, @c device, @c vendor_k and @c device_arena_t, and
- *  that arena, made from the executor's first stream, with @c allocate, @c contains, @c clear,
- *  @c upload and @c drain.
+ *  Every vendor's device header provides the same surface: a vendor-prefixed @c gpu_devices, an
+ *  executor with a static @c spawn over vendor ordinals, @c device, @c vendor_k and
+ *  @c device_arena_t, and that arena, made from the executor's first stream, with @c allocate,
+ *  @c contains, @c clear, @c upload and @c drain.
  */
 #pragma once
 
@@ -78,10 +78,15 @@ inline std::span<gpu_device_t const> gpu_devices() noexcept {
     return {listing, count};
 }
 
-/** Spawns the executor of the one vendor every device in @p devices belongs to, one stream per
+/**
+ *  Spawns the executor of the one vendor every device in @p devices belongs to, one stream per
  *  distinct device over their vendor ordinals, which every shard there shares, its scratch capped
- *  at @p scratch_limit bytes per stream, zero for no ceiling: @c config_mismatch_k when they span
- *  vendors, @c device_error_k when none is named or their runtime refuses. */
+ *  at @p scratch_limit bytes per stream, zero for no ceiling.
+ *
+ *  @par Statuses:
+ *  - @c device_error_k No device is named, or the build drives no executor of their vendor.
+ *  - @c config_mismatch_k The @p devices span vendors.
+ */
 inline expected<gpu_executor_t> spawn_gpu_executor(std::span<gpu_device_t const> devices,
                                                    std::size_t scratch_limit = 0) noexcept {
     if (devices.empty()) return {{}, status_t::device_error_k};
@@ -166,8 +171,13 @@ struct gpu_arena_t {
             arena);
     }
 
-    /** Queues a copy of @p bytes of host memory at @p source to @p destination in the arena on its
-     *  executor's first stream; @p source must stay alive until @ref drain. */
+    /**
+     *  Queues a copy of @p bytes of host memory at @p source to @p destination in the arena on its
+     *  executor's first stream; @p source must stay alive until @ref wait.
+     *
+     *  @par Statuses:
+     *  - @c device_error_k The arena has no device.
+     */
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
         return std::visit(
             [&]<typename arena_type_>(arena_type_& typed) noexcept {
@@ -259,8 +269,8 @@ enum class vram_kernel_t : u32_t {
     count_k,
 };
 
-/** The Itanium spelling of @ref vram_kernel_t, a sibling of every kernel's scope, as
- *  @c vram_kernel_symbol documents. */
+/** The Itanium spelling of @ref unum::usearch::utilities::vram_kernel_t, a sibling of every
+ *  kernel's scope, as @c vram_kernel_symbol documents. */
 constexpr char const* kernel_enum_mangling(vram_kernel_t) noexcept { return "NS0_9utilities13vram_kernel_tE"; }
 
 /** Bytes of the longest symbol any kernel's spelling reaches, its terminator included. */
@@ -311,8 +321,8 @@ constexpr char itanium_builtin() noexcept {
 
 /** Appends one template argument: a type, an integer, @c nk_dtype_t, or an enum spelled by the
  *  @c kernel_enum_mangling overload beside it, found by its namespace - through @c unum::usearch,
- *  @c S0_, for @ref vram_kernel_t, through the kernel's scope, @c S1_, for a design's own enum, or
- *  whole for a C enum. */
+ *  @c S0_, for @ref unum::usearch::utilities::vram_kernel_t, through the kernel's scope, @c S1_,
+ *  for a design's own enum, or whole for a C enum. */
 template <typename argument_type_>
 void append_itanium_argument(vram_kernel_symbol_t& symbol, argument_type_ argument) noexcept {
     if constexpr (std::is_same_v<argument_type_, nk_dtype_t>) {
@@ -348,7 +358,7 @@ void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<value_ty
 }
 
 /** Spells @c uuid_t, @c S3_ being @c unum::usearch::utilities, which a kernel's leading
- *  @ref vram_kernel_t argument introduces. */
+ *  @ref unum::usearch::utilities::vram_kernel_t argument introduces. */
 inline void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<uuid_t>) noexcept {
     symbol.append("NS3_6uuid_tE");
 }
@@ -371,16 +381,17 @@ struct itanium_parameter_t {
 };
 
 /**
- *  @brief Spells the symbol of @b unum::usearch::<scope>::<kernel><arguments...>(<parameter>), the
+ *  @brief Spells the symbol of a kernel by its scope, name, template arguments and parameter, the
  *      kernel's one parameter being a struct, or a struct template, of that same scope or of
  *      @c basic.
  *
  *  The substitutions are fixed by that shape: @c S_ is @c unum, @c S0_ is @c unum::usearch, @c S1_
- *  is the scope and @c S2_ the kernel's template. A @ref vram_kernel_t argument spells as
- *  @c NS0_9utilities13vram_kernel_tE, adding @c S3_ and @c S4_, of which only a @c uuid_t reuses
- *  @c S3_. The parameter spells as @c NS1_<length><parameter>E for the scope's own struct and as
- *  @c NS0_5basic<length><parameter>E for basic's - with @c I<T>E before the closing @c E when it
- *  reuses the kernel's template argument, @c T_ for the first and @c T<n-1>_ for the n-th. So
+ *  is the scope and @c S2_ the kernel's template. A @ref unum::usearch::utilities::vram_kernel_t
+ *  argument spells as @c NS0_9utilities13vram_kernel_tE, adding @c S3_ and @c S4_, of which only a
+ *  @c uuid_t reuses @c S3_. The parameter spells as @c NS1_ , the name's length, the name and @c E
+ *  for the scope's own struct and as @c NS0_5basic , the name's length, the name and @c E for
+ *  basic's - with @c I<T>E before the closing @c E when it reuses the kernel's template argument,
+ *  @c T_ for the first and @c T<n-1>_ for the n-th. So
  *  @c sequence::cuda_kernel<vram_kernel_t::search_k, sz_cap_cuda_k, sz_levenshtein_bytes_k, 2,
  *  u32_t, 4> over @c basic::vram_arguments<u32_t> spells, broken here at its components:
  *  @c _ZN4unum7usearch8sequence11cuda_kernel @c I @c LNS0_9utilities13vram_kernel_tE3E

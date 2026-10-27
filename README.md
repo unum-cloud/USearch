@@ -99,7 +99,7 @@ The build selects the kernel families it includes; runtime detection picks the n
 A description reports the classes an index dispatches as & the `shards_count` it spans.
 The graph & its traversal are templated on those kits, so a walk carries the matching vector loads, dot-products, norms, atomics, & wait instructions together.
 
-### Residencies
+### Residency
 
 __RAM__ shards follow memory domains, __VRAM__ shards follow devices, & __NVMe__ views follow checkpoint parts.
 Sharding partitions the indexed entries rather than replicating the entire graph.

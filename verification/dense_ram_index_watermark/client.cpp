@@ -6,13 +6,12 @@
  *      `include/usearch/dense/ram_index.hpp`.
  *
  *  The dispenser, the rows, the back-link's release fence, the watermark turn, and the save under
- *  `concurrent_k` with its settlement probe, spelled over the ForkUnion reference the index binds,
- *  without the claim counter the header's save also reads, since nothing grows here; the header's
- *  chunk fills are beyond GenMC's graph, see `dense_ram_index_capacity/client.cpp`.
+ *  @c concurrent_k with its settlement probe, spelled over the ForkUnion reference the index binds.
+ *  Two inserters dispense IDs 0 and 1, publish their rows, and the second back-links into row 0.
+ *  A saver plans, copies each row under its lock, and re-checks the counters after an acquire
+ *  fence. The same scenario is @c inserters.pml.
  *
- *  Two inserters dispense IDs 0 and 1, publish their rows, and the second back-links into row
- *  0. A saver plans, copies each row under its lock, and re-checks the counters after an acquire
- *  fence. A settled copy holds whole rows and no locked one. The same scenario is `inserters.pml`.
+ *  - A settled copy holds whole rows and no locked one.
  *
  *  @verify pass sc,rc11,imm inserters
  *  @verify pass sc,rc11,imm inserters_back_link_fence_false

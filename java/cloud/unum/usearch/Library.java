@@ -1,3 +1,9 @@
+/**
+ *  @file java/cloud/unum/usearch/Library.java
+ *  @author Ash Vardanian
+ *  @date September 8, 2026
+ *  @brief Loads the engine's shared object once per class loader and links the C interface through it.
+ */
 package cloud.unum.usearch;
 
 import java.io.File;

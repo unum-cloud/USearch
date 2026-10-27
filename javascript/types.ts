@@ -1,17 +1,20 @@
 /**
- * The vocabulary every modality shares: closed-set names, identities, vector rows, the
- * executor whose threads a fanned-out verb runs on, the arena every scaling output lands in,
- * the ranked run viewed inside it, and the deferred call a deferred receiver answers.
+ *  @file javascript/types.ts
+ *  @author Ash Vardanian
+ *  @date September 9, 2026
+ *  @brief The vocabulary every modality shares: closed-set names, identities, vector rows, the
+ *      executor whose threads a fanned-out verb runs on, the arena every scaling output lands in,
+ *      the ranked run viewed inside it, and the deferred call a deferred receiver answers.
  */
 import { CompiledDeferred, CompiledMatches, CompiledRows, compiled } from "./library";
 
 /**
- * What went wrong, one member per `usearch_status_*_k` of the C interface and spelled as its
- * canonical name. Every error the library or this binding throws carries one as its `code`, so a
- * caller branches on the identity of the fault rather than on which side of the boundary saw it.
- * A {@link Deferred} also reports `Success`, and `Deferred` until its call is final.
- * @enum {string}
- * @readonly
+ *  What went wrong, one member per `usearch_status_*_k` of the C interface and spelled as its
+ *  canonical name. Every error the library or this binding throws carries one as its `code`, so a
+ *  caller branches on the identity of the fault rather than on which side of the boundary saw it.
+ *  A {@link Deferred} also reports `Success`, and `Deferred` until its call is final.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Status {
   Success = "success",
@@ -45,9 +48,9 @@ export function fail(status: Status, message: string): USearchError {
 }
 
 /**
- * What an executor does with its threads or streams once it goes idle.
- * @enum {string}
- * @readonly
+ *  What an executor does with its threads or streams once it goes idle.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Mood {
   /** Idle threads sleep; the next call pays a wake-up. */
@@ -57,9 +60,9 @@ export enum Mood {
 }
 
 /**
- * Where an executor computes, and so where the arenas it makes keep their memory.
- * @enum {string}
- * @readonly
+ *  Where an executor computes, and so where the arenas it makes keep their memory.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Residency {
   /** Host memory traversed by CPU threads. */
@@ -71,9 +74,9 @@ export enum Residency {
 }
 
 /**
- * How a search reaches the rows it scores.
- * @enum {string}
- * @readonly
+ *  How a search reaches the rows it scores.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Traversal {
   /** Walks the graph, scoring the rows the expansion reaches - approximate, the default. */
@@ -83,9 +86,9 @@ export enum Traversal {
 }
 
 /**
- * Enumeration representing the scalar kinds vectors are stored and exchanged in.
- * @enum {string}
- * @readonly
+ *  Enumeration representing the scalar kinds vectors are stored and exchanged in.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Scalar {
   F64 = "f64",
@@ -106,12 +109,12 @@ export enum Scalar {
 }
 
 /**
- * One row of scalars, in whatever numeric TypedArray the caller already holds.
+ *  One row of scalars, in whatever numeric TypedArray the caller already holds.
  *
- * The engine converts on ingest, so this is independent of the index's own quantization: an
- * `Int8Array` reaches an `f16` index unchanged. The kinds no TypedArray spells on its own -
- * `bf16`, the mini-floats, the packed nibbles and bits - travel as bytes in a `Uint8Array` or
- * `Uint16Array`, inside a {@link RowsView} naming their `Scalar`.
+ *  The engine converts on ingest, so this is independent of the index's own quantization: an
+ *  `Int8Array` reaches an `f16` index unchanged. The kinds no TypedArray spells on its own -
+ *  `bf16`, the mini-floats, the packed nibbles and bits - travel as bytes in a `Uint8Array` or
+ *  `Uint16Array`, inside a {@link RowsView} naming their `Scalar`.
  */
 export type Vector = Float64Array | Float32Array | Float16Array | Int8Array | Uint8Array | Uint16Array;
 
@@ -119,10 +122,10 @@ export type Vector = Float64Array | Float32Array | Float16Array | Int8Array | Ui
 export const keyBytes = 16;
 
 /**
- * Sixteen opaque bytes, most significant first - one identity, losslessly.
+ *  Sixteen opaque bytes, most significant first - one identity, losslessly.
  *
- * A run of several identities is the same type with a length that is a multiple of
- * {@link keyBytes}, which is what lets one batch of keys cross as one array.
+ *  A run of several identities is the same type with a length that is a multiple of
+ *  {@link keyBytes}, which is what lets one batch of keys cross as one array.
  */
 export type Key = Uint8Array;
 
@@ -133,10 +136,10 @@ export type KeyLike = bigint | number | string | Uint8Array;
 export type KeysLike = KeyLike | BigUint64Array | Array<bigint | number | string | Uint8Array>;
 
 /**
- * Parks an integer identity in the trailing eight bytes, most significant first. Binding-only.
+ *  Parks an integer identity in the trailing eight bytes, most significant first. Binding-only.
  *
- * @param {bigint|number} value - A non-negative integer below 2^64.
- * @return {Key} The sixteen identity bytes, the leading eight zeroed.
+ *  @param value - A non-negative integer below 2^64.
+ *  @returns The sixteen identity bytes, the leading eight zeroed.
  */
 export function keyFromInteger(value: bigint | number): Key {
   const integer = BigInt(value);
@@ -149,12 +152,12 @@ export function keyFromInteger(value: bigint | number): Key {
 }
 
 /**
- * Reports the integer identity in the trailing eight bytes. Binding-only.
+ *  Reports the integer identity in the trailing eight bytes. Binding-only.
  *
- * @param {Uint8Array} key - Sixteen identity bytes.
- * @return {bigint} The integer the trailing eight bytes spell.
- * @throws Will throw an error if the leading eight bytes carry anything, since no integer
- *         spells that identity.
+ *  @param key - Sixteen identity bytes.
+ *  @returns The integer the trailing eight bytes spell.
+ *  @throws Will throw an error if the leading eight bytes carry anything, since no integer
+ *          spells that identity.
  */
 export function integerFromKey(key: Uint8Array): bigint {
   if (key.length !== keyBytes) throw fail(Status.Malformed, "A key is sixteen bytes, most significant first.");
@@ -166,10 +169,10 @@ export function integerFromKey(key: Uint8Array): bigint {
 }
 
 /**
- * Renders one identity as a lowercase dashed UUID, which is how every SDK prints it. Binding-only.
+ *  Renders one identity as a lowercase dashed UUID, which is how every SDK prints it. Binding-only.
  *
- * @param {Uint8Array} key - Sixteen identity bytes.
- * @return {string} Thirty-six characters, dashed after the 4th, 6th, 8th and 10th byte.
+ *  @param key - Sixteen identity bytes.
+ *  @returns Thirty-six characters, dashed after the 4th, 6th, 8th and 10th byte.
  */
 export function formatKey(key: Uint8Array): string {
   if (key.length !== keyBytes) throw fail(Status.Malformed, "A key is sixteen bytes, most significant first.");
@@ -182,10 +185,10 @@ export function formatKey(key: Uint8Array): string {
 }
 
 /**
- * Reads the rendering {@link formatKey} produces. Dashes may sit anywhere, or nowhere. Binding-only.
+ *  Reads the rendering {@link formatKey} produces. Dashes may sit anywhere, or nowhere. Binding-only.
  *
- * @param {string} text - Thirty-two hexadecimal digits, dashes ignored.
- * @return {Key} The sixteen identity bytes.
+ *  @param text - Thirty-two hexadecimal digits, dashes ignored.
+ *  @returns The sixteen identity bytes.
  */
 export function parseKey(text: string): Key {
   const malformed = "The key is not thirty-two hexadecimal digits.";
@@ -197,11 +200,11 @@ export function parseKey(text: string): Key {
 }
 
 /**
- * Borrows the identity at `position` of a run, as a view rather than a copy. Binding-only.
+ *  Borrows the identity at `position` of a run, as a view rather than a copy. Binding-only.
  *
- * @param {Uint8Array} keys - A run of sixteen-byte identities.
- * @param {number} position - Which identity to borrow.
- * @return {Key} A view over those sixteen bytes, backed by the run's own storage.
+ *  @param keys - A run of sixteen-byte identities.
+ *  @param position - Which identity to borrow.
+ *  @returns A view over those sixteen bytes, backed by the run's own storage.
  */
 export function keyAt(keys: Uint8Array, position: number): Key {
   return keys.subarray(position * keyBytes, (position + 1) * keyBytes);
@@ -228,10 +231,10 @@ export function normalizeKey(key: KeyLike): Key {
 }
 
 /**
- * Gathers any spelling of a run of identities into the two forms the addon reads.
+ *  Gathers any spelling of a run of identities into the two forms the addon reads.
  *
- * A `BigUint64Array` and a whole run of sixteen-byte identities pass straight through, so a
- * caller that already holds either pays for no copy.
+ *  A `BigUint64Array` and a whole run of sixteen-byte identities pass straight through, so a
+ *  caller that already holds either pays for no copy.
  */
 export function normalizeKeys(keys: KeysLike): Uint8Array | BigUint64Array {
   if (keys instanceof BigUint64Array) return keys;
@@ -281,19 +284,19 @@ export function scalarOf(data: Vector): Scalar {
 }
 
 /**
- * A borrowed run of rows of one width - what every batch argument is, and what a single row is
- * when it travels as a bare TypedArray. Mirrors `usearch_rows_view_t`, with the row count the
- * call's `count` takes beside it.
+ *  A borrowed run of rows of one width - what every batch argument is, and what a single row is
+ *  when it travels as a bare TypedArray. Mirrors `usearch_rows_view_t`, with the row count the
+ *  call's `count` takes beside it.
  */
 export class RowsView {
   /**
-   * Borrows `rows` rows of `columns` values of `scalar`, `stride` bytes apart; a zero stride repeats the first row.
+   *  Borrows `rows` rows of `columns` values of `scalar`, `stride` bytes apart; a zero stride repeats the first row.
    *
-   * @param {Vector} data - The array holding every row; never copied.
-   * @param {number} rows - Rows the run holds, which the call reads as its batch.
-   * @param {number} columns - Values per row, as the index counts its dimensions.
-   * @param {number} stride - Bytes between the starts of consecutive rows.
-   * @param {Scalar} scalar - What the bytes hold, converted by the engine where it differs from storage.
+   *  @param data - The array holding every row; never copied.
+   *  @param rows - Rows the run holds, which the call reads as its batch.
+   *  @param columns - Values per row, as the index counts its dimensions.
+   *  @param stride - Bytes between the starts of consecutive rows.
+   *  @param scalar - What the bytes hold, converted by the engine where it differs from storage.
    */
   constructor(
     readonly data: Vector,
@@ -304,13 +307,13 @@ export class RowsView {
   ) {}
 
   /**
-   * Borrows a packed run, every row `columns` values wide and laid end to end. Binding-only sugar.
+   *  Borrows a packed run, every row `columns` values wide and laid end to end. Binding-only sugar.
    *
-   * @param {Vector} data - The rows, end to end.
-   * @param {number} columns - Values per row.
-   * @param {Scalar} [scalar] - What the bytes hold; defaults to the kind the array spells.
-   * @return {RowsView} As many rows as `data` holds.
-   * @throws Will throw when the array does not split into whole rows.
+   *  @param data - The rows, end to end.
+   *  @param columns - Values per row.
+   *  @param scalar - What the bytes hold; defaults to the kind the array spells.
+   *  @returns As many rows as `data` holds.
+   *  @throws Will throw when the array does not split into whole rows.
    */
   static of(data: Vector, columns: number, scalar: Scalar = scalarOf(data)): RowsView {
     const rowBytes = Math.ceil((columns * scalarBits[scalar]) / 8);
@@ -374,17 +377,17 @@ export interface ExecutorForNvmeConfig {
 }
 
 /**
- * The workers a fanned-out verb runs on, shared across indexes.
+ *  The workers a fanned-out verb runs on, shared across indexes.
  *
- * An executor owns host threads or device streams; an index owns rows. Keeping them apart is
- * what lets one pool serve several indexes, and what makes the cost of spawning visible at the
- * line that spawns it. The collector frees it eventually; `free` joins the workers now.
+ *  An executor owns host threads or device streams; an index owns rows. Keeping them apart is
+ *  what lets one pool serve several indexes, and what makes the cost of spawning visible at the
+ *  line that spawns it. The collector frees it eventually; `free` joins the workers now.
  */
 export interface Executor extends Disposable {
   /**
-   * Waits for every call submitted to this executor so far, then idles in `mood`. Calls `usearch_executor_drain`.
+   *  Waits for every call submitted to this executor so far, then idles in `mood`. Calls `usearch_executor_drain`.
    *
-   * @param {Mood} [mood=Mood.Parked] - What the threads or streams do once they go idle.
+   *  @param [mood=Mood.Parked] - What the threads or streams do once they go idle.
    */
   drain(mood?: Mood): void;
 
@@ -395,35 +398,35 @@ export interface Executor extends Disposable {
 /** The four factories an {@link Executor} is spawned by; a direct `new Executor()` is refused. */
 export interface ExecutorConstructor {
   /**
-   * Spawns host worker threads for a RAM-resident index. Calls `usearch_executor_for_ram`.
+   *  Spawns host worker threads for a RAM-resident index. Calls `usearch_executor_for_ram`.
    *
-   * @param {ExecutorForRamConfig} [config] - The NUMA nodes, the thread count and the deferred limit.
-   * @return {Executor} The pool, which must outlive every call it runs.
+   *  @param config - The NUMA nodes, the thread count and the deferred limit.
+   *  @returns The pool, which must outlive every call it runs.
    */
   forRam(config?: ExecutorForRamConfig): Executor;
 
   /**
-   * Borrows a ForkUnion `fu_pool_t` for a RAM-resident index, keeping its lender's mood. Calls `usearch_executor_on_pool`.
+   *  Borrows a ForkUnion `fu_pool_t` for a RAM-resident index, keeping its lender's mood. Calls `usearch_executor_on_pool`.
    *
-   * @param {bigint} pool - The pool's address; it must outlive the executor.
-   * @param {ExecutorOnPoolConfig} [config] - The NUMA nodes and the deferred limit.
-   * @return {Executor} The executor over the borrowed pool.
+   *  @param pool - The pool's address; it must outlive the executor.
+   *  @param config - The NUMA nodes and the deferred limit.
+   *  @returns The executor over the borrowed pool.
    */
   onPool(pool: bigint, config?: ExecutorOnPoolConfig): Executor;
 
   /**
-   * Opens one stream per device for a VRAM-resident index, driven from a single host thread. Calls `usearch_executor_for_vram`.
+   *  Opens one stream per device for a VRAM-resident index, driven from a single host thread. Calls `usearch_executor_for_vram`.
    *
-   * @param {ExecutorForVramConfig} [config] - The devices, borrowed streams, scratch ceiling and deferred limit.
-   * @return {Executor} The streams, which must outlive every call they run.
+   *  @param config - The devices, borrowed streams, scratch ceiling and deferred limit.
+   *  @returns The streams, which must outlive every call they run.
    */
   forVram(config?: ExecutorForVramConfig): Executor;
 
   /**
-   * Opens one submission ring per worker for an NVMe-resident index. Calls `usearch_executor_for_nvme`.
+   *  Opens one submission ring per worker for an NVMe-resident index. Calls `usearch_executor_for_nvme`.
    *
-   * @param {ExecutorForNvmeConfig} [config] - The device or directory paths, the thread count and the deferred limit.
-   * @return {Executor} The pool, which must outlive every call it runs.
+   *  @param config - The device or directory paths, the thread count and the deferred limit.
+   *  @returns The pool, which must outlive every call it runs.
    */
   forNvme(config?: ExecutorForNvmeConfig): Executor;
 
@@ -434,19 +437,19 @@ export interface ExecutorConstructor {
 export const Executor = compiled.Executor as ExecutorConstructor;
 
 /**
- * Memory the library writes every output whose length scales with a call into, reused across calls.
+ *  Memory the library writes every output whose length scales with a call into, reused across calls.
  *
- * Every verb with such an output takes one and answers a view into it rather than a copy, so a
- * steady loop allocates once. Each call rewinds the arena it is handed and detaches every buffer
- * over the previous call's outputs: a view refuses its reads with {@link Status.Uninitialized} from
- * then on, and every array already taken out of one reads empty rather than another call's memory.
- * To keep one result past the next call, give that call another arena. A deferred call borrows it
- * as a blocking one does: another call naming it before the first is final finishes
- * {@link Status.Contended} and leaves the first call's outputs alone, and `free` waits for it. The
- * collector frees the arena once nothing views it; `free` releases it now.
+ *  Every verb with such an output takes one and answers a view into it rather than a copy, so a
+ *  steady loop allocates once. Each call rewinds the arena it is handed and detaches every buffer
+ *  over the previous call's outputs: a view refuses its reads with {@link Status.Uninitialized} from
+ *  then on, and every array already taken out of one reads empty rather than another call's memory.
+ *  To keep one result past the next call, give that call another arena. A deferred call borrows it
+ *  as a blocking one does: another call naming it before the first is final finishes
+ *  {@link Status.Contended} and leaves the first call's outputs alone, and `free` waits for it. The
+ *  collector frees the arena once nothing views it; `free` releases it now.
  *
- * A `Vram` arena grows, fills and frees on its executor's first stream, so it serves only calls on
- * that executor and keeps it alive until freed; host pages may outlive their executor.
+ *  A `Vram` arena grows, fills and frees on its executor's first stream, so it serves only calls on
+ *  that executor and keeps it alive until freed; host pages may outlive their executor.
  */
 export interface Arena extends Disposable {
   /** The residency of the executor that made it; a `Vram` arena's views refuse host reads with {@link Status.Device}. */
@@ -466,11 +469,11 @@ export interface ArenaConstructor {
 export const Arena = compiled.Arena as unknown as ArenaConstructor;
 
 /**
- * Outputs a call wrote into an arena, readable until the arena's next call rewinds it.
+ *  Outputs a call wrote into an arena, readable until the arena's next call rewinds it.
  *
- * The rewind detaches the buffer under every array, so each accessor refuses once the arena moved
- * on, with {@link Status.Uninitialized}, and refuses device memory with {@link Status.Device}, so a
- * view never reads memory its call did not write.
+ *  The rewind detaches the buffer under every array, so each accessor refuses once the arena moved
+ *  on, with {@link Status.Uninitialized}, and refuses device memory with {@link Status.Device}, so a
+ *  view never reads memory its call did not write.
  */
 export abstract class ArenaView {
   /** Answers `view` while its buffer still holds this call's outputs in host memory, and refuses otherwise. */
@@ -483,9 +486,9 @@ export abstract class ArenaView {
 }
 
 /**
- * The matches of one query, borrowed out of a run rather than copied.
+ *  The matches of one query, borrowed out of a run rather than copied.
  *
- * Both arrays are subarrays of the run's own storage, so reading a row costs nothing.
+ *  Both arrays are subarrays of the run's own storage, so reading a row costs nothing.
  */
 export class MatchesRow {
   constructor(
@@ -502,8 +505,8 @@ export class MatchesRow {
 }
 
 /**
- * The ranked rows a search or a stream pull wrote into its arena: `queries` rows of `columns`
- * cells, row `i` holding `counts[i]` matches. Mirrors `usearch_matches_view_t`.
+ *  The ranked rows a search or a stream pull wrote into its arena: `queries` rows of `columns`
+ *  cells, row `i` holding `counts[i]` matches. Mirrors `usearch_matches_view_t`.
  */
 export class Matches extends ArenaView {
   /** Rows the call resolved, one per query. */
@@ -536,10 +539,10 @@ export class Matches extends ArenaView {
   }
 
   /**
-   * Borrows the matches of one query, without copying. Binding-only.
+   *  Borrows the matches of one query, without copying. Binding-only.
    *
-   * @param {number} queryIndex - Which query of the run to read.
-   * @returns {MatchesRow} - The keys and scores that query found.
+   *  @param queryIndex - Which query of the run to read.
+   *  @returns The keys and scores that query found.
    */
   get(queryIndex: number): MatchesRow {
     if (!Number.isInteger(queryIndex) || queryIndex < 0 || queryIndex >= this.queries)
@@ -554,10 +557,10 @@ export class Matches extends ArenaView {
 }
 
 /**
- * One serialized monolith, viewed inside the arena `saveBuffer` landed it in.
+ *  One serialized monolith, viewed inside the arena `saveBuffer` landed it in.
  *
- * The bytes are what a checkpoint holds, so a service that keeps its indexes in an object store
- * never touches the filesystem; `loadRamBuffer` and `metadataReadBuffer` read them back.
+ *  The bytes are what a checkpoint holds, so a service that keeps its indexes in an object store
+ *  never touches the filesystem; `loadRamBuffer` and `metadataReadBuffer` read them back.
  */
 export class Monolith extends ArenaView {
   readonly #bytes: Uint8Array | null;
@@ -580,18 +583,18 @@ const unfinished = new FinalizationRegistry<CompiledDeferred>((call) => {
 });
 
 /**
- * A call submitted by a deferred receiver, final once its executor finishes it.
+ *  A call submitted by a deferred receiver, final once its executor finishes it.
  *
- * It keeps everything the library reads or writes alive until then - the outcome, the inputs,
- * the outputs and every handle it names - so none of them is collected under the call, and it
- * borrows its arena as a blocking call does. A result read after the arena was rewound or freed
- * throws {@link Status.Uninitialized}. `status` polls without
- * blocking, `wait` blocks and answers, and `await` runs that wait on the libuv pool; both answer
- * the same cached result, or throw the same failure, however often they are asked.
+ *  It keeps everything the library reads or writes alive until then - the outcome, the inputs,
+ *  the outputs and every handle it names - so none of them is collected under the call, and it
+ *  borrows its arena as a blocking call does. A result read after the arena was rewound or freed
+ *  throws {@link Status.Uninitialized}. `status` polls without
+ *  blocking, `wait` blocks and answers, and `await` runs that wait on the libuv pool; both answer
+ *  the same cached result, or throw the same failure, however often they are asked.
  *
- * ```js
- * const matches = await call; // or: call.wait()
- * ```
+ *  ```js
+ *  const matches = await call; // or: call.wait()
+ *  ```
  */
 export class Deferred<T> implements PromiseLike<T>, Disposable {
   readonly #call: CompiledDeferred;
@@ -612,8 +615,8 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
   }
 
   /**
-   * Blocks the calling thread until the call is final, then answers its result or throws its failure.
-   * Calls `usearch_outcome_wait`.
+   *  Blocks the calling thread until the call is final, then answers its result or throws its failure.
+   *  Calls `usearch_outcome_wait`.
    */
   wait(): T {
     if (!this.#outcome) {

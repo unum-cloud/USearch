@@ -230,8 +230,9 @@ status_t shapes_ram_variant<scalar_type_, cpu_class_>::export_points(value_t con
     return us::shapes::status_of(kit_t::cast(unpacked.data(), dtype_k, output, dtype, elements, nullptr));
 }
 
-/** Hands @p write, as `write(config) → status_t`, the save configuration recording what @p geometry
- *  froze, the connectivity and the point count, as every residency's checkpoint records them. */
+/** Hands @p write, as <tt>write(config) → status_t</tt>, the save configuration recording what
+ *  @p geometry froze, the connectivity and the point count, as every residency's checkpoint
+ *  records them. */
 template <typename write_type_>
 status_t with_shapes_provenance(shapes_geometry_t const& geometry, write_type_&& write) noexcept {
     std::array<char, 24> connectivity_text, points_text;

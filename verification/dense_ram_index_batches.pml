@@ -1,45 +1,38 @@
 /**
+ *  @file verification/dense_ram_index_batches.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief A batch's commit on the dense index: one add dispenses its whole range, and one watermark
  *      turn makes it visible whole, with no new atomics.
  *
  *  Two commits of two rows each. A commit's leader dispenses, hands the range to a helper as the
  *  executor's fan-out would, each wires one row, the helper joins with a release the leader
  *  acquires, and the leader takes one turn from the range's first ID to its end. A row's wirer
- *  stores its payload, the vector and norms it lands, relaxed ahead of the release of slot zero
- *  that publishes it. A row's walk admits the rows below its snapshot, and past it a row of its own
- *  range, or of the other commit once an acquire of the dispenser shows it dispensed, only once an
- *  acquire of that row's slot zero shows it published; it back-links into row 0 behind the fence
- *  whenever it reached it, so commits in flight together link to each other rather than forming
- *  islands. The searcher acquires the watermark, which never lies strictly inside a range, reads
- *  every row below it, and follows row 0's tail only below its snapshot, so a back-link into a
- *  later commit's rows never leads into them. Every row a reader admits, it reads with its payload
- *  whole.
+ *  stores its payload relaxed ahead of the release of slot zero that publishes it. The searcher
+ *  acquires the watermark, which never lies strictly inside a range, and reads every row below it.
  *
+ *  - Every row a reader admits, it reads with its payload whole.
+ *  - A back-link into a later commit's rows never leads into them.
+ *
+ *  @budget 8192: rc11 stores 2.2 GB of states, and three times that needs 8192
  *  @verify pass sc,rc11
- *  @verify stuck sc watermark_wakes=false: `await_turn_` waits uncapped, so the store that ends each
- *      turn must wake it, as every store to a monitored line does; behind a waiter only a notify
- *      wakes, with none after the watermark store, the later commit waits forever for a turn that
- *      came
- *  @verify stuck sc recheck=false: the monitored wait re-reads the watermark after arming; without
- *      it, a turn that ends between the waiter's load and its arming wakes nobody, and the later
- *      commit blocks forever
- *  @verify fail sc range_turn=false:one turn per range keeps a batch whole; a turn per row lets
- *      the searcher see half a commit
- *  @verify fail sc,rc11 own_range_check=false: a walk admits a row of its own range only once an
- *      acquire of its slot zero shows it published; unchecked, it reads the sibling's payload before
- *      its wirer published it
- *  @verify fail rc11 admission_order=order_relaxed: a walk admits a row past its snapshot by an
- *      acquire of its slot zero, which carries the payload stored before the release; relaxed, the
- *      walk sees the row published and reads its payload stale
- *  @verify fail rc11 publish_order=order_relaxed: slot zero's release carries the payload its wirer
- *      stored before it; relaxed, a walk that admits the row through its slot zero reads the payload
- *      stale
+ *  @verify stuck sc watermark_wakes=false: with none after the watermark store, the later commit
+ *      waits forever for a turn that came
+ *  @verify stuck sc recheck=false: without it, a turn that ends between the waiter's load and its
+ *      arming wakes nobody, and the later commit blocks forever
+ *  @verify fail sc range_turn=false: a turn per row lets the searcher see half a commit
+ *  @verify fail sc,rc11 own_range_check=false: unchecked, it reads the sibling's payload before its
+ *      wirer published it
+ *  @verify fail rc11 admission_order=order_relaxed: relaxed, the walk sees the row published and
+ *      reads its payload stale
+ *  @verify fail rc11 publish_order=order_relaxed: relaxed, a walk that admits the row through its
+ *      slot zero reads the payload stale
  */
 #define thread_count 5
 #define location_count 13
 #define history_depth 7
-#include "weak_memory.pml"
-#include "watermark_turn.pml"
+#include <weak_memory.pml>
+#include <watermark_turn.pml>
 
 // The words, by the index member each stands for; the four rows keep slot zero alone, but for row
 // 0's tail, which the back-links edit, and each row's payload comes last.

@@ -8,6 +8,10 @@ and `lld`, and using it would put a link flag in every consumer's build.
 Every entry point is resolved once, when the library loads, into a typed `thin abi("C")` function
 pointer. `OwnedDLHandle.get_function` would run `dlsym` on every call and parameterises only on the
 return type, leaving arguments unchecked; a search on the hot path cannot afford either.
+
+File: mojo/usearch/library.mojo
+Author: Ash Vardanian
+Date: September 7, 2026
 """
 
 from std.ffi import OwnedDLHandle, __fn_type_is_cabi, c_int

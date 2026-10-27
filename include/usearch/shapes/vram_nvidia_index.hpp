@@ -52,14 +52,26 @@ struct vram_nvidia_kits {
      *  codec saves a cloud. */
     static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept;
 
-    /** Unpacks the @p stored pack into @p saved. */
+    /**
+     *  Unpacks the @p stored pack into @p saved.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p saved bytes hold other than the pack's points.
+     */
     static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept;
 
     /** Bytes the @p saved cloud stores into once packed; @c malformed_k unless it holds whole
      *  points. */
     static expected<std::size_t> stored_bytes_(bytes_view_t saved) noexcept;
 
-    /** Packs the @p saved cloud into @p stored, as an insertion packs one on the host. */
+    /**
+     *  Packs the @p saved cloud into @p stored, as an insertion packs one on the host.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k The @p saved cloud is not a whole number of points.
+     *  - @c overflow_k The @p stored bytes are shorter than the cloud's points.
+     *  - @c config_mismatch_k The cloud holds fewer points than @p stored reserves.
+     */
     static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept;
 
     /** Loads the fatbin onto @p device and finds every kernel by its symbol. */

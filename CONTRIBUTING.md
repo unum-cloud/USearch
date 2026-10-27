@@ -82,15 +82,16 @@ Unset, the SPDK suite saves `usearch-nvme-spdk.safegraphs` under `TMPDIR` for a 
 Those three configurations, and the benchmarking one from [bench/README.md](bench/README.md), are also packaged as CMake presets, so the flag soup below is optional:
 
 ```sh
-cmake --list-presets                   # the ones this host can build, from `host_debug` to `wasm32_wasi_release` and `windows_x64_release`
-cmake --preset host_release            # configures into `build_host_release`
-cmake --build --preset host_release    # builds it
-ctest --preset host_release            # runs the suites
+cmake --list-presets              # the ones this host can build, from `debug` to `wasm32_wasi` and `windows_x64`
+cmake --preset release            # configures into `build_release`
+cmake --build --preset release    # builds it
+ctest --preset release            # runs the suites
 ```
 
 Every preset writes into `build_<preset name>` and exports a `compile_commands.json` for the language server.
-The development ones build with LLVM through Ninja and link with `lld`; `host_tsan` uses GCC, and CI rows override the compiler with `-D CMAKE_CXX_COMPILER`.
-The rest match CI: `host_library` for the C library alone, `linux_arm64_library`, `android_arm64_library`, `android_armv7_library`, the three WASM toolchains, and `windows_x64_release` / `windows_arm64_library`.
+The development ones build with LLVM through Ninja and link with `lld`; `tsan` uses GCC, and CI rows override the compiler with `-D CMAKE_CXX_COMPILER`.
+`check` compiles every suite at `-O0` with warnings as errors.
+The rest match CI: `library` for the C library alone, `linux_arm64`, `android_arm64`, `android_armv7`, the three WASM toolchains, and `windows_x64` / `windows_arm64`.
 Two of them are about GPUs: `cuda_relwithdebinfo` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `cuda_release` emits a fat binary spanning every architecture from the Ampere floor through both Blackwell lines.
 `cuda_trace` adds `-ftime-trace`, dropping a profile beside every object for when a translation unit starts dominating the build.
 Machine-specific overrides - a different compiler, `ccache`, a CUDA toolkit outside the default prefix - belong in an untracked `CMakeUserPresets.json` beside it:
@@ -118,13 +119,13 @@ Ubuntu's own package predates the former, so [Kitware's repository](https://apt.
 The CMakeLists.txt file has a number of options you can pass:
 
 - What to build:
-  - `USEARCH_BUILD_TEST` - build the C++ test suite, and the C one alongside `USEARCH_BUILD_LIB_C`
+  - `USEARCH_BUILD_TEST` - build the C++ test suite, and the C one alongside `USEARCH_BUILD_SHARED`
   - `USEARCH_BUILD_BENCH` - build the C++ benchmark suite
-  - `USEARCH_BUILD_LIB_C` - build the C library
-  - `USEARCH_BUILD_LIB_C_STUB` - a brute-force stand-in answering the same verbs over the standard library alone, for isolating a binding from the engine while bisecting one.
+  - `USEARCH_BUILD_SHARED` - build and install the shared and static C libraries by default; without it they build only for a target that links them
+  - `USEARCH_BUILD_STUB` - a brute-force stand-in answering the same verbs over the standard library alone, for isolating a binding from the engine while bisecting one.
     It carries the same library names in a `stub/` subdirectory, so pointing a binding at it is a search path rather than a different link line.
   - `USEARCH_BUILD_CUDA` - build the CUDA test & benchmark suites
-  - `USEARCH_DENSE_DTYPES` - how many dense storage dtypes the library, tests and benchmarks compile, from the front of bf16, u1, i8, e4m3, f16, u8, e5m2, i4, u4, e3m2, e2m3, `4` by default and `11` wherever a prebuilt package comes from: the `library`, `wasm` and `windows_x64_release` presets, `pyproject.toml`, the npm scripts, `build.gradle`, `pixi.toml` and the per-binding recipes below. Binding suites skip the kinds a narrower build refuses.
+  - `USEARCH_DENSE_DTYPES` - how many dense storage dtypes the library, tests and benchmarks compile, from the front of bf16, u1, i8, e4m3, f16, u8, e5m2, i4, u4, e3m2, e2m3, `4` by default and `11` wherever a prebuilt package comes from: the `library`, `wasm` and `windows_x64` presets, `pyproject.toml`, the npm scripts, `build.gradle`, `pixi.toml` and the per-binding recipes below. Binding suites skip the kinds a narrower build refuses.
     The C interface refuses a dtype the build left out with `usearch_status_unsupported_k`; the Rust crate builds from source and keeps the default four.
 - Which GPUs to target:
   - `USEARCH_CUDA_ARCHITECTURES` - the architectures the CUDA tests and benchmarks compile for and the GPU classes the library builds, `80-real;89-real;90a-real;100f-real;120f-real` by default: the Ampere floor, Ada, then Hopper, architecture-specific, and both Blackwell lines, family-specific so they carry the fp6 and fp4 conversions. A class builds only when its own entry is listed, so `100f-real` compiles the Blackwell kernels alone, and `native` builds every class.
@@ -133,7 +134,9 @@ The CMakeLists.txt file has a number of options you can pass:
     NVCC compiles only device code, into fatbins the binaries embed; nothing links `libcuda` or the CUDA runtime, as the library opens the driver at first use.
     A NumKong GPU tier turns on in those targets only when every listed architecture runs it, so the default list exercises the Ampere kits alone; iterate on one GPU with its family code, like `100f-real`, to test that generation's kits.
 - Which other dependencies to use:
-  - `USEARCH_USE_JEMALLOC` - use Jemalloc for memory management
+  - `USEARCH_WITH_JEMALLOC` - use Jemalloc for memory management
+- How strict to be:
+  - `USEARCH_WERROR` - treat compiler warnings as errors, as the `check` preset does
 
 The sibling libraries carry no switches.
 NumKong, ForkUnion, StringZilla and SmashTable are what the headers are written against, so every build acquires all four - from the submodule when a recursive clone provides one, and from the pinned commit otherwise.
@@ -142,7 +145,7 @@ The language bindings take their headers from `numkong/include`, `forkunion/incl
 Putting all of this together, compiling all targets on most platforms should work with the following snippet:
 
 ```sh
-cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_USE_JEMALLOC=1 -D USEARCH_BUILD_TEST=1 -D USEARCH_BUILD_BENCH=1 -D USEARCH_BUILD_LIB_C=1 -B build_release
+cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_WITH_JEMALLOC=1 -D USEARCH_BUILD_TEST=1 -D USEARCH_BUILD_BENCH=1 -D USEARCH_BUILD_SHARED=1 -B build_release
 
 cmake --build build_release --config Release
 build_release/usearch_test
@@ -157,10 +160,10 @@ cmake \
     -D CMAKE_BUILD_TYPE=Release \
     -D CMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" \
     -D CMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" \
-    -D USEARCH_USE_JEMALLOC=1 \
+    -D USEARCH_WITH_JEMALLOC=1 \
     -D USEARCH_BUILD_TEST=1 \
     -D USEARCH_BUILD_BENCH=1 \
-    -D USEARCH_BUILD_LIB_C=1 \
+    -D USEARCH_BUILD_SHARED=1 \
     -B build_release
 
 cmake --build build_release --config Release
@@ -303,7 +306,7 @@ cmake -D CMAKE_BUILD_TYPE=Release \
 cmake --build build_artifacts --config Release
 ```
 
-The `android_arm64_library` and `android_armv7_library` presets need Android NDK r28 or newer, whose libc++ ships `std::atomic_ref`, found through `ANDROID_NDK_ROOT`.
+The `android_arm64` and `android_armv7` presets need Android NDK r28 or newer, whose libc++ ships `std::atomic_ref`, found through `ANDROID_NDK_ROOT`.
 For Android development, you can also cross-compile for ARM architectures without requiring the full Android NDK setup.
 Here's an example targeting 32-bit ARM (`armeabi-v7a`):
 
@@ -323,9 +326,7 @@ cmake -B build_artifacts \
   -D CMAKE_C_FLAGS="--target=armv7-linux-gnueabihf -march=armv7-a" \
   -D CMAKE_CXX_FLAGS="--target=armv7-linux-gnueabihf -march=armv7-a" \
   -D CMAKE_BUILD_TYPE=RelWithDebInfo \
-  -D USEARCH_BUILD_LIB_C=1 \
-  -D USEARCH_BUILD_TEST=0 \
-  -D USEARCH_BUILD_BENCH=0
+  -D USEARCH_BUILD_SHARED=1
 
 cmake --build build_artifacts --config RelWithDebInfo
 file build_artifacts/libusearch_shared.so # Verify the output
@@ -444,9 +445,9 @@ There is no WebAssembly target of its own — the C library is what crosses, and
 - `cmake/toolchain-wasm32-wasi.cmake` builds `wasm32_v128_k` against the WASI SDK, for Wasmtime, Wasmer and the Rust crate.
 
 ```sh
-emcmake cmake -B build_wasm32_emscripten_release -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
-cmake --build build_wasm32_emscripten_release --target usearch_static usearch_test_c
-ctest --test-dir build_wasm32_emscripten_release -R '^usearch_test_c$'
+emcmake cmake -B build_wasm32_emscripten -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_SHARED=1 -DUSEARCH_BUILD_TEST=1
+cmake --build build_wasm32_emscripten --target usearch_static usearch_test_c
+ctest --test-dir build_wasm32_emscripten -R '^usearch_test_c$'
 ```
 
 The toolchain file must be passed as the single argument `-DCMAKE_TOOLCHAIN_FILE=…`; written with a space, `emcmake` appends its own file, which then wins.
@@ -502,7 +503,7 @@ No C or C++ is compiled there: the engine is CMake's to build, and `-Dlib-dir` n
 It takes the shared library rather than the archive, since Zig answers `linkSystemLibrary("stdc++")` with its own libc++, which leaves a GCC-built archive short of symbols.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11
+cmake -B build_release -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --target usearch_shared
 
 zig build                                     # compile check, resolving no symbols
@@ -529,17 +530,20 @@ Mojo 1.0 has no test discovery, so every check is registered in `main` by hand a
 ## Swift
 
 USearch provides Swift bindings through the [Swift Package Manager](https://swiftpackageindex.com/unum-cloud/USearch).
-`Package.swift` controls the compilation settings and is independent of the CMake used for C and C++ builds.
 Swift 6.4 or newer is required: the streaming and checkpoint verbs take `MutableSpan` and `RawSpan`, and `Key` stores its bytes in an `InlineArray`.
 
-The package links a library CMake built, so the engine is compiled first and the linker is pointed at it:
+SwiftPM links the C library prebuilt, as the `USearchC` XCFramework on Apple platforms and as an SE-0482 artifact bundle elsewhere, which the `swift` preset builds for the host.
+`USEARCH_SWIFT_ARTIFACT` points `Package.swift` at it, relative to the package root, and `NUMKONG_SWIFT_ARTIFACT` points the `numkong/` checkout at the one its own `swift` preset builds; without them, SwiftPM downloads the releases':
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11
-cmake --build build_release --target usearch_static
+(cd numkong && cmake --preset swift && cmake --build --preset swift)
+cmake --preset swift
+cmake --build --preset swift
 
-swift build -Xlinker -Lbuild_release
-swift test -Xlinker -Lbuild_release
+export USEARCH_SWIFT_ARTIFACT=build_swift/USearchC.xcframework # USearchC.artifactbundle off Apple platforms
+export NUMKONG_SWIFT_ARTIFACT=build_swift/NumKongC.xcframework # NumKongC.artifactbundle off Apple platforms
+swift build
+swift test
 ```
 
 The suite is Swift Testing: tests are `@Test` functions grouped into `@Suite` types, and assertions read as `#expect(...)`.
@@ -561,7 +565,7 @@ USearch provides Go bindings, that depend on the C library that must be installe
 So one should first compile the C library, link it with Go, and only then run tests.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11
+cmake -B build_release -D USEARCH_BUILD_SHARED=1 -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --config Release -j
 
 cp build_release/libusearch_static.a golang/  # the archive `golang/types.go` links, NumKong and ForkUnion included
@@ -601,7 +605,7 @@ gradle spotlessApply                    # format Java, Kotlin and Scala
 `-PusearchPrebuilt=<directory>` points every suite at a library that is already built and skips the CMake tasks, which is how CI builds the engine once and tests it from three languages.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11
+cmake -B build_release -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --target usearch_static usearch_shared
 gradle -PusearchPrebuilt=$PWD/build_release test
 ```
@@ -627,7 +631,7 @@ USearch provides CSharp bindings on .NET 10, reaching the C interface through so
 The project drives no CMake of its own, so the shared library is built first and dropped where the runtime probes for it.
 
 ```sh
-cmake -B build_artifacts -D USEARCH_BUILD_LIB_C=1
+cmake -B build_artifacts -D USEARCH_BUILD_SHARED=1
 cmake --build build_artifacts --config Release -j
 ```
 
@@ -672,7 +676,7 @@ It builds from the repository root, and `USEARCH_WOLFRAM_PATH` names the Mathema
 ```sh
 brew install --cask wolfram-engine
 
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11 -D USEARCH_BUILD_LIB_WOLFRAM=1 \
+cmake -B build_release -D USEARCH_DENSE_DTYPES=11 -D USEARCH_BUILD_WOLFRAM=1 \
     -D USEARCH_WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
 cmake --build build_release --config Release --target usearch_wolfram
 
@@ -709,9 +713,9 @@ Unpack a [WASI SDK release](https://github.com/WebAssembly/wasi-sdk/releases) an
 
 ```sh
 export WASI_SDK_PATH=/opt/wasi-sdk-34.0-x86_64-linux
-cmake -B build_wasm32_wasi_release -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
-cmake --build build_wasm32_wasi_release --target usearch_static usearch_test_c
-ctest --test-dir build_wasm32_wasi_release -R '^usearch_test_c$'
+cmake -B build_wasm32_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_SHARED=1 -DUSEARCH_BUILD_TEST=1
+cmake --build build_wasm32_wasi --target usearch_static usearch_test_c
+ctest --test-dir build_wasm32_wasi -R '^usearch_test_c$'
 ```
 
 `ctest` runs the module under Wasmtime when it is on the path.
@@ -720,13 +724,14 @@ The Rust crate hands CMake the same toolchain file on its own, so `cargo build -
 ## Documentation
 
 Sphinx builds the site under `docs/`.
-Doxygen feeds the C, C++ and Java references through Breathe, and the Python reference imports the compiled `usearch` package:
+A function's `@par Statuses:` block lists only its contract statuses, the conditions the caller controls or can observe, since the status enum documents once which categories any allocating, device-binding, file-touching or cancellable verb may also return.
+Doxygen feeds the C and C++ references through Breathe, and the Python reference imports the compiled `usearch` package:
 
 ```sh
 pip install -r docs/requirements.txt
-pip install -e .                    # the package the Python reference documents
-cd docs && doxygen conf.dox         # writes the XML into `build/xml`
-make html                           # writes the site into `build/docs/html`
+pip install -e .                        # the package the Python reference documents
+cd docs && doxygen conf.dox             # writes the XML into `build/xml`
+sphinx-build -M html . ../build/docs -W # writes the site into `build/docs/html`
 ```
 
 ## Working on Sub-Modules

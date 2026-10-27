@@ -1,65 +1,44 @@
 /**
+ *  @file verification/dense_vram_index_locks.pml
+ *  @author Ash Vardanian
+ *  @date September 11, 2026
  *  @brief The CUDA index's rows: publication by one release, the bounded slot-zero lock, the
  *      back-link's sweep and append, and a traversal warp whose follower lanes read behind a shuffle.
  *
- *  From `include/usearch/dense/vram_nvidia_index.cuh`: no device watermark, one warp per node, slot zero
- *  of every row the combined lock and first-neighbor word; a search walk also skips every ID at or
- *  past the host watermark it launched under, which `dense_vram_index_claims.pml` models, and the
- *  reader here is a walk that admits node 1. A warp is two lanes here, the leader and one follower,
- *  each a thread of the memory model with its own view; `__syncwarp` is the only step that merges
- *  views, `__shfl_sync` copies a value and merges nothing, which is what the PTX ISA promises of
- *  each.
+ *  From `include/usearch/dense/vram_nvidia_index.cuh`: no device watermark, one warp per node, slot
+ *  zero of every row the combined lock and first-neighbor word. A warp is two lanes here, the
+ *  leader and one follower, each a thread of the memory model with its own view; `__syncwarp` is
+ *  the only step that merges views, `__shfl_sync` copies a value and merges nothing, which is what
+ *  the PTX ISA promises of each.
  *
- *  Row 0 is published by an earlier batch, made visible to every lane by the launch edge. The
- *  inserter warp lands node 1: the follower writes the payload word, which stands for the vector
- *  row and the own tail slots that follow the same path, the warp syncs, and the leader
- *  release-stores slot zero, node 0 when the walk found it and a self-loop otherwise. It then
- *  back-links into row 0: the leader's bounded acquire exchange of the sentinel, broadcast by
- *  shuffle; a published-empty row takes the newcomer as its head, otherwise the follower sweeps
- *  slot one and the empty slot is appended into by the leader, or the full row is rewritten by the
- *  follower. A single-lane prior holder inserts node 2: its walk draws landmarks below its own ID,
- *  so it may draw node 1, admitted by an acquire of node 1's own slot zero, and then it appends
- *  node 2 into row 0, so the inserter's sweep may follow an edit its leader's exchange acquired.
- *  The reader warp walks row 0: the leader acquires slot zero with one retry on the sentinel,
- *  broadcasts it, the follower loads slot one, the warp syncs on its staging and each lane reads
- *  its neighbor's payload plainly.
- *
- *  An ID a lane read from a published row, or a landmark it drew through the node's own slot zero,
- *  names a node it sees published, with the payload it sees whole; a lock holder's edit is whole
- *  to a reader that acquired its unlock, so the follower's
- *  slot-one read is at least the write that unlock published; an assigned ID ends published,
- *  self-loop or not, whether or not its reverse edge landed; and an append lands in a slot that is
- *  empty, since the sweep that found it followed the unlock the exchange acquired.
+ *  - An ID a lane read from a published row names a node it sees published, with its payload whole.
+ *  - A lock holder's edit is whole to a reader that acquired its unlock.
+ *  - An assigned ID ends published, self-loop or not, whether or not its reverse edge landed.
+ *  - An append lands in a slot that is empty.
  *
  *  @verify pass sc,rc11
  *  @verify pass sc syncwarp_after_broadcast=false syncwarp_after_lock=false tail_order=order_relaxed tail_fence=false
- *  @verify fail rc11 syncwarp_after_broadcast=false: a traversal's follower lanes sync with the
- *      leader after the shuffle; loading their tail slots straight after it, a lane reads a slot
- *      older than the unlock its leader acquired, and the warp assembles a row no holder ever wrote
- *  @verify fail rc11 syncwarp_after_lock=false: a back-linker's follower lanes sync with the leader
- *      after the lock's shuffle; sweeping the locked row straight after it, a stale sentinel names a
- *      slot the previous holder just filled, and the append overwrites that holder's link
- *  @verify fail rc11 tail_order=order_relaxed: the follower's slot-one load acquires, pairing with
- *      the release fence every lock holder places between its lock and its slot stores; relaxed, it
- *      returns an edit newer than the unlock its leader acquired, which carries nothing, and the ID
- *      it found names a node whose payload it then reads stale. No syncwarp closes this one, since
- *      no lane acquired that edit
- *  @verify fail rc11 publish_order=order_relaxed: the newcomer's slot-zero release carries the
- *      payload its lanes wrote before the warp synced; relaxed, a peer insertion that draws the node
- *      as a landmark sees it published and reads its payload stale
- *  @verify fail rc11 tail_fence=false: every lock holder places a release fence between its lock and
- *      its slot stores, which the follower's acquiring slot-one load pairs with; without it, the
- *      follower reads an edit newer than the unlock its leader acquired, and the payload behind it
- *      stale
+ *  @verify fail rc11 syncwarp_after_broadcast=false: loading their tail slots straight after it, a
+ *      lane reads a slot older than the unlock its leader acquired, and the warp assembles a row no
+ *      holder ever wrote
+ *  @verify fail rc11 syncwarp_after_lock=false: sweeping the locked row straight after it, a stale
+ *      sentinel names a slot the previous holder just filled, and the append overwrites that
+ *      holder's link
+ *  @verify fail rc11 tail_order=order_relaxed: relaxed, it returns an edit newer than the unlock its
+ *      leader acquired, which carries nothing, and the ID it found names a node whose payload it
+ *      then reads stale
+ *  @verify fail rc11 publish_order=order_relaxed: relaxed, a peer insertion that draws the node as a
+ *      landmark sees it published and reads its payload stale
+ *  @verify fail rc11 tail_fence=false: without it, the follower reads an edit newer than the unlock
+ *      its leader acquired, and the payload behind it stale
  *  @verify fail rc11 syncwarp_after_broadcast=false syncwarp_after_lock=false tail_order=order_relaxed tail_fence=false:
- *      the header before the four edits holds sequentially, since each one orders memory and
- *      nothing else, and under `rc11` a follower reads a node's payload stale behind an edit newer
- *      than the unlock its leader acquired
+ *      under `rc11` a follower reads a node's payload stale behind an edit newer than the unlock
+ *      its leader acquired
  */
 #define thread_count 5
 #define location_count 4
 #define history_depth 6
-#include "weak_memory.pml"
+#include <weak_memory.pml>
 
 // The warps: warp w runs its leader lane as thread 2w and its follower as 2w + 1; the prior holder is thread 4.
 #define inserter_warp 0

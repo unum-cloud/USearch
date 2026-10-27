@@ -1,27 +1,24 @@
 /**
+ *  @file verification/dense_ram_index_watermark/cursor.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief `dense::ram_cursor` beside two inserters: the constructor's acquire of the watermark,
  *      `seek`, `follow` refused past the snapshot, `refresh`, and the same follow admitted.
  *
  *  `seek` acquires slot zero exactly once per try and waits out a sentinel on the index's monitor,
- *  then reads the tail relaxed. The follower's own seek waits out the stale sentinel a traversal
- *  would trip on, and the row it follows rides the back-link's release unlock into even a relaxed
- *  watermark store, so only the searcher reads a row stale when the watermark's release goes.
- *
- *  A back-link names a row once it is published, but a reader reaches the row's hosting chunk only
- *  behind the ID's dispense, which the watermark above the ID carries and a relaxed tail read does
- *  not; each row here grows a chunk of its own, the case where the followed row opens a fresh
- *  chunk. So `follow` seeks the staged ID only below the snapshot, and `refresh` widens the
- *  snapshot by acquiring the watermark.
+ *  then reads the tail relaxed. A back-link names a row once it is published, but a reader reaches
+ *  the row's hosting chunk only behind the ID's dispense, which the watermark above the ID carries
+ *  and a relaxed tail read does not. So `follow` seeks the staged ID only below the snapshot, and
+ *  `refresh` widens the snapshot by acquiring the watermark.
  *
  *  @verify pass sc,rc11
- *  @verify fail rc11 watermark_order=order_relaxed: the watermark's release carries every row below
- *      it; without it, the searcher reads a row below the watermark it acquired unpublished
- *  @verify fail rc11 snapshot_check=false: `seek` refuses an ID at or past the cursor's snapshot;
- *      unchecked, the follower follows an ID it read from row 0's tail relaxed and locates a row
- *      whose hosting chunk has not reached it
- *  @verify fail rc11 refresh_order=order_relaxed: `refresh` acquires the watermark, which carries
- *      the dispense of every ID below it; relaxed, the snapshot widens past the staged ID with no
- *      edge to its chunk, and the second follow locates a row whose hosting chunk has not reached it
+ *  @verify fail rc11 watermark_order=order_relaxed: without it, the searcher reads a row below the
+ *      watermark it acquired unpublished
+ *  @verify fail rc11 snapshot_check=false: unchecked, the follower follows an ID it read from row
+ *      0's tail relaxed and locates a row whose hosting chunk has not reached it
+ *  @verify fail rc11 refresh_order=order_relaxed: relaxed, the snapshot widens past the staged ID
+ *      with no edge to its chunk, and the second follow locates a row whose hosting chunk has not
+ *      reached it
  */
 #define thread_count 4
 #define location_count 9
@@ -29,7 +26,7 @@
 #define named_rows true
 #define appended_rows false
 #define refined_rows false
-#include "protocol.pml"
+#include <dense_ram_index_watermark/protocol.pml>
 
 proctype inserter(byte t) { insert(t) }
 

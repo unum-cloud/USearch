@@ -52,6 +52,10 @@ kernel compiled in C installs unchanged.
 
 This package root re-exports every public symbol from the modules that mirror the C headers, so
 `from usearch import X` resolves whatever module X lives in.
+
+File: mojo/usearch/__init__.mojo
+Author: Ash Vardanian
+Date: September 7, 2026
 """
 
 # library

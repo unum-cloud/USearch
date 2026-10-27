@@ -1,27 +1,20 @@
 /**
- *  `dense::vram_nvidia_indexes` from `include/usearch/dense/vram_nvidia_indexes.cuh`: the sharded CUDA index,
- *  whose batches claim every shard's share in shard order, each claim one compare-exchange of the
- *  shard's `claimed_rows_` from its watermark, so a shard holds one batch in flight at most and a
- *  refused claim gives the earlier shares back and answers `contended_k`; which write every key
- *  before the turn; which turn every shard's watermark inside one commit of a sequence word, so a
- *  reader spanning the shards snapshots each batch whole or not at all; and whose load and save
- *  close every shard's dispenser in shard order first, refused while a batch is in flight, and
- *  reopen them at the end, the last shard first.
+ *  @file verification/dense_vram_indexes/protocol.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
+ *  @brief `dense::vram_nvidia_indexes` from `include/usearch/dense/vram_nvidia_indexes.cuh`: the
+ *      sharded CUDA index.
  *
- *  Two shards of two rows each, one per claimer. A mutator claims one row on each shard in shard
- *  order, stores each key relaxed, and commits, `insert_plan_t::finish`: a release add of one to the
- *  sequence word, each shard's turn, a wait until its watermark reaches the part's first node and
- *  a release store past it, then a release add of the unit less one. The searcher snapshots: an
- *  acquire of the word, a wait while a commit is in flight, an acquire of each shard's watermark, a
- *  relaxed re-read of the word and a retry when it moved; then it reads every key below each
- *  snapshotted watermark.
+ *  Its batches claim every shard's share in shard order, each claim one compare-exchange of the
+ *  shard's `claimed_rows_` from its watermark, so a shard holds one batch in flight at most; they
+ *  write every key before the turn, and turn every shard's watermark inside one commit of a
+ *  sequence word. Its load and save close every shard's dispenser in shard order first, and reopen
+ *  them at the end, the last shard first. Two shards of two rows each, one per claimer.
  *
- *  Every key a searcher reads below a watermark it snapshotted is the key of the thread that
- *  claimed the row, never unset and never another's, and a snapshot it accepts holds each
- *  committed batch on both shards or on neither. Every scenario beside this file defines
- *  `mutators`, the batches it runs as threads `0` and up.
+ *  - Every key a searcher reads is the key of the thread that claimed the row, never unset.
+ *  - A snapshot it accepts holds each committed batch on both shards or on neither.
  */
-#include "../weak_memory.pml"
+#include <weak_memory.pml>
 
 // The words: each shard's watermark, `commit_sequence_`, and each shard's keys. A shard's claim and
 // its closed state publish nothing a searcher reads, since the watermark bounds every walk, so they

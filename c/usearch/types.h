@@ -189,6 +189,19 @@ typedef struct usearch_keys_view_t {
  *  layout information than the ABI can accept rejects the call before it crosses, and reports the
  *  same status the engine would if it could see the same thing. The set describes the project's
  *  failures, not this implementation's exits, so unused enumerators are deliberate.
+ *
+ *  The failures fall into five categories. Resources: @c usearch_status_out_of_memory_k,
+ *  @c usearch_status_device_k and @c usearch_status_io_k. Input:
+ *  @c usearch_status_shape_mismatch_k, @c usearch_status_unsupported_layout_k,
+ *  @c usearch_status_unknown_kind_k, @c usearch_status_malformed_k and
+ *  @c usearch_status_invalid_argument_k. State: @c usearch_status_uninitialized_k,
+ *  @c usearch_status_config_mismatch_k, @c usearch_status_read_only_k,
+ *  @c usearch_status_overflow_k, @c usearch_status_contended_k and
+ *  @c usearch_status_unsupported_k. Interruptions: @c usearch_status_cancelled_k and
+ *  @c usearch_status_deferred_k. Defects: @c usearch_status_internal_k. Any verb that allocates,
+ *  binds a device or touches a file may also return a Resources status; any verb taking a progress
+ *  callback may return @c usearch_status_cancelled_k. A verb's own block lists only what its
+ *  contract adds.
  */
 typedef enum usearch_status_t {
 
@@ -873,7 +886,7 @@ USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t* outcome)
  *  @brief Reads the status of @p outcome without waiting, with the acquire ordering its final
  *      store pairs with, so a final status also publishes every output of the call.
  *  @param[in] outcome An outcome passed to a call.
- *  @return @c usearch_status_deferred_k while the call is not final, then its final status.
+ *  @return The final status once the call is final.
  *
  *  The one way to poll: the status word is atomic only by this contract, so a caller reading the
  *  field directly needs an atomic load its language may not offer on foreign memory.
@@ -991,6 +1004,9 @@ typedef struct usearch_executor_on_pool_t {
  *  @brief Creates a RAM executor over a borrowed ForkUnion pool, so several libraries in one process share one set
  *      of threads while each keeps its own scratch.
  *  @param[in] arguments Named arguments, whose outputs are written through their pointers.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unsupported_k Always, as borrowed pools are not wired yet.
  */
 USEARCH_EXPORT void usearch_executor_on_pool(usearch_executor_on_pool_t* arguments);
 
@@ -1026,6 +1042,11 @@ typedef struct usearch_executor_for_vram_t {
  *  order, a single host thread keeps every device fed, and adding host threads would buy nothing,
  *  since the work has already left for the accelerator by the time one of them would return. A
  *  GPU executor never changes process-wide device flags.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_unsupported_k Borrowed @c streams, which are not wired yet.
+ *  - @c usearch_status_device_k An ordinal past the listing, or no device named.
+ *  - @c usearch_status_config_mismatch_k Devices of more than one vendor.
  */
 USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments);
 
@@ -1113,6 +1134,14 @@ typedef struct usearch_executor_for_nvme_t {
  *  One ring per thread is what keeps submission lock-free: a thread owns its ring outright, so
  *  an external-memory walk never coordinates with a sibling to issue a read. A ring reports its
  *  reads only to the thread that owns it, so deferred calls finish on those threads.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k @c NULL paths for a nonzero count, or an unknown
+ *    @c nvme_class.
+ *  - @c usearch_status_config_mismatch_k Kernel paths mixed with transport identifiers, or SPDK
+ *    pinned over kernel paths or a kernel engine over transport identifiers.
+ *  - @c usearch_status_unsupported_k Transport identifiers in a build without SPDK, or a pinned
+ *    engine this build lacks.
  */
 USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments);
 
@@ -1152,13 +1181,18 @@ typedef struct usearch_executor_drain_t {
  *
  *  Parked means futex waits on RAM, blocking-sync events on VRAM, and ring waits on NVMe; spinning
  *  polls each of them instead. A borrowed pool keeps its lender's mood.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_contended_k A call running on the executor holds it, as for a drain from
+ *    that call's own progress handler, predicate or host function.
+ *  - @c usearch_status_device_k A GPU executor with no vendor behind it.
  */
 USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
 
 /**
  *  @brief Drains every call, releases the scratch and the streams it owns, and frees the executor;
  *      @c NULL is safe, and it cannot fail, so takes no outcome.
- *  @param[inout] executor The handle to be freed; invalid afterwards.
+ *  @param[in,out] executor The handle to be freed; invalid afterwards.
  *
  *  Waits until every deferred call naming the handle is final.
  *  Waits until every call running on the executor, blocking or deferred, is final.
@@ -1222,7 +1256,7 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments);
 /**
  *  @brief Frees the arena and every output in it; @c NULL is safe, and it cannot fail, so takes no
  *      outcome.
- *  @param[inout] arena The arena to be freed; invalid afterwards.
+ *  @param[in,out] arena The arena to be freed; invalid afterwards.
  *
  *  Waits until every deferred call naming the handle is final.
  *  Free a GPU arena once the caller's own device work on its outputs has finished, keeping the

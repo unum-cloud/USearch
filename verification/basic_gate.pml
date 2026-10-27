@@ -1,6 +1,10 @@
 /**
- *  The unique side of `basic::shared_mutex` from `include/usearch/basic/ram_index.hpp`, as the
- *  basic index's stop-the-world calls take it: `try_lock`'s acquire compare-exchange, only from a
+ *  @file verification/basic_gate.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
+ *  @brief The unique side of `basic::shared_mutex`, as the stop-the-world calls take it.
+ *
+ *  From `include/usearch/basic/ram_index.hpp`: `try_lock`'s acquire compare-exchange, only from a
  *  free word, and `unlock`'s release clear. A component includes this file after the memory model
  *  and passes its gate word.
  */

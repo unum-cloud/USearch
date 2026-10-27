@@ -1,22 +1,26 @@
 /**
+ *  @file verification/dense_ram_indexes_gate/clearing_locators.pml
+ *  @author Ash Vardanian
+ *  @date October 22, 2026
  *  @brief An insert plan's `finish` beside a `clear`: the shared side `finish` holds keeps its
  *      locator insert from landing after a clear forgot the row.
  *
  *  The one shard holds one row dispensed and landed, short of its watermark turn. `finish`, holding
  *  the gate's shared side, takes the turn and then inserts the key's locator. The clearer takes the
  *  unique side or is refused, closes the shard, which `close_` refuses while a dispensed row awaits
- *  its turn, and inside its window forgets the row and wipes the locator map. Once both are done,
- *  the locator names no row the index forgot.
+ *  its turn, and inside its window forgets the row and wipes the locator map.
+ *
+ *  - Once both are done, the locator names no row the index forgot.
  *
  *  @verify pass sc
- *  @verify fail sc insert_hold=none: every mutator holds the shared side for its call; without it, a
- *      clear lands between `finish`'s turn and its locator insert, finds the row published, forgets
- *      it, and the insert leaves a locator naming the forgotten row
+ *  @verify fail sc insert_hold=none: without it, a clear lands between `finish`'s turn and its
+ *      locator insert, finds the row published, forgets it, and the insert leaves a locator naming
+ *      the forgotten row
  */
 #define thread_count 2
 #define location_count 6
 #define history_depth 1
-#include "protocol.pml"
+#include <dense_ram_indexes_gate/protocol.pml>
 
 // The word past the protocol's: the key's locator slot, zero when empty and one past its row.
 #define locator 5

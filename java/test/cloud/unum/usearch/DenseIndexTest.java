@@ -833,7 +833,6 @@ public class DenseIndexTest {
 
     @Test
     public void theLinkedLibraryNamesItself() {
-        assertFalse(Types.version().isEmpty());
         assertFalse(Types.capabilitiesCompiled().isEmpty());
         assertFalse(Types.capabilitiesAvailable().isEmpty());
         try (DenseIndex index = populated()) {

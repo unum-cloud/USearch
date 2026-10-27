@@ -9,7 +9,7 @@ It exposes dense indexes; sequence, matrix and geospatial indexes follow as the 
 The library is a subdirectory of the root project rather than a project of its own, so build it from the repository root:
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_LIB_WOLFRAM=1 -D USEARCH_DENSE_DTYPES=11 \
+cmake -B build_release -D USEARCH_BUILD_WOLFRAM=1 -D USEARCH_DENSE_DTYPES=11 \
     -D USEARCH_WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
 cmake --build build_release --config Release --target usearch_wolfram
 

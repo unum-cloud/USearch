@@ -1,3 +1,9 @@
+/**
+ *  @file csharp/src/Cloud.Unum.USearch/Types.cs
+ *  @author Ash Vardanian
+ *  @date September 8, 2026
+ *  @brief The vocabulary every modality shares: status codes, keys, executors, arenas and the exception they raise.
+ */
 using System;
 using System.Buffers;
 using System.Runtime.CompilerServices;

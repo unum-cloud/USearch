@@ -1,3 +1,9 @@
+/**
+ *  @file java/cloud/unum/usearch/DenseVerbs.java
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
+ *  @brief The dense verbs, written once for the index and for every receiver that runs them.
+ */
 package cloud.unum.usearch;
 
 import java.lang.foreign.MemoryLayout;

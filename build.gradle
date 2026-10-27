@@ -149,15 +149,13 @@ ext.loadsTheEngine = { Test task ->
 
 // One CMake tree serves the compiler flags, the cross-compilation targets, and the release
 // artifacts, so the SDK has one native build rather than a second one described here. Swap
-// `-DUSEARCH_BUILD_LIB_C=1` for `-DUSEARCH_BUILD_LIB_C_STUB=1` to load the brute-force stand-in.
+// `-DUSEARCH_BUILD_SHARED=1` for `-DUSEARCH_BUILD_STUB=1` to load the brute-force stand-in.
 tasks.register("configureNativeLibrary", Exec) {
     inputs.files("$rootDir/CMakeLists.txt", "$rootDir/c/CMakeLists.txt", "$rootDir/src/CMakeLists.txt")
     outputs.file("${project.ext.usearchLibraryPath}/CMakeCache.txt")
     commandLine "cmake", "-B", project.ext.usearchLibraryPath, "-S", rootDir.toString(),
-        "-DUSEARCH_BUILD_LIB_C=1",
-        "-DUSEARCH_DENSE_DTYPES=11",
-        "-DUSEARCH_BUILD_TEST=0",
-        "-DUSEARCH_BUILD_BENCH=0"
+        "-DUSEARCH_BUILD_SHARED=1",
+        "-DUSEARCH_DENSE_DTYPES=11"
 }
 
 tasks.register("compileNativeLibrary", Exec) {

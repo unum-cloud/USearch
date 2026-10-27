@@ -11,11 +11,13 @@
  *  only thing that merges graphs. A buffer holding several parts leads with a manifest listing
  *  each by its offset inside the buffer. What a residency does differently rides in as a
  *  residency object the plan owns, answering:
- *  - `open_shard_save(shards, shard, columns, synchronization)`, one shard's own save;
- *  - `open_shard_for_part(shards, part)`, the shard a load's part lands on, placed or opened;
- *  - `open_shard_load(shards, shard, rows)`, one shard's own load at its watermark;
- *  - `land_keys(shards, shard, rows, load_plan)`, once a load's keys reached the host column;
- *  - `end_save(shards)`, once a save finished or died.
+ *  - <tt>open_shard_save(shards, shard, columns, synchronization)</tt>, one shard's own save;
+ *  - <tt>open_shard_for_part(shards, part)</tt>, the shard a load's part lands on, placed or
+ *    opened;
+ *  - <tt>open_shard_load(shards, shard, rows)</tt>, one shard's own load at its watermark;
+ *  - <tt>land_keys(shards, shard, rows, load_plan)</tt>, once a load's keys reached the host
+ *    column;
+ *  - <tt>end_save(shards)</tt>, once a save finished or died.
  *
  *  Checkpoints are written positionally with every header last, so a failed save reads as absent.
  */
@@ -107,8 +109,15 @@ struct monolith_layout_t {
  *      fixed-degree neighbors - then the norms where @p layout names their dtype, with the data
  *      offset they follow.
  *
+ *  @param[in] layout The columns' extents and dtypes.
+ *  @param[in] alignment The byte alignment of every column's start.
+ *  @param[in] custom_fields The caller's own fields the header carries.
  *  @param[out] norms The norms column, named, which the header's producer columns view; it must
  *      outlive the header, and stays unnamed when @p layout keeps no norms.
+ *  @param[in] allocator Where the header's own storage is allocated.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k @p alignment is not a power of two.
  */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_header_t> monolith_header(monolith_layout_t const& layout, std::size_t alignment,
@@ -158,8 +167,13 @@ std::size_t live_shards_(shards_type_ const& shards) noexcept {
     return shards.size() - shards.retired_shards();
 }
 
-/** The monolith header for @p nodes rows of one shard of @p shards under @p config 's alignment,
- *  its norms column laid into @p norms. */
+/**
+ *  The monolith header for @p nodes rows of one shard of @p shards under @p config 's alignment,
+ *  its norms column laid into @p norms.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k The alignment is not a power of two.
+ */
 template <typename shards_type_>
 expected<safegraphs_header_t> shard_monolith_header(shards_type_ const& shards, std::size_t nodes,
                                                     save_config_t const& config,
@@ -177,7 +191,12 @@ expected<safegraphs_header_t> shard_monolith_header(shards_type_ const& shards, 
 
 /** Bytes a buffer save of @p shards under @p config writes: a lone live shard's monolith, or the
  *  manifest and every live shard's part it lists; zero for an invalid config or an unplaced set.
- *  The row counts are read now, so a buffer sized here fits a save no row lands before. */
+ *  The row counts are read now, so a buffer sized here fits a save no row lands before.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No shard is placed, or none froze its geometry.
+ *  - @c config_mismatch_k @p config does not validate.
+ */
 template <typename shards_type_>
 expected<std::size_t> shard_storage_requirements(shards_type_ const& shards, save_config_t const& config) noexcept {
     if (shards.empty() || !shards[0].index->dimensions()) return {0, status_t::uninitialized_k};
@@ -267,6 +286,16 @@ struct [[nodiscard]] shard_save_plan {
      *  Every part is framed, sized and mapped here, and every header lands in @c finish, so a
      *  failed or cancelled save reads as absent. The plan takes @p residency first, so even a
      *  refused opening ends the save there.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard is placed or froze its geometry, or on VRAM a shard was never
+     *    reserved.
+     *  - @c unknown_kind_k The stored scalar has no interchange dtype.
+     *  - @c config_mismatch_k @p config does not validate, a shard's columns cannot hold its rows,
+     *    or on VRAM the save is not certified exclusive.
+     *  - @c invalid_argument_k A part path does not parse.
+     *  - @c overflow_k A device ends before a part does.
+     *  - @c contended_k On RAM, a dispensed batch has yet to publish.
      */
     static expected<shard_save_plan> open(shards_type_& shards, residency_type_ residency, std::string_view path,
                                           save_config_t const& config) noexcept {
@@ -282,7 +311,17 @@ struct [[nodiscard]] shard_save_plan {
     /** Opens a save of @p shards into @p buffer - the in-memory sibling of the path form: a lone
      *  live shard's monolith, or the manifest leading the buffer and one part per live shard at
      *  the offsets it lists. Size the bytes by @ref shard_storage_requirements; fewer answer
-     *  @c overflow_k. */
+     *  @c overflow_k.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard is placed or froze its geometry, or on VRAM a shard was never
+     *    reserved.
+     *  - @c unknown_kind_k The stored scalar has no interchange dtype.
+     *  - @c config_mismatch_k @p config does not validate, a shard's columns cannot hold its rows,
+     *    or on VRAM the save is not certified exclusive.
+     *  - @c overflow_k @p buffer is shorter than the checkpoint.
+     *  - @c contended_k On RAM, a dispensed batch has yet to publish.
+     */
     static expected<shard_save_plan> open(shards_type_& shards, residency_type_ residency, bytes_span_t buffer,
                                           save_config_t const& config) noexcept {
         shard_save_plan plan {shards.allocator()};
@@ -323,8 +362,15 @@ struct [[nodiscard]] shard_save_plan {
         return {first, first + plans_[part].steps().size()};
     }
 
-    /** Lands step @p step through its own shard's plan, using @p scratch on the host residency; a
-     *  device shard leaves it untouched. */
+    /**
+     *  Lands step @p step through its own shard's plan, using @p scratch on the host residency; a
+     *  device shard leaves it untouched.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan is empty or spent.
+     *  - @c config_mismatch_k The step names a retired shard or no part, holds no rows, or the
+     *    columns or, on RAM, @p scratch cannot hold them.
+     */
     status_t save(step_t const& step, nk::matrix_span<node_id_t> scratch) noexcept {
         if (!shards_) return status_t::uninitialized_k;
         std::size_t const part = step.shard - shards_->retired_shards();
@@ -339,6 +385,14 @@ struct [[nodiscard]] shard_save_plan {
      *
      *  @param[in] on_saved Fires per finished shard with its index; answering @c cancel_k stops the
      *      remaining shards and reports @c cancelled_k.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan is empty or spent.
+     *  - @c config_mismatch_k A shard's steps never landed all its rows, or a header does not fit
+     *    before its data.
+     *  - @c contended_k On RAM under @c concurrent_k, a counter moved during the save.
+     *  - @c overflow_k A part is shorter than its header, or the manifest does not fit.
+     *  - @c invalid_argument_k The manifest path does not parse.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t finish(progress_type_&& on_saved = {}) noexcept {
@@ -604,6 +658,18 @@ struct [[nodiscard]] shard_load_plan {
      *  The reservation comes from @p config, and part @c p lands on live shard @c p, which the
      *  residency opens past the placed ones. Every shard's claim word closes first, and the plan's
      *  death reopens them.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard is placed, or on VRAM a shard was never reserved.
+     *  - @c contended_k A call holds the gate, a batch or plan holds a shard's claims, or on RAM a
+     *    dispensed batch has yet to publish.
+     *  - @c config_mismatch_k The shards hold entries, or the checkpoint's geometry, dtypes or
+     *    metric differ from the shards'.
+     *  - @c invalid_argument_k The checkpoint or a part path does not parse.
+     *  - @c malformed_k The checkpoint lists no part, a part or its header does not parse, or its
+     *    connectivity or dimensions are unusable.
+     *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
+     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map.
      */
     static expected<shard_load_plan> open(shards_type_& shards, residency_type_ residency, std::string_view path,
                                           load_config_t const& config) noexcept {
@@ -618,8 +684,21 @@ struct [[nodiscard]] shard_load_plan {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Opens a load of the checkpoint held in @p buffer: a lone monolith, or the manifest leading
-     *  the buffer and the parts it lists. */
+    /**
+     *  Opens a load of the checkpoint held in @p buffer: a lone monolith, or the manifest leading
+     *  the buffer and the parts it lists.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard is placed, or on VRAM a shard was never reserved.
+     *  - @c contended_k A call holds the gate, a batch or plan holds a shard's claims, or on RAM a
+     *    dispensed batch has yet to publish.
+     *  - @c config_mismatch_k The shards hold entries, or the checkpoint's geometry, dtypes or
+     *    metric differ from the shards'.
+     *  - @c malformed_k The manifest lists no part, a part or its header does not parse, or its
+     *    connectivity or dimensions are unusable.
+     *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
+     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map.
+     */
     static expected<shard_load_plan> open(shards_type_& shards, residency_type_ residency, bytes_view_t buffer,
                                           load_config_t const& config) noexcept {
         shard_load_plan plan {shards.allocator()};
@@ -672,8 +751,16 @@ struct [[nodiscard]] shard_load_plan {
         return {first, bound};
     }
 
-    /** Lands step @p step: its part's own columns, under that part's ID space, through the shard's
-     *  own plan. */
+    /**
+     *  Lands step @p step: its part's own columns, under that part's ID space, through the shard's
+     *  own plan.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan is empty or spent, or on NVIDIA or AMD its bounce was never
+     *    pinned.
+     *  - @c config_mismatch_k The step names no shard or part, holds no rows, or the columns
+     *    cannot hold them, or its IDs rebase past the plan.
+     */
     status_t load(step_t const& step) noexcept {
         if (!shards_) return status_t::uninitialized_k;
         if (step.shard >= plans_.size() || step.part >= parts_.size()) return status_t::config_mismatch_k;
@@ -692,6 +779,14 @@ struct [[nodiscard]] shard_load_plan {
      *
      *  @param[in] on_loaded Fires per finished shard; answering @c cancel_k reports
      *      @c cancelled_k.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan is empty or spent.
+     *  - @c malformed_k A part's key column disagrees with its rows.
+     *  - @c config_mismatch_k A shard's steps never landed all its rows.
+     *  - @c overflow_k On NVIDIA or AMD, a device key column cannot cover the rows.
+     *  - @c unsupported_k or @c unsupported_layout_k On NVIDIA or AMD, a shard keeps this earlier
+     *    refusal.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t finish(progress_type_&& on_loaded = {}) noexcept {

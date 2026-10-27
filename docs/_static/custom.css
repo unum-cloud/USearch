@@ -1,22 +1,2 @@
-p.caption {
-    font-size: 0 !important;
-    margin: 8px 0px !important;
-    padding: 0 !important;
-    border-bottom: 1px solid #8b7f8b12;
-}
-
-.sidebar-brand-text {
-    cursor: initial;
-}
-
-table>tbody>tr>td {
-    text-align: center;
-}
-
-table>tbody>tr>td:first-child {
-    text-align: left;
-}
-
-#overview>p>a>img {
-    height: 25px !important;
-}
+h1, h2, h3, h4, h5, h6 { font-weight: 500; }
+table.docutils { border-top: 1px solid var(--color-background-border); border-bottom: 1px solid var(--color-background-border); }

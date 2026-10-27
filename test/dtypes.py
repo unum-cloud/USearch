@@ -34,12 +34,6 @@ from usearch.keys import integers_to_keys, keys_to_integers
 # region Library
 
 
-def test_version_is_semantic():
-    """The version is a three-part semantic version, and the package agrees with the library."""
-    assert usearch.version().count(".") == 2
-    assert usearch.__version__ == usearch.version()
-
-
 def test_capabilities_are_reported():
     """Both capability probes answer, whatever this machine turns out to be."""
     assert isinstance(usearch.capabilities_compiled(), str)

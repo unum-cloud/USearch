@@ -2,8 +2,8 @@
 #
 # ~~~
 #   source /path/to/emsdk/emsdk_env.sh
-#   emcmake cmake -B build_wasm32_emscripten_release -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_LIB_C=1
-#   cmake --build build_wasm32_emscripten_release --target usearch_static
+#   emcmake cmake -B build_wasm32_emscripten -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake
+#   cmake --build build_wasm32_emscripten --target usearch_static
 # ~~~
 #
 # The module every engine loads: 32-bit, one thread, the fixed-width `simd128` tier, so it runs in any page - served

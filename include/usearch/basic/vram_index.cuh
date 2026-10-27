@@ -45,13 +45,14 @@ struct vram_row_t {
 /** What a basic VRAM kit binds: one modality's distance on one GPU generation, with the warp policy
  *  its walks shuffle through and the selector its rows keep neighbors by. @c prepare lays a row out
  *  as a query in a span, every lane of the warp taking part, from the row alone or, for a kit with
- *  runtime parameters, from the storage's @c parameters too, which @ref vram_prepare tells apart;
- *  @c lower_bound answers a lower bound from the two rows' headers alone. Its @c score runs on its
- *  lanes per row, every one of them returning the distance, exact within the radius and above it
- *  past: @c lanes_per_row_k of them and a plain @c score, or, for a kit whose split follows a rung,
- *  @c lanes_per_row of the rung and a @c score templated on it, which @ref vram_lanes_per_row and
- *  @ref vram_score tell apart. A round's rows carry no order: results land by slot, and ties break
- *  by node ID. */
+ *  runtime parameters, from the storage's @c parameters too, which
+ *  @ref unum::usearch::basic::vram_prepare tells apart; @c lower_bound answers a lower bound from
+ *  the two rows' headers alone. Its @c score runs on its lanes per row, every one of them returning
+ *  the distance, exact within the radius and above it past: @c lanes_per_row_k of them and a plain
+ *  @c score, or, for a kit whose split follows a rung, @c lanes_per_row of the rung and a @c score
+ *  templated on it, which @ref unum::usearch::basic::vram_lanes_per_row and
+ *  @ref unum::usearch::basic::vram_score tell apart. A round's rows carry no order: results land by
+ *  slot, and ties break by node ID. */
 template <typename kit_>
 concept vram_basic_kit = requires(typename kit_::query_t const& query, vram_row_t row, byte_t* span,
                                   byte_t const* parameters, nk_kernel_kind_t kernel, u32_t lane) {
@@ -309,8 +310,15 @@ struct vram_lane_schedule {
  *      @b [sampling_first,sampling_bound) into @p candidate_ids, drawn as the dense walk draws
  *      them.
  *
+ *  @param[in] storage The graph's rows.
+ *  @param[in] sampling_first The first row of the range sampled.
+ *  @param[in] sampling_bound One past the last row of the range sampled.
+ *  @param[in,out] visited The rows this walk has scored already.
  *  @param[in] frontier The walk's frontier, asked whether it holds a draw once a saturated visited
  *      set re-scores it.
+ *  @param[in,out] random_generator The draw state of this lane.
+ *  @param[out] candidate_ids Receives the staged landmarks.
+ *  @param[in] lane This lane's index in its warp.
  *  @return How many it staged: zero once every published row of the range is visited, or the
  *      visited set saturated.
  */

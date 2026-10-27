@@ -132,7 +132,7 @@ concept query = (std::same_as<query_type_, value_type_> || transparent_metric<me
 
 /** A metric that prepares many queries at once: @c reset over a span of them prepares every one for
  *  all the rounds that follow, and each @c drain writes @b [queries,rows] distances, query @c q to
- *  staged row @c r at `distances[q * rows + r]`, exact within the one radius they share. */
+ *  staged row @c r at <tt>distances[q * rows + r]</tt>, exact within the one radius they share. */
 template <typename metric_type_, typename query_type_>
 concept batched_metric = requires(metric_type_& metric, std::span<query_type_ const> queries) {
     { metric.reset(queries) } noexcept;
@@ -427,7 +427,7 @@ struct traversal_context {
     splitmix64_t random_generator;
 
     /** IDs of one staged fan-out - the batch a single metric round scores; also
-     *  the flood stack of `health` and the row copies of back-linking. */
+     *  the flood stack of @c health and the row copies of back-linking. */
     scratch_buffer<node_id_type_> staged_ids;
 
     /** Distances output of one batched metric round, parallel to @c staged_ids. */
@@ -720,12 +720,17 @@ struct ram_index {
         std::size_t ceiling = max_node_count_k;
     };
 
-    /** Covers the node records & the key multimap for @p config.capacity entries ahead of the
+    /**
+     *  Covers the node records & the key multimap for @p config.capacity entries ahead of the
      *  inserts, which cover what they claim on their own, so this is a hint callable any time
      *  beside every other verb, and bounds every later claim by @p config.ceiling. Neighbor rows
-     *  start empty and grow with wiring. Answers the node capacity covered so far: @c overflow_k
-     *  past @c max_node_count_k, and @c bad_alloc_k keeps the chunks it did cover, so the same
-     *  call retries. */
+     *  start empty and grow with wiring. Answers the node capacity covered so far, and a
+     *  @c bad_alloc_k keeps the chunks it did cover, so the same call retries.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k @p config.capacity passes @c max_node_count_k, or the seats the key
+     *    multimap can ever hold.
+     */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         atomic_ref<std::size_t>(ceiling_rows_)
             .store(min_of(config.ceiling, max_node_count_k), std::memory_order_relaxed);
@@ -735,13 +740,24 @@ struct ram_index {
         return {nodes_.capacity(), status_t::success_k};
     }
 
-    /** Covers @p capacity entries, bounded by the ID space alone. */
+    /**
+     *  Covers @p capacity entries, bounded by the ID space alone.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k @p capacity passes @c max_node_count_k, or the seats the key multimap can
+     *    ever hold.
+     */
     expected<std::size_t> reserve(std::size_t capacity) noexcept { return reserve(reserve_capacity_t {capacity}); }
 
     /** Forgets every node and key and keeps every covered chunk for the next build: each record
      *  below the dispenser gets a fresh value from the index allocator, an empty row and no key.
      *  Takes the shared mutex's unique side - live mutators and open plans answer @c contended_k -
-     *  while the caller keeps readers out, as for @c load, since the IDs restart from zero. */
+     *  while the caller keeps readers out, as for @c load, since the IDs restart from zero.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A mutator or an open plan holds the shared mutex.
+     *  - @c contended_k A dispensed batch has yet to publish.
+     */
     status_t clear() noexcept {
         unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
         if (!unique_lock) return status_t::contended_k;
@@ -792,17 +808,24 @@ struct ram_index {
      *
      *  @param[in] incoming_values The batch to consume - moved from on success only.
      *  @param[in] keys Caller identities, parallel to @p incoming_values.
-     *  @param[inout] metric This thread's scoring instance; weights may be shared,
+     *  @param[in,out] metric This thread's scoring instance; weights may be shared,
      *      staging scratch must be thread-private.
      *  @param[out] assigned_ids Caller-owned output: either empty, or exactly one slot per
      *      incoming value, receiving that value's dispensed node ID - one contiguous range
      *      per batch, in batch order.
-     *  @param[inout] context The calling thread's scratch & telemetry, reused across batches, over
+     *  @param[in,out] context The calling thread's scratch & telemetry, reused across batches, over
      *      any allocator.
      *  @param[in] selector The link-selection heuristic, carrying its own
      *      neighbors-per-node budget - a per-call value, so heuristics & budgets swap per
      *      batch without re-instantiating the index.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The selector's connectivity is zero, or @p keys or a non-empty
+     *    @p assigned_ids differs in length from @p incoming_values.
+     *  - @c overflow_k A scratch capacity of @p context wraps when rounded.
+     *  - @c contended_k A refine plan holds the claims closed.
+     *  - @c overflow_k The batch passes the key multimap's seats or the reserved ceiling.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename metric_type_,
               typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
@@ -900,7 +923,12 @@ struct ram_index {
         /** Publishes every position at once: @c config_mismatch_k while any has yet to land,
          *  leaving the plan whole; then the range's one watermark turn, the keys in their seats,
          *  and the hold dropped. A success spends the plan, so a second call answers
-         *  @c uninitialized_k. */
+         *  @c uninitialized_k.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already spent.
+         *  - @c config_mismatch_k A position has yet to land.
+         */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (atomic_ref<std::size_t>(landed).load(std::memory_order_acquire) != range.size())
@@ -950,6 +978,10 @@ struct ram_index {
      *  of zero dispenses nothing, and a refine plan holding the claims closed refuses with
      *  @c contended_k. Joining the shared side waits out a unique holder, so a call from a thread
      *  holding a save or load plan deadlocks on its own hold, by construction.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A refine plan holds the claims closed.
+     *  - @c overflow_k The batch passes the key multimap's seats or the reserved ceiling.
      */
     expected<insert_plan_t> plan_insert(std::size_t count) noexcept {
         auto [claim, status] = claim_(count);
@@ -964,7 +996,12 @@ struct ram_index {
      *  radius keeps it within, so only ties at that radius grow it. The visited set starts at one
      *  row per candidate and alone re-tables as a walk widens - once per doubling per context
      *  lifetime, which a context kept across walks amortizes. Idempotent; a zero @p connectivity
-     *  answers @c config_mismatch_k. */
+     *  answers @c config_mismatch_k.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p connectivity is zero.
+     *  - @c overflow_k A scratch capacity wraps when rounded.
+     */
     template <typename context_allocator_type_>
     static status_t reserve_traversal(traversal_context_over<context_allocator_type_>& context,
                                       std::size_t connectivity, insert_config_t config) noexcept {
@@ -998,11 +1035,16 @@ struct ram_index {
             connectivity + 1);
     }
 
-    /** Appends one directed edge @p from → @p to - purely structural: no metric,
-     *  no selector, no pruning, and the row grows past any prior extent when needed.
-     *  Idempotent: an existing edge answers @c present_k. Both IDs must be published;
-     *  unpublished IDs & self-links answer @c malformed_k. Safe concurrently with
-     *  @c insert, @c search, readers & other manual wiring. */
+    /**
+     *  Appends one directed edge @p from → @p to - purely structural: no metric, no selector, no
+     *  pruning, and the row grows past any prior extent when needed. Idempotent: an existing edge
+     *  answers @c present_k. Both IDs must be published; unpublished IDs & self-links answer
+     *  @c malformed_k. Safe concurrently with @c insert, @c search, readers & other manual wiring.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k Either ID is unpublished, or the edge is a self-link.
+     *  - @c overflow_k The grown row's capacity wraps.
+     */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
     expected<membership_t> link(node_id_t from, node_id_t to) noexcept {
         static_assert(synchronization_ != synchronization_t::immutable_k,
@@ -1032,9 +1074,15 @@ struct ram_index {
         return {membership, status};
     }
 
-    /** Removes one directed edge @p from → @p to; @c malformed_k when the edge or
+    /**
+     *  Removes one directed edge @p from → @p to; @c malformed_k when the edge or
      *  either ID is unpublished or absent. The surviving row's order is unspecified.
-     *  Safe concurrently with @c insert, @c search, readers & other manual wiring. */
+     *  Safe concurrently with @c insert, @c search, readers & other manual wiring.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k Either ID is unpublished.
+     *  - @c malformed_k The row holds no edge to @p to.
+     */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
     status_t unlink(node_id_t from, node_id_t to) noexcept {
         static_assert(synchronization_ != synchronization_t::immutable_k,
@@ -1288,9 +1336,14 @@ struct ram_index {
             return !contains_(reaches_back_k, node_id) || release_(back_linked_twice_k, node_id);
         }
 
-        /** The report: the nodes reached and reaching back, and the levels each direction took.
+        /**
+         *  The report: the nodes reached and reaching back, and the levels each direction took.
          *  @c internal_k when a level is still pending, since the count would then be a lower
-         *  bound. */
+         *  bound.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The audit is bound to no index.
+         */
         expected<health_result_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
             if (expanded_in_level_ || reached_back_in_level_) return {{}, status_t::internal_k};
@@ -1385,9 +1438,10 @@ struct ram_index {
      *
      *  The plan holds the shared side and the claims closed from planning to its death, so batches
      *  answer @c contended_k and stop-the-world verbs refuse meanwhile, while searches run
-     *  throughout. Round @c r walks every node across the neighboring group of `2^r` parts, which
-     *  @ref part_across names, so @c k parts merge in `bit_width(k - 1)` rounds and two parts in
-     *  one. The first round starts at the planned range's first node, every later one at node zero.
+     *  throughout. Round @c r walks every node across the neighboring group of <tt>2^r</tt> parts,
+     *  which @ref part_across names, so @c k parts merge in <tt>bit_width(k - 1)</tt> rounds and
+     *  two parts in one. The first round starts at the planned range's first node, every later one
+     *  at node zero.
      *
      *  Steps of the current phase are disjoint ID ranges, so any number of threads may @ref run
      *  them at once, each with its own metric and a context @ref reserve_traversal sized for the
@@ -1465,6 +1519,9 @@ struct ram_index {
          *  node and wires what @p selector picks, a sweep step expands the audit, and a
          *  reconnection step links islands to the nodes the audit proved both ways; @p metric and
          *  @p context serve the walks alone.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is bound to no index.
          */
         template <typename metric_type_, typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
             requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
@@ -1541,7 +1598,13 @@ struct ram_index {
          *  counts. */
         bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
 
-        /** The pass so far: complete once @ref advance answered false, otherwise @c cancelled_k. */
+        /**
+         *  The pass so far: complete once @ref advance answered false, otherwise @c cancelled_k.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is bound to no index.
+         *  - @c cancelled_k The pass stopped before @ref advance answered false.
+         */
         expected<refine_result_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
             return {tally_, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
@@ -1998,10 +2061,15 @@ struct ram_index {
      *  in flight.
      *
      *  @param[in] nodes The ID range the first round re-selects.
-     *  @param[inout] context The planning thread's scratch, whose allocator places the plan.
+     *  @param[in,out] context The planning thread's scratch, whose allocator places the plan.
      *  @param[in] selector Carries the budget every row is reserved for; the steps take a selector
      *      of the same budget.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from the selector's budget".
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The selector's budget is zero.
+     *  - @c overflow_k A scratch capacity of @p context wraps when rounded.
+     *  - @c contended_k A batch is in flight, or another refine holds the claims closed.
      */
     template <typename selector_type_ = keep_diverse_t>
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
@@ -2014,7 +2082,7 @@ struct ram_index {
      *      this index, one donor after another, as a part of its own, then re-selects every node
      *      walking across the parts round by round, and heals.
      *
-     *  Every fallible step of every landing happens here, after the checks of @ref plan_refine:
+     *  Every fallible step of every landing happens here, after the checks of @c plan_refine:
      *  each donor's unique side taken, the records past the watermark covered, a key seat claimed
      *  per donor row, and every donor row reserved to the budget. A landing step swaps a donor
      *  row's value and neighbors in with every ID shifted, so nothing allocates, and the phase
@@ -2022,11 +2090,16 @@ struct ram_index {
      *  nulls its slot; at most one donor's rows are ever unpublished. Donors must share this
      *  index's allocator, and nothing may search them meanwhile.
      *
-     *  @param[inout] donors The indexes giving their rows up, each nulled once landed; the slots
+     *  @param[in,out] donors The indexes giving their rows up, each nulled once landed; the slots
      *      must outlive the plan.
-     *  @retval config_mismatch_k A null donor, this index itself, or a zero budget.
-     *  @retval contended_k A batch in flight on this index or on a donor, or another refine.
-     *  @retval overflow_k Rows past the reserved ceiling.
+     *  @param[in,out] context The traversal context the plan's walks draw their buffers from.
+     *  @param[in] selector Picks the neighbors each row keeps when the plan re-selects.
+     *  @param[in] config The refinement budget the plan runs under.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k A null donor, this index itself, or a zero budget.
+     *  - @c contended_k A batch in flight on this index or on a donor, or another refine.
+     *  - @c overflow_k Rows past the reserved ceiling.
      */
     template <typename selector_type_ = keep_diverse_t>
     expected<refine_plan_t> plan_absorb(std::span<ram_index*> donors, traversal_context_t& context,
@@ -2036,7 +2109,7 @@ struct ram_index {
     }
 
     /**
-     *  @brief Opens a split of this index into @p receivers - the inverse of @ref plan_absorb:
+     *  @brief Opens a split of this index into @p receivers - the inverse of @c plan_absorb:
      *      its plan's first phases move every row into one graph-local part per receiver, then
      *      refine every receiver in turn over the rows that lost a link, and heal.
      *
@@ -2055,11 +2128,16 @@ struct ram_index {
      *  allocator, the slots must outlive the plan, and nothing may search this index meanwhile.
      *
      *  @param[in] receivers The empty indexes taking the parts, at least two, all distinct.
+     *  @param[in,out] context The traversal context the plan's walks draw their buffers from.
+     *  @param[in] selector Picks the neighbors each row keeps when the plan re-selects.
+     *  @param[in] config The refinement budget the plan runs under.
      *  @param[in] seed Picks the parts' roots, so equal seeds over equal graphs split alike.
-     *  @retval config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
-     *      index itself, or a zero budget.
-     *  @retval contended_k A batch in flight on this index or on a receiver, or another refine.
-     *  @retval overflow_k Part slots past the node ID type, or a part past a receiver's ceiling.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
+     *    index itself, or a zero budget.
+     *  - @c contended_k A batch in flight on this index or on a receiver, or another refine.
+     *  - @c overflow_k Part slots past the node ID type, or a part past a receiver's ceiling.
      */
     template <typename selector_type_ = keep_diverse_t>
     expected<refine_plan_t> plan_split(std::span<ram_index*> receivers, traversal_context_t& context,
@@ -2073,10 +2151,15 @@ struct ram_index {
      *      strands - one @ref refine_plan_t drained on the calling thread.
      *
      *  @param[in] nodes The ID range to re-select; IDs at or past the watermark are skipped.
-     *  @param[inout] metric This thread's scoring instance.
-     *  @param[inout] context The calling thread's scratch & telemetry, which also places the plan.
+     *  @param[in,out] metric This thread's scoring instance.
+     *  @param[in,out] context The calling thread's scratch & telemetry, which also places the plan.
      *  @param[in] selector The link-selection heuristic and its budget.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from the selector's budget".
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The selector's budget is zero.
+     *  - @c overflow_k A scratch capacity of @p context wraps when rounded.
+     *  - @c contended_k A batch is in flight, or another refine holds the claims closed.
      */
     template <typename metric_type_, typename selector_type_ = keep_diverse_t>
         requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
@@ -2132,10 +2215,14 @@ struct ram_index {
      *  @c transparent_metric accepts other query forms.
      *
      *  @param[in] query The similarity target, alive for the whole call.
-     *  @param[inout] metric This thread's scoring instance.
-     *  @param[inout] context The calling thread's scratch & telemetry over any allocator; holds the
-     *      matches.
+     *  @param[in,out] metric This thread's scoring instance.
+     *  @param[in,out] context The calling thread's scratch & telemetry over any allocator; holds
+     *      the matches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *
+     *  @par Statuses:
+     *  - @c contended_k A certified walk meets a mutator or a batch yet to publish.
+     *  - @c overflow_k A scratch capacity of @p context wraps when rounded.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, //
               typename metric_type_, typename context_allocator_type_, typename query_type_ = value_t>
@@ -2151,12 +2238,16 @@ struct ram_index {
      *      entry point for verbs that reduce a walk to something other than its nearest matches.
      *
      *  @param[in] query The similarity target, alive for the whole call.
-     *  @param[inout] metric This thread's scoring instance.
-     *  @param[inout] fold The reader of every scored round - see @c basic::fold. A @c sated_k ends
+     *  @param[in,out] metric This thread's scoring instance.
+     *  @param[in,out] fold The reader of every scored round - see @c basic::fold. A @c sated_k ends
      *      the walk successfully, before that round reaches the candidates.
-     *  @param[inout] context The calling thread's scratch & telemetry over any allocator; holds the
-     *      matches.
+     *  @param[in,out] context The calling thread's scratch & telemetry over any allocator; holds
+     *      the matches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *
+     *  @par Statuses:
+     *  - @c contended_k A certified walk meets a mutator or a batch yet to publish.
+     *  - @c overflow_k A scratch capacity of @p context wraps when rounded.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, //
               typename metric_type_, typename fold_type_, typename context_allocator_type_,
@@ -2175,13 +2266,17 @@ struct ram_index {
      *      ends once the admitted ones fill the expansion or the graph runs out.
      *
      *  @param[in] query The similarity target, alive for the whole call.
-     *  @param[inout] metric This thread's scoring instance.
-     *  @param[inout] relation The engine's own filter over node IDs, or @c dummy_predicate_t.
-     *  @param[inout] predicate The caller's filter over node IDs, asked only about the contenders
+     *  @param[in,out] metric This thread's scoring instance.
+     *  @param[in,out] relation The engine's own filter over node IDs, or @c dummy_predicate_t.
+     *  @param[in,out] predicate The caller's filter over node IDs, asked only about the contenders
      *      @p relation kept: a quad at a time, or once per round when it aggregates.
-     *  @param[inout] context The calling thread's scratch & telemetry over any allocator; holds the
-     *      matches.
+     *  @param[in,out] context The calling thread's scratch & telemetry over any allocator; holds
+     *      the matches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *
+     *  @par Statuses:
+     *  - @c contended_k A certified walk meets a mutator or a batch yet to publish.
+     *  - @c overflow_k A scratch capacity of @p context wraps when rounded.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, //
               typename metric_type_, typename relation_type_, typename predicate_type_,
@@ -2211,10 +2306,10 @@ struct ram_index {
      *  about, which makes the scan the fallback for filters too selective for a walk to cross.
      *
      *  @param[in] query The similarity target, alive for the whole call.
-     *  @param[inout] metric This thread's scoring instance.
-     *  @param[inout] relation The engine's own filter over node IDs, or @c dummy_predicate_t.
-     *  @param[inout] predicate The caller's filter over node IDs, or @c dummy_predicate_t.
-     *  @param[inout] context The calling thread's scratch & telemetry; holds the matches.
+     *  @param[in,out] metric This thread's scoring instance.
+     *  @param[in,out] relation The engine's own filter over node IDs, or @c dummy_predicate_t.
+     *  @param[in,out] predicate The caller's filter over node IDs, or @c dummy_predicate_t.
+     *  @param[in,out] context The calling thread's scratch & telemetry; holds the matches.
      *  @param[in] wanted How many matches to keep.
      */
     template <typename metric_type_, typename relation_type_, typename predicate_type_,
@@ -2237,8 +2332,11 @@ struct ram_index {
      *      to @p fold: the exact sibling of the folding @c search, for verbs that reduce all rows
      *      to something other than the nearest few, such as containment.
      *
-     *  @param[inout] fold The reader of every scored round - see @c basic::fold. A @c sated_k ends
+     *  @param[in] query The query every row is scored against.
+     *  @param[in,out] metric The metric the rows are scored with.
+     *  @param[in,out] fold The reader of every scored round - see @c basic::fold. A @c sated_k ends
      *      the scan successfully.
+     *  @param[in,out] context The traversal context the scan's buffers come from.
      */
     template <typename metric_type_, typename fold_type_, typename context_allocator_type_,
               typename query_type_ = value_t>
@@ -2282,17 +2380,26 @@ struct ram_index {
      *  values allocate on their own are left out, since counting them would walk every record. */
     std::size_t memory_usage() const noexcept { return nodes_.memory_usage() + key_map_.memory_usage(); }
 
-    /** The key stored under @p node_id - the authoritative direction, immutable
-     *  after publication. One acquire load of the watermark gates the ID, so any input
-     *  is safe any time; an unpublished ID answers @c malformed_k. */
+    /**
+     *  The key stored under @p node_id - the authoritative direction, immutable after publication.
+     *  One acquire load of the watermark gates the ID, so any input is safe any time.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k @p node_id is unpublished.
+     */
     expected<key_t> key_of(node_id_t node_id) const noexcept {
         if (static_cast<std::size_t>(node_id) >= size()) return {key_t {}, status_t::malformed_k};
         return {nodes_[node_id].key, status_t::success_k};
     }
 
-    /** The payload stored under @p node_id - never relocated, valid until teardown,
+    /**
+     *  The payload stored under @p node_id - never relocated, valid until teardown,
      *  immutable after publication. The same watermark gate as @c key_of, so any input
-     *  is safe any time; an unpublished ID answers @c malformed_k. */
+     *  is safe any time.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k @p node_id is unpublished.
+     */
     expected<value_t const&> value_of(node_id_t node_id) const noexcept {
         if (static_cast<std::size_t>(node_id) >= size()) return {nullptr, status_t::malformed_k};
         return {&nodes_[node_id].value, status_t::success_k};
@@ -2304,9 +2411,14 @@ struct ram_index {
      *  row another insert wired ahead of its turn. */
     value_t const& published_value_of(node_id_t node_id) const noexcept { return nodes_[node_id].value; }
 
-    /** The out-degree of @p node_id: the same watermark gate as @c key_of, then the
+    /**
+     *  The out-degree of @p node_id: the same watermark gate as @c key_of, then the
      *  row lock - every post-publication row edit holds it, so the read is one
-     *  consistent instant even while back-linking appends. */
+     *  consistent instant even while back-linking appends.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k @p node_id is unpublished.
+     */
     expected<std::size_t> degree_of(node_id_t node_id) noexcept {
         if (static_cast<std::size_t>(node_id) >= size()) return {0, status_t::malformed_k};
         node_t& node = nodes_[node_id];
@@ -2316,9 +2428,13 @@ struct ram_index {
         return {degree, status_t::success_k};
     }
 
-    /** One published node under @p key: @c malformed_k when absent. Duplicates surface in an
-     *  unspecified order - use @c find_each to see them all. Wait-free, concurrent
-     *  with everything. */
+    /**
+     *  One published node under @p key. Duplicates surface in an unspecified order - use
+     *  @c find_each to see them all. Wait-free, concurrent with everything.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k No published node is stored under @p key.
+     */
     expected<node_id_t> find(key_t const& key) const noexcept { return key_map_.find(key); }
 
     /** Invokes @p callback with the ID of every published node under @p key -
@@ -2373,7 +2489,7 @@ struct ram_index {
      *  Takes the shared mutex's unique side for the whole walk - live mutators answer
      *  @c contended_k at entry, and none can start until the report returns.
      *
-     *  @param[inout] context The calling thread's scratch over any allocator; its visited set and
+     *  @param[in,out] context The calling thread's scratch over any allocator; its visited set and
      *      staged IDs grow to the full graph size for the duration of the walk. */
     template <typename context_allocator_type_>
     graph_health_t health(traversal_context_over<context_allocator_type_>& context) noexcept {
@@ -2494,7 +2610,13 @@ struct ram_index {
 
         /** Copies the node range's keys, neighbor IDs & encoded values into the columns -
          *  disjoint slices, so any number of caller threads run their steps concurrently;
-         *  every slice starts where the plan's prefix sums say. */
+         *  every slice starts where the plan's prefix sums say. A refusal of @p codec passes
+         *  through.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already spent.
+         *  - @c config_mismatch_k @p node_range falls outside the plan's rows.
+         */
         template <typename value_codec_type_>
             requires value_codec<value_codec_type_, value_t>
         status_t save(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
@@ -2526,7 +2648,12 @@ struct ram_index {
         /** Pronounces the columns complete & releases the hold: @c config_mismatch_k
          *  unless the steps' sizes sum to the row count - overlapping steps that still
          *  sum right are the caller's own lie. A success spends the plan, so a second call
-         *  answers @c uninitialized_k instead of unlocking a hold it no longer owns. */
+         *  answers @c uninitialized_k instead of unlocking a hold it no longer owns.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already spent.
+         *  - @c config_mismatch_k The steps covered other than every row.
+         */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != columns.keys.size())
@@ -2556,7 +2683,15 @@ struct ram_index {
      *  on its own hold, by construction.
      *
      *  A column shorter than its count answers @c overflow_k and a longer one
-     *  @c config_mismatch_k, so the key column's length always names the row count. */
+     *  @c config_mismatch_k, so the key column's length always names the row count.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A mutator or an open plan holds the shared mutex, or a dispensed batch has
+     *    yet to publish.
+     *  - @c overflow_k The key or a prefix-sum column is shorter than its count.
+     *  - @c config_mismatch_k The key or a prefix-sum column is longer than its count.
+     *  - @c overflow_k The neighbor IDs or the value bytes are shorter than the sums need.
+     */
     template <typename value_codec_type_>
         requires value_codec<value_codec_type_, value_t>
     expected<save_plan_t> plan_save(columns_t columns, value_codec_type_ const& codec) noexcept {
@@ -2595,6 +2730,10 @@ struct ram_index {
      *      side for the tally; live mutators and open plans answer @c contended_k at entry.
      *
      *  @param[in] codec Sizes each stored value's encoded form.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A mutator or an open plan holds the shared mutex, or a dispensed batch has
+     *    yet to publish.
      */
     template <typename value_codec_type_>
         requires value_codec<value_codec_type_, value_t>
@@ -2620,7 +2759,14 @@ struct ram_index {
      *  running throughout.
      *
      *  @param[out] columns Caller-placed destinations sized from @ref columns_extents.
-     *  @param[in] codec Encodes each stored value into its slice. */
+     *  @param[in] codec Encodes each stored value into its slice; its refusal passes through.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A mutator or an open plan holds the shared mutex, or a dispensed batch has
+     *    yet to publish.
+     *  - @c overflow_k A column is shorter than its count or than the sums need.
+     *  - @c config_mismatch_k The key or a prefix-sum column is longer than its count.
+     */
     template <typename value_codec_type_>
         requires value_codec<value_codec_type_, value_t>
     status_t save(columns_t columns, value_codec_type_ const& codec) noexcept {
@@ -2631,9 +2777,9 @@ struct ram_index {
         return plan.finish();
     }
 
-    /** One step-parallel load in flight - the mirror of @ref save_plan_t: the
-     *  vetted columns, the covered-node tally, and the shared mutex's unique hold,
-     *  released when the plan dies or @c finish publishes the loaded graph. */
+    /** One step-parallel load in flight - the mirror of @c save_plan_t: the vetted columns, the
+     *  covered-node tally, and the shared mutex's unique hold, released when the plan dies or
+     *  @c finish publishes the loaded graph. */
     struct [[nodiscard]] load_plan_t {
 
         /** The vetted columns being decoded. */
@@ -2659,7 +2805,13 @@ struct ram_index {
 
         /** Decodes the node range's keys, neighbor rows & values into its
          *  pre-constructed records and registers the keys - the multimap inserts are
-         *  concurrency-safe, so any number of caller threads run their steps. */
+         *  concurrency-safe, so any number of caller threads run their steps. A refusal of
+         *  @p codec passes through.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already published.
+         *  - @c config_mismatch_k @p node_range falls outside the plan's rows.
+         */
         template <typename value_codec_type_>
             requires value_codec<value_codec_type_, value_t>
         status_t load(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
@@ -2701,7 +2853,12 @@ struct ram_index {
 
         /** Publishes the loaded graph in the tier-wide order - claims, identity,
          *  watermark last - and releases the hold: @c config_mismatch_k unless the
-         *  steps' sizes sum to the row count. */
+         *  steps' sizes sum to the row count.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already published.
+         *  - @c config_mismatch_k The steps covered other than every row.
+         */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
@@ -2740,7 +2897,16 @@ struct ram_index {
      *  that needs memory; nothing publishes until its @c finish.
      *
      *  @param[in] columns The five columns a prior @c save filled; the key column's length
-     *      is the row count. */
+     *      is the row count.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A mutator or an open plan holds the shared mutex.
+     *  - @c config_mismatch_k The index already publishes rows.
+     *  - @c malformed_k A prefix-sum column is not one longer than the keys, does not rise from
+     *    zero to its element column's length, or a neighbor ID names no row.
+     *  - @c overflow_k The rows pass @c max_node_count_k or the key multimap's seats, or a row's
+     *    capacity wraps.
+     */
     expected<load_plan_t> plan_load(columns_view_t columns) noexcept {
         // The gate excludes mutators & flips certified probes to refusal; the exclusivity
         // contract against readers stays the caller's - key lookups race the map rebuild.
@@ -2771,7 +2937,16 @@ struct ram_index {
      *  The key map is wiped at planning, so a failed attempt may be retried with corrected columns.
      *
      *  @param[in] columns The five columns a prior @c save filled.
-     *  @param[in] codec Decodes each value slice into its record. */
+     *  @param[in] codec Decodes each value slice into its record; its refusal passes through.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A mutator or an open plan holds the shared mutex.
+     *  - @c config_mismatch_k The index already publishes rows.
+     *  - @c malformed_k A prefix-sum column is not one longer than the keys, does not rise from
+     *    zero to its element column's length, or a neighbor ID names no row.
+     *  - @c overflow_k The rows pass @c max_node_count_k or the key multimap's seats, or a row's
+     *    capacity wraps.
+     */
     template <typename value_codec_type_>
         requires value_codec<value_codec_type_, value_t>
     status_t load(columns_view_t columns, value_codec_type_ const& codec) noexcept {
@@ -2803,7 +2978,7 @@ struct ram_index {
 
     /** Forgets every record below @p visible, every key and every counter: what @c clear does under
      *  the unique side, and what a landed donor becomes under its plan's. Open claims restart from
-     *  zero, while closed ones stay closed, reopening there with @ref reopen_. */
+     *  zero, while closed ones stay closed, reopening there with @c reopen_. */
     void forget_(node_id_t visible) noexcept {
         for (std::size_t node = 0; node != static_cast<std::size_t>(visible); ++node) {
             node_t& record = nodes_[node];
@@ -2827,7 +3002,7 @@ struct ram_index {
     void retire_() noexcept { atomic_ref<node_id_t>(last_visible_id_).store(0, std::memory_order_release); }
 
     /** Closes the claims at the watermark: one compare-exchange that succeeds only while every
-     *  claimed ID is published, after which every batch refuses until @ref reopen_. */
+     *  claimed ID is published, after which every batch refuses until @c reopen_. */
     status_t close_() noexcept {
         std::size_t visible = size();
         return atomic_ref<std::size_t>(claimed_count_)
@@ -2852,7 +3027,7 @@ struct ram_index {
      *      seats and the rows, so a plural claims on every shard before it dispenses on any.
      *
      *  Dying undispensed gives the rows back, still under the hold, and strands the seats, which
-     *  only leaves their chunks emptier; @ref dispense_ turns it into the batch's plan.
+     *  only leaves their chunks emptier; @c dispense_ turns it into the batch's plan.
      */
     struct [[nodiscard]] capacity_claim_t {
         capacity_claim_t() noexcept = default;
@@ -2884,7 +3059,7 @@ struct ram_index {
         shared_lock_t hold_;
     };
 
-    /** The fallible half of @ref plan_insert: joins the shared side, claims the key seats, then
+    /** The fallible half of @c plan_insert: joins the shared side, claims the key seats, then
      *  claims and covers @p count rows, dispensing none; it refuses as @ref plan_insert does. */
     expected<capacity_claim_t> claim_(std::size_t count) noexcept {
         // The gate opens before the claim, so a batch parked behind a unique holder never
@@ -3665,7 +3840,7 @@ struct ram_index {
                                                      context)) {}
     }
 
-    /** One reverse link of @ref back_link_ into @p neighbor_id 's row; @c false when the row raced
+    /** One reverse link of @c back_link_ into @p neighbor_id 's row; @c false when the row raced
      *  the re-selection and must be tried again from the lock. */
     template <synchronization_t synchronization_, typename metric_type_, typename selector_type_,
               typename context_type_>
@@ -3822,7 +3997,7 @@ struct ram_index {
     /** The visibility watermark: every ID strictly below it is published. */
     alignas(default_alignment_k) node_id_t last_visible_id_ {0};
 
-    /** What @ref connectivity answers, only ever raised through @ref widen_; beside the watermark,
+    /** What @ref connectivity answers, only ever raised through @c widen_; beside the watermark,
      *  since every search reads both and this one stops moving once the graph's budget is met. */
     std::size_t widest_row_ {0};
 
@@ -3894,9 +4069,12 @@ struct ram_cursor {
     value_t const& value() const noexcept { return index_.nodes_[current_].value; }
     std::span<node_id_t const> neighbors() const noexcept { return {staged_row_.begin(), staged_row_.end()}; }
 
-    /** Positions on @p node & stages its row: @c malformed_k at or past the
-     *  snapshot, @c bad_alloc_k when the staging buffer refused to grow - the cursor
-     *  stays where it was on either refusal. */
+    /**
+     *  Positions on @p node & stages its row, the cursor staying where it was on either refusal.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k @p node is at or past the snapshot.
+     */
     status_t seek(node_id_t node) noexcept {
         if (static_cast<std::size_t>(node) >= static_cast<std::size_t>(visible_count_)) return status_t::malformed_k;
         typename index_t::node_t& record = index_.nodes_[node];
@@ -3933,8 +4111,13 @@ struct ram_cursor {
     /** Deleted: it would copy the staged row - an allocation in disguise. */
     ram_cursor operator++(int) = delete;
 
-    /** Hops to the staged row's @p position -th neighbor: @c malformed_k past the
-     *  staged degree or when the neighbor sits at or past the snapshot. */
+    /**
+     *  Hops to the staged row's @p position -th neighbor.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k @p position is past the staged degree.
+     *  - @c malformed_k The neighbor sits at or past the snapshot.
+     */
     status_t follow(std::size_t position) noexcept {
         if (position >= staged_row_.size()) return status_t::malformed_k;
         return seek(staged_row_[position]);

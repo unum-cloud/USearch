@@ -19,6 +19,10 @@ then the UTF-8 bytes they span.
 Then serve the repository and open `explorer/index.html` with
 `?modality=dense&index=../data/wikipedia-simple/index.safegraphs&titles=../data/wikipedia-simple/titles.tape`, or
 `?dev=shapes&source=../data/usearch-molecules-explorer/conformers.bin&titles=../data/usearch-molecules-explorer/titles.tape`.
+
+File: explorer/prepare.py
+Author: Ash Vardanian
+Date: October 17, 2026
 """
 
 import argparse

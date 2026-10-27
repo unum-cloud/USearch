@@ -10,6 +10,10 @@
 //! directory it lands in; all of them answer the same verbs, and the engine and the stand-in even
 //! carry the same library name, so choosing between them is a search path rather than a different
 //! link line.
+//!
+//! File: build.rs
+//! Author: Ash Vardanian
+//! Date: April 29, 2023
 
 use std::env;
 use std::error::Error;
@@ -17,14 +21,7 @@ use std::path::{Path, PathBuf};
 
 /// Every CMake option this crate sets, so an implementation is the subset it switches on and
 /// nothing is left to whatever CMake would otherwise detect on the host.
-const KNOWN_OPTIONS: &[&str] = &[
-    "USEARCH_BUILD_LIB_C",
-    "USEARCH_BUILD_LIB_C_STUB",
-    "USEARCH_BUILD_CUDA",
-    "USEARCH_BUILD_TEST",
-    "USEARCH_BUILD_BENCH",
-    "USEARCH_BUILD_LIB_WOLFRAM",
-];
+const KNOWN_OPTIONS: &[&str] = &["USEARCH_BUILD_STUB", "USEARCH_BUILD_CUDA"];
 
 /// One implementation of the C interface, and what CMake must be told to produce it.
 #[derive(Clone, Copy)]
@@ -46,7 +43,7 @@ struct Implementation {
 /// The engine, linked as a self-contained archive - what a caller gets by naming nothing.
 const ENGINE: Implementation = Implementation {
     feature: "static",
-    options: &["USEARCH_BUILD_LIB_C"],
+    options: &[],
     target: "usearch_static",
     directory: "",
     library: "usearch_static",
@@ -56,14 +53,14 @@ const ENGINE: Implementation = Implementation {
 /// The engine with its CUDA backends compiled in.
 const ENGINE_CUDA: Implementation = Implementation {
     feature: "cuda",
-    options: &["USEARCH_BUILD_LIB_C", "USEARCH_BUILD_CUDA"],
+    options: &["USEARCH_BUILD_CUDA"],
     ..ENGINE
 };
 
 /// The brute-force stand-in, which answers the same verbs over the standard library alone.
 const STUB: Implementation = Implementation {
     feature: "stub",
-    options: &["USEARCH_BUILD_LIB_C_STUB"],
+    options: &["USEARCH_BUILD_STUB"],
     target: "usearch_static_stub",
     directory: "stub",
     library: "usearch_static",
@@ -118,6 +115,9 @@ fn watch(directory: &Path) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    if env::var_os("DOCS_RS").is_some() {
+        return Ok(());
+    }
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let chosen = selected()?;
 

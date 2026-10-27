@@ -441,6 +441,9 @@ class levenshtein_metric {
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at least the
      *      index's round capacity, @c max(fan_out × connectivity, connectivity + 1), or rounds saturate rather
      *      than fail. A round is bounded to @c u32_t slots by design.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p staging_limit is zero or past @c u32_t slots.
      */
     status_t init(std::size_t staging_limit) noexcept {
         if (!staging_limit || staging_limit > (std::numeric_limits<u32_t>::max)()) return status_t::config_mismatch_k;
@@ -569,8 +572,8 @@ constexpr u64_t overlap_distance(u64_t longer, u64_t matches) noexcept {
  *  the staging and the match counts. The staging and the counts are sized once by @c init, and the
  *  engine's tree and chains bump in the arena, so a round allocates nothing once a query and a
  *  round as long have been scored. A distance is the windows the shorter side misses of the longer,
- *  in fixed point over @ref overlap_resolution_k: zero where the windows coincide at every width,
- *  and @ref overlap_resolution_k where they share none.
+ *  in fixed point over @c overlap_resolution_k: zero where the windows coincide at every width, and
+ *  @ref overlap_resolution_k where they share none.
  *
  *  @tparam kit_type_ The engine of one ISA backend, as @c overlap_ladder picks it.
  *  @tparam allocator_type_ places every buffer, one set per metric.
@@ -630,6 +633,10 @@ class overlap_metric {
      *      than fail.
      *  @param[in] window_widths Window widths in bytes, all sharing one B-tree, borrowed until the
      *      metric dies; a width past a text contributes nothing.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p staging_limit is zero, @p window_widths is empty, or a width is
+     *    zero or past @c u32_t bytes.
      */
     status_t init(std::size_t staging_limit, std::span<std::size_t const> window_widths) noexcept {
         if (!staging_limit || window_widths.empty()) return status_t::config_mismatch_k;
@@ -808,9 +815,15 @@ struct needleman_wunsch_costs_t {
     /** Cost of the row's code aligned to the column's, at most 15. */
     u8_t substitutions[needleman_wunsch_classes_k][needleman_wunsch_classes_k];
 
-    /** Folds @p similarities, a row-major square over byte codes whose classes end at the last code
-     *  scoring anything, and the @p gap cost; @c config_mismatch_k past 32 classes, for a negative
-     *  gap, or for a pair scoring above its mean self-score. */
+    /**
+     *  Folds @p similarities, a row-major square over byte codes whose classes end at the last code
+     *  scoring anything, and the @p gap cost.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p similarities is not the byte square, or @p gap is negative.
+     *  - @c config_mismatch_k No code scores anything, or the codes span past 32 classes.
+     *  - @c config_mismatch_k A pair scores above its mean self-score.
+     */
     static expected<needleman_wunsch_costs_t> fold(std::span<i8_t const> similarities, i8_t gap) noexcept {
         expected<needleman_wunsch_costs_t> folded {{}, status_t::config_mismatch_k};
         constexpr std::size_t side_k = needleman_wunsch_byte_alphabet_k;
@@ -1146,6 +1159,10 @@ class needleman_wunsch_metric {
      *      least the index's round capacity, @c max(fan_out × connectivity, connectivity + 1), or
      *      rounds saturate rather than fail. A round is bounded to @c u32_t slots by design.
      *  @param[in] costs A folded table, borrowed until the metric dies.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p staging_limit is zero or past @c u32_t slots, or @p costs is not
+     *    folded.
      */
     status_t init(std::size_t staging_limit, needleman_wunsch_costs_t const& costs) noexcept {
         if (!staging_limit || staging_limit > (std::numeric_limits<u32_t>::max)() || !costs.code_bits)

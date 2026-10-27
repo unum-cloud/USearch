@@ -1,29 +1,27 @@
 /**
+ *  @file verification/dense_ram_index_watermark/closing.pml
+ *  @author Ash Vardanian
+ *  @date October 15, 2026
  *  @brief The dispenser closed around a load or a refinement beside an inserter and a searcher:
  *      every dispense refuses while it is closed, so no insert reuses a loaded ID or loses a
  *      back-link to a rewrite.
  *
  *  `ram_indexes` closes every shard's `next_dispensed_id_` before an absorb lands its rows or a
  *  refine rewrites them, and reopens it at the end. In one run the index starts empty and the
- *  closer loads one row: it closes the dispenser, appends at the watermark, lands the row, runs
- *  `finish`, whose compare-exchange leaves a closed dispenser closed while the watermark moves past
- *  the row, and reopens the dispenser at the watermark. In the other the index rests at one
- *  published row and the closer refines it: it closes the dispenser, stages row 0 as `refine_one_`
- *  does before its walk, rewrites it under its lock from the staged copy, and reopens. Beside
- *  either, the inserter dispenses one ID or is refused, wires its row, back-links into row 0 once
- *  it saw it published, and takes its turn; a searcher reads every row below the watermark it
- *  acquired.
+ *  closer loads one row. In the other the index rests at one published row and the closer refines
+ *  it. Beside either, the inserter dispenses one ID or is refused, wires its row, back-links into
+ *  row 0 once it saw it published, and takes its turn.
  *
- *  No ID is dispensed twice, every row below the watermark reads published, and a back-link the
- *  inserter appended survives the refinement.
+ *  - No ID is dispensed twice.
+ *  - Every row below the watermark reads published.
+ *  - A back-link the inserter appended survives the refinement.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc dispenser_closes=false: a load closes the dispenser; checking only at
- *      `plan_load` that the dispenser stands level with the watermark, it leaves the dispenser where
- *      it was until `finish`, and an insert arriving meanwhile dispenses the ID the load is landing
- *  @verify fail sc refine_closes=false: a refinement closes the dispenser; without it, an insert
- *      appends its back-link into row 0 between the refinement's staging and its rewrite, and the
- *      rewrite from the staged copy drops it, leaving the new row without that in-link
+ *  @verify fail sc dispenser_closes=false: an insert arriving meanwhile dispenses the ID the load is
+ *      landing
+ *  @verify fail sc refine_closes=false: without it, an insert appends its back-link into row 0
+ *      between the refinement's staging and its rewrite, and the rewrite from the staged copy drops
+ *      it, leaving the new row without that in-link
  */
 #define thread_count 3
 #define location_count 7
@@ -31,7 +29,7 @@
 #define named_rows false
 #define appended_rows false
 #define refined_rows false
-#include "protocol.pml"
+#include <dense_ram_index_watermark/protocol.pml>
 
 byte done; // the inserter and the closer, once finished
 

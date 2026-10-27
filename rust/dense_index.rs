@@ -10,6 +10,10 @@
 //! Every verb comes from [`DenseVerbs`], written once over the receiver: a [`DenseIndex`] blocks on
 //! the calling thread, `index.on(&executor)` blocks on an executor, and `index.deferred(&executor)`
 //! answers a [`Deferred`](crate::Deferred) from the same verbs given owned arguments.
+//!
+//! File: rust/dense_index.rs
+//! Author: Ash Vardanian
+//! Date: August 15, 2026
 
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types)]
@@ -503,11 +507,20 @@ extern "C" {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 #[non_exhaustive]
 pub enum DenseMetric {
+    /// Sum of elementwise products, unnormalized and scale-sensitive; the only kind the linear-algebra verbs
+    /// accept, since a product and a softmax both need logits rather than distances.
     Inner = 1,
+    /// Cosine distance in [0, 2], zero for identical directions and blind to magnitude, which is precomputed once
+    /// per row at insertion rather than per comparison.
     #[default]
     Angular = 2,
+    /// L2 distance, non-negative and zero only for identical rows - the scale-sensitive counterpart to angular,
+    /// where a doubled vector is far from its original rather than identical to it.
     Euclidean = 3,
+    /// Count of differing bits, so its range is the dimensionality and every bit weighs the same.
     Hamming = 4,
+    /// Differing bits over union bits in [0, 1], ignoring the zeros both rows share - the kind for sparse sets,
+    /// where Hamming would call two nearly-empty rows identical.
     Jaccard = 5,
 }
 

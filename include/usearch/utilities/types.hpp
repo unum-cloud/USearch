@@ -300,6 +300,14 @@ struct dummy_fold_t {
  *
  *  The set describes the project's failures, not this tier's exits: several enumerators name
  *  conditions only a binding or a higher layer can see, and are never returned from here.
+ *
+ *  The failures fall into five categories. Resources: @c bad_alloc_k, @c device_error_k and
+ *  @c io_k. Input: @c shape_mismatch_k, @c unsupported_layout_k, @c unknown_kind_k,
+ *  @c malformed_k and @c invalid_argument_k. State: @c uninitialized_k, @c config_mismatch_k,
+ *  @c read_only_k, @c overflow_k, @c contended_k and @c unsupported_k. Interruptions:
+ *  @c cancelled_k and @c deferred_k. Defects: @c internal_k. Any verb that allocates, binds a
+ *  device or touches a file may also return a Resources status; any verb taking a progress
+ *  callback may return @c cancelled_k. A verb's own block lists only what its contract adds.
  */
 enum class [[nodiscard]] status_t : int {
 
@@ -367,7 +375,12 @@ constexpr bool succeeded(status_t status) noexcept { return status == status_t::
 /** Whether @p status reports failure. */
 constexpr bool failed(status_t status) noexcept { return status != status_t::success_k; }
 
-/** Copies @p source over @p destination; the sizes must agree. */
+/**
+ *  Copies @p source over @p destination; the sizes must agree.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k The sizes differ.
+ */
 inline status_t copy_bytes(bytes_span_t destination, bytes_view_t source) noexcept {
     if (destination.size() != source.size()) return status_t::config_mismatch_k;
     if (!source.empty()) std::memcpy(destination.data(), source.data(), source.size());
@@ -843,7 +856,7 @@ constexpr std::uint64_t reversed_bytes(std::uint64_t value) noexcept {
 
 /** @p value with its bytes in little-endian order, and the same call to read one back - the
  *  conversion is its own inverse, so one name serves both directions. A no-op where the host is
- *  already little-endian, and a @ref reversed_bytes where it is not. */
+ *  already little-endian, and a @ref unum::usearch::utilities::reversed_bytes where it is not. */
 template <typename value_type_>
 constexpr value_type_ little_endian(value_type_ value) noexcept {
     static_assert(std::is_unsigned_v<value_type_>, "Byte order is only defined for unsigned integers");
@@ -851,7 +864,7 @@ constexpr value_type_ little_endian(value_type_ value) noexcept {
     else return reversed_bytes(value);
 }
 
-/** The smaller of @p first & @p second - @c std::min without the <algorithm> tax,
+/** The smaller of @p first & @p second - @c std::min without the algorithm header's tax,
  *  named to also dodge the @c min macro of Windows headers. */
 template <typename value_type_>
 constexpr value_type_ min_of(value_type_ first, value_type_ second) noexcept {
@@ -1001,8 +1014,8 @@ constexpr size_type_ heal_spread(size_type_ connectivity) noexcept {
 }
 
 /** The rows that @p node_id walks across first in round @p round of merging @p parts parts, whose
- *  ascending @p part_bases start below @p rows: the neighboring group of `2^round` parts, or none
- *  when no group neighbors its own. */
+ *  ascending @p part_bases start below @p rows: the neighboring group of <tt>2^round</tt> parts,
+ *  or none when no group neighbors its own. */
 template <typename node_id_type_>
 constexpr iota_view<node_id_type_> part_across(node_id_type_ const* part_bases, std::size_t parts, std::size_t round,
                                                node_id_type_ rows, node_id_type_ node_id) noexcept {
@@ -1020,8 +1033,8 @@ inline constexpr std::size_t tile_span_k = 16;
 
 /**
  *  @brief The first position in the @p values, ascending under @p comparator, not ordered before
- *      @p value - @c std::lower_bound re-spelled in ten lines, so headers don't drag in
- *      @c <algorithm>, one of the heaviest includes on the compile-health charts.
+ *      @p value - @c std::lower_bound re-spelled in ten lines, so headers don't drag in the
+ *      algorithm header, one of the heaviest includes on the compile-health charts.
  *  @see https://artificial-mind.net/projects/compile-health/
  */
 template <typename value_type_, typename comparator_type_ = std::less<void>>
@@ -1068,10 +1081,10 @@ constexpr auto to_span(vector_type_ const& vector) noexcept {
 }
 
 /**
- *  @brief The writable sibling of @ref to_span, for a run the caller owns and fills; named
- *      apart rather than overloaded, since an overload would silently hand a mutable span to
- *      every existing caller holding a non-const run.
- *  @see @c std::as_bytes and @c std::as_writable_bytes, which separate the same pair.
+ *  @brief The writable sibling of @ref unum::usearch::utilities::to_span, for a run the caller owns
+ *      and fills; named apart rather than overloaded, since an overload would silently hand a
+ *      mutable span to every existing caller holding a non-const run.
+ *  @sa @c std::as_bytes and @c std::as_writable_bytes, which separate the same pair.
  */
 template <typename vector_type_>
     requires requires(vector_type_& vector) {
@@ -1083,7 +1096,7 @@ constexpr auto to_writable_span(vector_type_& vector) noexcept {
     return std::span<value_t> {vector.data(), vector.size()};
 }
 
-/** The character sibling of @ref to_span: any contiguous run of @c char as a view. */
+/** The character sibling of @c to_span: any contiguous run of @c char as a view. */
 template <typename characters_type_>
     requires requires(characters_type_ const& characters) {
         { characters.data() } -> std::convertible_to<char const*>;
@@ -1142,8 +1155,8 @@ concept index_family = index_plan<typename index_type_::save_plan_t> && index_pl
  *  @param[in] results One index's search results, ascending by distance.
  *  @param[in] keys_of_ids Any ID-to-key mapping with @c operator[] - a flat array, a raw
  *      pointer, or a custom type.
- *  @param[inout] keys Keys of the ranking, already holding @p old_count hits from other indexes.
- *  @param[inout] distances Distances of the same ranking, parallel to @p keys.
+ *  @param[in,out] keys Keys of the ranking, already holding @p old_count hits from other indexes.
+ *  @param[in,out] distances Distances of the same ranking, parallel to @p keys.
  *  @param[in] old_count Hits already in the ranking before this merge.
  *  @return The merged hit count, never exceeding the capacity.
  */
@@ -1207,8 +1220,8 @@ struct cache_line_tags<dummy_cache_hints_t> {
  *      line at a time.
  *
  *  Engines build it from the raw hints @c src/ picks and the line bytes it reads once per machine.
- *  Over hints that emit nothing, @ref prefetches_k is false, so a walk skips the loads that only
- *  fed it.
+ *  Over hints that emit nothing, @c prefetches_k is false, so a walk skips the loads that only fed
+ *  it.
  */
 template <typename cache_hints_type_>
 struct object_prefetcher {
@@ -1301,7 +1314,7 @@ struct standard_atomic_ref {
     }
 
     /** Adds @p operand only if the sum stays at most @p limit, returning the value held before; the
-     *  caller learns the outcome from `observed + operand <= limit`. */
+     *  caller learns the outcome from <tt>observed + operand &lt;= limit</tt>. */
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
                                      std::memory_order order = std::memory_order_seq_cst) const noexcept {
         value_type_ observed = word_.load(std::memory_order_acquire);
@@ -1655,7 +1668,7 @@ enum class gpu_vendor_t : u32_t {
     apple_k,
 };
 
-/** The GPU families USearch ships tuned variants for, the device twin of @ref cpu_class_t: one
+/** The GPU families USearch ships tuned variants for, the device twin of @c cpu_class_t: one
  *  class per generation of kernel kits, each compiled for its own architecture alone. A class
  *  implies its vendor, and within a vendor an unknown newer device takes the newest class it
  *  satisfies. */
@@ -1803,7 +1816,7 @@ constexpr u64_t mix_bits(u64_t word) noexcept {
  *  successor on the ring, never the class's lowest ID. */
 constexpr u32_t ring_offset(u32_t candidate, u32_t query) noexcept { return golden_ratio_u32_k * (candidate - query); }
 
-/** The image of @p position under a bijection over `[0, count)` keyed by @p seed: two odd
+/** The image of @p position under a bijection over <tt>[0, count)</tt> keyed by @p seed: two odd
  *  multiplies around an xor-shift over the next power of two, its cycle walked until the image
  *  lands below @p count, so the first few positions name distinct rows in constant expected time,
  *  never a scan. Positions at or past @p count have no image. */
@@ -1981,8 +1994,14 @@ struct claim_word_t {
         return claimed == closed_k ? visible : claimed;
     }
 
-    /** Claims @p rows from @p visible: one compare-exchange that succeeds only on an open word
-     *  with no batch or load in flight, so its holder alone grows, launches and publishes them. */
+    /**
+     *  Claims @p rows from @p visible: one compare-exchange that succeeds only on an open word
+     *  with no batch or load in flight, so its holder alone grows, launches and publishes them.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rows pass @p max_rows.
+     *  - @c contended_k The word is closed, or a batch or load is in flight.
+     */
     expected<std::size_t> claim(std::size_t visible, std::size_t rows, std::size_t max_rows) noexcept {
         std::size_t first = visible;
         if (rows > max_rows - first) return {{}, status_t::overflow_k};
@@ -2000,8 +2019,12 @@ struct claim_word_t {
             .compare_exchange_strong(claimed, first, std::memory_order_release, std::memory_order_relaxed);
     }
 
-    /** Closes the word at @p visible, so every claim refuses until @ref reopen; refused while a
-     *  batch or load is in flight. */
+    /**
+     *  Closes the word at @p visible, so every claim refuses until @ref reopen.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A batch or load is in flight.
+     */
     status_t close(std::size_t visible) noexcept {
         return standard_atomic_ref<std::size_t>(claimed_rows)
                        .compare_exchange_strong(visible, closed_k, std::memory_order_acq_rel, std::memory_order_relaxed)
@@ -2119,8 +2142,9 @@ struct shared_mutex {
 
 #pragma endregion Gates
 
-/** Shards viewed as one, defined in `usearch/utilities/ram_shards.hpp`; declared here, so a shard
- *  type including nothing past this header can still befriend the set that closes its claims. */
+/** Shards viewed as one, defined in <tt>usearch/utilities/ram_shards.hpp</tt>; declared here, so a
+ *  shard type including nothing past this header can still befriend the set that closes its
+ *  claims. */
 template <typename index_type_, typename shard_keys_type_, typename key_type_, typename key_hash_type_,
           template <typename> class atomic_ref_template_, typename wait_type_>
 struct shard_set;

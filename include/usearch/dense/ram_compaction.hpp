@@ -38,19 +38,35 @@ namespace unum::usearch::dense {
  *  shards stay as idle slots on their placement for the target's next shard generation, and the
  *  source slots must outlive the plan.
  *
- *  @retval config_mismatch_k A null or repeated source, another metric or geometry.
- *  @retval contended_k A call or batch in flight on the target or a source, or another refine,
- *      absorb, split, compaction or load holding either.
- *  @retval unsupported_k A source shard past the capacity, which would have to be cut first.
+ *  @par Statuses:
+ *  - @c config_mismatch_k A null or repeated source, another metric or geometry.
+ *  - @c contended_k A call or batch in flight on the target or a source, or another refine,
+ *    absorb, split, compaction or load holding either.
+ *  - @c unsupported_k A source shard past the capacity, which would have to be cut first.
  */
 template <typename indexes_type_>
 expected<ram_compact_plan<indexes_type_>> plan_compact(std::span<indexes_type_* const> sources, indexes_type_& target,
                                                        typename indexes_type_::executor_t& executor,
                                                        compact_config_t const& config = {}) noexcept;
 
-/** The one-shot @ref plan_compact, run and finished over @p executor on contexts carved for the
- *  call; @p on_visited reports and cancels the re-selection alone, as in @c ram_compact_plan::run.
- *  */
+/**
+ *  The one-shot @ref unum::usearch::dense::plan_compact, run and finished over @p executor on
+ *  contexts carved for the call; @p on_visited reports and cancels the re-selection alone, as in
+ *  @c ram_compact_plan::run.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No source, no target shard, or @p executor holds no threads, pool or
+ *    arenas.
+ *  - @c config_mismatch_k A null or repeated source, another kernel or geometry, or a landing
+ *    step meeting rows outside its plan.
+ *  - @c contended_k A call or plan holds the target or a source, a source stopped emptying,
+ *    another call holds @p executor, or its pool runs another dispatch.
+ *  - @c unknown_kind_k An empty target reserving for the sources' geometry cannot finalize the
+ *    kernel.
+ *  - @c unsupported_k A source shard is past the capacity.
+ *  - @c overflow_k No shard takes a landing, a landing passes a shard's rows, key column or the
+ *    locator map, or a queue capacity wraps.
+ */
 template <typename indexes_type_, typename progress_type_ = dummy_progress_t>
 expected<compact_result_t> compact(std::span<indexes_type_* const> sources, indexes_type_& target,
                                    typename indexes_type_::executor_t& executor, compact_config_t const& config = {},
@@ -91,11 +107,21 @@ struct [[nodiscard]] ram_compact_plan {
      *
      *  A source failing to land stays pending and closed, with every later one, for the next call.
      *
-     *  @param[inout] executor The executor the plan was opened over.
-     *  @param[inout] traversals The caller's context of every executor thread, which the walks run
+     *  @param[in,out] executor The executor the plan was opened over.
+     *  @param[in,out] traversals The caller's context of every executor thread, which the walks run
      *      on; the call sizes them.
      *  @param[in] on_visited Fires per re-selected step with the nodes visited so far and the
      *      population; a @c cancel_k answer stops the drain where its steps ran.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan is bound to no target, or @p executor holds no pool or no
+     *    workers.
+     *  - @c config_mismatch_k @p traversals holds other than one context per thread, or a landing
+     *    step meets rows outside its plan.
+     *  - @c contended_k Another call holds @p executor, its pool runs another dispatch, or a
+     *    source stopped emptying under the landing.
+     *  - @c overflow_k A landing passes a shard's rows, its key column or the locator map, or a
+     *    queue capacity wraps when rounded.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t run(executor_t& executor, std::span<traversal_context_t> traversals,
@@ -107,8 +133,17 @@ struct [[nodiscard]] ram_compact_plan {
         return refining_.run(executor, traversals, on_visited);
     }
 
-    /** Stops any re-selection, heals on the caller's @p traversals, one per executor thread,
-     *  reopens the target and reports. A plan whose sources have not all landed heals nothing. */
+    /**
+     *  Stops any re-selection, heals on the caller's @p traversals, one per executor thread,
+     *  reopens the target and reports. A plan whose sources have not all landed heals nothing.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan is bound to no target, or @p executor holds no pool or no
+     *    workers.
+     *  - @c config_mismatch_k @p traversals holds other than one context per thread.
+     *  - @c contended_k Another call holds @p executor, or its pool runs another dispatch.
+     *  - @c overflow_k A queue capacity wraps when rounded.
+     */
     expected<result_t> finish(executor_t& executor, std::span<traversal_context_t> traversals) noexcept {
         result_t result;
         indexes_t* const target = refining_.owner_;

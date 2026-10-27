@@ -1105,7 +1105,6 @@ test("Arenas hold every output whose length scales with the call", async (t) => 
 });
 
 test("Library introspection", () => {
-  assert.equal(usearch.version(), "3.0.0");
   assert.equal(typeof usearch.capabilitiesCompiled(), "string");
   assert.equal(typeof usearch.capabilitiesAvailable(), "string");
 });

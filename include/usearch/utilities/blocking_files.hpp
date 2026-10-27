@@ -2,9 +2,9 @@
  *  @file include/usearch/utilities/blocking_files.hpp
  *  @author Ash Vardanian
  *  @date September 4, 2026
- *  @brief Files as bytes, two ways: @ref seekable_file_t addressed by offset with sliceable proxies
- *      over its contents, and @ref mapped_file_t addressed as memory - so a reader and a writer
- *      both speak @c subspan and @ref copy_bytes wherever the bytes sit.
+ *  @brief Files as bytes, two ways: @c seekable_file_t addressed by offset with sliceable proxies
+ *      over its contents, and @c mapped_file_t addressed as memory - so a reader and a writer
+ *      both speak @c subspan and @c copy_bytes wherever the bytes sit.
  *
  *  Every verb here blocks the calling thread, which is the whole difference from the NVMe
  *  engines: those queue their reads and return, where these park until the kernel answers.
@@ -13,9 +13,10 @@
  *
  *  The format this backs is memory-mappable by design, so reading is a mapping and every reader
  *  works on @c bytes_view_t. Writing has two shapes for one reason: a mapping dirties the page
- *  cache, which a terabyte checkpoint should not, so @ref file_span_t addresses a descriptor
- *  positionally and @ref copy_bytes puts the difference in an overload rather than at a call site.
- *  Slices carry their own absolute offset, which is what an aligned direct write will want.
+ *  cache, which a terabyte checkpoint should not, so @ref unum::usearch::utilities::file_span_t
+ *  addresses a descriptor positionally and @ref unum::usearch::utilities::copy_bytes puts the
+ *  difference in an overload rather than at a call site. Slices carry their own absolute offset,
+ *  which is what an aligned direct write will want.
  */
 #pragma once
 
@@ -55,20 +56,21 @@ namespace unum::usearch::utilities {
 
 #pragma region Descriptors
 
-/** How @ref seekable_file_t::open opens a file: reading an existing one, or creating a fresh one. */
+/** How @ref unum::usearch::utilities::seekable_file_t::open opens a file: reading an existing one,
+ *  or creating a fresh one. */
 enum class file_mode_t { read_k, write_k };
 
 /**
  *  @brief Where a part lives: the file, device node or SPDK namespace that holds it, and where its
  *      byte zero sits there. @ref parse_file_address reads it from any of these forms:
  *
- *  @code
+ *  @verbatim
  *  /data/sift.safegraphs                              a file at byte zero
  *  /dev/nvme1n1@64GiB                                 a device node from byte 64 GiB
  *  spdk://0000:5e:00.0@64GiB                          namespace 1 of a local PCIe controller
  *  spdk://0000:5e:00.0/2@64GiB                        namespace 2 of it
  *  trtype:PCIe traddr:0000:5e:00.0 ns:2 base:4096     an SPDK transport ID with its keys
- *  @endcode
+ *  @endverbatim
  *
  *  A base is a whole number of B, KiB, MiB, GiB or TiB, all binary, bytes when bare; a file whose
  *  name ends in such a suffix takes an explicit @c @0 after it.
@@ -117,8 +119,15 @@ inline bool parse_byte_count_(std::string_view text, u64_t& bytes) noexcept {
     return false;
 }
 
-/** Splits @p path into the parts of a @ref file_address_t, in any form it lists; refuses a path
- *  that names no location, a base in an unknown unit, and an unreadable namespace. */
+/**
+ *  Splits @p path into the parts of a @ref unum::usearch::utilities::file_address_t, in any form it
+ *  lists.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k The base is in an unknown unit or overflows.
+ *  - @c invalid_argument_k The namespace after an @c spdk:// controller is unreadable.
+ *  - @c invalid_argument_k The path names no location.
+ */
 inline expected<file_address_t> parse_file_address(std::string_view path) noexcept {
     file_address_t parsed;
     std::string_view location = path.substr(0, path.find_last_not_of(" \t") + 1);
@@ -186,9 +195,14 @@ struct seekable_file_t {
     /** Truthy exactly while a file is open. */
     explicit operator bool() const noexcept { return descriptor_ != closed_k; }
 
-    /** Opens @p path, a file or a device in any form @ref file_address_t lists, every offset
+    /**
+     *  Opens @p path, a file or a device in any form @ref file_address_t lists, every offset
      *  counting from its base; the NUL terminator the OS demands is one transient allocation
-     *  through @p allocator. A write past byte zero opens an existing medium. */
+     *  through @p allocator. A write past byte zero opens an existing medium.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k The path does not parse.
+     */
     template <typename allocator_type_ = std::allocator<byte_t>>
     static expected<seekable_file_t> open(std::string_view path, file_mode_t mode,
                                           allocator_type_ allocator = {}) noexcept {
@@ -209,14 +223,24 @@ struct seekable_file_t {
         return {std::move(file), opened};
     }
 
-    /** Sets the file's length to @p bytes past its base, so positional writes land in a pre-sized
-     *  file; a device keeps its size and answers @c overflow_k when the bytes do not fit. */
+    /**
+     *  Sets the file's length to @p bytes past its base, so positional writes land in a pre-sized
+     *  file; a device keeps its size and answers @c overflow_k when the bytes do not fit.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k A device ends before its base plus @p bytes.
+     */
     status_t truncate(std::size_t bytes) noexcept;
 
     /** Writes every byte of @p source at @p offset, looping over short writes. */
     status_t write_at(std::size_t offset, bytes_view_t source) noexcept;
 
-    /** Reads exactly @p destination.size() bytes at @p offset; a short read answers @c io_k. */
+    /**
+     *  Reads exactly @p destination.size() bytes at @p offset; a short read answers @c io_k.
+     *
+     *  @par Statuses:
+     *  - @c io_k The read reaches the end of the file first.
+     */
     status_t read_at(std::size_t offset, bytes_span_t destination) const noexcept;
 
     /** Byte length of the file or the device past its base. */
@@ -423,7 +447,7 @@ struct shared_library_t {
 #pragma region Slices and Mappings
 
 /** A read-only run of a file's bytes: the descriptor and an absolute byte range, sliced
- *  like a span and read through @ref copy_bytes. */
+ *  like a span and read through @ref unum::usearch::utilities::copy_bytes. */
 struct file_view_t {
 
     /** The file the range lives in; null for an empty slice. */
@@ -445,7 +469,8 @@ struct file_view_t {
     }
 };
 
-/** The writable twin of @ref file_view_t, written through @ref copy_bytes. */
+/** The writable twin of @ref file_view_t, written through
+ *  @ref unum::usearch::utilities::copy_bytes. */
 struct file_span_t {
 
     /** The file the range lives in; null for an empty slice. */
@@ -470,7 +495,13 @@ struct file_span_t {
     file_view_t view() const noexcept { return {file, begin, end}; }
 };
 
-/** Writes @p source into the file bytes @p destination names, at their own offset. */
+/**
+ *  Writes @p source into the file bytes @p destination names, at their own offset.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k The two ranges differ in size.
+ *  - @c uninitialized_k A non-empty @p destination names no file.
+ */
 inline status_t copy_bytes(file_span_t destination, bytes_view_t source) noexcept {
     if (destination.size() != source.size()) return status_t::config_mismatch_k;
     if (source.empty()) return status_t::success_k;
@@ -478,7 +509,14 @@ inline status_t copy_bytes(file_span_t destination, bytes_view_t source) noexcep
     return destination.file->write_at(destination.begin, source);
 }
 
-/** Reads the file bytes @p source names into @p destination. */
+/**
+ *  Reads the file bytes @p source names into @p destination.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The two ranges differ in size.
+ *  - @c uninitialized_k A non-empty @p source names no file.
+ *  - @c io_k The read reaches the end of the file first.
+ */
 inline status_t copy_bytes(bytes_span_t destination, file_view_t source) noexcept {
     if (destination.size() != source.size()) return status_t::malformed_k;
     if (destination.empty()) return status_t::success_k;
@@ -532,10 +570,23 @@ class mapped_file_t {
     /** Bytes the mapping spans. */
     std::size_t size() const noexcept { return bytes_; }
 
-    /** Maps the whole of @p path read-only. */
+    /**
+     *  Maps the whole of @p path read-only.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k The path does not parse.
+     *  - @c malformed_k The file is empty.
+     */
     static expected<mapped_file_t> read(std::string_view path) noexcept;
 
-    /** Creates @p path at @p bytes and maps it writable; the bytes arrive zeroed. */
+    /**
+     *  Creates @p path at @p bytes and maps it writable; the bytes arrive zeroed.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p bytes is zero.
+     *  - @c invalid_argument_k The path does not parse.
+     *  - @c overflow_k A device ends before its base plus @p bytes.
+     */
     static expected<mapped_file_t> write(std::string_view path, std::size_t bytes) noexcept;
 
     /** Flushes a write mapping and releases it, surfacing what the destructor swallows. */

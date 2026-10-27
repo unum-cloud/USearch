@@ -3,7 +3,6 @@ package cloud.unum.usearch
 import scala.util.Using
 
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
 // Aliased, since JUnit names its annotation `Test` and the Scala suite reads better with it renamed.
 import org.junit.jupiter.api.{Test => JUnitTest}
 
@@ -43,8 +42,4 @@ class InteropTest {
     assertEquals("00000000-0000-0000-0000-00000000002a", key.toString)
     assertEquals(key, Key.parse(key.toString))
   }
-
-  @JUnitTest
-  def theLibraryNamesItself(): Unit =
-    assertTrue(!Types.version().isEmpty)
 }

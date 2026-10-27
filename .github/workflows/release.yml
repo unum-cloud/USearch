@@ -25,9 +25,9 @@ permissions:
   packages: write
 
 jobs:
-  versioning:
-    name: Update Version
-    # Every other job needs this one, so a private fork never tags, releases or publishes.
+  # The files the release commit bumps that land in the Swift artifacts: the headers' version macros and the bundle's.
+  bump_swift_version:
+    name: Bump Swift Artifacts Version
     if: github.repository == 'unum-cloud/USearch'
     runs-on: ubuntu-26.04
     steps:
@@ -36,6 +36,187 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Bump Version
+        uses: ashvardanian/tinysemver@v3
+        with:
+          version-file: "VERSION"
+          update-version-in: |
+            CMakeLists.txt:VERSION (\d+\.\d+\.\d+(?:-rc\.\d+)?)
+          update-major-version-in: |
+            c/usearch/types.h:^#define USEARCH_VERSION_MAJOR (\d+)
+          update-minor-version-in: |
+            c/usearch/types.h:^#define USEARCH_VERSION_MINOR (\d+)
+          update-patch-version-in: |
+            c/usearch/types.h:^#define USEARCH_VERSION_PATCH (\d+)
+          dry-run: "false"
+      - name: Upload Bumped Files
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-version
+          path: |
+            VERSION
+            CMakeLists.txt
+            c/usearch/types.h
+          if-no-files-found: error
+          retention-days: 1
+
+  # Each build adds its slice, and `lipo` joins the architectures of one SDK. The simulators' runtimes and the 32-bit
+  # watchOS one lack the `__sme_memset` routine streaming SME code calls, so those go without NumKong's SME kernels.
+  build_swift_xcframework:
+    name: Build Swift XCFramework
+    needs: bump_swift_version
+    runs-on: xcode-27
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Take the Release Version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Build Every Apple Slice
+        run: |
+          set -euo pipefail
+          no_sme="-D NUMKONG_TARGET_SME=0 -D NUMKONG_TARGET_SMEF64=0 -D NUMKONG_TARGET_SMEBI32=0"
+          slice() {
+            local name=$1
+            shift
+            cmake -S . -B "build_$name" --preset swift -D USEARCH_SWIFT_DIRECTORY="$PWD/build_swift" "$@"
+            cmake --build "build_$name"
+          }
+          for arch in arm64 x86_64; do
+            slice "macos_$arch" -D CMAKE_OSX_ARCHITECTURES=$arch
+            slice "catalyst_$arch" -D USEARCH_SWIFT_SDK=maccatalyst -D CMAKE_OSX_ARCHITECTURES=$arch \
+              -D "CMAKE_C_FLAGS=-target $arch-apple-ios18.0-macabi" -D "CMAKE_CXX_FLAGS=-target $arch-apple-ios18.0-macabi"
+            slice "iossim_$arch" -D CMAKE_SYSTEM_NAME=iOS -D CMAKE_OSX_SYSROOT=iphonesimulator \
+              -D USEARCH_SWIFT_SDK=iphonesimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0 $no_sme
+            slice "tvossim_$arch" -D CMAKE_SYSTEM_NAME=tvOS -D CMAKE_OSX_SYSROOT=appletvsimulator \
+              -D USEARCH_SWIFT_SDK=appletvsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0 $no_sme
+            slice "watchsim_$arch" -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchsimulator \
+              -D USEARCH_SWIFT_SDK=watchsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0 $no_sme
+            slice "xrsim_$arch" -D CMAKE_SYSTEM_NAME=visionOS -D CMAKE_OSX_SYSROOT=xrsimulator \
+              -D USEARCH_SWIFT_SDK=xrsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=2.0 $no_sme
+          done
+          slice watchos_arm64_32 -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchos -D USEARCH_SWIFT_SDK=watchos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64_32 -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0 $no_sme
+          slice watchos_arm64 -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchos -D USEARCH_SWIFT_SDK=watchos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          slice ios -D CMAKE_SYSTEM_NAME=iOS -D CMAKE_OSX_SYSROOT=iphoneos -D USEARCH_SWIFT_SDK=iphoneos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0
+          slice tvos -D CMAKE_SYSTEM_NAME=tvOS -D CMAKE_OSX_SYSROOT=appletvos -D USEARCH_SWIFT_SDK=appletvos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0
+          slice xros -D CMAKE_SYSTEM_NAME=visionOS -D CMAKE_OSX_SYSROOT=xros -D USEARCH_SWIFT_SDK=xros \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=2.0
+          (cd build_swift && zip -qry ../USearchC.xcframework.zip USearchC.xcframework)
+      - name: Upload XCFramework
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-xcframework
+          path: USearchC.xcframework.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  build_swift_linux:
+    name: Build Swift Artifact Bundle for Linux ${{ matrix.arch }}
+    needs: bump_swift_version
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    container: swift:6.4
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Install CMake
+        run: apt-get update && apt-get install -y cmake ninja-build
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Take the Release Version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift -D CMAKE_C_COMPILER=clang -D CMAKE_CXX_COMPILER=clang++
+          cmake --build --preset swift
+      # SE-0482 admits libraries that need nothing beyond the C library and runtime.
+      - name: Audit Artifact Bundle
+        run: swift package experimental-audit-binary-artifact build_swift/USearchC.artifactbundle
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-part-linux-${{ matrix.arch }}
+          path: build_swift/USearchC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # Each part's variants go through the same CMake script that wrote them, into one bundle.
+  merge_swift_artifact_bundle:
+    name: Merge Swift Artifact Bundle
+    needs: build_swift_linux
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Download Artifact Bundle Parts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: swift-part-*
+          path: parts
+      - name: Merge Artifact Bundle Parts
+        run: |
+          set -euo pipefail
+          for part in parts/*; do
+            version=$(jq -r '.artifacts.USearchC.version' "$part/info.json")
+            jq -r '.artifacts.USearchC.variants[] | [.path, (.supportedTriples | join(","))] | @tsv' "$part/info.json" |
+              while IFS=$'\t' read -r path triples; do
+                cmake -D NUMKONG_SWIFT_MODULE=USearchC -D NUMKONG_SWIFT_ARCHIVE="$part/$path" \
+                  -D NUMKONG_SWIFT_HEADERS="$part/include" -D NUMKONG_SWIFT_DIRECTORY="$PWD/merged" \
+                  -D NUMKONG_SWIFT_TRIPLES="$triples" -D NUMKONG_SWIFT_VERSION="$version" \
+                  -P numkong/cmake/numkong_swift_artifact.cmake
+              done
+          done
+          (cd merged && zip -qry ../USearchC.artifactbundle.zip USearchC.artifactbundle)
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-artifactbundle
+          path: USearchC.artifactbundle.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # `Package.swift` names the Swift artifacts by URL and checksum, so the release commit carries both and the
+  # artifacts join the release it creates.
+  versioning:
+    name: Update Version
+    # Every other job needs this one, so a private fork never tags, releases or publishes.
+    if: github.repository == 'unum-cloud/USearch'
+    needs: [build_swift_xcframework, merge_swift_artifact_bundle]
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download Swift Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: swift-{xcframework,artifactbundle}
+          path: ${{ runner.temp }}/swift
+          merge-multiple: true
+      - name: Write Swift Checksums
+        run: |
+          apple=$(sha256sum "$RUNNER_TEMP"/swift/*.xcframework.zip | cut -c -64)
+          portable=$(sha256sum "$RUNNER_TEMP"/swift/*.artifactbundle.zip | cut -c -64)
+          sed -i "s/^let appleChecksum = .*/let appleChecksum = \"$apple\"/" Package.swift
+          sed -i "s/^let portableChecksum = .*/let portableChecksum = \"$portable\"/" Package.swift
       - name: Run TinySemVer
         uses: ashvardanian/tinysemver@v3
         with:
@@ -51,6 +232,7 @@ jobs:
             README.md:version = {(\d+\.\d+\.\d+(?:-rc\.\d+)?)}
             csharp/nuget/nuget-package.props:>(\d+\.\d+\.\d+(?:-rc\.\d+)?)</Version>
             CMakeLists.txt:VERSION (\d+\.\d+\.\d+(?:-rc\.\d+)?)
+            Package.swift:releases/download/v(\d+\.\d+\.\d+(?:-rc\.\d+)?)
           update-major-version-in: |
             c/usearch/types.h:^#define USEARCH_VERSION_MAJOR (\d+)
           update-minor-version-in: |
@@ -61,6 +243,8 @@ jobs:
           push: "true"
           create-release: "true"
           github-token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+      - name: Upload Swift Artifacts
+        run: git diff --quiet HEAD~1 HEAD -- VERSION || gh release upload "v$(cat VERSION)" "$RUNNER_TEMP"/swift/*.zip
 
   rebase:
     name: Rebase Dev Branch
@@ -128,7 +312,7 @@ jobs:
       - name: Build C/C++
         run: |
           # Configure and build the project
-          cmake --preset host_library -B build_release \
+          cmake --preset library -B build_release \
             -D CMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
             -D CMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -D CMAKE_SYSTEM_NAME=Linux \
@@ -210,7 +394,7 @@ jobs:
       - name: Build library with MinGW
         if: matrix.arch != 'arm64'
         run: |
-          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=0 -DUSEARCH_BUILD_BENCH=0 -DUSEARCH_DENSE_DTYPES=11 -B ./build_release
+          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_SHARED=1 -DUSEARCH_DENSE_DTYPES=11 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\
@@ -222,7 +406,7 @@ jobs:
       - name: Build library with MSVC for Arm64
         if: matrix.arch == 'arm64'
         run: |
-          cmake --preset windows_arm64_library -B ./build_release
+          cmake --preset windows_arm64 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\
@@ -276,7 +460,7 @@ jobs:
 
       - name: Build library
         run: |
-          cmake --preset host_library -B ./build_release -D CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+          cmake --preset library -B ./build_release -D CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
           cmake --build ./build_release
           mkdir pkg
           cp build_release/libusearch_shared.dylib pkg/
@@ -318,12 +502,12 @@ jobs:
             abi: armeabi-v7a
             target: armv7-linux-androideabi
             arch: arm32
-            preset: android_armv7_library
+            preset: android_armv7
           - processor: aarch64
             abi: arm64-v8a
             target: aarch64-linux-android
             arch: arm64
-            preset: android_arm64_library
+            preset: android_arm64
 
     steps:
       - name: Check out refreshed version
@@ -424,9 +608,7 @@ jobs:
             -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_processor }} \
-            -DUSEARCH_BUILD_TEST=0 \
-            -DUSEARCH_BUILD_BENCH=0 \
-            -DUSEARCH_BUILD_LIB_C=1 \
+            -DUSEARCH_BUILD_SHARED=1 \
             -DUSEARCH_DENSE_DTYPES=11
 
           cmake --build build_artifacts --config Release -j
@@ -476,9 +658,7 @@ jobs:
         run: |
           cmake -B build_artifacts -A ${{ matrix.cmake_arch }} `
             -DCMAKE_BUILD_TYPE=Release `
-            -DUSEARCH_BUILD_TEST=0 `
-            -DUSEARCH_BUILD_BENCH=0 `
-            -DUSEARCH_BUILD_LIB_C=1 `
+            -DUSEARCH_BUILD_SHARED=1 `
             -DUSEARCH_DENSE_DTYPES=11
 
           cmake --build build_artifacts --config Release
@@ -524,9 +704,7 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.cmake_arch }} \
             -DCMAKE_SYSTEM_NAME=Darwin \
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_arch }} \
-            -DUSEARCH_BUILD_TEST=0 \
-            -DUSEARCH_BUILD_BENCH=0 \
-            -DUSEARCH_BUILD_LIB_C=1 \
+            -DUSEARCH_BUILD_SHARED=1 \
             -DUSEARCH_DENSE_DTYPES=11
 
           cmake --build build_artifacts --config Release
@@ -583,9 +761,7 @@ jobs:
             -DCMAKE_ANDROID_STL_TYPE=c++_static \
             -DANDROID_PLATFORM=${{ env.ANDROID_SDK_VERSION }} \
             -DANDROID_ABI=${{ matrix.abi }} \
-            -DUSEARCH_BUILD_TEST=0 \
-            -DUSEARCH_BUILD_BENCH=0 \
-            -DUSEARCH_BUILD_LIB_C=1 \
+            -DUSEARCH_BUILD_SHARED=1 \
             -DUSEARCH_DENSE_DTYPES=11
 
           cmake --build build_artifacts --config Release
@@ -634,10 +810,9 @@ jobs:
 
       - name: Build and test WASM with CMake
         run: |
-          # The archive is named after the target, the preset after the target and its flavor
-          cmake --workflow --preset ${{ matrix.archive }}_release
+          cmake --workflow --preset ${{ matrix.archive }}
 
-          cd build_${{ matrix.archive }}_release
+          cd build_${{ matrix.archive }}
           for root in c include cpp; do cp -r ../$root/usearch .; done
           tar -czf ../usearch_${{ matrix.archive }}_${{ steps.set_version.outputs.version }}.tar.gz libusearch_static.a usearch
           zip -r ../usearch_${{ matrix.archive }}_${{ steps.set_version.outputs.version }}.zip libusearch_static.a usearch
@@ -711,7 +886,7 @@ jobs:
     needs: versioning
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2022]
+        os: [ubuntu-24.04, macos-26, windows-2022]
         python-version:
           ["312", "313", "313t", "314", "314t"]
     steps:
@@ -779,10 +954,10 @@ jobs:
         arch: [x64, x86]
         # Windows pre-build is not working
         # - windows-latest
-        os: [macos-14, ubuntu-24.04]
+        os: [macos-26, ubuntu-24.04]
         exclude:
           - arch: x86
-            os: macos-14
+            os: macos-26
           - arch: x86
             os: ubuntu-24.04
     runs-on: ${{ matrix.os }}
@@ -816,16 +991,16 @@ jobs:
           npm install --ignore-scripts
       - name: Prebuild for one target
         run: npm run prebuild
-        if: matrix.os != 'macos-14'
+        if: matrix.os != 'macos-26'
       - name: Prebuild for both macOS architectures
         run: npm run prebuild && npm run prebuild-arm64
         env:
           CC: clang
           CXX: clang++
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-26'
       - name: Inspect the prebuilt binaries
         run: file prebuilds/*/*
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-26'
       - name: Extra for cross build
         if: matrix.os == 'ubuntu-24.04'
         env:
@@ -1019,10 +1194,14 @@ jobs:
           file: "build/libs/*.jar"
           update_latest_release: true
 
+  # SwiftPM resolves the package from the tag `versioning` pushes, downloading the artifacts that release carries, so
+  # publishing is proving the tag builds as a consumer's would. The NumKong checkout links the artifact its preset builds.
   publish_swift:
     name: Publish Objective-C & Swift
     needs: versioning
     runs-on: xcode-27
+    env:
+      NUMKONG_SWIFT_ARTIFACT: build_swift/NumKongC.xcframework
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v7
@@ -1030,12 +1209,13 @@ jobs:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-      - name: Build C Library
+      - name: Build NumKong XCFramework
+        working-directory: numkong
         run: |
-          cmake --preset host_library
-          cmake --build --preset host_library --target usearch_static
+          cmake --preset swift
+          cmake --build --preset swift
       - name: Test Swift
-        run: swift test -Xlinker -L${{ github.workspace }}/build_host_library
+        run: swift test
 
   # Publishes to both Docker Hub and GitHub Container Registry
   # https://docs.github.com/en/actions/publishing-packages/publishing-docker-images#publishing-images-to-docker-hub-and-github-packages
@@ -1106,7 +1286,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y build-essential libjemalloc-dev libomp-dev
-          cmake --preset host_library -B build_artifacts -D USEARCH_USE_JEMALLOC=1
+          cmake --preset library -B build_artifacts -D USEARCH_WITH_JEMALLOC=1
           cmake --build build_artifacts
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
@@ -1116,7 +1296,7 @@ jobs:
         run: |
           brew update
           brew reinstall cmake
-          cmake --preset host_library -B build_artifacts -D USEARCH_USE_JEMALLOC=0
+          cmake --preset library -B build_artifacts
           cmake --build build_artifacts
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_shared.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
@@ -1125,7 +1305,7 @@ jobs:
         if: matrix.os == 'windows-2022'
         run: |
           choco install cmake
-          cmake --preset windows_x64_release -B build_artifacts -D USEARCH_BUILD_TEST=0 -D USEARCH_USE_JEMALLOC=0
+          cmake --preset windows_x64 -B build_artifacts -D USEARCH_BUILD_TEST=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           cp "${{ github.workspace }}\build_artifacts\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
@@ -1202,18 +1382,21 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: "main"
-      - name: Install dependencies
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install Doxygen
         run: |
-          sudo apt update &&
-          sudo apt install -y doxygen graphviz dia git &&
-          pip install -r docs/requirements.txt
-      - name: Install USearch from PyPi
-        run: pip install usearch
-      - name: Build documentation
-        run: cd docs && doxygen conf.dox && make html
-      - name: Copy assets
-        run: cp -r assets build/docs/html/
-      - name: Compress assets
+          curl -sSfL https://www.doxygen.nl/files/doxygen-1.18.0.linux.bin.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/doxygen-1.18.0/bin" >> "$GITHUB_PATH"
+      - name: Install Sphinx
+        run: pip install -r docs/requirements.txt
+      - name: Install the Released USearch
+        run: pip install "usearch==$(cat VERSION)"
+      - name: Build Docs
+        run: cd docs && doxygen conf.dox && sphinx-build -M html . ../build/docs -W
+      - name: Compress Docs
         run: tar -czvf docs.tar.gz build/docs/html/
       - name: Upload docs to release
         uses: xresloader/upload-to-github-release@v1

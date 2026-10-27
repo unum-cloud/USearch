@@ -53,7 +53,16 @@
 namespace unum::usearch::shapes {
 using namespace unum::usearch::utilities;
 
-/** The USearch status of a NumKong one. */
+/**
+ *  The USearch status of a NumKong one.
+ *
+ *  @par Statuses:
+ *  - @c shape_mismatch_k NumKong met unexpected dimensions.
+ *  - @c device_error_k NumKong met device code or memory of another device.
+ *  - @c unsupported_k NumKong is missing the kernel or its library.
+ *  - @c unsupported_layout_k NumKong met misaligned memory.
+ *  - @c malformed_k NumKong met a pack of another layout.
+ */
 inline status_t status_of(nk_status_t status) noexcept {
     switch (status) {
     case nk_success_k: return status_t::success_k;
@@ -70,7 +79,16 @@ inline status_t status_of(nk_status_t status) noexcept {
     }
 }
 
-/** The USearch status of a NumKong C++ one, whose codes are the C ones. */
+/**
+ *  The USearch status of a NumKong C++ one, whose codes are the C ones.
+ *
+ *  @par Statuses:
+ *  - @c shape_mismatch_k NumKong met unexpected dimensions.
+ *  - @c device_error_k NumKong met device code or memory of another device.
+ *  - @c unsupported_k NumKong is missing the kernel or its library.
+ *  - @c unsupported_layout_k NumKong met misaligned memory.
+ *  - @c malformed_k NumKong met a pack of another layout.
+ */
 inline status_t status_of(nk::status_t status) noexcept { return status_of(static_cast<nk_status_t>(status)); }
 
 #pragma region Kits
@@ -547,7 +565,9 @@ class shapes_metric {
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at
      *      least the index's round capacity, @c max(⌈expansion / connectivity⌉ × connectivity,
      *      connectivity + 1), or rounds saturate rather than fail.
-     *  @return @c unknown_kind_k for a kernel kind other than the four shape kinds.
+     *
+     *  @par Statuses:
+     *  - @c unknown_kind_k A kernel kind other than the four shape kinds.
      */
     status_t init(std::size_t staging_limit) noexcept {
         if (!staging_limit) return status_t::config_mismatch_k;

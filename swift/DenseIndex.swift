@@ -1,14 +1,14 @@
-//
-//  DenseIndex.swift
-//  USearch
-//
-//  Vector Search over equidimensional dense embeddings.
-//
-//  Every verb is a batch over strided rows, so a memory-mapped dataset reaches the index
-//  with no reshape and no copy, and a single vector is a one-row matrix. The breadth of the
-//  candidates rides each call rather than the handle, which lets a recall sweep run against one
-//  immutable index with no mutation between points.
-//
+/**
+ *  @file swift/DenseIndex.swift
+ *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief Vector Search over equidimensional dense embeddings.
+ *
+ *  Every verb is a batch over strided rows, so a memory-mapped dataset reaches the index
+ *  with no reshape and no copy, and a single vector is a one-row matrix. The breadth of the
+ *  candidates rides each call rather than the handle, which lets a recall sweep run against one
+ *  immutable index with no mutation between points.
+ */
 
 import NumKong
 

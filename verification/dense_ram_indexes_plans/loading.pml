@@ -1,4 +1,7 @@
 /**
+ *  @file verification/dense_ram_indexes_plans/loading.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief The sharded load path: every shard's keys before `finish`, beside a searcher.
  *
  *  The loader runs `plan_load` per shard on the still-empty index: it reads the shard's watermark
@@ -6,14 +9,13 @@
  *  the dispenser and releases the watermark.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc,rc11 keys_before_finish=false: the load path lands every shard's keys before
- *      `finish` releases the dispenser and the watermark; after them, the searcher reads an unset
- *      key below the watermark it acquired
+ *  @verify fail sc,rc11 keys_before_finish=false: after them, the searcher reads an unset key below
+ *      the watermark it acquired
  */
 #define thread_count 2
 #define location_count 8
 #define history_depth 2
-#include "protocol.pml"
+#include <dense_ram_indexes_plans/protocol.pml>
 
 proctype loader(byte t) {
     byte shard;

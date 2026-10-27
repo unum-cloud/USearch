@@ -690,7 +690,7 @@ inline connectivity_t connectivity_of(std::size_t degree) noexcept {
  *      the keys. Prints its own diagnostics.
  *
  *  @param[in] settings Supplies @c load_name and @c checkpoints_dir.
- *  @param[inout] index A virgin index already reserved to the run's geometry, which every part's
+ *  @param[in,out] index A virgin index already reserved to the run's geometry, which every part's
  *      header is vetted against.
  *  @param[out] id_to_row Landing for the restored map; spans at least the checkpoint's rows.
  *  @param[in] stream The executor's stream a device index restores on; a RAM index takes none.
@@ -756,7 +756,7 @@ static bool load_checkpoint(settings_t const& settings, index_type_& index, std:
  *      diagnostics.
  *
  *  @param[in] settings Supplies @c save_name, @c checkpoints_dir and the @c connectivity.
- *  @param[inout] index The built index; @c save drains it under @c immutable_k, so no insertions
+ *  @param[in,out] index The built index; @c save drains it under @c immutable_k, so no insertions
  *      may be in flight.
  *  @param[in] id_to_row The map filled during ingestion; its first @c saved_shape().nodes entries
  *      become the key column.

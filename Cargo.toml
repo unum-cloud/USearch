@@ -2,7 +2,7 @@
 authors = ["Ash Vardanian <info@unum.cloud>"]
 description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
 keywords = ["vector-search", "vector-database", "similarity-search", "embeddings", "nearest-neighbor"]
-documentation = "https://unum-cloud.github.io/USearch"
+documentation = "https://docs.rs/usearch"
 edition = "2021"
 rust-version = "1.100"
 include = [

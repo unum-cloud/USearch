@@ -1,19 +1,17 @@
 /**
- *  The dense index's publication protocol from `include/usearch/dense/ram_index.hpp`: identity
- *  dispensed from `next_dispensed_id_`, rows written and unlocked below it, the hole-free
+ *  @file verification/dense_ram_index_watermark/protocol.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
+ *  @brief The dense index's publication protocol from `include/usearch/dense/ram_index.hpp`.
+ *
+ *  Identity dispensed from `next_dispensed_id_`, rows written and unlocked below it, the hole-free
  *  `last_visible_id_` watermark advanced in dispensed order, and the readers that rest on the
  *  watermark: a traversal, a cursor, and a concurrent save with its settlement probe, beside a
- *  refinement that relocks published rows. The dispenser closes for a load or a refinement: one
- *  compare-exchange from the watermark to `node_id_unknown_k`, refused while a batch sits between
- *  its dispense and its turn, after which every dispense refuses until the closer reopens it.
- *
- *  A row is slot zero, which locks and publishes it, and one tail slot. Every scenario beside this
- *  file defines its shape, `named_rows` for the key column `on_assigned` writes, `appended_rows`
- *  for rows that arrive only through the load path's `finish`, and `refined_rows` for row 0's
- *  second tail slot, which a refinement rewrites beside the first.
+ *  refinement that relocks published rows. The dispenser closes for a load or a refinement. A row
+ *  is slot zero, which locks and publishes it, and one tail slot.
  */
-#include "../weak_memory.pml"
-#include "../watermark_turn.pml"
+#include <weak_memory.pml>
+#include <watermark_turn.pml>
 
 // The words, by the index member each stands for; the key column, the load plan's tally and row 0's
 // second tail slot come last.

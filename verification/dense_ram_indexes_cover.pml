@@ -1,35 +1,30 @@
 /**
+ *  @file verification/dense_ram_indexes_cover.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief Three adders on one shard, each covering its key column before it dispenses.
  *
  *  A shard of `include/usearch/dense/ram_indexes.hpp` keeps its keys in a `chunked_column` on the
  *  shard's own chunk schedule, and every claimer covers it to what the shard hosts after its claim,
- *  before dispensing. `basic::ram_index` from `include/usearch/basic/ram_index.hpp` is the second
- *  user: its node records are a `chunked_column`, and `plan_insert` covers them only to its own
- *  claim's end. One shard whose rows and key chunks hold one row apiece; three adders claim a row
- *  each, cover the key column, dispense, store their key before the watermark turn and publish; a
- *  searcher reads every key below the watermark it acquired. The third adder's cover may be refused
- *  at any chunk, leaving the chunks before it published, and that adder then gives its claim back
- *  with a release before dispensing anything, as both indexes do.
+ *  before dispensing. Three adders claim a row each, cover the key column, dispense, store their key
+ *  before the watermark turn and publish. The third adder's cover may be refused at any chunk, and
+ *  that adder then gives its claim back with a release before dispensing anything.
  *
- *  Every key slot an insert writes or a searcher reads lies in a chunk the key column published.
- *  The ID an adder dispenses may lie past its own claim, in a chunk only a later claimer covered,
- *  but that claimer dispensed first, and the dispenser's acquire-release carries its cover along.
- *  A refused claim given back lowers later claims' ends, but only by rows nobody dispenses: of the
- *  adders dispensed up to any one, the last to claim covered past that one's ID.
+ *  - Every key slot an insert writes or a searcher reads lies in a chunk the key column published.
+ *  - A refused claim given back lowers later claims' ends, but only by rows nobody dispenses.
  *
+ *  @budget 4096
  *  @verify pass sc,rc11,far
  *  @verify pass sc,rc11,far cover_to=claim
- *  @verify fail sc cover=false: every claimer covers the key column to what the shard hosts after
- *      its claim; without the cover, an adder writes a key into a chunk never published
- *  @verify fail rc11 dispense_order=order_relaxed: the dispenser's acquire-release carries the
- *      cover of the claimer that dispensed first; relaxed, an adder whose ID lies in a chunk only
+ *  @verify fail sc cover=false: without the cover, an adder writes a key into a chunk never published
+ *  @verify fail rc11 dispense_order=order_relaxed: relaxed, an adder whose ID lies in a chunk only
  *      that claimer covered writes a key into a chunk it never saw published
  */
 #define thread_count 4
 #define location_count 9
 #define history_depth 5
-#include "weak_memory.pml"
-#include "watermark_turn.pml"
+#include <weak_memory.pml>
+#include <watermark_turn.pml>
 
 // The words, by the index member each stands for, of the one shard.
 #define last_visible_id 0

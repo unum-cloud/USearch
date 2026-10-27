@@ -80,7 +80,16 @@ class nvme_indexes {
     nvme_indexes(nvme_indexes const&) = delete;
     nvme_indexes& operator=(nvme_indexes const&) = delete;
 
-    /** The checkpoint's metadata without viewing it, @ref nvme_read_metadata. */
+    /**
+     *  The checkpoint's metadata without viewing it, @ref nvme_read_metadata.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k @p path, or a manifest's first part path, does not parse or names an
+     *    unusable base or namespace.
+     *  - @c unsupported_k A transport ID in a build without SPDK.
+     *  - @c malformed_k A transport ID starting no monolith, or a manifest or header that does not
+     *    parse.
+     */
     static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept { return nvme_read_metadata(path); }
 
     /**
@@ -92,7 +101,20 @@ class nvme_indexes {
      *  @param[in] paths Where to serve each part from instead, one per part: a directory holding
      *      the part's file, or the file itself; empty serves every part where the manifest points.
      *  @param[in] metric The token every part must name, or empty to take any.
-     *  @param[inout] executor Builds the parts' directories, one part per thread at a time.
+     *  @param[in,out] executor Builds the parts' directories, one part per thread at a time.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k @p path is empty, or it or a part's path does not parse or names a
+     *    base off the medium's block.
+     *  - @c unsupported_k @p path is a transport ID.
+     *  - @c malformed_k The manifest names no part, or a manifest, header or row directory does not
+     *    parse.
+     *  - @c config_mismatch_k @p paths does not name one place per part, or a part disagrees with
+     *    this instantiation's codec, keys, node IDs or @p metric, or lays out a graph no reader
+     *    walks.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c uninitialized_k @p executor holds no threads or pool workers.
+     *  - @c overflow_k A header read spans more than one read can move.
      */
     status_t view(std::string_view path, std::span<std::string_view const> paths, std::string_view metric,
                   executor_t& executor) noexcept {
@@ -131,42 +153,109 @@ class nvme_indexes {
         return catalog_().non_zero_expansion_factor(config);
     }
 
-    /** @ref nvme_parts_catalog::search over every part, merging the parts' rankings by key. */
+    /**
+     *  @ref nvme_parts_catalog::search over every part, merging the parts' rankings by key.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
+     *  - @c config_mismatch_k The counts are not one per query, the keys and distances differ in
+     *    length or do not split into a row per query, or a medium the engines cannot read.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows.
+     */
     template <typename... arguments_type_>
     expected<search_result_t> search(arguments_type_&&... arguments) noexcept {
         return catalog_().search(std::forward<arguments_type_>(arguments)...);
     }
 
-    /** @ref nvme_parts_catalog::scan over every part. */
+    /**
+     *  @ref nvme_parts_catalog::scan over every part.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
+     *  - @c config_mismatch_k The counts are not one per query, the keys and distances differ in
+     *    length or do not split into a row per query, or a medium the engines cannot read.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     template <typename... arguments_type_>
     expected<search_result_t> scan(arguments_type_&&... arguments) noexcept {
         return catalog_().scan(std::forward<arguments_type_>(arguments)...);
     }
 
-    /** @ref nvme_parts_catalog::scan_within over every part. */
+    /**
+     *  @ref nvme_parts_catalog::scan_within over every part.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     *  - @c config_mismatch_k A medium the engines cannot read.
+     */
     template <typename... arguments_type_>
     expected<search_result_t> scan_within(arguments_type_&&... arguments) noexcept {
         return catalog_().scan_within(std::forward<arguments_type_>(arguments)...);
     }
 
-    /** @ref nvme_parts_catalog::count over every part. */
+    /**
+     *  @ref nvme_parts_catalog::count over every part.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *    cannot read.
+     *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) const noexcept {
         return catalog_().count(keys, entries, executor);
     }
 
-    /** @ref nvme_parts_catalog::contains over every part. */
+    /**
+     *  @ref nvme_parts_catalog::contains over every part.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the engines
+     *    cannot read.
+     *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     template <typename... arguments_type_>
     status_t contains(arguments_type_&&... arguments) const noexcept {
         return catalog_().contains(std::forward<arguments_type_>(arguments)...);
     }
 
-    /** @ref nvme_parts_catalog::get over every part. */
+    /**
+     *  @ref nvme_parts_catalog::get over every part.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the engines
+     *    cannot read.
+     *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     template <typename... arguments_type_>
     status_t get(arguments_type_&&... arguments) const noexcept {
         return catalog_().get(std::forward<arguments_type_>(arguments)...);
     }
 
-    /** @ref nvme_parts_catalog::read_rows over every part, in part order. */
+    /**
+     *  @ref nvme_parts_catalog::read_rows over every part, in part order.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
+     *  - @c config_mismatch_k The rows run past @ref size, or a medium the engines cannot read.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     template <typename... arguments_type_>
     status_t read_rows(arguments_type_&&... arguments) const noexcept {
         return catalog_().read_rows(std::forward<arguments_type_>(arguments)...);

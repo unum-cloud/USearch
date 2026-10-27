@@ -1,5 +1,7 @@
 /**
  *  @file explorer/explorer.js
+ *  @author Ash Vardanian
+ *  @date October 17, 2026
  *  @brief The scaffolding around the projection core: the key-to-ordinal map, what to draw next, gestures, hover arcs,
  *      selection, hubs, landmarks, glyphs and the readout strip, for every modality alike.
  *

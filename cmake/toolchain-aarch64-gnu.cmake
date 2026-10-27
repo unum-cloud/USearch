@@ -2,7 +2,7 @@
 #
 # ~~~
 #   sudo apt install crossbuild-essential-arm64 qemu-user
-#   cmake -B build_aarch64_gnu -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-gnu.cmake -D USEARCH_BUILD_LIB_C=1
+#   cmake -B build_aarch64_gnu -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-gnu.cmake
 #   cmake --build build_aarch64_gnu --target usearch_shared
 # ~~~
 #

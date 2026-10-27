@@ -39,6 +39,10 @@
 //! This root re-exports every public symbol from the modules that mirror the C headers - `types`
 //! and `dense` - so `@import("usearch").X` resolves whichever header X came from. Each module
 //! carries its own FFI declarations at the top and its tests at the bottom.
+//!
+//! File: zig/usearch.zig
+//! Author: Ash Vardanian
+//! Date: September 7, 2026
 
 const types = @import("usearch/types.zig");
 const dense = @import("usearch/dense.zig");

@@ -1,47 +1,40 @@
 /**
+ *  @file verification/basic_shared_mutex.pml
+ *  @author Ash Vardanian
+ *  @date September 11, 2026
  *  @brief `basic::shared_mutex`: the one-word gate every mutator of the basic index holds shared,
  *      the stop-the-world operations take unique, and the certified searches bracket with two probes.
  *
  *  From `include/usearch/utilities/ram_device.hpp`. Two mutators each take the shared side once and
- *  write their own pair of rows inside it, the way an insert edits neighbor rows below the
- *  watermark. One thread tries the unique side once and reads the rows. One prober snapshots the
- *  gate, reads every row, and snapshots again, certifying the reads when the word rested unlocked
- *  at the same generation. The word keeps two holder bits, the unique bit and the generation
- *  above, where silicon keeps twenty-two, one and forty-one.
+ *  write their own pair of rows inside it. One thread tries the unique side once and reads the rows.
+ *  One prober snapshots the gate, reads every row, and snapshots again, certifying the reads when
+ *  the word rested unlocked at the same generation. The word keeps two holder bits, the unique bit
+ *  and the generation above, where silicon keeps twenty-two, one and forty-one.
  *
- *  No mutator is inside its section while the unique side is held, and a certified prober never
- *  sees one mutator's pair torn. Under `sc` a certified prober also saw no acquisition of the gate;
- *  under `rc11` the exit probe may read an older word, so that clock-time claim is too strong
- *  there, and the torn pair is the claim that carries.
+ *  - No mutator is inside its section while the unique side is held.
+ *  - A certified prober never sees one mutator's pair torn.
+ *  - Under `sc` a certified prober also saw no acquisition of the gate.
  *
+ *  @budget 2048
  *  @verify pass sc,rc11
- *  @verify fail sc generation_modulus=2: the generation steps modulo 2^41, so wrapping it inside one
- *      probe bracket takes days of saturated acquisitions; modulo 2 it wraps in three steps, and a
- *      probe a mutator ran through is certified
- *  @verify fail rc11 lock_shared_fence=false: `lock_shared` ends in a release fence, since its
- *      acquire read-modify-write releases nothing before the row stores; without it, a certified
- *      prober reads a store made under the lock while its exit probe still reads the untouched word,
- *      a torn edit certified as quiet. `basic_shared_mutex.cpp` replays it under IMM too, so Arm
- *      and POWER need the fence as much as the C++ model does
- *  @verify fail rc11 probe_fence=false: the certified walk's acquire fence before its exit probe is
- *      the other half of that pair, so a row read that met a store made under the lock moves the
- *      exit probe past the lock's add; without it, the exit probe reads the untouched word and
+ *  @verify fail sc generation_modulus=2: modulo 2 it wraps in three steps, and a probe a mutator
+ *      ran through is certified
+ *  @verify fail rc11 lock_shared_fence=false: without it, a certified prober reads a store made
+ *      under the lock while its exit probe still reads the untouched word, a torn edit certified
+ *      as quiet
+ *  @verify fail rc11 probe_fence=false: without it, the exit probe reads the untouched word and
  *      certifies the torn pair
- *  @verify fail rc11 unlock_shared_order=order_relaxed: `unlock_shared` subtracts its holder with a
- *      release, which carries the edits made under the shared side to the unique side; relaxed, the
- *      unique taker reads a mutator's pair torn
- *  @verify fail rc11 try_lock_order=order_relaxed: `try_lock` takes the unique side with an acquire
- *      compare-exchange, the other half of that pair; relaxed, the unique taker reads a mutator's
+ *  @verify fail rc11 unlock_shared_order=order_relaxed: relaxed, the unique taker reads a mutator's
  *      pair torn
- *  @verify stuck sc backoff_cap=false: a mutator backing off behind a unique holder waits capped,
- *      so it re-checks on its own; armed on the word alone, its monitor arms after the holder already
- *      left, and the mutator waits forever. The same shape governs the deficit wait in
- *      `claim_capacity`
+ *  @verify fail rc11 try_lock_order=order_relaxed: relaxed, the unique taker reads a mutator's pair
+ *      torn
+ *  @verify stuck sc backoff_cap=false: armed on the word alone, its monitor arms after the holder
+ *      already left, and the mutator waits forever
  */
 #define thread_count 4
 #define location_count 5
 #define history_depth 11
-#include "weak_memory.pml"
+#include <weak_memory.pml>
 
 // The words: the gate, and each mutator's pair of rows.
 #define gate 0

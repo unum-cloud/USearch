@@ -1,9 +1,13 @@
 /**
+ *  @file verification/dense_ram_index_watermark/appender.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief The load path's `finish`: one compare-exchange moving `next_dispensed_id_` from the
  *      load's base past its rows, before the watermark's release store, beside a searcher and a save.
  *
- *  The loader lands both rows relaxed, moves the dispenser and releases the watermark. A saver that
- *  acquired the watermark must read the dispenser level with it.
+ *  The loader lands both rows relaxed, moves the dispenser and releases the watermark.
+ *
+ *  - A saver that acquired the watermark must read the dispenser level with it.
  *
  *  @verify pass sc,rc11,far
  *  @verify pass far appender_order=order_relaxed: a compare-exchange is never posted, so even a
@@ -17,7 +21,7 @@
 #define named_rows false
 #define appended_rows true
 #define refined_rows false
-#include "protocol.pml"
+#include <dense_ram_index_watermark/protocol.pml>
 
 proctype loader(byte t) {
     int expected;

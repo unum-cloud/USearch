@@ -1,3 +1,9 @@
+/**
+ *  @file java/cloud/unum/usearch/Types.java
+ *  @author Ash Vardanian
+ *  @date September 8, 2026
+ *  @brief The vocabulary every modality shares: identities, failures, scalar kinds, executors and deferred calls.
+ */
 package cloud.unum.usearch;
 
 import java.io.Serial;

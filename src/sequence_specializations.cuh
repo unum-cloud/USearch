@@ -196,9 +196,10 @@ status_t sequence_ram_variant<cpu_class_>::refine(refine_plan_t& plan, progress_
     return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
 }
 
-/** Hands @p write, as `write(config) → status_t`, the save configuration recording what @p geometry
- *  and @p costs froze: the connectivity, the window widths as decimals between commas, and the
- *  costs as one hexadecimal digit per entry, as every residency's checkpoint records them. */
+/** Hands @p write, as <tt>write(config) → status_t</tt>, the save configuration recording what
+ *  @p geometry and @p costs froze: the connectivity, the window widths as decimals between
+ *  commas, and the costs as one hexadecimal digit per entry, as every residency's checkpoint
+ *  records them. */
 template <typename write_type_>
 status_t with_sequence_provenance(sequence_geometry_t const& geometry,
                                   us::sequence::needleman_wunsch_costs_t const& costs, write_type_&& write) noexcept {

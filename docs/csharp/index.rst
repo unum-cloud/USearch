@@ -1,1 +1,0 @@
-.. mdinclude:: ../../csharp/README.md

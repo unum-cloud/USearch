@@ -1,29 +1,29 @@
 /**
+ *  @file verification/basic_ram_index_batches/planned.pml
+ *  @author Ash Vardanian
+ *  @date October 14, 2026
  *  @brief A planned basic batch publishes whole: one dispense of two rows, two steppers landing one
  *      row each, and one `finish` that takes the range's turn once both landed.
  *
  *  `basic::ram_index::plan_insert` from `include/usearch/basic/ram_index.hpp`. The planner
  *  dispenses a range of two rows and fans it out to two steppers, each landing one position
  *  through `insert_plan_t::insert` and adding it to the plan's `landed` tally; a refused fan-out
- *  lands both positions on the planner instead. The planner's `finish` acquires the tally,
- *  retrying as a caller retries a refused `finish`, until both positions landed, then takes the
- *  range's one turn and lands the keys. A peer batch inserts two rows as `insert` does, and the
- *  searcher reads every row below the watermark it acquired wired and whole.
+ *  lands both positions on the planner instead. A peer batch inserts two rows as `insert` does.
+ *
+ *  - The searcher reads every row below the watermark it acquired wired and whole.
  *
  *  @verify pass sc,rc11,far
- *  @verify fail rc11 landed_order=order_relaxed: each step adds its count to the tally with a
- *      release, which the finisher's acquire pairs with, so the turn's release carries every
- *      stepper's rows; relaxed, the searcher acquires the watermark and reads a row unwritten
- *  @verify fail sc finish_waits_landed=false: `finish` refuses until every position landed; taking
- *      the turn at once, it publishes a row no stepper wrote yet
- *  @verify stuck sc caller_lands_refused=false: a refused fan-out lands every position on the
- *      calling thread, since nothing cancels a dispensed range; dropped, `finish` waits on a tally
- *      nobody moves, and every later turn waits on it
+ *  @verify fail rc11 landed_order=order_relaxed: relaxed, the searcher acquires the watermark and
+ *      reads a row unwritten
+ *  @verify fail sc finish_waits_landed=false: taking the turn at once, it publishes a row no stepper
+ *      wrote yet
+ *  @verify stuck sc caller_lands_refused=false: dropped, `finish` waits on a tally nobody moves, and
+ *      every later turn waits on it
  */
 #define thread_count 5
 #define location_count 11
 #define history_depth 3
-#include "protocol.pml"
+#include <basic_ram_index_batches/protocol.pml>
 
 // The fan-out's answer the steppers wait for: none yet, the steppers run, or refused.
 #define undecided 0

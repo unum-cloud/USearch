@@ -353,9 +353,18 @@ struct vram_ragged_graph {
         std::size_t ceiling = max_node_count_k;
     };
 
-    /** Ensures the index can host at least @p config.capacity rows of @p config.bytes value bytes
+    /**
+     *  Ensures the index can host at least @p config.capacity rows of @p config.bytes value bytes
      *  in all, and answers the row capacity now in effect; the first success binds the device,
-     *  loads the kernels and reserves the address ranges, later ones only map. */
+     *  loads the kernels and reserves the address ranges, later ones only map.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The face's kits take parameters, and none were set.
+     *  - @c config_mismatch_k The connectivity is not a power of two, or differs from the frozen
+     *    one.
+     *  - @c overflow_k The capacity passes the ID space or the reserved range, or the value bytes
+     *    pass the reserved tape.
+     */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         if (!std::has_single_bit(static_cast<u32_t>(config.connectivity))) return {0, status_t::config_mismatch_k};
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
@@ -467,8 +476,17 @@ struct vram_ragged_graph {
             if (index_ && rows) index_->unclaim_(first_id, rows);
         }
 
-        /** Launches the claimed rows of @p tape, one row a claimed ID, as the one-shot
-         *  @ref vram_ragged_graph::insert describes. */
+        /**
+         *  Launches the claimed rows of @p tape, one row a claimed ID, as the one-shot
+         *  @ref vram_ragged_graph::insert describes.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or spent, or the index was never reserved.
+         *  - @c config_mismatch_k The @p tape holds other than the claimed rows, or @p context
+         *    rides another device or cannot walk.
+         *  - @c unsupported_k A row past every rung of the face's kits.
+         *  - @c overflow_k The rows pass the reserved range, or their values the reserved tape.
+         */
         expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
                                          insert_config_t config = {}) noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
@@ -485,9 +503,15 @@ struct vram_ragged_graph {
         vram_ragged_graph* index_ = nullptr;
     };
 
-    /** Claims @p rows for one batch, exposing their first ID before any of them launches; refuses a
+    /**
+     *  Claims @p rows for one batch, exposing their first ID before any of them launches; refuses a
      *  kept failure, rows past the reserved ceiling, and another batch in flight with
-     *  @c contended_k. */
+     *  @c contended_k.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rows pass the ceiling.
+     *  - @c contended_k Another batch or load is in flight, or the claim word is closed.
+     */
     expected<insert_plan_t> plan_insert(std::size_t rows) noexcept {
         insert_plan_t plan;
         if (status_t const kept = status(); failed(kept)) return {std::move(plan), kept};
@@ -503,10 +527,20 @@ struct vram_ragged_graph {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Inserts the rows of @p tape as the contiguous IDs @b [first_id,first_id+rows), in
+    /**
+     *  Inserts the rows of @p tape as the contiguous IDs @b [first_id,first_id+rows), in
      *  admission waves riding the context's stream, then drains it and turns the watermark over
      *  the range: @ref plan_insert, then its plan's @c insert. Another batch in flight answers
-     *  @c contended_k. */
+     *  @c contended_k.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index was never reserved.
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c unsupported_k A row past every rung of the face's kits.
+     *  - @c overflow_k The rows pass the ceiling or the reserved range, or their values the
+     *    reserved tape.
+     *  - @c contended_k Another batch or load is in flight, or the claim word is closed.
+     */
     expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
                                      insert_config_t config = {}) noexcept {
         std::size_t const rows = tape.size();
@@ -544,7 +578,7 @@ struct vram_ragged_graph {
     friend struct vram_nvidia_indexes;
 
     /** Launches and drains the rows @p plan claimed, spending it unless the arguments mismatch, and
-     *  leaves them for @ref publish_ to turn visible; the claim word holds until then. */
+     *  leaves them for @c publish_ to turn visible; the claim word holds until then. */
     expected<insert_result_t> launch_(insert_plan_t& plan, tape_view<byte_t const> tape, traversal_context_t& context,
                                       insert_config_t config) noexcept {
         if (plan.index_ != this) return {{}, status_t::uninitialized_k};
@@ -553,7 +587,7 @@ struct vram_ragged_graph {
         return launch_claimed_(plan.first_id, tape, context, config);
     }
 
-    /** Turns every row below @p rows visible, the end of a batch @ref launch_ drained, which also
+    /** Turns every row below @p rows visible, the end of a batch @c launch_ drained, which also
      *  frees the claim word for the next batch. */
     void publish_(std::size_t rows) noexcept {
         fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(rows, std::memory_order_release);
@@ -711,8 +745,15 @@ struct vram_ragged_graph {
      *  @param[in] queries The queries, one tape entry of bytes each.
      *  @param[out] result_ids IDs of the matches, @b [queries,count], in host or device memory.
      *  @param[out] result_distances Distances of the same matches, in host or device memory.
-     *  @param[inout] context The stream every transfer and the launch ride; drained before
+     *  @param[in,out] context The stream every transfer and the launch ride; drained before
      *      returning.
+     *  @param[in] config The search breadth and traversal.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index was never reserved.
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk, or the outputs
+     *    hold other than one row per query or fewer than @c count columns.
+     *  - @c unsupported_k A query past every rung of the face's kits.
      */
     expected<search_result_t> search(tape_view<byte_t const> queries, nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
@@ -891,10 +932,10 @@ struct vram_ragged_graph {
          *  receivers, rounded up. */
         std::size_t rows = 0, part_capacity = 0;
 
-        /** The device scratch, laid out as @ref split_scratch_ reads it. */
+        /** The device scratch, laid out as @c split_scratch_ reads it. */
         typename traversal_context_t::bytes_ptr_t bytes;
 
-        /** Page-locked host bytes, laid out as @ref split_bytes_ places them: the labels, dealt
+        /** Page-locked host bytes, laid out as @c split_bytes_ places them: the labels, dealt
          *  into slots in place, the seams, the receivers' offsets columns back to back, the
          *  source's row starts, the bases and the roots planning uploads, and the last round's
          *  placed count. */
@@ -965,9 +1006,14 @@ struct vram_ragged_graph {
             if (split_.source) split_.source->reopen_();
         }
 
-        /** Queues the current phase on the stream of @p context, the one the plan was opened on,
+        /**
+         *  Queues the current phase on the stream of @p context, the one the plan was opened on,
          *  then the landing of its counters and telemetry behind its event; never waits and never
-         *  allocates. */
+         *  allocates.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is unbound, as a refused one answers.
+         */
         status_t queue(traversal_context_t& context) noexcept {
             if (!landing_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
@@ -1071,9 +1117,15 @@ struct vram_ragged_graph {
         /** Nodes re-selected so far. */
         std::size_t visited() const noexcept { return tally_.reselected_nodes; }
 
-        /** The pass: its telemetry read from the last landing on @p context, complete once
+        /**
+         *  The pass: its telemetry read from the last landing on @p context, complete once
          *  @ref advance answered false, otherwise @c cancelled_k; a failure a phase kept answers
-         *  instead. */
+         *  instead.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is unbound, as a refused one answers.
+         *  - @c cancelled_k A phase still follows.
+         */
         expected<refine_result_t> finish(traversal_context_t const& context) const noexcept {
             if (!landing_) return {{}, status_t::uninitialized_k};
             refine_result_t result = tally_;
@@ -1217,8 +1269,11 @@ struct vram_ragged_graph {
      *  neighbors and from landmarks over every published row, so a range refines against the whole
      *  graph.
      *
-     *  @retval unsupported_k The shared kernels lack this node-ID type.
-     *  @retval contended_k A batch, a load or another plan in flight.
+     *  @par Statuses:
+     *  - @c uninitialized_k No @c reserve froze the connectivity yet.
+     *  - @c unsupported_k The shared kernels lack this node-ID type.
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c contended_k A batch, a load or another plan in flight.
      */
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                         refine_config_t config = {}) noexcept {
@@ -1233,7 +1288,15 @@ struct vram_ragged_graph {
         return {std::move(plan), opened};
     }
 
-    /** One @ref refine_plan_t driven to its end on the calling thread, waiting once per phase. */
+    /**
+     *  One @ref refine_plan_t driven to its end on the calling thread, waiting once per phase.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No @c reserve froze the connectivity yet.
+     *  - @c unsupported_k The shared kernels lack this node-ID type.
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c contended_k A batch, a load or another plan in flight.
+     */
     expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                      refine_config_t config = {}) noexcept {
         auto [plan, status] = plan_refine(nodes, context, config);
@@ -1257,12 +1320,16 @@ struct vram_ragged_graph {
      *  Donors must share this index's device, connectivity and metric, and nothing may search them
      *  meanwhile.
      *
-     *  @param[inout] donors The indexes giving their rows up, each emptied once landed.
+     *  @param[in,out] donors The indexes giving their rows up, each emptied once landed.
      *  @param[in] graph The member of each donor holding its graph.
-     *  @retval config_mismatch_k A null donor, this index itself, or one of another device,
-     *      connectivity or metric.
-     *  @retval contended_k A batch, a load or a plan in flight on this index or on a donor.
-     *  @retval overflow_k Rows past the reserved ceiling.
+     *  @param[in,out] context The traversal context the plan's walks draw their buffers from.
+     *  @param[in] config The refinement budget the plan runs under.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k A null donor, this index itself, or one of another device,
+     *    connectivity or metric.
+     *  - @c contended_k A batch, a load or a plan in flight on this index or on a donor.
+     *  - @c overflow_k Rows past the reserved ceiling.
      */
     template <typename owner_type_>
     expected<refine_plan_t> plan_absorb(std::span<owner_type_*> donors, vram_ragged_graph owner_type_::* graph,
@@ -1357,7 +1424,7 @@ struct vram_ragged_graph {
     }
 
     /**
-     *  @brief Opens a split of this index into @p receivers - the inverse of @ref plan_absorb: the
+     *  @brief Opens a split of this index into @p receivers - the inverse of @c plan_absorb: the
      *      plan's first phases move every row into one graph-local part per receiver, then refine
      *      every receiver in turn over the rows that lost a link, and heal.
      *
@@ -1379,13 +1446,17 @@ struct vram_ragged_graph {
      *  yet, which planning then reserves; every claim word stays closed for the plan's life, and
      *  nothing may search this index meanwhile.
      *
-     *  @param[inout] receivers The empty indexes taking the parts, at least two, all distinct.
+     *  @param[in,out] receivers The empty indexes taking the parts, at least two, all distinct.
      *  @param[in] graph The member of each receiver holding its graph.
+     *  @param[in,out] context The traversal context the plan's walks draw their buffers from.
+     *  @param[in] config The refinement budget the plan runs under.
      *  @param[in] seed Picks the parts' roots, so equal seeds over equal graphs split alike.
-     *  @retval config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
-     *      index itself, or one of another device, connectivity or metric.
-     *  @retval contended_k A batch, a load or a plan in flight on this index or on a receiver.
-     *  @retval overflow_k Part slots past the 32-bit IDs.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
+     *    index itself, or one of another device, connectivity or metric.
+     *  - @c contended_k A batch, a load or a plan in flight on this index or on a receiver.
+     *  - @c overflow_k Part slots past the 32-bit IDs.
      */
     template <typename owner_type_>
     expected<refine_plan_t> plan_split(std::span<owner_type_*> receivers, vram_ragged_graph owner_type_::* graph,
@@ -1447,11 +1518,18 @@ struct vram_ragged_graph {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Measures forward reachability from as many stride-spread landmarks as one search draws -
+    /**
+     *  Measures forward reachability from as many stride-spread landmarks as one search draws -
      *  the connectivity; any shortfall against @c size() is the population no search can
      *  discover. Read-only on the graph, so concurrent insertions may leave fresh nodes
      *  uncounted. Waits on the context's event once per batch of sweeps, the batches doubling
-     *  until one expands nothing. */
+     *  until one expands nothing.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No @c reserve froze the connectivity yet.
+     *  - @c unsupported_k The shared kernels lack this node-ID type.
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     */
     expected<health_result_t> health(traversal_context_t& context) noexcept {
         std::size_t const rows = size();
         if (!rows) return {{}, status_t::success_k};
@@ -1541,9 +1619,16 @@ struct vram_ragged_graph {
             if (index_) index_->reopen_();
         }
 
-        /** Copies the neighbor IDs and the values of @p rows off the device into the slices the
+        /**
+         *  Copies the neighbor IDs and the values of @p rows off the device into the slices the
          *  prefix sums name, half a bounce at a time; the last half is still copying when it
-         *  returns. */
+         *  returns.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or spent.
+         *  - @c config_mismatch_k The @p rows pass the plan, or a row's kept neighbors or its saved
+         *    value disagree with the offsets the plan measured.
+         */
         status_t save(iota_view<node_id_t> rows) noexcept {
             if (!index_ || neighbor_offsets_.empty()) return status_t::uninitialized_k;
             if (rows.bound < rows.first || rows.bound > extents.nodes) return status_t::config_mismatch_k;
@@ -1559,9 +1644,16 @@ struct vram_ragged_graph {
             return status_t::success_k;
         }
 
-        /** Pronounces the snapshot complete once the last half landed and every row did: a success
+        /**
+         *  Pronounces the snapshot complete once the last half landed and every row did: a success
          *  spends the plan and reopens the claim word; a refusal leaves it whole, so the missing
-         *  rows can still land. */
+         *  rows can still land.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or spent.
+         *  - @c config_mismatch_k Some rows were never saved, or a row's kept neighbors or its
+         *    saved value disagree with the offsets the plan measured.
+         */
         status_t finish() noexcept {
             if (!index_ || neighbor_offsets_.empty()) return status_t::uninitialized_k;
             if (status_t const landed = land_pending_(); failed(landed)) return landed;
@@ -1631,8 +1723,14 @@ struct vram_ragged_graph {
             return status_t::success_k;
         }
 
-        /** Awaits the pending half's copies, then lands its rows in the columns: every neighbor
-         *  under the watermark but the row's own ID, and the value through the face's codec. */
+        /**
+         *  Awaits the pending half's copies, then lands its rows in the columns: every neighbor
+         *  under the watermark but the row's own ID, and the value through the face's codec.
+         *
+         *  @par Statuses:
+         *  - @c config_mismatch_k A row's kept neighbors or its saved value disagree with the
+         *    offsets the plan measured.
+         */
         status_t land_pending_() noexcept {
             if (pending_.empty()) return status_t::success_k;
             iota_view<node_id_t> const rows = std::exchange(pending_, {});
@@ -1684,9 +1782,15 @@ struct vram_ragged_graph {
         vram_ragged_graph* index_ = nullptr;
     };
 
-    /** Row & element counts a save needs right now, through one sizing pass over every row under
+    /**
+     *  Row & element counts a save needs right now, through one sizing pass over every row under
      *  the watermark with the claim word closed; @c contended_k while a batch, a load or a plan is
-     *  in flight. */
+     *  in flight.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c contended_k A batch, a load or a plan in flight.
+     */
     expected<columns_extents_t> columns_extents(traversal_context_t& context) noexcept {
         auto [plan, status] = open_save_(context);
         if (succeeded(status)) status = plan.size_({}, {});
@@ -1703,7 +1807,13 @@ struct vram_ragged_graph {
      *  @c config_mismatch_k, so no call ever writes past them.
      *
      *  @param[out] columns Where the rows land, sized from @ref columns_extents.
-     *  @param[inout] context The stream every copy queues on.
+     *  @param[in,out] context The stream every copy queues on.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk, or the key or a
+     *    sums column is longer than its count.
+     *  - @c overflow_k A column is shorter than its count.
+     *  - @c contended_k A batch, a load or a plan in flight.
      */
     template <typename key_type_>
     expected<save_plan_t> plan_save(columns<key_type_, node_id_t, byte_t, u64_t> columns,
@@ -1724,8 +1834,17 @@ struct vram_ragged_graph {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Serializes every row under the watermark into @p columns on the calling thread - the
-     *  one-shot over @ref plan_save. */
+    /**
+     *  Serializes every row under the watermark into @p columns on the calling thread - the
+     *  one-shot over @ref plan_save.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk, the key or a
+     *    sums column is longer than its count, or a row's kept neighbors or its saved value
+     *    disagree with the offsets the plan measured.
+     *  - @c overflow_k A column is shorter than its count.
+     *  - @c contended_k A batch, a load or a plan in flight.
+     */
     template <typename key_type_>
     status_t save(columns<key_type_, node_id_t, byte_t, u64_t> columns, traversal_context_t& context) noexcept {
         auto [plan, status] = plan_save(columns, context);
@@ -1781,8 +1900,15 @@ struct vram_ragged_graph {
             index_->unclaim_(base, rows);
         }
 
-        /** Stages and copies the columns' rows @p range, counted from the columns' first row, half
-         *  a bounce at a time; the last half is still copying when it returns. */
+        /**
+         *  Stages and copies the columns' rows @p range, counted from the columns' first row, half
+         *  a bounce at a time; the last half is still copying when it returns.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or spent.
+         *  - @c config_mismatch_k The @p range passes the plan, or a saved value does not fit the
+         *    bytes the plan stored it in.
+         */
         status_t load(iota_view<node_id_t> range) noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (range.bound < range.first || range.bound > rows) return status_t::config_mismatch_k;
@@ -1834,7 +1960,12 @@ struct vram_ragged_graph {
         /** Publishes the appended rows once every one landed: the tape's extent, the longest row
          *  and the widest span grow over them, and the watermark turns, which lifts the claim. A
          *  success spends the plan; a refusal leaves it whole, so the missing rows can still
-         *  land. */
+         *  land.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or spent.
+         *  - @c config_mismatch_k Some rows never landed.
+         */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (covered_ != rows) return status_t::config_mismatch_k;
@@ -1895,10 +2026,18 @@ struct vram_ragged_graph {
      *  neighbors than the connectivity, both @c malformed_k otherwise.
      *
      *  @param[in] columns The five columns a save filled, by this face or another residency's.
-     *  @param[inout] context The stream every copy queues on.
-     *  @retval uninitialized_k No @c reserve froze the connectivity yet.
-     *  @retval unsupported_k A row past every rung of the face's kits.
-     *  @retval contended_k A batch, a load or a plan in flight.
+     *  @param[in,out] context The stream every copy queues on.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No @c reserve froze the connectivity yet.
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c malformed_k The offsets columns are not one longer than the rows, their sums pass
+     *    their columns, a row keeps more neighbors than the connectivity or names no row of the
+     *    columns, or a saved value does not parse.
+     *  - @c unsupported_k A row past every rung of the face's kits.
+     *  - @c overflow_k The rows pass the ceiling or the reserved range, or their values the
+     *    reserved tape.
+     *  - @c contended_k A batch, a load or a plan in flight.
      */
     template <typename key_type_>
     expected<load_plan_t> plan_load(columns<key_type_ const, node_id_t const, byte_t const, u64_t const> columns,
@@ -1958,8 +2097,22 @@ struct vram_ragged_graph {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Loads @p columns past every claimed row on the calling thread - the one-shot over
-     *  @ref plan_load. */
+    /**
+     *  Loads @p columns past every claimed row on the calling thread - the one-shot over
+     *  @ref plan_load.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No @c reserve froze the connectivity yet.
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk, or a saved
+     *    value does not fit the bytes the plan stored it in.
+     *  - @c malformed_k The offsets columns are not one longer than the rows, their sums pass
+     *    their columns, a row keeps more neighbors than the connectivity or names no row of the
+     *    columns, or a saved value does not parse.
+     *  - @c unsupported_k A row past every rung of the face's kits.
+     *  - @c overflow_k The rows pass the ceiling or the reserved range, or their values the
+     *    reserved tape.
+     *  - @c contended_k A batch, a load or a plan in flight.
+     */
     template <typename key_type_>
     status_t load(columns<key_type_ const, node_id_t const, byte_t const, u64_t const> columns,
                   traversal_context_t& context) noexcept {
@@ -2161,8 +2314,13 @@ struct vram_ragged_graph {
      *  on, closed by a caller around a load, stays as it is. */
     void unclaim_(std::size_t first, std::size_t rows) noexcept { claims_.unclaim(first, rows); }
 
-    /** Maps the offsets column and the neighbors matrix up to @p rows, host work alone, so it rides
-     *  no stream, and leaves the fresh neighbor rows for @ref grow_rows_ to fill. */
+    /**
+     *  Maps the offsets column and the neighbors matrix up to @p rows, host work alone, so it rides
+     *  no stream, and leaves the fresh neighbor rows for @c grow_rows_ to fill.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The @p rows pass the reserved range.
+     */
     status_t map_rows_(std::size_t rows) noexcept {
         if (rows <= capacity()) return status_t::success_k;
         if (status_t const mapped = offsets_column_.commit((rows + 1) * sizeof(u64_t)); failed(mapped)) return mapped;
@@ -2506,7 +2664,7 @@ struct vram_ragged_graph {
     }
 
     /** Queues a reachability audit over @p rows rows from as many stride-spread landmarks as one
-     *  search draws - the connectivity - and its first sweep, through @ref queue_sweeps_. Nothing
+     *  search draws - the connectivity - and its first sweep, through @c queue_sweeps_. Nothing
      *  waits; the caller reads @p landing once its event fired, and queues further sweeps from
      *  sweep 2 while the last one still expanded. */
     status_t queue_audit_(audit_scratch_t const& scratch, audit_landing_t* landing, std::size_t rows,

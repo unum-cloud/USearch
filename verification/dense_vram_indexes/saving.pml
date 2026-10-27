@@ -1,23 +1,27 @@
 /**
+ *  @file verification/dense_vram_indexes/saving.pml
+ *  @author Ash Vardanian
+ *  @date October 15, 2026
  *  @brief A save beside one batch: the save closes every shard's dispenser in shard order, refused
  *      while the batch is in flight on either, copies every key below each shard's watermark, and
  *      reopens them, the last first.
  *
  *  `plan_save` holds the closure until the plan dies, since the device storage cannot be
  *  settlement-probed, and a batch meeting a closed shard is refused. The copy stands for every
- *  column a shard plan exports: it holds the batch on both shards or on neither, and every key it
- *  copies is its claimer's.
+ *  column a shard plan exports.
+ *
+ *  - The copy holds the batch on both shards or on neither.
+ *  - Every key it copies is its claimer's.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc save_closes=false: the save closes every shard before it copies; without the
- *      closure, it copies the first shard after the batch's turn there and the second before it, a
- *      checkpoint holding half a batch
+ *  @verify fail sc save_closes=false: without the closure, it copies the first shard after the
+ *      batch's turn there and the second before it, a checkpoint holding half a batch
  */
 #define thread_count 2
 #define location_count 7
 #define history_depth 3
 #define mutators 1
-#include "protocol.pml"
+#include <dense_vram_indexes/protocol.pml>
 
 proctype mutator(byte t) { insert_batch(t) }
 

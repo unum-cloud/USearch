@@ -7,7 +7,7 @@ It exposes all four modalities: the engine implements dense, sequence and shape 
 ## Installation
 
 ```sh
-cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11 && cmake --build build_release --config Release
+cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_DENSE_DTYPES=11 && cmake --build build_release --config Release
 ```
 
 That leaves both libraries in `build_release/`, carrying all eleven dense storage types; precompiled ones ship on the [releases page](https://github.com/unum-cloud/USearch/releases).
@@ -15,7 +15,7 @@ Put `c/` on the include path, or `include/` once installed, where the C headers 
 One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`.
 `ctest --test-dir build_release -R usearch_test_c` runs the smoke test in `c/test.c`.
 
-`-D USEARCH_BUILD_LIB_C_STUB=1` adds a brute-force stand-in under the same library names in `build_release/stub/`.
+`-D USEARCH_BUILD_STUB=1` adds a brute-force stand-in under the same library names in `build_release/stub/`.
 It answers every verb of every modality by exhaustive scan with the C++ standard library alone, so a binding links and runs its suite in seconds without building the engine.
 Its search is exact, its traversal statistics are invented, and its checkpoints are its own memory image, readable by nothing else.
 
@@ -230,7 +230,7 @@ The options name where an index lives, never who walks it.
 `usearch_ram_options_t` names NUMA nodes, one shard per node, so a dual-socket box gets two graphs whose walks stay local; payload blocks claim huge pages where a pool is provisioned.
 `usearch_vram_options_t` names device ordinals, one shard per device and never a replica, so an index outgrowing them fails rather than paging to the host.
 Both take a `shard_capacity`, the entries one shard may hold, zero meaning the 32-bit ID space: an insertion past it opens another generation of shards on the same nodes or devices, and only the newest generation takes insertions.
-`usearch_nvme_options_t` names paths: a filesystem path selects a kernel I/O engine, a transport identifier like `trtype:PCIe traddr:0000:5e:00.0` selects SPDK in a `-D USEARCH_BUILD_SPDK=1` build, and a FUSE mount over a bucket reads as an ordinary path.
+`usearch_nvme_options_t` names paths: a filesystem path selects a kernel I/O engine, a transport identifier like `trtype:PCIe traddr:0000:5e:00.0` selects SPDK in a `-D USEARCH_WITH_SPDK=1` build, and a FUSE mount over a bucket reads as an ordinary path.
 
 Memory follows residency: an index keeps its payload where its lifecycle verb put it, an executor keeps its scratch next to its threads or devices, and an arena lives where the executor that created it computes.
 So outputs come back in RAM from a RAM executor and in VRAM from a VRAM executor, and moving them elsewhere is the caller's own copy.
@@ -402,7 +402,7 @@ usearch_dense_search(&(usearch_dense_search_t) {.index = index,
 AMD and Apple VRAM handles refuse scans with `usearch_status_unsupported_k`.
 Every verb that walks the graph fills the optional `stats` with the members it visited, the distances it computed, and its restarts, a connectivity health signal rather than a cost.
 
-### Filtering & Progress
+### Filtered Search
 
 Sometimes you may want to cross-reference search results against some external database or filter them by some criteria.
 In most engines, you'd have to manually perform paging requests, successively filtering the results.
@@ -451,7 +451,7 @@ A batch verb hands its engine one slice per step, and a call without a handler r
 A stopped call reports `usearch_status_cancelled_k` and leaves its outputs `NULL`.
 An insertion claims every row before its first report, so its handler only reports, and all its rows publish at once.
 
-### Retrieval: Get, Cursors & Streams
+### Retrieval and Streaming
 
 `usearch_dense_get` writes every vector stored under one key into an arena, shard by shard and in insertion order within each, as the [Arenas](#arenas) example shows; an absent key leaves `vectors->data` `NULL`.
 A cursor walks the graph, every row in storage order or breadth-first from `starts`, its keys and, when asked, each row's `links` landing in an arena batch by batch:

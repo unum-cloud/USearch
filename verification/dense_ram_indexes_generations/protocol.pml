@@ -1,27 +1,21 @@
 /**
- *  The shard set's generations from `include/usearch/utilities/ram_shards.hpp`: once the open
- *  generation's shards reach the bound, `open_generation_` appends one shard per placement, and only
- *  the newest generation takes insertions. One caller opens it: a compare-exchange takes
- *  `shards_count_` from the generation's first shard to the same count with the opening bit set,
- *  the caller builds the shards, and a release store publishes the count past them, or, when a build
- *  fails, puts the count back. A caller refused by the bit waits on the word and tries again; one
- *  that finds the count already past the generation's first shard answers success, its failed
- *  compare-exchange acquiring the store that moved it. `size()` acquires the count and masks the
- *  bit, so every shard it counts is whole.
+ *  @file verification/dense_ram_indexes_generations/protocol.pml
+ *  @author Ash Vardanian
+ *  @date October 22, 2026
+ *  @brief The shard set's generations from `include/usearch/utilities/ram_shards.hpp`.
  *
- *  One placement, so a generation is one shard of `row_limit` rows, and the model holds the first
- *  generation and the next. A shard's construction is one word, written relaxed before the count's
- *  release and read relaxed by every thread that touches the shard; its claim word and dispenser
- *  are ghosts, each step on them one atomic step, `claim_capacity` seen from outside. The opener's
- *  wait is the one `wait_type_` makes with no tag, capped: the spin waiter `ram_indexes` defaults to
- *  returns at once, and ForkUnion's monitored waiters arm the count's line, re-check it, and wake on
- *  any store to it or at the cap.
+ *  Once the open generation's shards reach the bound, `open_generation_` appends one shard per
+ *  placement, and only the newest generation takes insertions. One caller opens it: a
+ *  compare-exchange takes `shards_count_` from the generation's first shard to the same count with
+ *  the opening bit set, the caller builds the shards, and a release store publishes the count past
+ *  them, or, when a build fails, puts the count back.
  *
- *  Every scenario beside this file checks that each generation is built once, that every shard a
- *  thread touches is constructed, and that no opener waits forever.
+ *  - Each generation is built once.
+ *  - Every shard a thread touches is constructed.
+ *  - No opener waits forever.
  */
-#include "../weak_memory.pml"
-#include "../watermark_turn.pml"
+#include <weak_memory.pml>
+#include <watermark_turn.pml>
 
 // The sizes: the shards the model holds, and the rows one shard takes under the bound.
 #define shards 2

@@ -1,4 +1,7 @@
 /**
+ *  @file verification/dense_ram_index_watermark/keyed.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief The sharded index's key column beside the publication: `on_assigned` writes a row's key
  *      right after the dispense, so every row a reader locates carries its key.
  *
@@ -7,11 +10,10 @@
  *  only below its snapshot, the traversal's `neighbor_id >= first_invisible_id` filter.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc key_before_turn=false: `on_assigned` stores the key before the walk and the
- *      publication; after the turn, a reader locates a row that carries no key yet
- *  @verify fail sc watermark_filter=false: the walk locates only IDs below its snapshot; without
- *      the filter it follows a fresher ID, whose turn has not come and whose row the snapshot did
- *      not carry
+ *  @verify fail sc key_before_turn=false: after the turn, a reader locates a row that carries no key
+ *      yet
+ *  @verify fail sc watermark_filter=false: without the filter it follows a fresher ID, whose turn
+ *      has not come and whose row the snapshot did not carry
  */
 #define thread_count 4
 #define location_count 9
@@ -19,7 +21,7 @@
 #define named_rows true
 #define appended_rows false
 #define refined_rows false
-#include "protocol.pml"
+#include <dense_ram_index_watermark/protocol.pml>
 
 proctype inserter(byte t) { insert(t) }
 

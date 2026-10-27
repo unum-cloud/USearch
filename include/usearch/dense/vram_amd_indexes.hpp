@@ -8,11 +8,11 @@
  *  The multi-shard layer over @c vram_amd_index: same-geometry shards, each owned and pinned to one
  *  AMD device, viewed as one index. Insertions rotate across the shards so they fill evenly and
  *  each holds a representative sample; searches scatter over every shard and gather through
- *  @ref merge_search_results, resolving matches into the caller's keys, so shards with colliding ID
- *  spaces land in one shared ranking. The shards and their keys are a @c shard_set, checkpoints
- *  ride @c shard_save_plan and @c shard_load_plan, and every batched read fans out through a
- *  @c vram_shard_fanout; the device keys, the HIP calls and the drivers are this tower's own. One
- *  collection spans one vendor.
+ *  @ref unum::usearch::utilities::merge_search_results, resolving matches into the caller's keys,
+ *  so shards with colliding ID spaces land in one shared ranking. The shards and their keys are a
+ *  @c shard_set, checkpoints ride @c shard_save_plan and @c shard_load_plan, and every batched read
+ *  fans out through a @c vram_shard_fanout; the device keys, the HIP calls and the drivers are this
+ *  tower's own. One collection spans one vendor.
  *
  *  Beyond the executor's claim, each shard's claim word admits one batch or load at a time and
  *  closes around a refine, an absorb, a checkpoint load or a save, which refuse with
@@ -198,18 +198,30 @@ struct vram_amd_indexes {
     /** Rows one shard may hold. */
     std::size_t shard_capacity() const noexcept { return shards_.shard_capacity(); }
 
-    /** Appends one shard built here on the device @p stream names, for callers with none to hand
-     *  over. */
+    /**
+     *  Appends one shard built here on the device @p stream names, for callers with none to hand
+     *  over.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The set is reserved, retired shards, or has a shard generation in
+     *    flight.
+     */
     status_t emplace(typename executor_t::stream_t const& stream) noexcept {
         std::unique_ptr<index_t> shard = build_(stream.device);
         if (!shard) return status_t::bad_alloc_k;
         return emplace(std::move(shard));
     }
 
-    /** Appends one shard the caller already built, consuming it, with its host key column, a device
-     *  twin and the staging between them on its device, where the staging's events are born;
-     *  refuses any walking by another kernel, any whose frozen geometry differs from the shards
-     *  already here, and any already reserved. @ref reserve closes the shard set. */
+    /**
+     *  Appends one shard the caller already built, consuming it, with its host key column, a device
+     *  twin and the staging between them on its device, where the staging's events are born.
+     *  @ref reserve closes the shard set.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p shard is null, walks by another kernel, has a frozen geometry
+     *    differing from the shards already here, or is already reserved; or the set is reserved,
+     *    retired shards, or has a shard generation in flight.
+     */
     status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
         if (!shard || shard->kernel() != kernel_ ||
             (!shards_.empty() && (shard->dimensions() != dimensions() || shard->connectivity() != connectivity())))
@@ -227,11 +239,15 @@ struct vram_amd_indexes {
         return status_t::success_k;
     }
 
-    /** Empties every shard in place, keeping its placement, geometry and capacity, and every shard
+    /**
+     *  Empties every shard in place, keeping its placement, geometry and capacity, and every shard
      *  generation past the first as idle shards the next ones reuse; a kept failure drops with the
-     *  rows. Takes the gate alone and closes every shard first, so a call in flight, a batch or
-     *  load holding claims or a plan holding the index closed refuses it with @c contended_k; a
-     *  search it lands under retries. */
+     *  rows. Takes the gate alone and closes every shard first; a search it lands under retries.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A call in flight, a batch or load holding claims, or a plan holding the
+     *    index closed.
+     */
     status_t clear() noexcept {
         unique_lock_t const held {gate_, std::try_to_lock};
         if (!held) return status_t::contended_k;
@@ -272,7 +288,8 @@ struct vram_amd_indexes {
     /** Rows the shards host without growing again; they grow past it on demand. */
     std::size_t capacity() const noexcept { return shards_.capacity(); }
 
-    /** The first shard's kept failure, or success; asked of the shards, never cached. */
+    /** The first shard's kept failure, or success; asked of the shards, never cached. It is the
+     *  failure an insertion refused with after rows launched on a shard, kept until @ref clear. */
     status_t status() const noexcept {
         for (shard_t const& one : shards_)
             if (status_t const kept = one.index->status(); failed(kept)) return kept;
@@ -283,9 +300,20 @@ struct vram_amd_indexes {
      *  shared locator map; traversal scratch is the executor's. */
     std::size_t memory_usage() const noexcept { return sizeof(vram_amd_indexes) + shards_.memory_usage(); }
 
-    /** Grows every shard ahead of @p config.capacity rows, split evenly over them, and both key
+    /**
+     *  Grows every shard ahead of @p config.capacity rows, split evenly over them, and both key
      *  columns of each with it - a hint, since all of them grow on demand; the first call freezes
-     *  the geometry. */
+     *  the geometry.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard is placed.
+     *  - @c unknown_kind_k A shard's kits cannot score its metric.
+     *  - @c config_mismatch_k A shard's neighbors live on another device, its dimensions are zero,
+     *    its connectivity is not a power of two, its geometry differs from the frozen one, or no
+     *    walk fits it.
+     *  - @c overflow_k A shard's share passes its ID space, its reserved range or its host key
+     *    column.
+     */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         auto const [reserved, status] = shards_.reserve(config);
         if (failed(status)) return {reserved, status};
@@ -335,9 +363,23 @@ struct vram_amd_indexes {
                 status_t const abandoned = abandon_(status_t::cancelled_k);
         }
 
-        /** Launches rows @b [first_row,first_row+rows) of the plan under @p keys on their shards;
+        /**
+         *  Launches rows @b [first_row,first_row+rows) of the plan under @p keys on their shards;
          *  the rows and the keys stay live until @ref finish. Mismatched arguments launch nothing,
-         *  any later refusal fails the plan. */
+         *  any later refusal fails the plan.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or spent, or @ref status keeps it.
+         *  - @c config_mismatch_k The @p keys are not one per row, the rows pass the batch or are
+         *    not as wide as the index, a step overlaps rows already launched, or @ref status keeps
+         *    it.
+         *  - @c unsupported_k The rows' scalar has no device cast into the stored one, or
+         *    @ref status keeps it.
+         *  - @c unsupported_layout_k Rows sit closer than one packed row apart, or @ref status
+         *    keeps it.
+         *  - @c overflow_k A shard's rows pass its reserved range, or @ref status keeps it.
+         *  - @c cancelled_k The index keeps it, as @ref status says.
+         */
         status_t insert(std::size_t first_row, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
             if (!owner_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
@@ -374,10 +416,20 @@ struct vram_amd_indexes {
             return status_;
         }
 
-        /** Settles every launch, publishes every row at once, and reports the batch's telemetry. A
+        /**
+         *  Settles every launch, publishes every row at once, and reports the batch's telemetry. A
          *  plan short of rows refuses and stays whole, so the missing steps can still land; any
          *  other call spends it, and a failed launch or drain publishes nothing and keeps its
-         *  failure on every shard holding launched rows. */
+         *  failure on every shard holding launched rows.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or spent, or a step or @ref status keeps it.
+         *  - @c config_mismatch_k The steps launched fewer rows than the batch holds, or a step or
+         *    @ref status keeps it.
+         *  - @c unsupported_k, @c unsupported_layout_k or @c overflow_k A step or @ref status keeps
+         *    it.
+         *  - @c cancelled_k The index keeps it, as @ref status says.
+         */
         expected<insert_result_t> finish() noexcept {
             if (!owner_) return {{}, status_t::uninitialized_k};
             std::size_t launched = 0;
@@ -545,8 +597,20 @@ struct vram_amd_indexes {
      *  in flight refuses its claim, and the whole plan with @c contended_k.
      *
      *  @param[in] rows Rows in the batch; the plan's steps launch each exactly once, in any order.
-     *  @param[inout] executor The streams and their scratch, paired positionally with the shards.
+     *  @param[in,out] executor The streams and their scratch, paired positionally with the shards.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards, the @p executor has no streams, or
+     *    @ref status keeps it.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, a shard
+     *    refuses to grow, as its @c reserve says, or @ref status keeps it.
+     *  - @c contended_k The index is sealed, another call holds the @p executor, or a shard has a
+     *    batch or load in flight or its claim word closed.
+     *  - @c overflow_k The seats pass the locator chunks, a shard's rows pass its ceiling, its
+     *    reserved range or its key columns, or @ref status keeps it.
+     *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref
+     *    status says.
      */
     expected<insert_plan_t> plan_insert(std::size_t rows, executor_t& executor, insert_config_t config = {}) noexcept {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
@@ -630,8 +694,24 @@ struct vram_amd_indexes {
      *  @param[in] keys One caller identity per row; several rows may share one.
      *  @param[in] new_rows The batch, one row per entry, in any scalar NumKong casts, imported on
      *      each shard's device.
-     *  @param[inout] executor The streams and their scratch, paired positionally with the shards.
+     *  @param[in,out] executor The streams and their scratch, paired positionally with the shards.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p keys are not one per row, the rows are not as wide as the
+     *    index, the @p executor drives no stream on some shard's device, a shard refuses to grow,
+     *    or @ref status keeps it.
+     *  - @c uninitialized_k The index has no shards, the @p executor has no streams, or
+     *    @ref status keeps it.
+     *  - @c contended_k The index is sealed, another call holds the @p executor, or a shard has a
+     *    batch or load in flight or its claim word closed.
+     *  - @c overflow_k The seats pass the locator chunks, a shard's rows pass its ceiling, its
+     *    reserved range or its key columns, or @ref status keeps it.
+     *  - @c unsupported_k The rows' scalar has no device cast into the stored one, or @ref status
+     *    keeps it.
+     *  - @c unsupported_layout_k Rows sit closer than one packed row apart, or @ref status keeps
+     *    it.
+     *  - @c cancelled_k The index keeps it, as @ref status says.
      */
     expected<insert_result_t> insert(std::span<key_t const> keys, rows_view_t new_rows, executor_t& executor,
                                      insert_config_t config = {}) noexcept {
@@ -644,8 +724,22 @@ struct vram_amd_indexes {
         return plan.finish();
     }
 
-    /** Inserts one row under @p key into whichever shard the rotation names next - the one-row
-     *  sibling of the batched form, priced identically: one launch on one device. */
+    /**
+     *  Inserts one row under @p key into whichever shard the rotation names next - the one-row
+     *  sibling of the batched form, priced identically: one launch on one device.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_layout_k The @p new_vector is not contiguous, or @ref status keeps it.
+     *  - @c config_mismatch_k The row is not as wide as the index, the @p executor drives no
+     *    stream on some shard's device, a shard refuses to grow, or @ref status keeps it.
+     *  - @c uninitialized_k The index has no shards, the @p executor has no streams, or
+     *    @ref status keeps it.
+     *  - @c contended_k The index is sealed, another call holds the @p executor, or a shard has a
+     *    batch or load in flight or its claim word closed.
+     *  - @c overflow_k The seat passes the locator chunks, a shard's rows pass its ceiling, its
+     *    reserved range or its key columns, or @ref status keeps it.
+     *  - @c unsupported_k or @c cancelled_k The index keeps it, as @ref status says.
+     */
     expected<insert_result_t> insert(key_t const& key, vector_view_t new_vector, executor_t& executor,
                                      insert_config_t config = {}) noexcept {
         if (!new_vector.is_contiguous()) return {{}, status_t::unsupported_layout_k};
@@ -702,9 +796,19 @@ struct vram_amd_indexes {
          *  pending and closed, with every later one, for the next call, and a landed one stays
          *  empty, closed and sealed. The executor is held only for the call.
          *
-         *  @param[inout] executor The executor the plan was opened over.
+         *  @param[in,out] executor The executor the plan was opened over.
          *  @param[in] on_visited Fires per re-selecting phase with the nodes visited so far and the
          *      population; a @c cancel_k answer stops before the next phase.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or finished, or @ref status keeps it.
+         *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, a
+         *    donor's rows never land, or @ref status keeps it.
+         *  - @c contended_k Another call holds the @p executor or a donor's gate, or a shard has a
+         *    batch or load in flight.
+         *  - @c overflow_k The landed rows pass a shard's ceiling, reserved range, key columns or
+         *    the locator chunks, or @ref status keeps it.
+         *  - @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref status says.
          */
         template <typename progress_type_ = dummy_progress_t>
         status_t run(executor_t& executor, progress_type_&& on_visited = {}) noexcept {
@@ -723,8 +827,19 @@ struct vram_amd_indexes {
             return drive_(on_visited);
         }
 
-        /** Stops any re-selection, audits and heals, reopens the claim words, and reports. A plan
-         *  whose donors have not all landed heals nothing and reports nothing. */
+        /**
+         *  Stops any re-selection, audits and heals, reopens the claim words, and reports. A plan
+         *  whose donors have not all landed heals nothing and reports nothing.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or finished, or a pass found @ref status keeping
+         *    it.
+         *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, or a
+         *    pass found @ref status keeping it.
+         *  - @c contended_k Another call holds the @p executor.
+         *  - @c cancelled_k, @c unsupported_k, @c unsupported_layout_k or @c overflow_k
+         *    A pass found the index keeping it, as @ref status says.
+         */
         expected<refine_result_t> finish(executor_t& executor) noexcept {
             if (!owner_) return {{}, status_t::uninitialized_k};
             if (status_t const paired = fanout_t::pairs_with(owner_->shards_, executor); failed(paired))
@@ -842,7 +957,7 @@ struct vram_amd_indexes {
          *  last. */
         growing_buffer<node_id_t, forkunion_allocator_t> part_bases_;
 
-        /** Where each shard's run of @ref part_bases_ starts, and one past the last; empty with no
+        /** Where each shard's run of @c part_bases_ starts, and one past the last; empty with no
          *  donors. */
         growing_buffer<std::size_t, forkunion_allocator_t> part_offsets_;
 
@@ -867,8 +982,20 @@ struct vram_amd_indexes {
         vram_amd_indexes* owner_ = nullptr;
     };
 
-    /** Opens a refine of every shard: closes the claim words and builds everything the plan runs
-     *  on, as @ref plan_absorb does with no donors, then opens the shards' passes. */
+    /**
+     *  Opens a refine of every shard: closes the claim words and builds everything the plan runs
+     *  on, as @ref plan_absorb does with no donors, then opens the shards' passes.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards or was never reserved, or @ref status keeps
+     *    it.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, or
+     *    @ref status keeps it.
+     *  - @c contended_k A call, batch, load or save in flight, or another refine or absorb holding
+     *    the index.
+     *  - @c cancelled_k, @c unsupported_k, @c unsupported_layout_k or @c overflow_k The index
+     *    keeps it, as @ref status says.
+     */
     expected<refine_plan_t> plan_refine(executor_t& executor, refine_config_t config = {}) noexcept {
         return plan_absorb({}, executor, config);
     }
@@ -881,11 +1008,21 @@ struct vram_amd_indexes {
      *  stays closed for the pass, so a batch, load or save in flight refuses it with
      *  @c contended_k, and one arriving meanwhile is refused.
      *
-     *  @param[inout] executor The streams and their scratch.
+     *  @param[in,out] executor The streams and their scratch.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @param[in] on_visited Fires per re-selecting phase with the nodes visited so far and the
      *      population; a @c cancel_k answer skips the rounds left, still heals, and reports
      *      @c cancelled_k.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards or was never reserved, or @ref status keeps
+     *    it.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, or
+     *    @ref status keeps it.
+     *  - @c contended_k A call, batch, load or save in flight, another refine or absorb holding
+     *    the index, or another call holding the @p executor.
+     *  - @c unsupported_k, @c unsupported_layout_k or @c overflow_k The index keeps it, as @ref
+     *    status says.
      */
     template <typename progress_type_ = dummy_progress_t>
     expected<refine_result_t> refine(executor_t& executor, refine_config_t config = {},
@@ -924,17 +1061,27 @@ struct vram_amd_indexes {
      *  retrying once around the window that empties it. An index never reserved takes the first
      *  donor's geometry.
      *
-     *  @param[inout] donors The indexes giving their rows up, each nulled once consumed; the slots
+     *  @param[in,out] donors The indexes giving their rows up, each nulled once consumed; the slots
      *      must outlive the landings.
-     *  @param[inout] executor The streams every @c run and @c finish names, driving every device of
-     *      every index.
+     *  @param[in,out] executor The streams every @c run and @c finish names, driving every device
+     *      of every index.
      *  @param[in] config The refine's knobs; zeros mean "derive from connectivity".
-     *  @retval config_mismatch_k A null donor, another metric or geometry, a device the executor
-     *      does not drive, a donor device one of this index's devices cannot reach, or this index
-     *      itself.
-     *  @retval contended_k A call, batch, load or save in flight on this index or a donor, a
-     *      repeated donor, or another refine or absorb holding either.
-     *  @retval unsupported_k A donor shard past @ref shard_capacity, which would have to be cut.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k This index has no shards, or it or a donor keeps it, as its
+     *    @ref status says.
+     *  - @c config_mismatch_k A null donor, another metric or geometry, a device the executor
+     *    does not drive, a donor device one of this index's devices cannot reach, this index
+     *    itself, or a geometry or walk context a shard refuses, as its @c reserve and
+     *    @c plan_refine say; or this index or a donor keeps it.
+     *  - @c contended_k A call, batch, load or save in flight on this index or a donor, a
+     *    repeated donor, or another refine or absorb holding either.
+     *  - @c unsupported_k A donor shard past @ref shard_capacity, which would have to be cut, or
+     *    this index or a donor keeps it.
+     *  - @c overflow_k A fresh shard generation still has no room for a donor shard, or this
+     *    index or a donor keeps it.
+     *  - @c cancelled_k or @c unsupported_layout_k This index or a donor keeps it,
+     *    as its @ref status says.
      */
     expected<refine_plan_t> plan_absorb(std::span<vram_amd_indexes*> donors, executor_t& executor,
                                         refine_config_t config = {}) noexcept {
@@ -1013,9 +1160,28 @@ struct vram_amd_indexes {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Moves every row of each of @p donors into this index and links them in: @ref plan_absorb,
+    /**
+     *  Moves every row of each of @p donors into this index and links them in: @ref plan_absorb,
      *  then @c run and @c finish. @p on_visited answers as in @ref refine, for the re-selection
-     *  alone; a cancel still heals and reports @c cancelled_k. */
+     *  alone; a cancel still heals and reports @c cancelled_k.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k This index has no shards, or it or a donor keeps it, as its
+     *    @ref status says.
+     *  - @c config_mismatch_k A null donor, another metric or geometry, a device the @p executor
+     *    does not drive, a donor device one of this index's devices cannot reach, this index
+     *    itself, a geometry or walk context a shard refuses, or donor rows that never land; or
+     *    this index or a donor keeps it.
+     *  - @c contended_k A call, batch, load or save in flight on this index or a donor, a
+     *    repeated donor, another refine or absorb holding either, or another call holding the
+     *    @p executor.
+     *  - @c unsupported_k A donor shard past @ref shard_capacity, or this index or a donor keeps
+     *    it.
+     *  - @c overflow_k A fresh shard generation still has no room for a donor shard, the landed
+     *    rows pass a shard's ceiling, reserved range or key columns or the locator chunks, or
+     *    this index or a donor keeps it.
+     *  - @c unsupported_layout_k This index or a donor keeps it, as its @ref status says.
+     */
     template <typename progress_type_ = dummy_progress_t>
     expected<refine_result_t> absorb(std::span<vram_amd_indexes*> donors, executor_t& executor,
                                      refine_config_t config = {}, progress_type_&& on_visited = {}) noexcept {
@@ -1026,24 +1192,52 @@ struct vram_amd_indexes {
         return {result, failed(finish_status) ? finish_status : ran};
     }
 
-    /** Moves every row of @p donor into this index, as the plural @ref absorb does with one
-     *  donor. */
+    /**
+     *  Moves every row of @p donor into this index, as the plural @ref absorb does with one
+     *  donor.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k This index has no shards, or it or @p donor keeps it, as its
+     *    @ref status says.
+     *  - @c config_mismatch_k The @p donor is this index, has another metric or geometry, or
+     *    sits on a device the @p executor does not drive or one of this index's devices cannot
+     *    reach; a shard refuses the geometry or its walk context, the donor's rows never land,
+     *    or this index or @p donor keeps it.
+     *  - @c contended_k A call, batch, load or save in flight on this index or @p donor, another
+     *    refine or absorb holding either, or another call holding the @p executor.
+     *  - @c unsupported_k A shard of @p donor past @ref shard_capacity, or this index or
+     *    @p donor keeps it.
+     *  - @c overflow_k A fresh shard generation still has no room for a shard of @p donor, the
+     *    landed rows pass a shard's ceiling, reserved range or key columns or the locator
+     *    chunks, or this index or @p donor keeps it.
+     *  - @c unsupported_layout_k This index or @p donor keeps it, as its @ref status says.
+     */
     expected<refine_result_t> absorb(vram_amd_indexes& donor, executor_t& executor,
                                      refine_config_t config = {}) noexcept {
         vram_amd_indexes* donors[1] = {&donor};
         return absorb(std::span<vram_amd_indexes*>(donors), executor, config);
     }
 
-    /** Splits this index into receivers, the inverse of @ref plan_absorb: a gap on the device
-     *  residencies, which answer @c unsupported_k, while the host residency defines its own. */
+    /**
+     *  Splits this index into receivers, the inverse of @c plan_absorb: a gap on the device
+     *  residencies, while the host residency defines its own.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k Always, as the device residencies split nothing.
+     */
     expected<refine_plan_t> plan_split(std::span<vram_amd_indexes*>, executor_t&, refine_config_t = {},
                                        u64_t = 0) noexcept {
         return {{}, status_t::unsupported_k};
     }
 
-    /** Moves every row of this index into one graph-local part per receiver and links each in:
+    /**
+     *  Moves every row of this index into one graph-local part per receiver and links each in:
      *  @ref plan_split, then @c run and @c finish. @p on_visited answers as in @ref refine, for the
-     *  re-selection alone; a cancel still heals and reports @c cancelled_k. */
+     *  re-selection alone; a cancel still heals and reports @c cancelled_k.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k Always, as @ref plan_split refuses.
+     */
     template <typename progress_type_ = dummy_progress_t>
     expected<refine_result_t> split(std::span<vram_amd_indexes*> receivers, executor_t& executor,
                                     refine_config_t config = {}, u64_t seed = 0,
@@ -1062,7 +1256,17 @@ struct vram_amd_indexes {
      *
      *  Read-only, and bracketed by the epoch as every reader is.
      *
-     *  @param[inout] executor The streams and their scratch, one per shard.
+     *  @param[in,out] executor The streams and their scratch, one per shard.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards, the @p executor has no streams, or
+     *    @ref status keeps it.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, or
+     *    @ref status keeps it.
+     *  - @c contended_k Another call holds the @p executor, or a destructive window overlapped
+     *    the read twice.
+     *  - @c cancelled_k, @c unsupported_k, @c unsupported_layout_k or @c overflow_k The index
+     *    keeps it, as @ref status says.
      */
     expected<health_result_t> health(executor_t& executor) noexcept {
         return shards_.read_retrying_once([&]() noexcept -> expected<health_result_t> {
@@ -1126,17 +1330,27 @@ struct vram_amd_indexes {
      *  opened on, so no single one can walk every shard.
      *
      *  @param[in] query_vector The query, in the shards' stored scalar type.
-     *  @param[inout] executor The streams and their scratch, paired positionally with the shards.
+     *  @param[in,out] executor The streams and their scratch, paired positionally with the shards.
      *  @param[in] config The per-shard search configuration, applied uniformly.
-     *  @param[inout] keys Keys of the merged ranking; its length is the capacity. Resolved through
+     *  @param[in,out] keys Keys of the merged ranking; its length is the capacity. Resolved through
      *      the shards' key columns, so colliding ID spaces still land in one ranking.
-     *  @param[inout] distances Distances of the same ranking, parallel to @p keys.
+     *  @param[in,out] distances Distances of the same ranking, parallel to @p keys.
      *
      *  The batched search over one row, so every shard walks at once and the rankings merge as
      *  they land; each shard keeps as many matches as the ranking is wide, walking as broad as its
      *  expansion factor, or broader where the shard raises it to cover that width, as the batched
      *  search does. A failing shard keeps whatever the others already merged, so the reported
      *  count and the ranking always agree.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards or was never reserved, or the @p executor has
+     *    no streams.
+     *  - @c unsupported_layout_k The @p query_vector is not contiguous.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, or the
+     *    query is not as wide as the index.
+     *  - @c contended_k Another call holds the @p executor, or a destructive window overlapped
+     *    the read twice.
+     *  - @c unsupported_k A scan is asked, which this vendor has none of.
      */
     expected<search_result_t> search(vector_view_t query_vector, executor_t& executor, search_config_t config,
                                      std::span<key_t> keys, std::span<distance_t> distances) noexcept {
@@ -1171,7 +1385,7 @@ struct vram_amd_indexes {
      *
      *  @param[in] queries The batch, one query per row, in any scalar NumKong casts, imported on
      *      each shard's device.
-     *  @param[inout] executor The contexts and streams, paired positionally with the shards.
+     *  @param[in,out] executor The contexts and streams, paired positionally with the shards.
      *  @param[in] config The per-shard search configuration, applied uniformly; the width of
      *      @p keys sets its @c count.
      *  @param[out] keys Merged rankings, one query per row, as many matches as its width.
@@ -1184,6 +1398,19 @@ struct vram_amd_indexes {
      *  the caller's queries and the call's own landing are DMA targets until then. Rankings scored
      *  in f32 or f64 that all live on the first shard's device may merge there instead, into the
      *  same rankings, and land only once every shard did.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards or was never reserved, or the @p executor has
+     *    no streams.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, @p counts
+     *    is not one per query, the row counts or widths of @p keys and @p distances disagree, or
+     *    the queries are not as wide as the index.
+     *  - @c unsupported_layout_k A row of @p keys or @p distances is not contiguous, or query rows
+     *    sit closer than one packed row apart.
+     *  - @c contended_k Another call holds the @p executor, or a destructive window overlapped
+     *    the read twice.
+     *  - @c unsupported_k A scan is asked, which this vendor has none of, or the queries' scalar
+     *    has no device cast into the stored one.
      */
     template <typename score_type_>
     expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
@@ -1206,10 +1433,26 @@ struct vram_amd_indexes {
         });
     }
 
-    /** The batched @c search ranked by a lightning indexer: every shard walks the queries under the
+    /**
+     *  The batched @c search ranked by a lightning indexer: every shard walks the queries under the
      *  same @p heads, passed to it as is, so whichever shard scored them, the merged distances are:
-     *  `1 − Σₕ wₕ · ReLU(qₕ · k)`.
-     *  A dot verb: any other metric refuses with @c config_mismatch_k. */
+     *  <tt>1 − Σₕ wₕ · ReLU(qₕ · k)</tt>.
+     *  A dot verb.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index scores by another metric than dot, the @p executor drives
+     *    no stream on some shard's device, @p counts is not one per query, the row counts or
+     *    widths of @p keys and @p distances disagree, the heads or weights disagree with the
+     *    queries, or the queries are not as wide as the index.
+     *  - @c uninitialized_k The index has no shards or was never reserved, or the @p executor has
+     *    no streams.
+     *  - @c unsupported_layout_k A row of @p keys or @p distances is not contiguous, or query or
+     *    head rows sit closer than one packed row apart.
+     *  - @c contended_k Another call holds the @p executor, or a destructive window overlapped
+     *    the read twice.
+     *  - @c unsupported_k A scan is asked, which this vendor has none of, or the queries' or
+     *    heads' scalar has no device cast into the stored one.
+     */
     expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys,
                                      nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept
@@ -1245,7 +1488,7 @@ struct vram_amd_indexes {
      *
      *  @param[in] left The left-hand rows, one walk per row, in the shards' stored scalar type, as
      *      in @c search.
-     *  @param[inout] executor The contexts and streams, paired positionally with the shards.
+     *  @param[in,out] executor The contexts and streams, paired positionally with the shards.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
      *  @param[out] keys The key of each kept pair, one left-hand row per row, as many pairs as its
      *      width.
@@ -1256,7 +1499,19 @@ struct vram_amd_indexes {
      *  A full row keeps whichever pairs landed first. The rows cross @c window_rows_k at a time,
      *  and a refused shard stops the fan-out but keeps every shard and window already landed, so
      *  the pairs and the counts always agree; the first refusal is what the merged result reports.
-     *  A metric other than dot refuses with @c config_mismatch_k.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index scores by another metric than dot, the @p executor drives
+     *    no stream on some shard's device, @p counts is not one per row, the row counts or widths
+     *    of @p keys and @p products disagree, or the rows are not as wide as the index.
+     *  - @c uninitialized_k The index has no shards or was never reserved, or the @p executor has
+     *    no streams.
+     *  - @c unsupported_layout_k A row of @p keys or @p products is not contiguous, or rows sit
+     *    closer than one packed row apart.
+     *  - @c contended_k Another call holds the @p executor, or a destructive window overlapped
+     *    the read twice.
+     *  - @c unsupported_k A scan is asked, which this vendor has none of, or the rows' scalar has
+     *    no device cast into the stored one.
      */
     template <typename product_type_>
     expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config,
@@ -1339,7 +1594,7 @@ struct vram_amd_indexes {
      *
      *  @param[in] queries The token rows of every query, @p rows_per_query consecutive rows each.
      *  @param[in] rows_per_query Rows in every query; the row count must be a whole multiple of it.
-     *  @param[inout] executor The contexts and streams, paired positionally with the shards.
+     *  @param[in,out] executor The contexts and streams, paired positionally with the shards.
      *  @param[in] config The per-shard walk configuration, applied uniformly; each row ranks as
      *      many tokens as its expansion factor, and one wider than the device search can land
      *      refuses.
@@ -1352,7 +1607,22 @@ struct vram_amd_indexes {
      *  A key some row never ranked misses that row's maximum, so with non-negative per-row maxima a
      *  score lands below its exact value, never above. Whole queries cross @c window_rows_k rows at
      *  a time, or one query when it outgrows that, and a refused window keeps every one already
-     *  landed. A metric other than dot refuses with @c config_mismatch_k.
+     *  landed.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index scores by another metric than dot, the @p executor drives
+     *    no stream on some shard's device, @p counts or @p scored is not one per query, the row
+     *    counts or widths of @p keys and @p scores disagree, or the rows are not as wide as the
+     *    index.
+     *  - @c uninitialized_k The index has no shards or was never reserved, or the @p executor has
+     *    no streams.
+     *  - @c shape_mismatch_k The @p rows_per_query is zero or does not divide the rows.
+     *  - @c unsupported_layout_k A row of @p keys or @p scores is not contiguous, or rows sit
+     *    closer than one packed row apart.
+     *  - @c contended_k Another call holds the @p executor, or a destructive window overlapped
+     *    the read twice.
+     *  - @c unsupported_k A scan is asked, which this vendor has none of, or the rows' scalar has
+     *    no device cast into the stored one.
      */
     template <typename score_type_>
     expected<search_result_t> maxsim(rows_view_t queries, std::size_t rows_per_query, executor_t& executor,
@@ -1414,23 +1684,36 @@ struct vram_amd_indexes {
      *  @param[in] queries The query heads, in the shards' stored scalar type as in @c search; row t
      *      · @p head_count + h is head h of token t, and each token walks every shard once.
      *  @param[in] head_count The query heads sharing this key-value head; it must divide the rows.
-     *  @param[in] value_lookup Device-callable: `value_lookup(key)` points at the key's value row
-     *      on a 16-byte boundary, as wide as the keys and stored like them, in memory every shard's
-     *      device reads; a null row refuses the call with @c shape_mismatch_k.
+     *  @param[in] value_lookup Device-callable: <tt>value_lookup(key)</tt> points at the key's
+     *      value row on a 16-byte boundary, as wide as the keys and stored like them, in memory
+     *      every shard's device reads; a null row refuses the call with @c shape_mismatch_k.
      *  @param[in] score_scale The factor turning a dot into a logit.
      *  @param[out] outputs The attended rows, one per query row, as wide as the keys, in host or
      *      device memory; rows in any scalar but f32 cast on the first shard's device first, and
      *      must fill whole bytes.
      *  @param[out] carry Each row's softmax state over every shard, one per row, in host or device
      *      memory; an empty span skips them.
-     *  @param[inout] executor The contexts and streams, paired positionally with the shards.
+     *  @param[in,out] executor The contexts and streams, paired positionally with the shards.
      *  @param[in] config The per-shard walk configuration, applied uniformly; @c count plays no
      *      part.
-     *  @return The query rows attended, and the traversal telemetry every shard spent;
-     *      @c config_mismatch_k unless the shards score by dot.
+     *  @return The query rows attended, and the traversal telemetry every shard spent.
      *
      *  Whole tokens cross @c window_rows_k rows at a time, and a refused window keeps every one
      *  already landed.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The shards score by another metric than dot, the @p executor drives
+     *    no stream on some shard's device, @p outputs or @p carry disagree with the rows, the
+     *    queries are not as wide as the index, or the heads' scratch fits no walk.
+     *  - @c uninitialized_k The index has no shards or was never reserved, or the @p executor has
+     *    no streams.
+     *  - @c shape_mismatch_k The @p head_count is zero or does not divide the rows, or a walk met
+     *    a node with no value row.
+     *  - @c unsupported_k A scan is asked, which this vendor has none of, or the queries' or
+     *    outputs' scalar has no device cast.
+     *  - @c unsupported_layout_k Output or query rows sit closer than one packed row apart.
+     *  - @c contended_k Another call holds the @p executor, or a destructive window overlapped
+     *    the read twice.
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
@@ -1537,6 +1820,14 @@ struct vram_amd_indexes {
         /** The executor's hold, kept for the plan's whole life, one caller at a time. */
         typename executor_t::claim_t streams;
 
+        /**
+         *  Opens shard @p shard 's save into @p columns on the stream of its device.
+         *
+         *  @par Statuses:
+         *  - @c config_mismatch_k The @p synchronization is @c concurrent_k, or @p columns are too
+         *    short for the shard's rows.
+         *  - @c uninitialized_k The shard was never reserved.
+         */
         expected<typename index_t::save_plan_t> open_shard_save(shards_t& shards, std::size_t shard,
                                                                 typename index_t::columns_t const& columns,
                                                                 synchronization_t synchronization) noexcept {
@@ -1544,6 +1835,19 @@ struct vram_amd_indexes {
             return shards[shard].index->plan_save(columns, synchronization,
                                                   executor->stream(fanout_t::stream_of(shards, *executor, shard)));
         }
+
+        /**
+         *  Opens shard @p shard 's load of @p rows on the stream of its device and pins its bounce,
+         *  since the parts' columns cross from host memory.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The shard was never reserved, or its @c status keeps it.
+         *  - @c overflow_k The rows pass the shard's ceiling or reserved range, or its @c status
+         *    keeps it.
+         *  - @c contended_k A batch or load is in flight on the shard.
+         *  - @c cancelled_k, @c config_mismatch_k, @c unsupported_k or @c unsupported_layout_k
+         *    The shard keeps it, as its @c status says.
+         */
         expected<typename index_t::load_plan_t> open_shard_load(shards_t& shards, std::size_t shard,
                                                                 std::size_t rows) noexcept {
             if (status_t const entered = fanout_t::enter(shards, shard); failed(entered)) return {{}, entered};
@@ -1554,6 +1858,14 @@ struct vram_amd_indexes {
             status_t const pinned = plan.pin_bounce();
             return {std::move(plan), pinned};
         }
+
+        /**
+         *  Covers @p rows in shard @p shard 's device key column and uploads them from its host
+         *  column on the stream of @p plan.
+         *
+         *  @par Statuses:
+         *  - @c overflow_k The rows pass the device key column's range.
+         */
         status_t land_keys(shards_t& shards, std::size_t shard, iota_view<std::size_t> rows,
                            typename index_t::load_plan_t const& plan) noexcept {
             if (status_t const entered = fanout_t::enter(shards, shard); failed(entered)) return entered;
@@ -1562,7 +1874,13 @@ struct vram_amd_indexes {
         }
         void end_save(shards_t& shards) noexcept { shards.reopen(); }
 
-        /** Closes every shard of the loading index under its unique side. */
+        /**
+         *  Closes every shard of the loading index under its unique side.
+         *
+         *  @par Statuses:
+         *  - @c contended_k A call in flight, a claim outstanding, or a plan holding the index
+         *    closed.
+         */
         status_t close(shards_t&) noexcept { return owner->close_gated_(); }
 
         /** Leaves part @p part the live shard it names, a placed one, or opens shard generations on
@@ -1602,10 +1920,24 @@ struct vram_amd_indexes {
      *  failed or cancelled save reads as absent.
      *
      *  @param[in] path The monolith's path, or the manifest's - its parts land beside it as
-     *      @c <stem>-00001-of-0000S.safegraphs.
+     *      @c -00001-of-0000S.safegraphs after the stem.
      *  @param[in] config The alignment, certified contract and provenance; the device
      *      storage cannot be settlement-probed, so @c concurrent_k refuses.
-     *  @param[inout] executor The streams the exports ride, held until the plan dies.
+     *  @param[in,out] executor The streams the exports ride, held until the plan dies.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p config asks for @c concurrent_k or does not validate, the
+     *    @p executor drives no stream on some shard's device, a shard's columns cannot hold its
+     *    rows, or @ref status keeps it.
+     *  - @c uninitialized_k The index has no shards or was never reserved, or @ref status keeps
+     *    it.
+     *  - @c contended_k Another call holds the @p executor, or a call, batch, load or plan holds
+     *    the index.
+     *  - @c unknown_kind_k The stored scalar has no interchange dtype.
+     *  - @c invalid_argument_k A part path does not parse.
+     *  - @c overflow_k A device ends before a part does, or @ref status keeps it.
+     *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref
+     *    status says.
      */
     expected<save_plan_t> plan_save(std::string_view path, save_config_t const& config, executor_t& executor) noexcept {
         auto [residency, status] = gate_save_(config, executor);
@@ -1613,9 +1945,24 @@ struct vram_amd_indexes {
         return save_plan_t::open(shards_, std::move(residency), path, config);
     }
 
-    /** Opens a save into @p buffer - the in-memory sibling of the path form: a lone live shard's
+    /**
+     *  Opens a save into @p buffer - the in-memory sibling of the path form: a lone live shard's
      *  monolith, or the manifest leading the buffer and the parts it lists. Size the bytes by
-     *  @ref storage_requirements; fewer answer @c overflow_k. */
+     *  @ref storage_requirements.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p config asks for @c concurrent_k or does not validate, the
+     *    @p executor drives no stream on some shard's device, a shard's columns cannot hold its
+     *    rows, or @ref status keeps it.
+     *  - @c uninitialized_k The index has no shards or was never reserved, or @ref status keeps
+     *    it.
+     *  - @c contended_k Another call holds the @p executor, or a call, batch, load or plan holds
+     *    the index.
+     *  - @c unknown_kind_k The stored scalar has no interchange dtype.
+     *  - @c overflow_k The @p buffer is shorter than the checkpoint, or @ref status keeps it.
+     *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref
+     *    status says.
+     */
     expected<save_plan_t> plan_save(bytes_span_t buffer, save_config_t const& config, executor_t& executor) noexcept {
         auto [residency, status] = gate_save_(config, executor);
         if (failed(status)) return {{}, status};
@@ -1632,7 +1979,24 @@ struct vram_amd_indexes {
      *
      *  @param[in] path A monolith, or the manifest whose parts sit beside it.
      *  @param[in] config The rows to reserve; zero fits the checkpoint.
-     *  @param[inout] executor The streams the imports ride, held until the plan dies.
+     *  @param[in,out] executor The streams the imports ride, held until the plan dies.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards or a shard was never reserved, or
+     *    @ref status keeps it.
+     *  - @c config_mismatch_k The index holds entries, the @p executor drives no stream on some
+     *    shard's device, the checkpoint's geometry, dtypes or metric differ from the shards', or
+     *    @ref status keeps it.
+     *  - @c contended_k Another call holds the @p executor or the gate, or a batch or plan holds
+     *    a shard's claims.
+     *  - @c invalid_argument_k The checkpoint or a part path does not parse.
+     *  - @c malformed_k The checkpoint lists no part, a part or its header does not parse, or its
+     *    connectivity or dimensions are unusable.
+     *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
+     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map, or
+     *    @ref status keeps it.
+     *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref
+     *    status says.
      */
     expected<load_plan_t> plan_load(std::string_view path, load_config_t const& config, executor_t& executor) noexcept {
         auto [residency, status] = gate_load_(executor);
@@ -1640,8 +2004,26 @@ struct vram_amd_indexes {
         return load_plan_t::open(shards_, std::move(residency), path, config);
     }
 
-    /** Opens a load of the checkpoint held in @p buffer: a lone monolith, or the manifest leading
-     *  the buffer and the parts it lists. */
+    /**
+     *  Opens a load of the checkpoint held in @p buffer: a lone monolith, or the manifest leading
+     *  the buffer and the parts it lists.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards or a shard was never reserved, or
+     *    @ref status keeps it.
+     *  - @c config_mismatch_k The index holds entries, the @p executor drives no stream on some
+     *    shard's device, the checkpoint's geometry, dtypes or metric differ from the shards', or
+     *    @ref status keeps it.
+     *  - @c contended_k Another call holds the @p executor or the gate, or a batch or plan holds
+     *    a shard's claims.
+     *  - @c malformed_k The manifest lists no part, a part or its header does not parse, or its
+     *    connectivity or dimensions are unusable.
+     *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
+     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map, or
+     *    @ref status keeps it.
+     *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref
+     *    status says.
+     */
     expected<load_plan_t> plan_load(bytes_view_t buffer, load_config_t const& config, executor_t& executor) noexcept {
         auto [residency, status] = gate_load_(executor);
         if (failed(status)) return {{}, status};
@@ -1654,9 +2036,24 @@ struct vram_amd_indexes {
      *
      *  @param[in] path The monolith's path, or the manifest's.
      *  @param[in] config The alignment, synchronization contract and provenance.
-     *  @param[inout] executor The streams the shard writes ride.
+     *  @param[in,out] executor The streams the shard writes ride.
      *  @param[in] on_saved Fires per finished shard with its index; answering @c cancel_k stops
      *      the remaining shards and reports @c cancelled_k.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p config asks for @c concurrent_k or does not validate, the
+     *    @p executor drives no stream on some shard's device, a shard's columns cannot hold its
+     *    rows, a shard's steps never landed all its rows, a header does not fit before its data,
+     *    or @ref status keeps it.
+     *  - @c uninitialized_k The index has no shards or was never reserved, or @ref status keeps
+     *    it.
+     *  - @c contended_k Another call holds the @p executor, or a call, batch, load or plan holds
+     *    the index.
+     *  - @c unknown_kind_k The stored scalar has no interchange dtype.
+     *  - @c invalid_argument_k A part path or the manifest path does not parse.
+     *  - @c overflow_k A device ends before a part does, a part is shorter than its header, the
+     *    manifest does not fit, or @ref status keeps it.
+     *  - @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref status says.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t save(std::string_view path, save_config_t const& config, executor_t& executor,
@@ -1667,8 +2064,24 @@ struct vram_amd_indexes {
         return plan.finish(on_saved);
     }
 
-    /** Serializes the index into @p buffer - the one-shot over the bytes form of
-     *  @ref plan_save. */
+    /**
+     *  Serializes the index into @p buffer - the one-shot over the bytes form of
+     *  @ref plan_save.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p config asks for @c concurrent_k or does not validate, the
+     *    @p executor drives no stream on some shard's device, a shard's columns cannot hold its
+     *    rows, a shard's steps never landed all its rows, a header does not fit before its data,
+     *    or @ref status keeps it.
+     *  - @c uninitialized_k The index has no shards or was never reserved, or @ref status keeps
+     *    it.
+     *  - @c contended_k Another call holds the @p executor, or a call, batch, load or plan holds
+     *    the index.
+     *  - @c unknown_kind_k The stored scalar has no interchange dtype.
+     *  - @c overflow_k The @p buffer is shorter than the checkpoint, a part is shorter than its
+     *    header, the manifest does not fit, or @ref status keeps it.
+     *  - @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref status says.
+     */
     template <typename progress_type_ = dummy_progress_t>
     status_t save(bytes_span_t buffer, save_config_t const& config, executor_t& executor,
                   progress_type_&& on_saved = {}) noexcept {
@@ -1685,6 +2098,23 @@ struct vram_amd_indexes {
      *  The index must be empty, and a batch in flight refuses the load as @c contended_k, as the
      *  load refuses a batch. A cancelled or failed load clears it and reports why, so nothing is
      *  published and the next load starts clean.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards or a shard was never reserved, a bounce was
+     *    never pinned, or @ref status keeps it.
+     *  - @c config_mismatch_k The index holds entries, the @p executor drives no stream on some
+     *    shard's device, the checkpoint's geometry, dtypes or metric differ from the shards', a
+     *    step cannot land its rows, a shard's steps never landed all its rows, or @ref status
+     *    keeps it.
+     *  - @c contended_k Another call holds the @p executor or the gate, or a batch or plan holds
+     *    a shard's claims.
+     *  - @c invalid_argument_k The checkpoint or a part path does not parse.
+     *  - @c malformed_k The checkpoint lists no part, a part, its header or its key column does
+     *    not parse, or its connectivity or dimensions are unusable.
+     *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
+     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map, or
+     *    @ref status keeps it.
+     *  - @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref status says.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t load(std::string_view path, load_config_t const& config, executor_t& executor,
@@ -1703,8 +2133,26 @@ struct vram_amd_indexes {
         return settled;
     }
 
-    /** Restores the checkpoint held in @p buffer - the one-shot over the bytes form of
-     *  @ref plan_load. */
+    /**
+     *  Restores the checkpoint held in @p buffer - the one-shot over the bytes form of
+     *  @ref plan_load.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards or a shard was never reserved, a bounce was
+     *    never pinned, or @ref status keeps it.
+     *  - @c config_mismatch_k The index holds entries, the @p executor drives no stream on some
+     *    shard's device, the checkpoint's geometry, dtypes or metric differ from the shards', a
+     *    step cannot land its rows, a shard's steps never landed all its rows, or @ref status
+     *    keeps it.
+     *  - @c contended_k Another call holds the @p executor or the gate, or a batch or plan holds
+     *    a shard's claims.
+     *  - @c malformed_k The manifest lists no part, a part, its header or its key column does not
+     *    parse, or its connectivity or dimensions are unusable.
+     *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
+     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map, or
+     *    @ref status keeps it.
+     *  - @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref status says.
+     */
     template <typename progress_type_ = dummy_progress_t>
     status_t load(bytes_view_t buffer, load_config_t const& config, executor_t& executor,
                   progress_type_&& on_loaded = {}) noexcept {
@@ -1720,12 +2168,23 @@ struct vram_amd_indexes {
         return settled;
     }
 
-    /** The checkpoint's metadata without loading it - @ref safegraphs_read_metadata. */
+    /**
+     *  The checkpoint's metadata without loading it - @ref safegraphs_read_metadata.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k A path does not parse.
+     *  - @c malformed_k The file is empty, or its manifest or header does not parse.
+     */
     static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept {
         return safegraphs_read_metadata(path);
     }
 
-    /** The metadata of one monolith held in memory. */
+    /**
+     *  The metadata of one monolith held in memory.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k The manifest or the header does not parse.
+     */
     static expected<safegraphs_metadata_t> metadata(bytes_view_t buffer) noexcept {
         return safegraphs_read_metadata(buffer);
     }
@@ -1762,12 +2221,16 @@ struct vram_amd_indexes {
     }
 
     /**
-     *  @brief The batched @ref count: the entries stored under every key of @p keys.
+     *  @brief The batched @c count: the entries stored under every key of @p keys.
      *
      *  @param[in] keys The keys to count, repeats and absent ones included.
      *  @param[out] entries The entries under each key, parallel to @p keys; zero means absent.
-     *  @param[inout] executor Unused, since the locator map lives on the host; it rides in the
-     *      signature so a caller drives every residency alike.
+     *
+     *  The executor is unused, since the locator map lives on the host; it rides in the
+     *  signature so a caller drives every residency alike.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p entries are not as many as the @p keys.
      */
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t&) const noexcept {
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
@@ -1775,8 +2238,13 @@ struct vram_amd_indexes {
         return status_t::success_k;
     }
 
-    /** The batched @ref contains: one in @p entries where a key of @p keys holds any entry, zero
-     *  where it holds none; the executor rides in the signature as in the batched @ref count. */
+    /**
+     *  The batched @c contains: one in @p entries where a key of @p keys holds any entry, zero
+     *  where it holds none; the executor rides in the signature as in the batched @ref count.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p entries are not as many as the @p keys.
+     */
     status_t contains(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t&) const noexcept {
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
         for (std::size_t position = 0; position != keys.size(); ++position)
@@ -1785,7 +2253,7 @@ struct vram_amd_indexes {
     }
 
     /**
-     *  @brief The batched @ref get: up to @p wanted rows of every key of @p keys, and every key's
+     *  @brief The batched @c get: up to @p wanted rows of every key of @p keys, and every key's
      *      true total, every row queued on its shard's stream and the executor drained once.
      *
      *  @param[in] keys The keys to export, repeats and absent ones included.
@@ -1795,7 +2263,17 @@ struct vram_amd_indexes {
      *  @param[in] wanted Rows kept per key.
      *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted
      *      when its rows truncated, zero when absent.
-     *  @param[inout] executor The streams the copies ride, paired positionally with the shards.
+     *  @param[in,out] executor The streams the copies ride, paired positionally with the shards.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p entries are not as many as the @p keys, @p rows hold other
+     *    than @p keys · @p wanted rows or narrower ones, or @p executor drives no stream on some
+     *    shard's device.
+     *  - @c unsupported_k The @p rows are in another scalar than the stored one.
+     *  - @c unsupported_layout_k A row's values are not packed.
+     *  - @c uninitialized_k The index has no shards.
+     *  - @c contended_k Another call holds @p executor, or a destructive window overlapped the
+     *    read twice.
      */
     status_t get(std::span<key_t const> keys, rows_span_t rows, std::size_t wanted, std::span<std::size_t> entries,
                  executor_t& executor) const noexcept {

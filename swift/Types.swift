@@ -1,15 +1,15 @@
-//
-//  Types.swift
-//  USearch
-//
-//  Shared vocabulary of the USearch Swift SDK.
-//
-//  Statuses, keys, scalar kinds, rows, executors, arenas, and deferred calls are
-//  modality-agnostic, so they live here and the dense modality builds on them in DenseIndex.swift.
-//
-//  Batches travel in a `RowsView` over NumKong's `MatrixView` or `Tensor`, and its low-precision
-//  types are the scalars a caller builds rows out of, and this file only tags them by `Scalar`.
-//
+/**
+ *  @file swift/Types.swift
+ *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief Shared vocabulary of the USearch Swift SDK.
+ *
+ *  Statuses, keys, scalar kinds, rows, executors, arenas, and deferred calls are
+ *  modality-agnostic, so they live here and the dense modality builds on them in DenseIndex.swift.
+ *
+ *  Batches travel in a `RowsView` over NumKong's `MatrixView` or `Tensor`, and its low-precision
+ *  types are the scalars a caller builds rows out of, and this file only tags them by `Scalar`.
+ */
 
 import Dispatch
 import NumKong

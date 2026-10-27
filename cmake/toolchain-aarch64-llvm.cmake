@@ -2,7 +2,7 @@
 #
 # ~~~
 #   sudo apt install clang lld crossbuild-essential-arm64
-#   cmake -B build_aarch64_llvm -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-llvm.cmake -D USEARCH_BUILD_LIB_C=1
+#   cmake -B build_aarch64_llvm -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-llvm.cmake
 #   cmake --build build_aarch64_llvm --target usearch_shared
 # ~~~
 #

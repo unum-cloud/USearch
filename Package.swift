@@ -1,16 +1,46 @@
-// swift-tools-version:6.4
+// swift-tools-version:6.2
 
 import PackageDescription
 
-// The C surface is consumed as headers, not as sources: `src/dense_index.cpp` pulls the whole
+// The C surface is consumed as a library, not as sources: `src/dense_index.cpp` pulls the whole
 // NumKong, ForkUnion, and StringZilla stack, has a CUDA sibling SwiftPM cannot drive, and is
-// built by CMake into `libusearch_static` for every other binding already. So `USearchC` is the
-// module map over `c/`, and the Swift target links the library CMake produced. Point the
-// linker at it with `swift build -Xlinker -L<build directory>`, or install it system-wide.
+// built by CMake into `libusearch_static` for every other binding already. SwiftPM links what
+// CMake produced: an XCFramework on Apple platforms and an artifact bundle elsewhere. A checkout
+// points `USEARCH_SWIFT_ARTIFACT` at the one `cmake --build --preset swift` wrote, relative to
+// this directory; everyone else downloads the release's, whose checksums the release workflow
+// writes.
 //
 // NumKong is a source dependency rather than a header one: its matrix views are the batch
 // currency of every verb here, and its low-precision types are how a caller builds an `E4M3` row
 // in the first place.
+let release = "https://github.com/unum-cloud/USearch/releases/download/v3.0.0-rc.1"
+let appleChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
+let portableChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
+
+let library: [Target]
+let libraryDependencies: [Target.Dependency]
+if let artifact = Context.environment["USEARCH_SWIFT_ARTIFACT"] {
+    library = [.binaryTarget(name: "USearchC", path: artifact)]
+    libraryDependencies = ["USearchC"]
+}
+else {
+    library = [
+        .binaryTarget(name: "USearchCApple", url: "\(release)/USearchC.xcframework.zip", checksum: appleChecksum),
+        .binaryTarget(
+            name: "USearchCPortable",
+            url: "\(release)/USearchC.artifactbundle.zip",
+            checksum: portableChecksum
+        ),
+    ]
+    libraryDependencies = [
+        .target(
+            name: "USearchCApple",
+            condition: .when(platforms: [.macOS, .macCatalyst, .iOS, .tvOS, .watchOS, .visionOS])
+        ),
+        .target(name: "USearchCPortable", condition: .when(platforms: [.linux, .android, .windows, .wasi])),
+    ]
+}
+
 let package = Package(
     name: "USearch",
     platforms: [
@@ -29,25 +59,14 @@ let package = Package(
     dependencies: [
         .package(path: "numkong")
     ],
-    targets: [
-        .target(
-            name: "USearchC",
-            path: ".",
-            // The NumKong and StringZilla checkouts sit under this path, and their Metal kernels would read
-            // as resources.
-            exclude: ["numkong", "stringzilla"],
-            sources: ["swift/shim.c"],
-            publicHeadersPath: "c",
-            cSettings: [.headerSearchPath("c")]
-        ),
+    targets: library + [
         .target(
             name: "USearch",
-            dependencies: ["USearchC", .product(name: "NumKong", package: "numkong")],
+            dependencies: libraryDependencies + [.product(name: "NumKong", package: "numkong")],
             path: "swift",
-            exclude: ["README.md", "Test.swift", "shim.c"],
+            exclude: ["README.md", "Test.swift"],
             sources: ["Types.swift", "DenseIndex.swift"],
             linkerSettings: [
-                .linkedLibrary("usearch_static"),
                 // The engine is C++, and Apple SDKs ship only libc++ - there is no libstdc++ to name.
                 .linkedLibrary("c++", .when(platforms: [.macOS, .iOS, .tvOS, .watchOS, .visionOS])),
                 .linkedLibrary("stdc++", .when(platforms: [.linux])),
@@ -57,7 +76,7 @@ let package = Package(
             name: "USearchTestsSwift",
             dependencies: ["USearch", .product(name: "NumKong", package: "numkong")],
             path: "swift",
-            exclude: ["README.md", "shim.c", "Types.swift", "DenseIndex.swift"],
+            exclude: ["README.md", "Types.swift", "DenseIndex.swift"],
             sources: ["Test.swift"]
         ),
     ]

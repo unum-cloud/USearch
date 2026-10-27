@@ -6,6 +6,10 @@
 //! An [`On`] is the receiver every modality's verbs run through: it borrows an index and an
 //! executor, and its completion decides whether a verb answers what the call produced or a
 //! [`Deferred`] once the call is submitted.
+//!
+//! File: rust/types.rs
+//! Author: Ash Vardanian
+//! Date: August 15, 2026
 
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types, non_upper_case_globals)]
@@ -771,21 +775,40 @@ impl fmt::Debug for Key {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
 pub enum Scalar {
+    /// IEEE-754 binary64: ±1.80e308, epsilon 2.22e-16, subnormals to 4.94e-324, with infinities and NaNs.
     F64 = 1,
+    /// IEEE-754 binary32: ±3.40e38, epsilon 1.19e-7, subnormals to 1.40e-45, with infinities and NaNs.
     F32 = 2,
+    /// Truncated f32 - 8-bit exponent, 7-bit mantissa: f32's range at ±3.39e38 and epsilon 7.81e-3, with
+    /// infinities and NaNs.
     BF16 = 3,
+    /// IEEE-754 binary16: ±65504, epsilon 9.77e-4, subnormals to 5.96e-8, with infinities and NaNs.
     F16 = 4,
+    /// FP8 with a 5-bit exponent: ±57344, epsilon 0.25, with infinities and NaNs - f16's dynamic range carried
+    /// on two mantissa bits.
     E5M2 = 5,
+    /// FP8 with a 4-bit exponent: ±448, epsilon 0.125, no infinities, and two NaN codes at 0x7F and 0xFF.
     E4M3 = 6,
+    /// FP6 with a 3-bit exponent, byte-aligned with two padding bits: ±28, no infinities or NaNs, so every one
+    /// of its 64 codes is a number.
     E3M2 = 7,
+    /// FP6 with a 2-bit exponent, byte-aligned with two padding bits: ±7.5, no infinities or NaNs, and 72% of
+    /// its codes outside [-1, 1].
     E2M3 = 8,
 
+    /// 8-bit signed integer spanning -128 to 127, every code a number.
     I8 = 10,
+    /// Two signed nibbles per byte spanning -8 to 7, even dimensions in the low nibble and odd ones in the high.
     I4x2 = 11,
+    /// 32-bit signed integer spanning ±2.15e9, every code a number.
     I32 = 12,
 
+    /// 8-bit unsigned integer spanning 0 to 255, every code a number.
     U8 = 20,
+    /// Two unsigned nibbles per byte spanning 0 to 15, even dimensions in the low nibble and odd ones in the high.
     U4x2 = 21,
+    /// Eight single-bit dimensions per byte - the form the Hamming & Jaccard metrics score, where only the
+    /// set-bit count of a XOR or AND carries meaning.
     U1x8 = 22,
 }
 

@@ -2,7 +2,7 @@
 #
 # ~~~
 #   sudo apt install crossbuild-essential-armhf qemu-user
-#   cmake -B build_armv7_gnu -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-armv7-gnu.cmake -D USEARCH_BUILD_LIB_C=1
+#   cmake -B build_armv7_gnu -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-armv7-gnu.cmake
 #   cmake --build build_armv7_gnu --target usearch_shared
 # ~~~
 #

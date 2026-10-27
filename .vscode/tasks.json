@@ -4,7 +4,7 @@
     {
       "label": "Build Host Debug",
       "detail": "Unoptimized C++ and C suites, sanitizers armed",
-      "command": "cmake --preset host_debug && cmake --build --preset host_debug",
+      "command": "cmake --preset debug && cmake --build --preset debug",
       "args": [],
       "type": "shell",
       "problemMatcher": ["$gcc"]
@@ -12,7 +12,7 @@
     {
       "label": "Build Host Release",
       "detail": "Every CPU target, optimized",
-      "command": "cmake --preset host_release && cmake --build --preset host_release",
+      "command": "cmake --preset release && cmake --build --preset release",
       "args": [],
       "type": "shell",
       "group": "build",
@@ -21,7 +21,7 @@
     {
       "label": "Build Host Profile",
       "detail": "The profiling configuration bench/README.md measures with",
-      "command": "cmake --preset host_profile && cmake --build --preset host_profile",
+      "command": "cmake --preset profile && cmake --build --preset profile",
       "args": [],
       "type": "shell",
       "problemMatcher": ["$gcc"]

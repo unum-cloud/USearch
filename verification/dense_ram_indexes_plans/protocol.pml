@@ -1,13 +1,16 @@
 /**
- *  The sharded dense index's plans from `include/usearch/dense/ram_indexes.hpp`: the monolith save
- *  taking one `plan_save` per shard, and the load path landing every shard's keys under one
- *  `finish`, beside the search merge reading `keys[node]` below each shard's watermark.
+ *  @file verification/dense_ram_indexes_plans/protocol.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
+ *  @brief The sharded dense index's plans from `include/usearch/dense/ram_indexes.hpp`.
  *
+ *  The monolith save taking one `plan_save` per shard, and the load path landing every shard's keys
+ *  under one `finish`, beside the search merge reading `keys[node]` below each shard's watermark.
  *  Two shards of two rows each. A shard's dispenser is a word here, since the plans compare the
  *  watermark with it.
  */
-#include "../weak_memory.pml"
-#include "../watermark_turn.pml"
+#include <weak_memory.pml>
+#include <watermark_turn.pml>
 
 // The sizes: the shards, and the rows one shard's IDs reach.
 #define shards 2

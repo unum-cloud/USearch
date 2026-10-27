@@ -210,8 +210,7 @@ struct VocabularyTests {
         #expect(try Arena().residency == .ram)
     }
 
-    @Test func theLibraryNamesItselfAndItsCapabilities() {
-        #expect(version() == "3.0.0")
+    @Test func theLibraryNamesItsCapabilities() {
         #expect(!capabilitiesCompiled().isEmpty)
         #expect(!capabilitiesAvailable().isEmpty)
     }

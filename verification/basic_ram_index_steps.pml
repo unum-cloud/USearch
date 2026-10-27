@@ -1,27 +1,27 @@
 /**
+ *  @file verification/basic_ram_index_steps.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief The basic index's load path: two steps' tally, then `finish` under the unique side.
  *
  *  `load_plan_t` from `include/usearch/basic/ram_index.hpp`. Two steps each store their key and add
  *  their count to `covered` with a release; the finisher, holding the unique side through
  *  `basic_gate.pml`, acquires the tally, reads both keys, stores the claim and identity counters
- *  relaxed and the watermark with a release, and unlocks. A reader runs `watermark_` and `key_of`:
- *  a watermark it acquired at 2 must show the dispenser at 2 and node 1's key.
- *  `basic_ram_index_rows.pml` covers the rows and the gate's shared side.
+ *  relaxed and the watermark with a release, and unlocks.
+ *
+ *  - A watermark a reader acquired at 2 must show the dispenser at 2 and node 1's key.
  *
  *  @verify pass sc,rc11,far
- *  @verify fail rc11,far covered_order=order_relaxed: the steps' tally add releases for the
- *      finisher's acquire, which is what puts the steps' keys behind the watermark; relaxed, the
- *      finisher reads no key, and under `far` the add is posted and lands carrying nothing
- *  @verify fail rc11 counters_before_watermark=false: `finish` stores the claim and identity
- *      counters before the watermark's release, so a reader that acquired the watermark sees the
- *      dispenser with it; reversed, the reader finds the dispenser behind the watermark, and
- *      `watermark_` reports a settled load contended
+ *  @verify fail rc11,far covered_order=order_relaxed: relaxed, the finisher reads no key, and under
+ *      `far` the add is posted and lands carrying nothing
+ *  @verify fail rc11 counters_before_watermark=false: reversed, the reader finds the dispenser
+ *      behind the watermark, and `watermark_` reports a settled load contended
  */
 #define thread_count 4
 #define location_count 7
 #define history_depth 3
-#include "weak_memory.pml"
-#include "basic_gate.pml"
+#include <weak_memory.pml>
+#include <basic_gate.pml>
 
 // The words, by the index member each stands for.
 #define shared_mutex 0

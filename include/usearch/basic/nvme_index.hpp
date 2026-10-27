@@ -181,13 +181,13 @@ class nvme_parts_catalog {
      *
      *  @param[in] count The queries in the batch.
      *  @param[in] make_metric Builds the metric of one row slot, as
-     *      `make_metric(scratch_allocator, staging) noexcept → expected<metric>`, placing it on the
-     *      slot's arena and staging at least @p staging candidates a round.
-     *  @param[in] query_of Builds the query of one batch row, as
-     *      `query_of(row, scratch_allocator) noexcept → expected<query>`, anything it needs placed
-     *      on the slot's arena, which outlives the row; every walk of the row reopens the metric's
-     *      round on it.
-     *  @param[inout] executor The threads, their engines and their scratch; held for the call.
+     *      <tt>make_metric(scratch_allocator, staging) noexcept → expected<metric></tt>, placing it
+     *      on the slot's arena and staging at least @p staging candidates a round.
+     *  @param[in] query_of Builds the query of one batch row, as <tt>query_of(row,
+     *      scratch_allocator) noexcept → expected<query></tt>, anything it needs placed on the
+     *      slot's arena, which outlives the row; every walk of the row reopens the metric's round
+     *      on it.
+     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The per-shard walk breadth, applied uniformly.
      *  @param[out] keys @b [count,wanted] rankings by key, as many matches per row as their width.
      *  @param[out] distances The same rankings' distances, ascending per row, cast to
@@ -197,15 +197,21 @@ class nvme_parts_catalog {
      *      walks score, or a family of such per executor thread, which an aggregating one must be,
      *      gathering over each completion batch: every scored row's key lands beside its value,
      *      rejected rows still route the walks, and only what it admits enters the row's ranking.
-     *  @param[in] relation The optional admission test over stored values, as
-     *      `relation(query, values, admissions) noexcept`, or a family of such per executor
-     *      thread, handed the codec's views of up to four landed rows with every admission
-     *      admitting; it hears only rows that could still enter their walk's admitted set, each
-     *      walk stops once that set fills, and the row then holds the nearest entries both
-     *      admitted across every walk.
+     *  @param[in] relation The optional admission test over stored values, as <tt>relation(query,
+     *      values, admissions) noexcept</tt>, or a family of such per executor thread, handed the
+     *      codec's views of up to four landed rows with every admission admitting; it hears only
+     *      rows that could still enter their walk's admitted set, each walk stops once that set
+     *      fills, and the row then holds the nearest entries both admitted across every walk.
      *
      *  A failed read stops the call, which answers @c io_k; a refused query or metric answers its
      *  own status, its row left short.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
+     *  - @c config_mismatch_k @p counts is not @p count long, @p keys and @p distances differ in
+     *    length or do not split into @p count rows, or a medium the engines cannot read.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows.
      */
     template <typename make_metric_type_, typename query_of_type_, typename score_type_,
               typename predicate_type_ = dummy_predicate_t, typename relation_type_ = dummy_predicate_t>
@@ -230,7 +236,7 @@ class nvme_parts_catalog {
     }
 
     /**
-     *  @brief The exact sibling of @ref search: every row read once and scored against every
+     *  @brief The exact sibling of @c search: every row read once and scored against every
      *      query, each thread keeping its own nearest rows of every query until they merge and
      *      their keys resolve.
      *
@@ -239,6 +245,14 @@ class nvme_parts_catalog {
      *  @p predicate hears a row once, when it would enter some query's ranking on the reading
      *  thread, and @p relation then hears it for each query it would enter, so a row holds the
      *  nearest entries both admit. A failed read stops the call, which answers @c io_k.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
+     *  - @c config_mismatch_k @p counts is not @p count long, @p keys and @p distances differ in
+     *    length or do not split into @p count rows, or a medium the engines cannot read.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
      */
     template <typename make_metric_type_, typename query_of_type_, typename score_type_,
               typename predicate_type_ = dummy_predicate_t, typename relation_type_ = dummy_predicate_t>
@@ -356,18 +370,28 @@ class nvme_parts_catalog {
     }
 
     /**
-     *  @brief The containment sibling of @ref scan: every row read once beside its key and scored
+     *  @brief The containment sibling of @c scan: every row read once beside its key and scored
      *      against every query, each row strictly closer to a query than its reach handed to
      *      @p land on the reading thread instead of ranked.
      *
      *  Takes what @ref scan takes but the rankings and the filters, which @p land applies.
      *
      *  @param[in] reaches Every query's exclusive distance bound, one per query.
-     *  @param[in] land Takes a quad of one query's rows within reach as
-     *      `land(thread, query, keys, values, distances) noexcept`, three spans of one static
-     *      extent in row order, the codec's views borrowed for the call alone.
+     *  @param[in] make_metric Builds the metric of one row slot, as @ref scan takes it.
+     *  @param[in] query_of Builds the query of one batch row, as @ref scan takes it.
+     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in] land Takes a quad of one query's rows within reach as <tt>land(thread, query,
+     *      keys, values, distances) noexcept</tt>, three spans of one static extent in row
+     *      order, the codec's views borrowed for the call alone.
      *
      *  A failed read stops the call, which answers @c io_k.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     *  - @c config_mismatch_k A medium the engines cannot read.
      */
     template <typename make_metric_type_, typename query_of_type_, typename land_type_>
     expected<search_result_t> scan_within(std::span<distance_t const> reaches, make_metric_type_&& make_metric,
@@ -422,7 +446,15 @@ class nvme_parts_catalog {
      *
      *  @param[in] keys The keys to count, repeats and absent ones included.
      *  @param[out] entries The entries under each key, parallel to @p keys; zero means absent.
-     *  @param[inout] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *    cannot read.
+     *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
      */
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) const noexcept {
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
@@ -436,8 +468,18 @@ class nvme_parts_catalog {
         });
     }
 
-    /** The batched @ref count reduced to one in @p entries where a key of @p keys holds any entry,
-     *  zero where it holds none. */
+    /**
+     *  The batched @ref count reduced to one in @p entries where a key of @p keys holds any entry,
+     *  zero where it holds none.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *    cannot read.
+     *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     status_t contains(std::span<key_t const> keys, std::span<std::size_t> entries,
                       executor_t& executor) const noexcept {
         if (status_t const counted = count(keys, entries, executor); failed(counted)) return counted;
@@ -454,10 +496,18 @@ class nvme_parts_catalog {
      *      row order.
      *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted when
      *      its values truncated, zero when absent.
-     *  @param[inout] executor The threads, their engines and their scratch; held for the call.
-     *  @param[in] on_value Takes every kept value as `on_value(position, rank, thread, view)`, the
-     *      codec's view borrowed for the call alone, on the executor thread that read it, in no
-     *      particular order.
+     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in] on_value Takes every kept value as <tt>on_value(position, rank, thread,
+     *      view)</tt>, the codec's view borrowed for the call alone, on the executor thread that
+     *      read it, in no particular order.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *    cannot read.
+     *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
      */
     template <typename on_value_type_>
     status_t get(std::span<key_t const> keys, std::size_t wanted, std::span<std::size_t> entries, executor_t& executor,
@@ -522,10 +572,17 @@ class nvme_parts_catalog {
      *
      *  @param[in] first The first row read; every row read must lie before @ref size.
      *  @param[out] keys The key of every row read, in row order.
-     *  @param[inout] executor The threads, their engines and their scratch; held for the call.
-     *  @param[in] on_value Takes every row's value as `on_value(row, thread, view)`, @c row counted
-     *      from @p first, the codec's view borrowed for the call alone, on the executor thread that
-     *      read it, in no particular order.
+     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
+     *  @param[in] on_value Takes every row's value as <tt>on_value(row, thread, view)</tt>, @c row
+     *      counted from @p first, the codec's view borrowed for the call alone, on the executor
+     *      thread that read it, in no particular order.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No part is viewed, or @p executor holds no threads or pool workers.
+     *  - @c config_mismatch_k The rows run past @ref size, or a medium the engines cannot read.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
      */
     template <typename on_value_type_>
     status_t read_rows(std::size_t first, std::span<key_t> keys, executor_t& executor,
@@ -1168,13 +1225,13 @@ class nvme_parts_catalog {
     /**
      *  @brief Reads every row of every part once, in runs taken by the threads of @p executor, and
      *      scores each staged round of a run against all @p count queries into the reading thread's
-     *      share, handed to @p on_round as `on_round(thread, share, round, queries)`.
+     *      share, handed to @p on_round as <tt>on_round(thread, share, round, queries)</tt>.
      *
      *  Each share ranks @p wanted rows a query under thresholds starting at @p reaches, or
      *  unbounded when it is empty, and reserves the thread's @p predicate for a run's rows; key
      *  rows land beside value rows only for @c scored_k. @p on_shares reads every share as
-     *  `on_shares(shares) noexcept → status_t` while the call still holds the media, before they
-     *  release. A failed read stops the call, which answers @c io_k.
+     *  <tt>on_shares(shares) noexcept → status_t</tt> while the call still holds the media, before
+     *  they release. A failed read stops the call, which answers @c io_k.
      */
     template <nvme_key_reads_t key_reads_, typename predicate_type_, typename make_metric_type_,
               typename query_of_type_, typename on_round_type_, typename on_shares_type_>
@@ -1312,7 +1369,7 @@ class nvme_parts_catalog {
      *
      *  The table holds each distinct key's first batch position, the positions sharing it chained
      *  behind, in thread zero's arena; runs are read one at a time per thread, inside a call
-     *  @ref begin_scans_ began.
+     *  @c begin_scans_ began.
      */
     template <typename on_hit_type_>
     status_t scan_keys_(std::span<key_t const> keys, executor_t& executor, on_hit_type_&& on_hit) const noexcept {
@@ -1554,8 +1611,17 @@ class nvme_index {
      *      with the directories of its ragged columns built through blocking reads. A failed
      *      opening leaves the index empty.
      *
+     *  @param[in] path The part file, or the device holding it.
      *  @param[in] columns The part's columns, as any producer of its format fills them, such as
      *      @c safegraphs_persisted_part over a SafeGraphs monolith's header.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k @p path names no location, its base or namespace is unreadable, or
+     *    the base is off the medium's block.
+     *  - @c config_mismatch_k The engines read no files, or @p columns lay out keys, neighbors or
+     *    node counts this instantiation cannot walk.
+     *  - @c malformed_k A row directory's prefix sums do not cover the part's rows.
+     *  - @c overflow_k A row directory read spans more than one read can move.
      */
     status_t open(std::string_view path, persisted_columns_t const& columns) noexcept {
         medium_ = medium_t {};
@@ -1596,42 +1662,109 @@ class nvme_index {
         return catalog_().non_zero_expansion_factor(config);
     }
 
-    /** @ref nvme_parts_catalog::search over the part. */
+    /**
+     *  @ref nvme_parts_catalog::search over the part.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
+     *  - @c config_mismatch_k The counts are not one per query, the keys and distances differ in
+     *    length or do not split into a row per query, or a medium the engines cannot read.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows.
+     */
     template <typename... arguments_type_>
     expected<search_result_t> search(arguments_type_&&... arguments) noexcept {
         return catalog_().search(std::forward<arguments_type_>(arguments)...);
     }
 
-    /** @ref nvme_parts_catalog::scan over the part. */
+    /**
+     *  @ref nvme_parts_catalog::scan over the part.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
+     *  - @c config_mismatch_k The counts are not one per query, the keys and distances differ in
+     *    length or do not split into a row per query, or a medium the engines cannot read.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     template <typename... arguments_type_>
     expected<search_result_t> scan(arguments_type_&&... arguments) noexcept {
         return catalog_().scan(std::forward<arguments_type_>(arguments)...);
     }
 
-    /** @ref nvme_parts_catalog::scan_within over the part. */
+    /**
+     *  @ref nvme_parts_catalog::scan_within over the part.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     *  - @c config_mismatch_k A medium the engines cannot read.
+     */
     template <typename... arguments_type_>
     expected<search_result_t> scan_within(arguments_type_&&... arguments) noexcept {
         return catalog_().scan_within(std::forward<arguments_type_>(arguments)...);
     }
 
-    /** @ref nvme_parts_catalog::count over the part. */
+    /**
+     *  @ref nvme_parts_catalog::count over the part.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
+     *    cannot read.
+     *  - @c uninitialized_k Nothing is opened, or @p executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) const noexcept {
         return catalog_().count(keys, entries, executor);
     }
 
-    /** @ref nvme_parts_catalog::contains over the part. */
+    /**
+     *  @ref nvme_parts_catalog::contains over the part.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the engines
+     *    cannot read.
+     *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     template <typename... arguments_type_>
     status_t contains(arguments_type_&&... arguments) const noexcept {
         return catalog_().contains(std::forward<arguments_type_>(arguments)...);
     }
 
-    /** @ref nvme_parts_catalog::get over the part. */
+    /**
+     *  @ref nvme_parts_catalog::get over the part.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The entries and the keys differ in length, or a medium the engines
+     *    cannot read.
+     *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     template <typename... arguments_type_>
     status_t get(arguments_type_&&... arguments) const noexcept {
         return catalog_().get(std::forward<arguments_type_>(arguments)...);
     }
 
-    /** @ref nvme_parts_catalog::read_rows over the part. */
+    /**
+     *  @ref nvme_parts_catalog::read_rows over the part.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is opened, or the executor holds no threads or pool workers.
+     *  - @c config_mismatch_k The rows run past @ref size, or a medium the engines cannot read.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     */
     template <typename... arguments_type_>
     status_t read_rows(arguments_type_&&... arguments) const noexcept {
         return catalog_().read_rows(std::forward<arguments_type_>(arguments)...);

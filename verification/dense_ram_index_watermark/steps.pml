@@ -1,4 +1,7 @@
 /**
+ *  @file verification/dense_ram_index_watermark/steps.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief The load path's fan-out: two steps land one row each and tally it on `covered`, and the
  *      finisher publishes once the tally is whole.
  *
@@ -7,8 +10,8 @@
  *  watermark.
  *
  *  @verify pass sc,rc11
- *  @verify fail rc11 covered_order=order_relaxed: the tally's release is what carries the steps'
- *      rows into the watermark; relaxed, the searcher finds a row below the watermark unpublished
+ *  @verify fail rc11 covered_order=order_relaxed: relaxed, the searcher finds a row below the
+ *      watermark unpublished
  */
 #define thread_count 4
 #define location_count 10
@@ -16,7 +19,7 @@
 #define named_rows false
 #define appended_rows false
 #define refined_rows false
-#include "protocol.pml"
+#include <dense_ram_index_watermark/protocol.pml>
 
 // a step lands its row as the loader does, then tallies it on the plan
 proctype step(byte t; byte row) {

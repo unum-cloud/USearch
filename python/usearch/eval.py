@@ -3,6 +3,10 @@
 The oracle is NumKong: it computes distances in the same metric vocabulary and the same kernel
 family the index dispatches to, so a recall number compares like with like. NumPy stays for
 generation and for the top-k selection, where NumKong has no `argsort` and precision is moot.
+
+File: python/usearch/eval.py
+Author: Ash Vardanian
+Date: June 7, 2023
 """
 
 from __future__ import annotations
@@ -58,8 +62,7 @@ def random_vectors(
     metric: DenseMetric = DenseMetric.ANGULAR,
     seed: int = 0,
 ) -> npt.NDArray[np.generic]:
-    """Reproducible rows for the given metric: `float32`, or packed `uint8` bits for a bitwise one, hence the
-    generic dtype.
+    """Reproducible rows for the given metric: `float32`, or packed `uint8` bits for a bitwise one, hence the generic dtype.
 
     Bitwise metrics get packed bits, where *dimensions* counts bits rather than scalars;
     everything else gets unit-norm gaussians, which sit in the representable range of every
@@ -108,10 +111,12 @@ class SearchStats:
 
     @property
     def mean_efficiency(self) -> float:
+        """The share of the index an average query did not have to score."""
         return 1 - float(self.computed_distances) / (self.count_queries * self.index_size)
 
     @property
     def mean_recall(self) -> float:
+        """The share of queries whose true nearest neighbor came back."""
         return self.count_matches / self.count_queries
 
 

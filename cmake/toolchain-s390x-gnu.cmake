@@ -2,7 +2,7 @@
 #
 # ~~~
 #   sudo apt install crossbuild-essential-s390x qemu-user
-#   cmake -B build_s390x_gnu -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-s390x-gnu.cmake -D USEARCH_BUILD_LIB_C=1
+#   cmake -B build_s390x_gnu -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-s390x-gnu.cmake
 #   cmake --build build_s390x_gnu --target usearch_shared
 # ~~~
 #

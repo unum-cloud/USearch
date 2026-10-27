@@ -285,7 +285,7 @@ for batch in batches:
     total += stats
 ```
 
-### Filtering & Progress
+### Filtered Search
 
 A predicate admits keys one at a time.
 Non-matching entries still route the traversal, so recall does not collapse at low selectivity.
@@ -299,7 +299,7 @@ A `progress` handler is called with `(completed, total)` units; `False` stops th
 `insert` is the exception: every row is claimed before the first report, so its handler reports and cannot stop the batch.
 The first exception any callback raises outranks the outcome it turned into, whether the call blocked or was deferred.
 
-### Retrieval: Get, Cursors & Streams
+### Retrieval and Streaming
 
 ```python
 index.get(42, arena)  # a (count, dimensions) `DenseVectors` of what is stored under it

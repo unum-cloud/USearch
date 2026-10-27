@@ -9,8 +9,9 @@
  *  kernel, the capability ceiling, the dtype, the register rung and the attend value lookup - whose
  *  instantiations a fatbin carries. NVCC's device-only passes include it, one per dtype under one
  *  ceiling; each kernel turns the plain records of @c vram_index.hpp into the shared views of
- *  @c vram_index.cuh, runs the shared bodies there through @ref cuda_warp_t, and the host finds it
- *  by the symbol @c vram_kernel_symbol spells.
+ *  @c vram_index.cuh, runs the shared bodies there through
+ *  @ref unum::usearch::utilities::cuda_warp_t, and the host finds it by the symbol
+ *  @c vram_kernel_symbol spells.
  */
 #pragma once
 
@@ -522,9 +523,9 @@ __device__ __forceinline__ void cuda_kernel_prologue(cuda_arguments_t const& lau
 /** Every NVIDIA kernel of a walk basic graphs share: @p kernel_ picks the body, @p capability_ and
  *  @p dtype_ the kit, @p capability_ alone the schedule and its warp, @p slots_ the rung, and
  *  @p lookup_type_ is @c void, as @c cuda_dense_kernel takes it. The blocks
- *  @ref cuda_resident_blocks keeps per multiprocessor bound its registers and reach the body, which
- *  sizes its load window by them. The arguments stay in the parameter space, where a walk's
- *  schedule may read the tensor map. */
+ *  @ref unum::usearch::dense::cuda_resident_blocks keeps per multiprocessor bound its registers and
+ *  reach the body, which sizes its load window by them. The arguments stay in the parameter space,
+ *  where a walk's schedule may read the tensor map. */
 template <vram_kernel_t kernel_, nk_capability_t capability_, nk_dtype_t dtype_, u32_t slots_, typename lookup_type_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
                                   cuda_resident_blocks<capability_, dtype_>(kernel_, slots_))

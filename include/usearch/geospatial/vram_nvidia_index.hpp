@@ -58,7 +58,12 @@ struct vram_nvidia_kits {
         return {stored.size(), status_t::success_k};
     }
 
-    /** Saves the @p stored observation into @p saved as it is. */
+    /**
+     *  Saves the @p stored observation into @p saved as it is.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The two differ in size.
+     */
     static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept { return copy_bytes(saved, stored); }
 
     /** Bytes the @p saved observation stores into: its own, @c malformed_k unless one whole. */
@@ -67,7 +72,12 @@ struct vram_nvidia_kits {
         return {saved.size(), status_t::success_k};
     }
 
-    /** Stores the @p saved observation into @p stored as it is. */
+    /**
+     *  Stores the @p saved observation into @p stored as it is.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The two differ in size.
+     */
     static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept { return copy_bytes(stored, saved); }
 
     /** Loads the fatbin onto @p device and finds every kernel by its symbol. */

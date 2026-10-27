@@ -1153,6 +1153,13 @@ struct ram_index {
      *  is not a power of two. Constructors allocate nothing, so every storage failure surfaces
      *  here, in the returned status, and so does a kernel the dtype's kits cannot finalize, as
      *  @c status_t::unknown_kind_k.
+     *
+     *  @par Statuses:
+     *  - @c unknown_kind_k The dtype's kits cannot finalize the kernel.
+     *  - @c config_mismatch_k The geometry has no dimensions, leaves a storage value partly filled,
+     *    or has a connectivity that is not a power of two.
+     *  - @c config_mismatch_k Another geometry froze first.
+     *  - @c overflow_k The capacity passes the reserved ceiling or the chunk directory.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         if (!kernel_supported<quads_kit_t>(kernel_)) return {0, status_t::unknown_kind_k};
@@ -1260,6 +1267,10 @@ struct ram_index {
      *  the frontier sheds within its reservation; the visited set alone may re-table as a walk
      *  widens.
      *  The staged queries hold one imported row, so a landing row or a lone query never grows them.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The geometry is not frozen yet.
+     *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     status_t reserve_traversal(traversal_context_t& context, insert_config_t config = {}) noexcept {
         geometry_t const frozen = geometry();
@@ -1318,8 +1329,16 @@ struct ram_index {
      *  @param[in] new_vectors The batch to insert, one row per vector, in the frozen geometry.
      *  @param[out] assigned_ids Either empty, or one slot per incoming vector receiving its node
      *      ID. One batch's IDs are contiguous, in the order of its rows.
-     *  @param[inout] context The calling thread's scratch & telemetry, reused across batches.
+     *  @param[in,out] context The calling thread's scratch & telemetry, reused across batches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k A non-empty @p assigned_ids differs in length from the batch.
+     *  - @c uninitialized_k The geometry is not frozen yet.
+     *  - @c config_mismatch_k The rows' width differs from the frozen dimensions.
+     *  - @c overflow_k A queue capacity of @p context wraps when rounded, or the batch passes the
+     *    reserved ceiling or the chunk directory.
+     *  - @c contended_k The dispenser is closed by a refine or a load.
      */
     expected<insert_result_t> insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
                                      traversal_context_t& context, insert_config_t config = {}) noexcept {
@@ -1423,8 +1442,14 @@ struct ram_index {
         node_id_t base_ = 0;
     };
 
-    /** Claims storage for @p count rows without assigning any identity - the step a batch
-     *  spanning several indexes runs on every one of them before touching any. */
+    /**
+     *  Claims storage for @p count rows without assigning any identity - the step a batch
+     *  spanning several indexes runs on every one of them before touching any.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k @p count passes the reserved ceiling or the chunk directory.
+     *  - @c uninitialized_k A growth is needed before the geometry froze.
+     */
     expected<capacity_claim_t> claim(std::size_t count) noexcept {
         auto const [first_row, status] = claim_capacity(count);
         if (failed(status)) return {capacity_claim_t {}, status};
@@ -1439,7 +1464,8 @@ struct ram_index {
      *  forms stays conservative. The deflation releases as well - a posted, order-free subtract
      *  could land after the release. The release lands only on a non-negative counter: a negative
      *  one has a grower inside, and lifting it back across zero would elect a second. The floor is
-     *  the count itself, so `observed + count >= count` admits exactly the non-negative counters.
+     *  the count itself, so <tt>observed + count &gt;= count</tt> admits exactly the non-negative
+     *  counters.
      */
     void release_capacity(std::size_t count) noexcept {
         atomic_ref<node_id_t>(last_allocated_id_).sub(static_cast<node_id_t>(count), std::memory_order_release);
@@ -1465,8 +1491,9 @@ struct ram_index {
      *  walk and before publication - so an outer layer's per-ID state, like a key column, is
      *  written ahead of the watermark turn and no reachable node can be observed without it.
      *
-     *  @retval contended_k The dispenser is closed by a refine or a load; the claim's death
-     *      releases its rows.
+     *  @par Statuses:
+     *  - @c contended_k The dispenser is closed by a refine or a load; the claim's death
+     *    releases its rows.
      */
     template <typename callback_type_ = dummy_callback_t>
     status_t insert(capacity_claim_t&& claim, vectors_view_t new_vectors, node_ids_span_t assigned_ids,
@@ -1745,9 +1772,14 @@ struct ram_index {
             return !contains_(reaches_back_k, node_id) || release_(back_linked_twice_k, node_id);
         }
 
-        /** The report: the nodes reached both ways and the levels each direction took.
+        /**
+         *  The report: the nodes reached both ways and the levels each direction took.
          *  @c internal_k when a level is still pending, since the count would then be a lower
-         *  bound. */
+         *  bound.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The audit is bound to no index.
+         */
         expected<health_result_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
             if (expanded_in_level_ || reached_back_in_level_) return {{}, status_t::internal_k};
@@ -1836,10 +1868,10 @@ struct ram_index {
      *
      *  An empty range heals.
      *
-     *  Round @c r walks every node across the neighboring group of `2^r` parts, as
-     *  @ref part_across names it, so @c k parts merge in `bit_width(k - 1)` rounds and two parts
-     *  in one. The first round starts at the planned range's first node, every later one at node
-     *  zero.
+     *  Round @c r walks every node across the neighboring group of <tt>2^r</tt> parts, as
+     *  @ref part_across names it, so @c k parts merge in <tt>bit_width(k - 1)</tt> rounds and two
+     *  parts in one. The first round starts at the planned range's first node, every later one at
+     *  node zero.
      *
      *  Steps of the current phase are disjoint ID ranges, so any number of threads may @ref run
      *  them at once; @ref advance is the single-caller barrier between phases and answers whether
@@ -1910,6 +1942,9 @@ struct ram_index {
          *  The one partition step grows a split's parts, and a scatter step copies source rows into
          *  their receivers, firing @p on_landed per row with the source row, the receiver's
          *  position and the row there - what a sharded caller moves its keys by.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is bound to no index.
          */
         template <typename callback_type_ = dummy_callback_t>
         status_t run(step_t const& step, traversal_context_t& context, callback_type_&& on_landed = {}) noexcept {
@@ -1964,7 +1999,13 @@ struct ram_index {
         /** Whether the current phase re-selects the planned range - the phase a caller's progress counts. */
         bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
 
-        /** The pass so far: complete once @ref advance answered false, otherwise @c cancelled_k. */
+        /**
+         *  The pass so far: complete once @ref advance answered false, otherwise @c cancelled_k.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is bound to no index.
+         *  - @c cancelled_k The pass stopped before @ref advance answered false.
+         */
         expected<refine_result_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
             return {tally_, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
@@ -2359,6 +2400,9 @@ struct ram_index {
      *  them, then re-selects as a plain pass does from that walk's candidates and its own. A part
      *  whose neighbors all stay inside it is then seen from the others, which a walk seeded by
      *  those neighbors never reaches. The plan borrows the bases, which must outlive it.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The geometry is not frozen yet.
      */
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, refine_config_t config = {},
                                         std::span<node_id_t const> part_bases = {}) noexcept {
@@ -2385,8 +2429,12 @@ struct ram_index {
      *      @ref refine_plan_t drained on the calling thread. An empty range heals alone.
      *
      *  @param[in] nodes The ID range to re-select; IDs at or past the watermark are skipped.
-     *  @param[inout] context The calling thread's scratch & telemetry, reused across passes.
+     *  @param[in,out] context The calling thread's scratch & telemetry, reused across passes.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The geometry is not frozen yet.
+     *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                      refine_config_t config = {}) noexcept {
@@ -2428,10 +2476,12 @@ struct ram_index {
      *      slots must outlive the plan.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @param[in] seed Picks the parts' roots, so equal seeds over equal graphs split alike.
-     *  @retval config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
-     *      index itself, another metric or another geometry.
-     *  @retval contended_k An insertion in flight on this index or on a receiver.
-     *  @retval uninitialized_k This index was never reserved.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
+     *    index itself, another metric or another geometry.
+     *  - @c contended_k An insertion in flight on this index or on a receiver.
+     *  - @c uninitialized_k This index was never reserved.
      */
     expected<refine_plan_t> plan_split(std::span<ram_index*> receivers, refine_config_t config = {},
                                        u64_t seed = 0) noexcept {
@@ -2549,9 +2599,14 @@ struct ram_index {
      *  atomics-free. @ref dense_ram_index_concurrency
      *
      *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
-     *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
+     *  @param[in,out] context The calling thread's scratch & telemetry: the matches end up in
      *      @c context.results, ascending by distance - the nearest first.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k @p config names neither a walk nor a scan.
+     *  - @c config_mismatch_k The query's width differs from the frozen dimensions.
+     *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     expected<search_result_t> search(vector_view_t query_vector, traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
@@ -2566,10 +2621,12 @@ struct ram_index {
      *
      *  @param[in] query_vector The row the walk navigates by, conventionally Σₕ wₕ·qₕ.
      *  @param[in] heads The indexer heads of this one query row.
-     *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
+     *  @param[in,out] context The calling thread's scratch & telemetry: the matches end up in
      *      @c context.results, ascending by distance - the highest score first.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     *  @return @c config_mismatch_k unless the index walks by dot.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index does not walk by dot.
      */
     expected<search_result_t> search(vector_view_t query_vector, indexer_heads<scalar_t> const& heads,
                                      traversal_context_t& context, search_config_t config = {}) noexcept
@@ -2585,10 +2642,15 @@ struct ram_index {
      *      entry point for verbs that reduce a walk to something other than its nearest matches.
      *
      *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
-     *  @param[inout] fold The reader of every scored quad - see @c fold.
-     *  @param[inout] context The calling thread's scratch & telemetry: the nearest published
+     *  @param[in,out] fold The reader of every scored quad - see @c fold.
+     *  @param[in,out] context The calling thread's scratch & telemetry: the nearest published
      *      candidates end up in @c context.results, ascending by distance.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k @p config names a traversal other than a walk.
+     *  - @c config_mismatch_k The query's width differs from the frozen dimensions.
+     *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     template <typename fold_type_>
         requires fold<std::remove_cvref_t<fold_type_>, dot_result_t>
@@ -2611,9 +2673,14 @@ struct ram_index {
      *
      *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
      *  @param[in] predicate The admission filter, called with published node IDs only.
-     *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
+     *  @param[in,out] context The calling thread's scratch & telemetry: the matches end up in
      *      @c context.results, ascending by distance - the nearest first.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k @p config names neither a walk nor a scan.
+     *  - @c config_mismatch_k The query's width differs from the frozen dimensions.
+     *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     template <typename predicate_type_>
     expected<search_result_t> search_if(vector_view_t query_vector, predicate_type_&& predicate,
@@ -2631,10 +2698,17 @@ struct ram_index {
      *  @param[in] left The left-hand row, in the index's own dtype & frozen dimensionality.
      *  @param[out] node_ids The node ID of each kept pair, in walk order.
      *  @param[out] products The dot of each kept pair, parallel to @p node_ids.
-     *  @param[inout] context The calling thread's scratch & telemetry.
+     *  @param[in,out] context The calling thread's scratch & telemetry.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @return The pairs scored in @c count - above the spans' width when they were truncated - or
      *      @c config_mismatch_k unless the index walks by dot.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index does not walk by dot, or @p products and @p node_ids
+     *    differ in length.
+     *  - @c unsupported_k @p config names a traversal other than a walk.
+     *  - @c config_mismatch_k The row's width differs from the frozen dimensions.
+     *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     expected<search_result_t> multiply(vector_view_t left, std::span<node_id_t> node_ids,
                                        std::span<dot_result_t> products, traversal_context_t& context,
@@ -2659,16 +2733,19 @@ struct ram_index {
      *  @param[in] head_count Query heads sharing this key-value head; it must divide the rows.
      *  @param[in] value_lookup Resolves a scored batch's node IDs to their value rows, as wide as
      *      the keys and stored like them:
-     *      `void(std::span<node_id_t const>, std::span<vector_view_t>)`, one row per ID. A node
-     *      without a row refuses with @c shape_mismatch_k, since a missing row is a wrong softmax.
+     *      <tt>void(std::span&lt;node_id_t const&gt;, std::span&lt;vector_view_t&gt;)</tt>, one
+     *      row per ID. A node without a row refuses with @c shape_mismatch_k, since a missing
+     *      row is a wrong softmax.
      *  @param[in] score_scale The factor turning a dot into a logit.
      *  @param[out] outputs The attended rows, one per query row, as wide as the keys, packed and
      *      divided by their partitions.
      *  @param[out] carry Every query row's softmax state, which merges this walk with other branches.
-     *  @param[inout] context The calling thread's scratch & telemetry.
+     *  @param[in,out] context The calling thread's scratch & telemetry.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     *  @return The query rows attended in @c count, or @c config_mismatch_k unless the index walks
-     *      by dot.
+     *  @return The query rows attended in @c count.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The index does not walk by dot.
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
@@ -2709,7 +2786,13 @@ struct ram_index {
     /** The compile-time form of @c search() & @c search_if(): one whole-traversal instantiation per
      *  @p synchronization_ contract, per fold type and per rescoring type, so a certified contract carries
      *  no atomics and @c dummy_fold_t & @c dummy_rescoring_t inline away. The walk ends against @p bound
-     *  once it fills - @c context.results itself for every walk but a filtered one. */
+     *  once it fills - @c context.results itself for every walk but a filtered one.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k @p config names a traversal other than a walk.
+     *  - @c config_mismatch_k The query's width differs from the frozen dimensions.
+     *  - @c overflow_k A queue capacity of @p context wraps when rounded.
+     */
     template <synchronization_t synchronization_, typename fold_type_, typename rescoring_type_>
         requires fold<std::remove_cvref_t<fold_type_>, dot_result_t>
     expected<search_result_t> search_typed(vector_view_t query_vector, traversal_context_t& context,
@@ -2817,7 +2900,12 @@ struct ram_index {
          *  Every ID past the watermark folds to the sentinel.
          *
          *  @param[in] step The step to copy, as @ref steps hands them out.
-         *  @param[inout] scratch One step of IDs the caller reserved, where the fold happens.
+         *  @param[in,out] scratch One step of IDs the caller reserved, where the fold happens.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already spent.
+         *  - @c config_mismatch_k The step holds no rows, its rows fall outside the columns, or
+         *    @p scratch is shorter, of another width, or not contiguous.
          */
         status_t save(step_t const& step, nk::matrix_span<node_id_t> scratch) noexcept {
             if (!index_) return status_t::uninitialized_k;
@@ -2868,7 +2956,13 @@ struct ram_index {
 
         /** Pronounces the snapshot complete: every chunk's vectors and neighbors landed, and
          *  under @c concurrent_k the counters rested across the whole plan. A success spends the
-         *  plan; a refusal leaves it whole, so the missing steps can still land. */
+         *  plan; a refusal leaves it whole, so the missing steps can still land.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already spent.
+         *  - @c config_mismatch_k The steps covered other than every row.
+         *  - @c contended_k Under @c concurrent_k, a counter moved during the plan.
+         */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const nodes = static_cast<std::size_t>(visible);
@@ -2907,6 +3001,12 @@ struct ram_index {
      *
      *  @param[out] columns Where the rows land, sized from @ref saved_shape.
      *  @param[in] synchronization The contract the caller certifies.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The geometry is not frozen yet.
+     *  - @c contended_k A dispensed batch has yet to publish.
+     *  - @c config_mismatch_k A column is too short for the rows, or norms are given to an index
+     *    that stores none.
      */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization) noexcept {
         geometry_t const frozen = geometry();
@@ -2924,8 +3024,16 @@ struct ram_index {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Serializes every row under the watermark into @p columns on the calling thread - the
-     *  one-shot over @ref plan_save for a caller with no threads to fan the steps out over. */
+    /**
+     *  Serializes every row under the watermark into @p columns on the calling thread - the
+     *  one-shot over @ref plan_save for a caller with no threads to fan the steps out over.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The geometry is not frozen, a column is too short for the rows,
+     *    norms are given to an index that stores none, or @p scratch does not fit a step.
+     *  - @c contended_k A dispensed batch has yet to publish, or under @c concurrent_k a counter
+     *    moved during the save.
+     */
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch) noexcept {
         auto [plan, status] = plan_save(columns, synchronization);
         if (failed(status)) return status;
@@ -3026,6 +3134,11 @@ struct ram_index {
          *  @param[in] step The step to fill; its source rows address @p columns.
          *  @param[in] columns The rows' columns, one part's under a sharded plan.
          *  @param[in] source_range The ID space those rows speak.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already spent.
+         *  - @c config_mismatch_k The step holds no rows, or its rows fall outside @p columns.
+         *  - @c config_mismatch_k @p source_range rebases past the plan's rows.
          */
         status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
@@ -3085,6 +3198,12 @@ struct ram_index {
          *  @param[in] step The step to fill; its source rows address @p source.
          *  @param[in] source The index the rows come from, of this one's geometry and norms.
          *  @param[in] source_range The ID space the source's rows speak.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already spent.
+         *  - @c config_mismatch_k The step is empty or uneven, @p source differs in geometry or
+         *    norms, or the step reads past its published rows.
+         *  - @c config_mismatch_k @p source_range rebases past the plan's rows.
          */
         status_t load(step_t const& step, ram_index const& source, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
@@ -3123,7 +3242,12 @@ struct ram_index {
          *  consumed first, then identity, then the watermark last with a release. The identity
          *  releases too, and moves only an open dispenser: a closed one stays closed for its closer
          *  to reopen past the rows. A success spends the plan; a refusal leaves it whole, so the
-         *  missing steps can still land. */
+         *  missing steps can still land.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or already spent.
+         *  - @c config_mismatch_k The steps covered other than every row.
+         */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != rows)
@@ -3159,6 +3283,11 @@ struct ram_index {
      *  Refuses an unfrozen geometry, an insert mid-flight, and rows past the ID space. The sharded
      *  index closes the dispenser first, so no insert arrives before @c finish; a direct caller
      *  keeps insertions out itself.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The geometry is not frozen yet.
+     *  - @c contended_k A dispensed batch has yet to publish, or another claim landed first.
+     *  - @c overflow_k The rows pass the ID space, the reserved ceiling or the chunk directory.
      */
     expected<load_plan_t> plan_load(std::size_t rows) noexcept {
         if (!geometry()) return {{}, status_t::config_mismatch_k};
@@ -3173,9 +3302,18 @@ struct ram_index {
         return {load_plan_t {*this, visible, std::move(capacity_claim)}, status_t::success_k};
     }
 
-    /** Appends the whole source on the calling thread - the one-shot over @ref plan_load for a
+    /**
+     *  Appends the whole source on the calling thread - the one-shot over @ref plan_load for a
      *  caller with no threads to fan the steps out over; columns shorter than @p rows are refused
-     *  before a row is claimed. */
+     *  before a row is claimed.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The geometry is not frozen, a column is shorter than @p rows, or
+     *    norms are given to an index that stores none.
+     *  - @c contended_k A dispensed batch has yet to publish, or another claim landed first.
+     *  - @c overflow_k The rows pass the ID space, the reserved ceiling or the chunk directory.
+     *  - @c config_mismatch_k @p source_range rebases past the loaded rows.
+     */
     status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range) noexcept {
         geometry_t const frozen = geometry();
         if (!frozen) return status_t::config_mismatch_k;
@@ -3440,7 +3578,7 @@ struct ram_index {
      *
      *  Spins while other threads are mid-growth, covering all interleavings of the capacity state
      *  machine. Claims @b storage only, never identity: node IDs are dispensed per batch from
-     *  @c next_dispensed_id_ by @ref dispense_. On success, enough sentinel-filled rows exist for
+     *  @c next_dispensed_id_ by @c dispense_. On success, enough sentinel-filled rows exist for
      *  @p count dispenses, and the caller must roll forward to wiring & publishing them all -
      *  claimed capacity cannot be released once IDs are dispensed against it, or the
      *  visibility watermark would stall forever. @ref dense_ram_index_concurrency
@@ -3508,11 +3646,12 @@ struct ram_index {
      *
      *  Reads the graph without locks. Cost is O(kept · considered) one-to-one distances.
      *
-     *  @param[inout] candidates Search results, ascending by distance to the query; their ties
+     *  @param[in,out] candidates Search results, ascending by distance to the query; their ties
      *      reorder in place on the hashed ring around @p query_id.
      *  @param[in] query_id The row being linked.
      *  @param[in] limit Ceiling on the kept neighbors - typically the connectivity.
      *  @param[out] out Receives the kept scored nodes, diverse picks first; its live shape is the fill.
+     *  @param[in,out] context Scratch for the selection, plus the telemetry counters.
      *  @return The number of distance computations performed, for the caller's telemetry.
      */
     std::size_t select_diverse(results_array_t& candidates, node_id_t query_id, std::size_t limit, selection_t& out,
@@ -3642,9 +3781,10 @@ struct ram_index {
      *  is released by the time the turn's spin begins. All slot writes happen under the lock, and
      *  the unlocking release-store of slot 0 is what republishes the edited neighbors.
      *
+     *  @param[in] new_node_id The node whose neighbors are back-linked to it.
      *  @param[in] selected The node's chosen neighbors with their recorded query distances -
      *      those score the newcomer for free, since the metrics are symmetric.
-     *  @param[inout] context Scratch for the re-selection, plus the telemetry counters.
+     *  @param[in,out] context Scratch for the re-selection, plus the telemetry counters.
      */
     void back_link_neighbors(node_id_t new_node_id, selection_t const& selected,
                              traversal_context_t& context) noexcept {
@@ -3760,7 +3900,7 @@ struct ram_index {
     }
 
     /** Closes the dispenser at the watermark: one compare-exchange that succeeds only while every
-     *  dispensed ID is published, after which every dispense refuses until @ref reopen_. */
+     *  dispensed ID is published, after which every dispense refuses until @c reopen_. */
     status_t close_() noexcept {
         node_id_t visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         return atomic_ref<node_id_t>(next_dispensed_id_)
@@ -3782,7 +3922,7 @@ struct ram_index {
     /**
      *  @brief Wires the dispensed row @p new_node_id: lands row @p new_row of @p new_rows and its
      *      norms, walks the graph, writes the neighbors and unlocks slot zero, then back-links.
-     *      Moves no watermark, so the row's range publishes whole through @ref publish_.
+     *      Moves no watermark, so the row's range publishes whole through @c publish_.
      *
      *  The walk admits the rows below its watermark snapshot and the rows dispensed before it began
      *  whose slot zero shows them published. The row is already dispensed, so a refused walk wires a
@@ -4499,10 +4639,12 @@ struct ram_index {
      *  A refused re-table ends the walk early with the ranking it has and says so in the status,
      *  which the callers count as a saturated walk rather than a failure.
      *
+     *  @param[in] query The vector the walk heads toward.
+     *  @param[in] query_norms The norms of @p query, where the metric takes them.
      *  @param[in] admission What the walk may locate and draw landmarks from: the IDs below the
      *      caller's watermark snapshot, and for an insertion the published rows dispensed before it.
      *  @param[in] expansion_factor How many candidates the walk keeps - its stopping radius.
-     *  @param[inout] context Scratch & telemetry; must arrive pre-reserved & pre-cleared, and ends
+     *  @param[in,out] context Scratch & telemetry; must arrive pre-reserved & pre-cleared, and ends
      *      with up to @p expansion_factor nearest published candidates in @c context.results.
      *  @param[in] bound The candidates whose fill ends restarts and whose radius bounds the walk
      *      once full:
@@ -4743,7 +4885,7 @@ struct ram_index {
 
     /** Chunks every column covers. Deliberately non-atomic: only the elected grower mutates it,
      *  and successive growers are ordered by the acquire/release pair on @c remaining_capacity_,
-     *  which no release lifts while one is inside. @ref create_next_chunk */
+     *  which no release lifts while one is inside. @c create_next_chunk */
     small_size_t chunks_count_ = 0;
 };
 
@@ -4854,9 +4996,14 @@ struct ram_cursor {
     /** The staged neighbor IDs of the current node - decoded, stable until the next move. */
     std::span<node_id_t const> neighbors() const noexcept { return to_span(staged_neighbors_).first(staged_count_); }
 
-    /** Positions on @p node & stages a copy of its neighbors: @c malformed_k at or past the
-     *  snapshot, @c uninitialized_k before @c reserve - the cursor stays where it was on either
-     *  refusal. Read-only under every contract. */
+    /**
+     *  Positions on @p node & stages a copy of its neighbors, the cursor staying where it was on
+     *  either refusal. Read-only under every contract.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k @p node is at or past the snapshot.
+     *  - @c uninitialized_k The staging is not reserved yet.
+     */
     status_t seek(node_id_t node) noexcept {
         if (node >= visible_count_) return status_t::malformed_k;
         if (staged_neighbors_.size() < connectivity_) return status_t::uninitialized_k;
@@ -4911,8 +5058,13 @@ struct ram_cursor {
     /** Deleted: it would copy the staging tensor - an allocation in disguise. */
     ram_cursor operator++(int) = delete;
 
-    /** Follows the staged neighbor at @p slot: @c malformed_k when the slot is beyond the live
-     *  prefix or its target is at or past this cursor's snapshot. */
+    /**
+     *  Follows the staged neighbor at @p slot.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k @p slot is beyond the live prefix.
+     *  - @c malformed_k The neighbor is at or past this cursor's snapshot.
+     */
     status_t follow(small_size_t slot) noexcept {
         if (slot >= staged_count_) return status_t::malformed_k;
         return seek(staged_neighbors_[slot]);

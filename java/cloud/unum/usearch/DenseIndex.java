@@ -1,3 +1,9 @@
+/**
+ *  @file java/cloud/unum/usearch/DenseIndex.java
+ *  @author Ash Vardanian
+ *  @date August 16, 2026
+ *  @brief The dense index handle, its options, and the receivers that run its verbs on a chosen executor.
+ */
 package cloud.unum.usearch;
 
 import java.lang.foreign.FunctionDescriptor;

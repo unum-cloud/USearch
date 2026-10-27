@@ -313,7 +313,7 @@ The breadth of the candidates rides the call rather than the handle, as `expansi
 `traversal: Traversal::Scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle refuses it with `Status::Unsupported`.
 `DenseTraversalStats` reports the members visited, the distances computed and the starvation `restarts`, a graph-connectivity signal rather than a cost, overwritten by every call it is passed to.
 
-### Filtering & Progress
+### Filtered Search
 
 Cross-referencing an external database during traversal beats paging through results and filtering afterwards.
 Non-matching entries still route the traversal, so recall does not collapse at low selectivity.
@@ -360,7 +360,7 @@ A stopped search reports `Status::Cancelled` and leaves no matches.
 A stopped `refine` is not a failure but the time budget a whole-graph sweep is meant to run under - re-selection claims no identity, so the graph stays correct and merely less improved.
 A stopped load creates no index, and a stopped `save_buffer` leaves no monolith.
 
-### Retrieval: Get, Cursors & Streams
+### Retrieval and Streaming
 
 `get` lands every row stored under a key in an arena, converted to the scalar type you name, one row per entry in insertion order; an absent key yields no rows.
 

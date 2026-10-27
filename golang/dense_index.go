@@ -4,6 +4,10 @@
 // with no reshape and no copy, and a single vector is a one-row matrix. The breadth of the
 // candidates rides each call rather than the handle, which lets a recall sweep run against one
 // immutable index with no mutation between points.
+//
+// File: golang/dense_index.go
+// Author: Ash Vardanian
+// Date: August 16, 2026
 
 package usearch
 

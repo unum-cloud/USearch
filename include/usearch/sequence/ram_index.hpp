@@ -19,8 +19,9 @@
  *
  *  Checkpoints are SafeGraphs monoliths: keys, @c utf8 values, and neighbor lists, with the
  *  kernel the graph was built under recorded verbatim. They are written and read through
- *  @c safegraphs_write_index and @c safegraphs_read_index with the @ref codec_t, whose
- *  @c load assigns every value into its record's own string.
+ *  @c safegraphs_write_index and @c safegraphs_read_index with the
+ *  @ref unum::usearch::sequence::codec_t, whose @c load assigns every value into its record's own
+ *  string.
  *
  *  @section sequence_ram_index_organization File Organization
  *
@@ -48,7 +49,13 @@ namespace unum::usearch::sequence {
 
 #pragma region Serialization
 
-/** USearch's reading of a StringZilla status, the one crossing between the two vocabularies. */
+/**
+ *  USearch's reading of a StringZilla status, the one crossing between the two vocabularies.
+ *
+ *  @par Statuses:
+ *  - @c overflow_k StringZilla risked an overflow.
+ *  - @c shape_mismatch_k StringZilla met unexpected dimensions.
+ */
 inline status_t status_of(sz::status_t status) noexcept {
     switch (status) {
     case sz::status_t::success_k: return status_t::success_k;
@@ -70,11 +77,18 @@ struct codec_t {
         return value.size();
     }
 
+    /**
+     *  Copies the bytes of @p value into @p output as they are.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p output differs in length from @p value.
+     */
     template <typename string_type_>
     status_t save(string_type_ const& value, bytes_span_t output) const noexcept {
         return copy_bytes(output, std::as_bytes(std::span {value}));
     }
 
+    /** Assigns the bytes of @p input to @p value through the string's own allocator. */
     template <typename string_type_>
     status_t load(bytes_view_t input, string_type_& value) const noexcept {
         return status_of(value.assign(chars_of(input)));

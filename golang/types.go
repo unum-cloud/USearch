@@ -1,3 +1,9 @@
+// Shared vocabulary of every USearch modality, which the dense modality builds on.
+//
+// File: golang/types.go
+// Author: Ash Vardanian
+// Date: August 16, 2026
+
 // Package usearch provides Go bindings for USearch.
 //
 // The package links the precompiled engine, so building it compiles no index. Status, Key,

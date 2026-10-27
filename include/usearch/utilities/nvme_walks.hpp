@@ -104,8 +104,14 @@ inline io_request_t nvme_covering_read(u64_t begin, u64_t bytes, u64_t block_byt
     return {first, static_cast<u32_t>(bound - first), medium, buffer, context};
 }
 
-/** Reads the prefix and the header of the part @p source holds, any reader with
- *  `read_at(offset, bytes)`, into @p header_bytes; @c malformed_k when it holds no monolith. */
+/**
+ *  Reads the prefix and the header of the part @p source holds, any reader with
+ *  <tt>read_at(offset, bytes)</tt>, into @p header_bytes.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The prefix cannot be read or carries no monolith's magic.
+ *  - @c malformed_k The header cannot be read.
+ */
 template <typename source_type_, typename allocator_type_>
     requires requires(source_type_ const& source, bytes_span_t bytes) { source.read_at(0, bytes); }
 status_t nvme_read_header(source_type_ const& source, growing_buffer<byte_t, allocator_type_>& header_bytes) noexcept {
@@ -120,9 +126,18 @@ status_t nvme_read_header(source_type_ const& source, growing_buffer<byte_t, all
     return status_t::success_k;
 }
 
-/** Reads the prefix and the header of the part at @p path into @p header_bytes through the medium
+/**
+ *  Reads the prefix and the header of the part at @p path into @p header_bytes through the medium
  *  a view reads it by: a file or a device, or in SPDK builds a namespace a transport ID names,
- *  each with an optional @c base: token; @c malformed_k when no monolith starts there. */
+ *  each with an optional @c base: token.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k @p path names no location, its base or namespace is unreadable, or the
+ *    base is off the medium's block; in SPDK builds also an inactive namespace or an unparsable
+ *    transport ID.
+ *  - @c unsupported_k A transport ID in a build without SPDK.
+ *  - @c malformed_k No monolith starts there, or its header cannot be read.
+ */
 template <typename allocator_type_>
 status_t nvme_read_header(std::string_view path, growing_buffer<byte_t, allocator_type_>& header_bytes) noexcept {
 #if USEARCH_WITH_LINUX_SPDK
@@ -138,8 +153,17 @@ status_t nvme_read_header(std::string_view path, growing_buffer<byte_t, allocato
     return nvme_read_header(file, header_bytes);
 }
 
-/** The metadata of the checkpoint at @p path without viewing it: a manifest in a file, or a
- *  monolith wherever @ref nvme_read_header reaches one, its header read as a view reads it. */
+/**
+ *  The metadata of the checkpoint at @p path without viewing it: a manifest in a file, or a
+ *  monolith wherever @c nvme_read_header reaches one, its header read as a view reads it.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k @p path, or a manifest's first part path, does not parse or names an
+ *    unusable base or namespace.
+ *  - @c unsupported_k A transport ID in a build without SPDK.
+ *  - @c malformed_k A transport ID starting no monolith, or a manifest or header that does not
+ *    parse.
+ */
 inline expected<safegraphs_metadata_t> nvme_read_metadata(std::string_view path) noexcept {
     growing_buffer<byte_t> header_bytes {global_allocator};
     status_t const read = nvme_read_header(path, header_bytes);
@@ -346,9 +370,17 @@ struct nvme_call {
     typename executor_type_::attachment_t attachment;
 };
 
-/** Claims @p executor, sizes the arena of every thread at @p scratch_bytes and every engine at
+/**
+ *  Claims @p executor, sizes the arena of every thread at @p scratch_bytes and every engine at
  *  @p buffers staging buffers of @p buffer_bytes, and attaches @p media. Nothing rewinds the
- *  arenas again before the call ends, so whatever a call carves lasts all of it. */
+ *  arenas again before the call ends, so whatever a call carves lasts all of it.
+ *
+ *  @par Statuses:
+ *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+ *  - @c uninitialized_k The executor holds no threads, or its pool has no workers.
+ *  - @c overflow_k A staging region's byte count overflows, or passes what Windows registers.
+ *  - @c config_mismatch_k A medium the engines cannot read.
+ */
 template <typename executor_type_>
 expected<nvme_call<executor_type_>> nvme_begin_call(executor_type_& executor,
                                                     std::span<typename executor_type_::medium_t const> media,
@@ -785,7 +817,7 @@ class row_walker {
 
     /** Releases the staged flights of a draining @p walk unscored, or hands them to the tier, which
      *  scores them as one quad, folds them through the walk's row, releases them and ranks the rest
-     *  through @ref rank_. */
+     *  through @c rank_. */
     void score_staged_flights_(walk_t& walk) noexcept {
         if (!walk.staged.size()) return;
         if (walk.stage == nvme_walk_stage_t::draining_k) {

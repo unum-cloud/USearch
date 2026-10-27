@@ -1,36 +1,25 @@
-========
-USearch
-========
-.. mdinclude:: ../README.md
-   :start-line: 1
+USearch Reference
+=================
+
+Every public symbol, generated from the documentation comments in the sources.
+Guides for each language live at `unum.cloud/docs/usearch <https://unum.cloud/docs/usearch>`_.
+Rust, Go and Swift symbols are on `docs.rs <https://docs.rs/usearch>`_, `pkg.go.dev <https://pkg.go.dev/github.com/unum-cloud/USearch/golang>`_ and the `Swift Package Index <https://swiftpackageindex.com/unum-cloud/USearch>`_.
+The file format is specified in `format.md <https://github.com/unum-cloud/USearch/blob/main/docs/format.md>`_.
 
 .. toctree::
-   :hidden:
-   :caption: Languages
+   :caption: C
+   :maxdepth: 1
 
-   cpp/index
-   c/index
-   python/index
-   rust/index
-   javascript/index
-   java/index
-   swift/index
-   csharp/index
-   golang/index
-   zig/index
-   mojo/index
-   wolfram/index
+   c/reference
 
 .. toctree::
-   :hidden:
-   :caption: Project
+   :caption: C++
+   :maxdepth: 1
 
-   contributing
-   benchmarks
-   format
+   cpp/reference
 
 .. toctree::
-   :hidden:
-   :caption: Index
+   :caption: Python
+   :maxdepth: 1
 
-   genindex
+   python/reference

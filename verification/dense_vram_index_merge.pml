@@ -1,4 +1,7 @@
 /**
+ *  @file verification/dense_vram_index_merge.pml
+ *  @author Ash Vardanian
+ *  @date October 15, 2026
  *  @brief The CUDA index's refine merging a re-selected row into the live one beside a walking reader
  *      and an insertion's back-link, the two mutators kept apart by the closed dispenser.
  *
@@ -8,29 +11,19 @@
  *  reopens it after, refused while a batch is in flight, and a batch's claim is refused while it is
  *  closed, so an insertion's back-links never land in a row the merge rewrites.
  *
- *  Row 0 holds node 1 and an empty slot; nodes 1 and 2 are published below the watermark. The
- *  merger lane closes the dispenser, stages row 0 as its pass read it, waiting out a lock holder,
- *  and stores the re-selection back, the staged neighbors reordered and an empty slot filled with
- *  node 2. The back-linker lane is a batch inserting node 3: it claims, writes node 3's payload,
- *  takes row 0's bounded lock, sweeps slot one, appends node 3 into it when empty, unlocks, and
- *  turns the watermark past node 3. The reader lane acquires the watermark as its walk's bound,
- *  acquires slot zero with one retry on the sentinel, loads slot one, and reads the payload of
- *  every ID below the bound.
- *
- *  Slot zero reads the sentinel only while a lock holder has the row, every ID the reader admits
- *  names a node whose payload it sees whole, the row old, new or mixed, and a back-link the batch
- *  appended survives unless the merge saw it.
+ *  - Slot zero reads the sentinel only while a lock holder has the row.
+ *  - Every ID the reader admits names a node whose payload it sees whole, the row old, new or mixed.
+ *  - A back-link the batch appended survives unless the merge saw it.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc refine_closes=false: a refine closes the dispenser, which refuses the batch's
- *      claim; without it, the batch appends its back-link into row 0 after the merge staged the row
- *      and before it stored the re-selection back, and the store drops the only in-link of a node
- *      the merge never saw
+ *  @verify fail sc refine_closes=false: without it, the batch appends its back-link into row 0 after
+ *      the merge staged the row and before it stored the re-selection back, and the store drops the
+ *      only in-link of a node the merge never saw
  */
 #define thread_count 3
 #define location_count 6
 #define history_depth 4
-#include "weak_memory.pml"
+#include <weak_memory.pml>
 
 // The words: row 0's slot zero, the lock and first neighbor, and its one tail slot; the payloads of
 // nodes 1 to 3; the shard's watermark.

@@ -318,7 +318,7 @@ matches = index.on(pool).search(queries, new DenseSearchConfig(10).traversal(Tra
 System.out.println(stats.computedDistances() + " distances computed by the wider search");
 ```
 
-### Retrieval: Get, Cursors & Streams
+### Retrieval and Streaming
 
 `get` returns every row the key holds, however many there turn out to be, at the natural width of the kind asked for, with the `columns` and `strideBytes` the library reported.
 

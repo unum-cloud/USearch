@@ -1,3 +1,9 @@
+/**
+ *  @file csharp/src/Cloud.Unum.USearch/DenseIndex.cs
+ *  @author Ash Vardanian
+ *  @date September 8, 2026
+ *  @brief The dense index handle, its metric and scalar kinds, and the verbs that run over it.
+ */
 using System;
 using System.Buffers;
 using System.Runtime.CompilerServices;

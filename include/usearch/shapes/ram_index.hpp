@@ -13,11 +13,11 @@
  *  @section shapes_ram_index_persistence Persistence
  *
  *  Checkpoints are SafeGraphs monoliths, written by @c safegraphs_write_index and read by
- *  @c safegraphs_read_index with @ref codec, under the kernel's token: @c chamfer, @c hausdorff,
- *  @c wasserstein_procrustes or @c gromov_wasserstein. The value column is a ragged @c f16 or
- *  @c f32 matrix of one @b [points,3] slice per node, holding each cloud in its inserted pose
- *  within one storage rounding. A load packs every cloud again, so distances after a reload agree
- *  with those before it to the storage precision, rather than bit for bit.
+ *  @c safegraphs_read_index with @ref unum::usearch::shapes::codec, under the kernel's token:
+ *  @c chamfer, @c hausdorff, @c wasserstein_procrustes or @c gromov_wasserstein. The value column
+ *  is a ragged @c f16 or @c f32 matrix of one @b [points,3] slice per node, holding each cloud in
+ *  its inserted pose within one storage rounding. A load packs every cloud again, so distances
+ *  after a reload agree with those before it to the storage precision, rather than bit for bit.
  */
 #pragma once
 
@@ -65,8 +65,13 @@ struct codec {
         return value.max_points() * 3 * sizeof(scalar_t);
     }
 
-    /** The points of the one cloud @p pack holds into @p pose in their inserted pose; @p pose holds
-     *  exactly those points. */
+    /**
+     *  The points of the one cloud @p pack holds into @p pose in their inserted pose; @p pose holds
+     *  exactly those points.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p pose holds other than the pack's points.
+     */
     static status_t save_pack(bytes_view_t pack, bytes_span_t pose) noexcept {
         nk_size_t points = 0;
         if (status_t const read = status_of(
@@ -78,7 +83,12 @@ struct codec {
         return status_of(pack_kit_t::unpack(pack.data(), reinterpret_cast<raw_t*>(pose.data()), nullptr));
     }
 
-    /** The cloud @p pose holds packed into @p pack, which the kit's @c pack_size sized. */
+    /**
+     *  The cloud @p pose holds packed into @p pack, which the kit's @c pack_size sized.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k @p pose is not a whole number of points.
+     */
     static status_t load_pack(bytes_view_t pose, bytes_span_t pack) noexcept {
         constexpr std::size_t point_bytes_k = 3 * sizeof(raw_t);
         if (pose.size() % point_bytes_k) return status_t::malformed_k;
@@ -86,6 +96,13 @@ struct codec {
                                           pack.data(), nullptr));
     }
 
+    /**
+     *  Writes the cloud of @p value in its inserted pose at the front of @p output.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k @p output is shorter than the cloud's points.
+     *  - @c config_mismatch_k The cloud holds fewer points than @p value reserves.
+     */
     template <typename value_type_>
     status_t save(value_type_ const& value, bytes_span_t output) const noexcept {
         std::size_t const pose_bytes = storage_requirements(value);
@@ -97,6 +114,12 @@ struct codec {
         return save_pack({static_cast<byte_t const*>(value[0]), pack_bytes}, output.first(pose_bytes));
     }
 
+    /**
+     *  Packs the cloud @p input holds into @p value through its own allocator.
+     *
+     *  @par Statuses:
+     *  - @c shape_mismatch_k @p input is not a whole number of points.
+     */
     template <typename value_type_>
     status_t load(bytes_view_t input, value_type_& value) const noexcept {
         std::array const clouds {elements_of<scalar_t>(input)};

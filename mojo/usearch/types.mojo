@@ -33,6 +33,10 @@ A struct whose address crosses to C is materialized into a `stack_allocation` sl
 in a local whose address is taken. An `alloca` is not a value Mojo owns, so nothing destroys it and
 nothing folds its store away, where a local's last tracked use is the address-taking itself. A
 deferred call's slots outlive the verb that submitted them, so they live on the heap instead.
+
+File: mojo/usearch/types.mojo
+Author: Ash Vardanian
+Date: September 7, 2026
 """
 
 from std.bit import byte_swap

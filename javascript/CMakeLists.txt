@@ -1,12 +1,10 @@
 # The N-API boundary lives in `javascript/*.c` and instantiates nothing: it links the C interface as an archive, so
 # `usearch.node` carries the engine inside it. `cmake-js` drives this from `package.json`.
 
-if (TARGET usearch_static)
-    set(usearch_node_library_ usearch_static)
-elseif (TARGET usearch_static_stub)
+if (USEARCH_BUILD_STUB)
     set(usearch_node_library_ usearch_static_stub)
 else ()
-    message(FATAL_ERROR "The Node SDK links the C interface; configure with `-DUSEARCH_BUILD_LIB_C=1`.")
+    set(usearch_node_library_ usearch_static)
 endif ()
 
 if (NOT CMAKE_JS_INC)

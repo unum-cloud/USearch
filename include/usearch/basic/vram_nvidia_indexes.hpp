@@ -45,7 +45,7 @@ namespace unum::usearch::basic {
  *      32-bit node IDs, as the shard table locates every row in 8 bytes.
  *  @tparam key_type_ The caller-visible identity, opaque to every shard.
  *  @tparam build_type_ Builds one unreserved shard, configured as every other, on a device:
- *      `build(device) → std::unique_ptr<index_type_>`, null when the allocation fails.
+ *      <tt>build(device) → std::unique_ptr<index_type_></tt>, null when the allocation fails.
  *  @tparam landed_score_type_ The scores a shard's search lands on the host before the merge, the
  *      shard's own distance unless a modality's search lands another.
  *  @tparam wait_type_ What a reader spanning the shards waits through while a commit is in flight.
@@ -104,16 +104,32 @@ struct vram_nvidia_indexes {
      *  a batch opens another shard generation on the same devices. Ignored once storage exists. */
     void bound_shards(std::size_t rows) noexcept { shards_.bound_shards(rows); }
 
-    /** Appends one shard built on CUDA device @p device; refused once storage exists. */
+    /**
+     *  Appends one shard built on CUDA device @p device.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k Storage exists already: the set is reserved, retired shards, or has
+     *    a shard generation in flight.
+     */
     status_t emplace(int device) noexcept {
         std::unique_ptr<index_t> shard = build_(device);
         if (!shard) return status_t::bad_alloc_k;
         return shards_.emplace(std::move(shard), keys_column_t {shards_.allocator()});
     }
 
-    /** Grows every shard ahead of @p config.capacity rows and @p config.bytes value bytes, both
+    /**
+     *  Grows every shard ahead of @p config.capacity rows and @p config.bytes value bytes, both
      *  split evenly over the shards, since each shard's tape holds only its own rows' values; the
-     *  first call freezes the connectivity. */
+     *  first call freezes the connectivity.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard is placed, or the face's kits take parameters and none were
+     *    set.
+     *  - @c config_mismatch_k The connectivity is not a power of two, or differs from the one a
+     *    shard froze.
+     *  - @c overflow_k A shard's share passes its ID space, its reserved range or its key column,
+     *    or its value bytes the reserved tape.
+     */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         config.bytes = divide_round_up(config.bytes, max_of<std::size_t>(shards_.size(), 1));
         return shards_.reserve(config);
@@ -150,6 +166,9 @@ struct vram_nvidia_indexes {
      *
      *  Refused with @c contended_k while a batch, load or save holds a shard; a retired shard stays
      *  closed for good, and the fresh shard generation takes every later batch.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A shard has a batch or load in flight, or holds claims it never dispensed.
      */
     status_t clear() noexcept {
         if (status_t const closed = shards_.close(); failed(closed)) return closed;
@@ -167,8 +186,8 @@ struct vram_nvidia_indexes {
         return status_t::success_k;
     }
 
-    /** Invokes @p callback as `callback(device)` for the device of every shard, in placement order,
-     *  so a caller builds an executor driving them all. */
+    /** Invokes @p callback as <tt>callback(device)</tt> for the device of every shard, in placement
+     *  order, so a caller builds an executor driving them all. */
     template <typename callback_type_>
     void for_each_device(callback_type_&& callback) const noexcept {
         for (shard_t const& one : shards_) callback(one.index->device_specs().ordinal);
@@ -219,6 +238,13 @@ struct vram_nvidia_indexes {
          *
          *  A refusal stops at its shard: the runs before it still publish together with their keys,
          *  and the claims after it are given back.
+         *
+         *  @par Statuses:
+         *  - @c uninitialized_k The plan is empty or spent, or a shard was never reserved.
+         *  - @c config_mismatch_k The @p keys or @p tape hold other than the planned rows.
+         *  - @c unsupported_k A row past every rung of a shard's kits.
+         *  - @c overflow_k A shard's rows pass its reserved range, or their values its reserved
+         *    tape.
          */
         expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape) noexcept {
             if (!owner_) return {{}, status_t::uninitialized_k};
@@ -308,8 +334,16 @@ struct vram_nvidia_indexes {
      *  with @c contended_k, giving back the claims before it.
      *
      *  @param[in] rows Rows in the batch.
-     *  @param[inout] executor The streams and their scratch, held until the plan dies.
+     *  @param[in,out] executor The streams and their scratch, held until the plan dies.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device.
+     *  - @c contended_k Another call holds the @p executor, the index is sealed, or a shard has a
+     *    batch or load in flight or its claim word closed.
+     *  - @c overflow_k The seats pass the locator chunks, or a shard's rows pass its ceiling or
+     *    its key column.
      */
     expected<insert_plan_t> plan_insert(std::size_t rows, executor_t& executor, insert_config_t config = {}) noexcept {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
@@ -352,8 +386,20 @@ struct vram_nvidia_indexes {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Inserts every row of @p tape under its key in @p keys: @ref plan_insert, then its one
-     *  @c insert. */
+    /**
+     *  Inserts every row of @p tape under its key in @p keys: @ref plan_insert, then its one
+     *  @c insert.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards, or a shard was never reserved.
+     *  - @c config_mismatch_k The @p keys are not one per row, or the @p executor drives no stream
+     *    on some shard's device.
+     *  - @c contended_k Another call holds the @p executor, the index is sealed, or a shard has a
+     *    batch or load in flight or its claim word closed.
+     *  - @c unsupported_k A row past every rung of a shard's kits.
+     *  - @c overflow_k The seats pass the locator chunks, or a shard's rows pass its ceiling, its
+     *    reserved range or its key column, or their values its reserved tape.
+     */
     expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape, executor_t& executor,
                                      insert_config_t config = {}) noexcept {
         if (keys.size() != tape.size()) return {{}, status_t::config_mismatch_k};
@@ -366,7 +412,7 @@ struct vram_nvidia_indexes {
 
 #pragma region Checkpoints
 
-    /** What a checkpoint does on these shards' devices, for @ref save_shards and @ref load_shards:
+    /** What a checkpoint does on these shards' devices, for @ref save_shards and @c load_shards:
      *  every shard's plans on its own stream of @c executor, its keys through the host key column
      *  and the locator map, and a load's reservation at the connectivity the checkpoint froze. */
     struct checkpoint_residency_t {
@@ -415,15 +461,25 @@ struct vram_nvidia_indexes {
             });
         }
 
-        /** Claims the locator seats of @p rows keys a load lands. */
+        /**
+         *  Claims the locator seats of @p rows keys a load lands.
+         *
+         *  @par Statuses:
+         *  - @c overflow_k The seats pass what the locator chunks can ever hold.
+         */
         static expected<seats_t> claim_seats(shards_t& shards, std::size_t rows) noexcept {
             if (status_t const indexed = shards.locators().reserve(shards.entries() + rows); failed(indexed))
                 return {{}, indexed};
             return shards.locators().claim(rows);
         }
 
-        /** Lands @p keys from row @p first_row of shard @p shard into its host key column and the
-         *  locator map, on the seats @ref claim_seats claimed. */
+        /**
+         *  Lands @p keys from row @p first_row of shard @p shard into its host key column and the
+         *  locator map, on the seats @ref claim_seats claimed.
+         *
+         *  @par Statuses:
+         *  - @c overflow_k The rows pass the key column's directory.
+         */
         static status_t land_keys(shards_t& shards, std::size_t shard, std::size_t first_row,
                                   std::span<key_t const> keys, seats_t seats) noexcept {
             auto& column = host_keys(shards[shard].keys);
@@ -437,9 +493,15 @@ struct vram_nvidia_indexes {
             return status_t::success_k;
         }
 
-        /** Leaves part @p part the live shard it names, a placed one, or opens shard generations on
+        /**
+         *  Leaves part @p part the live shard it names, a placed one, or opens shard generations on
          *  the placed shards' devices until it exists, each placed shard first frozen at the
-         *  checkpoint's connectivity, which the shard generations take after it. */
+         *  checkpoint's connectivity, which the shard generations take after it.
+         *
+         *  @par Statuses:
+         *  - @c config_mismatch_k The checkpoint's connectivity is not a power of two, or differs
+         *    from the one a placed shard froze.
+         */
         status_t open_shard_for_part(shards_t& shards, std::size_t part) noexcept {
             if (shards.retired_shards() + part < shards.size()) return status_t::success_k;
             for (std::size_t shard = shards.retired_shards(); shard != shards.size(); ++shard)
@@ -464,9 +526,23 @@ struct vram_nvidia_indexes {
         }
     };
 
-    /** Writes the live shards under @p path through @ref save_shards: a lone live shard's monolith,
+    /**
+     *  Writes the live shards under @p path through @c save_shards: a lone live shard's monolith,
      *  or one per live shard beside a manifest; each shard's rows cross on its own stream of
-     *  @p executor, in order. */
+     *  @p executor, in order.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards, or none is live.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, @p config
+     *    does not validate, an element has no interchange dtype, a value disagrees with its
+     *    shape, or a segment is misaligned.
+     *  - @c contended_k Another call holds the @p executor, or a mutator, a batch or an open plan
+     *    holds a shard.
+     *  - @c invalid_argument_k A part or manifest path does not parse.
+     *  - @c overflow_k A device ends before a part or the manifest, or a column is shorter than
+     *    the layout needs.
+     *  - @c malformed_k A written part's header does not parse back.
+     */
     template <typename codec_type_, typename progress_type_ = dummy_progress_t>
     status_t save(std::string_view path, codec_type_ const& codec, executor_t& executor, save_config_t const& config,
                   std::string_view metric, progress_type_&& progress = {}) noexcept {
@@ -478,9 +554,25 @@ struct vram_nvidia_indexes {
                            std::forward<progress_type_>(progress));
     }
 
-    /** Reads the checkpoint at @p path into the placed, empty shards through @ref load_shards, one
+    /**
+     *  Reads the checkpoint at @p path into the placed, empty shards through @ref load_shards, one
      *  part per shard, opened past the placed ones where the parts outnumber them, reserving each
-     *  at @p connectivity, which the checkpoint froze. */
+     *  at @p connectivity, which the checkpoint froze.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards, or no reserve froze the connectivity.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, the shards
+     *    hold entries, the @p connectivity differs from the one a shard froze, a column's dtype,
+     *    shape or key width differs from what the shards and @p codec take, or a segment is
+     *    misaligned.
+     *  - @c contended_k Another call holds the @p executor, the set is sealed while a shard
+     *    generation must open, or a mutator, batch, load or plan holds a shard.
+     *  - @c invalid_argument_k The checkpoint or a part path does not parse.
+     *  - @c malformed_k The checkpoint lists no part, or a part, its header, columns or sums do
+     *    not parse.
+     *  - @c overflow_k The rows pass a shard's node IDs, key multimap or the locator map.
+     *  - @c unsupported_k A row past every rung of the face's kits.
+     */
     template <typename codec_type_, typename progress_type_ = dummy_progress_t>
     status_t load(std::string_view path, codec_type_ const& codec, executor_t& executor, load_config_t const& config,
                   connectivity_t connectivity, progress_type_&& progress = {}) noexcept {
@@ -502,11 +594,20 @@ struct vram_nvidia_indexes {
      *      the caller's rankings through its key column, ascending.
      *
      *  @param[in] queries The queries, one tape entry of bytes each.
-     *  @param[inout] executor The streams and their scratch, claimed for the call.
+     *  @param[in,out] executor The streams and their scratch, claimed for the call.
      *  @param[in] config The walks' breadth; the matches per query are as many as @p keys is wide.
      *  @param[out] keys One row of merged keys per query.
      *  @param[out] distances The same rankings' distances, in any type a distance converts to.
      *  @param[out] counts The matches each query's row holds.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards or a shard was never reserved, or the
+     *    @p executor has no streams.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, @p counts
+     *    is not one per query, or the row counts or widths of @p keys and @p distances disagree.
+     *  - @c unsupported_layout_k A row of @p keys or @p distances is not contiguous.
+     *  - @c contended_k Another call holds the @p executor.
+     *  - @c unsupported_k A query past every rung of a shard's kits.
      */
     template <typename score_type_>
     expected<search_result_t> search(tape_view<byte_t const> queries, executor_t& executor, search_config_t config,
@@ -525,12 +626,19 @@ struct vram_nvidia_indexes {
      *      modality's own search, and merges the shards' rankings by score into @p keys,
      *      @p scores and @p counts, as many matches per query as @p keys is wide.
      *
-     *  @p search_shard is called as `search_shard(index, node_ids, scores, counts, traversal,
-     *  visible) → status_t` on each shard holding visible rows, landing its rows' matches in the
-     *  host landing in @p landed_score_type_ scores; a row ends at its count or at its first
+     *  @p search_shard is called as <tt>search_shard(index, node_ids, scores, counts, traversal,
+     *  visible) → status_t</tt> on each shard holding visible rows, landing its rows' matches in
+     *  the host landing in @p landed_score_type_ scores; a row ends at its count or at its first
      *  sentinel ID. One snapshot bounds every shard's walk, so the merged rankings see each batch
      *  on every shard or on none, and @p usage, the arguments of a shard's
      *  @c traversal_memory_usage, sizes every context.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index has no shards, or the @p executor has no streams.
+     *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, @p counts
+     *    is not one per query, or the row counts or widths of @p keys and @p scores disagree.
+     *  - @c unsupported_layout_k A row of @p keys or @p scores is not contiguous.
+     *  - @c contended_k Another call holds the @p executor.
      */
     template <typename search_shard_type_, typename score_type_, typename... usage_types_>
     expected<search_result_t> search_every_shard(std::size_t queries_count, executor_t& executor,
@@ -554,7 +662,8 @@ struct vram_nvidia_indexes {
     /** Entries under @p key across every shard. */
     std::size_t count(key_t const& key) const noexcept { return shards_.locators().count(key); }
 
-    /** Invokes @p callback as `callback(shard, node_id)` for every published entry under @p key. */
+    /** Invokes @p callback as <tt>callback(shard, node_id)</tt> for every published entry under
+     *  @p key. */
     template <typename callback_type_>
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
         shards_.locators().find_each(

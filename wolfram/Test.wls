@@ -3,7 +3,7 @@
 
 (* :Title: Test *)
 (* :Author: Ash Vardanian *)
-(* :Date: 2023-05-04 *)
+(* :Date: May 4, 2023 *)
 (* :Summary: The binding's checks: managed handles, receivers and arenas over a built usearch_wolfram
     library, exiting non-zero at the first failure. *)
 (* :Usage: wolframscript -file wolfram/Test.wls [path/to/usearch_wolfram] *)

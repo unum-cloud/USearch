@@ -551,10 +551,10 @@ expected<traversal_telemetry_t> search_entries(index_type_& index, std::size_t c
     return ranked;
 }
 
-/** Hands every value an NVMe view stores under @p key to @p on_value, as
- *  `on_value(position, rank, thread, view)` with @c rank in insertion order: one scan of the key
- *  columns counts them, handing the count to @p on_count, as `on_count(entries) → status`, before
- *  one more reads them. */
+/** Hands every value an NVMe view stores under @p key to @p on_value, as <tt>on_value(position,
+ *  rank, thread, view)</tt> with @c rank in insertion order: one scan of the key columns counts
+ *  them, handing the count to @p on_count, as <tt>on_count(entries) → status</tt>, before one more
+ *  reads them. */
 template <typename index_type_, typename on_count_type_, typename on_value_type_>
 status_t values_under(index_type_ const& index, usearch_key_t key, nvme_executor_t& executor, on_count_type_&& on_count,
                       on_value_type_&& on_value) noexcept {

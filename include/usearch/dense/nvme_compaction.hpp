@@ -51,7 +51,7 @@
 namespace unum::usearch::dense {
 
 /** What the current phase's steps do, declared in the order every rewrite runs them, which
- *  @ref nvme_compact_plan::advance steps through one at a time, skipping phases with no
+ *  @c nvme_compact_plan::advance steps through one at a time, skipping phases with no
  *  steps; @c finish_k once it answered false. */
 enum class nvme_compact_phase_t : u8_t {
 
@@ -103,34 +103,78 @@ struct [[nodiscard]] nvme_compact_result_t {
 template <typename indexes_type_>
 struct nvme_compact_plan;
 
-/** Compacts the parts of @p sources into new parts at @p target, each holding at most
+/**
+ *  Compacts the parts of @p sources into new parts at @p target, each holding at most
  *  @p config.shard_capacity rows: parts pack largest first, each bin's largest part keeps its IDs,
  *  every other part lands after it with its edges rebased, its rows walk the target and link in,
  *  their back-links are spilled and merged, then each target part heals; one manifest commits them
  *  all. A part past the capacity is cut into ranges of it, the edges the cut crosses dropped and
  *  counted, and every row of their target parts re-selects. @p save names the target parts'
  *  alignment and provenance, and the target is a manifest beside its parts whatever its layout.
- *  The sources are borrowed until the plan dies and never edited. */
+ *  The sources are borrowed until the plan dies and never edited.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No source, a @c NULL first source, a first source viewing nothing, or
+ *    sources holding no rows.
+ *  - @c config_mismatch_k @p save names an alignment below the floor or not a power of two or a
+ *    reserved provenance field, or a source walks by another kernel or differs in geometry or
+ *    key width from the first.
+ *  - @c invalid_argument_k An empty @p target, a @c NULL later source, or a target part path that
+ *    does not parse.
+ *  - @c bad_alloc_k @p workspace cannot hold one row of some phase.
+ *  - @c overflow_k A target part of zero rows or past the node ID space, or a device ending before
+ *    its base plus a part.
+ *  - @c malformed_k A framed target header has no width.
+ */
 template <typename indexes_type_>
 expected<nvme_compact_plan<indexes_type_>> plan_compact(std::span<indexes_type_ const* const> sources,
                                                         std::string_view target, bytes_span_t workspace,
                                                         compact_config_t const& config = {},
                                                         save_config_t const& save = {}) noexcept;
 
-/** Copies @p source and re-selects @p rows of it, in placement order across its parts, by walks of
+/**
+ *  Copies @p source and re-selects @p rows of it, in placement order across its parts, by walks of
  *  the copy, or in RAM for a whole part the workspace holds, then merges the back-links and heals;
  *  empty rows heal alone. Every part keeps its rows, so the capacity plays no part. The source is
- *  borrowed until the plan dies. */
+ *  borrowed until the plan dies.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k @p source views nothing, or holds no rows.
+ *  - @c config_mismatch_k @p save names an alignment below the floor or not a power of two or a
+ *    reserved provenance field, or a part of @p source differs in geometry or key width.
+ *  - @c invalid_argument_k An empty @p target, or a target part path that does not parse.
+ *  - @c bad_alloc_k @p workspace cannot hold one row of some phase.
+ *  - @c overflow_k A target part of zero rows or past the node ID space, or a device ending before
+ *    its base plus a part.
+ *  - @c malformed_k A framed target header has no width.
+ */
 template <typename indexes_type_>
 expected<nvme_compact_plan<indexes_type_>> plan_refine(indexes_type_ const& source, iota_view<std::size_t> rows,
                                                        std::string_view target, bytes_span_t workspace,
                                                        compact_config_t const& config = {},
                                                        save_config_t const& save = {}) noexcept;
 
-/** Builds one graph per target part over every row of the parts at @p sources, their neighbors
+/**
+ *  Builds one graph per target part over every row of the parts at @p sources, their neighbors
  *  ignored, the parts packed as a compaction packs them, in contiguous blocks the workspace holds
  *  as a RAM index, each healed there before it is written, then links each part's later blocks
- *  across as a compaction links its appended parts. */
+ *  across as a compaction links its appended parts.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No source, or sources holding no rows.
+ *  - @c bad_alloc_k @p workspace cannot hold one row of some phase.
+ *  - @c invalid_argument_k A source path, the empty @p target or a target part path that does not
+ *    parse or names a base off its medium's block.
+ *  - @c malformed_k A source manifest names no part, a manifest or header does not parse, or a
+ *    part has no width or too many rows.
+ *  - @c config_mismatch_k A source part disagrees with the others or with this instantiation, or
+ *    @p save names an alignment below the floor or not a power of two or a reserved provenance
+ *    field.
+ *  - @c unsupported_k A transport ID in a build without SPDK.
+ *  - @c unknown_kind_k A kernel the stored scalar's kits cannot finalize.
+ *  - @c overflow_k A target part of zero rows or past the node ID space, or a device ending before
+ *    its base plus a part.
+ */
 template <typename indexes_type_>
 expected<nvme_compact_plan<indexes_type_>> plan_build(std::span<std::string_view const> sources,
                                                       std::string_view target, bytes_span_t workspace,
@@ -205,8 +249,20 @@ struct [[nodiscard]] nvme_compact_plan {
     /** The phase whose steps run now. */
     nvme_compact_phase_t phase() const noexcept { return phase_; }
 
-    /** Runs @p step of the current phase across every thread of @p executor, which it claims while
-     *  it runs. */
+    /**
+     *  Runs @p step of the current phase across every thread of @p executor, which it claims while
+     *  it runs.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p step lies past the current phase's steps, a part rebuilt in RAM
+     *    disagrees with its rows, or a medium the engines cannot read.
+     *  - @c uninitialized_k The plan is done, or @p executor holds no pool or workers.
+     *  - @c contended_k Another call holds @p executor, or its pool runs another dispatch.
+     *  - @c bad_alloc_k The workspace cannot hold the step's slices.
+     *  - @c overflow_k A part rebuilt in RAM passes a bound, a staging region's byte count
+     *    overflows, or a write runs past a device's end.
+     *  - @c unknown_kind_k A part rebuilt in RAM cannot finalize its kernel.
+     */
     status_t run(step_t const& step, executor_t& executor) noexcept {
         if (step.position >= steps().size()) return status_t::config_mismatch_k;
         switch (phase_) {
@@ -229,8 +285,17 @@ struct [[nodiscard]] nvme_compact_plan {
         return false;
     }
 
-    /** Writes every part header, then the manifest: the commit. @c cancelled_k before the last
-     *  phase ended. */
+    /**
+     *  Writes every part header, then the manifest: the commit.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan holds no target part.
+     *  - @c cancelled_k The last phase has not ended.
+     *  - @c config_mismatch_k A part header does not fit before its data.
+     *  - @c overflow_k A part is shorter than its header, or a device ends before its base plus the
+     *    manifest.
+     *  - @c invalid_argument_k The manifest path does not parse.
+     */
     expected<result_t> finish() noexcept {
         if (targets_.empty()) return {result_, status_t::uninitialized_k};
         if (phase_ != nvme_compact_phase_t::finish_k) return {result_, status_t::cancelled_k};
@@ -978,7 +1043,7 @@ struct [[nodiscard]] nvme_compact_plan {
         return land_rows_(view, part, first, count, columns, executor);
     }
 
-    /** The @ref scan_rows_ of a step whose call is already open, a scan's worth of slots
+    /** The @c scan_rows_ of a step whose call is already open, a scan's worth of slots
      *  begun. */
     status_t land_rows_(indexes_t const& view, u32_t part, std::size_t first, std::size_t count,
                         std::span<staged_column_t const> columns, executor_t& executor) noexcept {
@@ -2004,7 +2069,25 @@ expected<nvme_compact_result_t> nvme_compact_drain_(expected<plan_type_>&& plann
     return plan.finish();
 }
 
-/** The one-shot @ref plan_compact, drained over @p executor. */
+/**
+ *  The one-shot @c plan_compact, drained over @p executor.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No source, a @c NULL first source, a first source viewing nothing, sources
+ *    holding no rows, or @p executor holds no pool or workers.
+ *  - @c config_mismatch_k @p save names an alignment below the floor or not a power of two or a
+ *    reserved provenance field, a source differs in kernel, geometry or key width from the first,
+ *    a part rebuilt in RAM disagrees with its rows, a medium the engines cannot read, or a part
+ *    header does not fit before its data.
+ *  - @c invalid_argument_k An empty @p target, a @c NULL later source, or a target part or
+ *    manifest path that does not parse.
+ *  - @c bad_alloc_k @p workspace cannot hold one row of some phase.
+ *  - @c overflow_k A target part of zero rows or past the node ID space, a part rebuilt in RAM
+ *    passing a bound, a staging region's byte count, or a write past a device's end.
+ *  - @c malformed_k A framed target header has no width.
+ *  - @c contended_k Another call holds @p executor, or its pool runs another dispatch.
+ *  - @c unknown_kind_k A part rebuilt in RAM cannot finalize its kernel.
+ */
 template <typename indexes_type_>
 expected<nvme_compact_result_t> compact(std::span<indexes_type_ const* const> sources, std::string_view target,
                                         typename indexes_type_::executor_t& executor, bytes_span_t workspace,
@@ -2012,7 +2095,25 @@ expected<nvme_compact_result_t> compact(std::span<indexes_type_ const* const> so
     return nvme_compact_drain_(plan_compact(sources, target, workspace, config, save), executor);
 }
 
-/** The one-shot @ref plan_refine, drained over @p executor. */
+/**
+ *  The one-shot @c plan_refine, drained over @p executor.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k @p source views nothing or holds no rows, or @p executor holds no pool or
+ *    workers.
+ *  - @c config_mismatch_k @p save names an alignment below the floor or not a power of two or a
+ *    reserved provenance field, a part of @p source differs in geometry or key width, a part
+ *    rebuilt in RAM disagrees with its rows, a medium the engines cannot read, or a part header
+ *    does not fit before its data.
+ *  - @c invalid_argument_k An empty @p target, or a target part or manifest path that does not
+ *    parse.
+ *  - @c bad_alloc_k @p workspace cannot hold one row of some phase.
+ *  - @c overflow_k A target part of zero rows or past the node ID space, a part rebuilt in RAM
+ *    passing a bound, a staging region's byte count, or a write past a device's end.
+ *  - @c malformed_k A framed target header has no width.
+ *  - @c contended_k Another call holds @p executor, or its pool runs another dispatch.
+ *  - @c unknown_kind_k A part rebuilt in RAM cannot finalize its kernel.
+ */
 template <typename indexes_type_>
 expected<nvme_compact_result_t> refine(indexes_type_ const& source, iota_view<std::size_t> rows,
                                        std::string_view target, typename indexes_type_::executor_t& executor,
@@ -2021,7 +2122,28 @@ expected<nvme_compact_result_t> refine(indexes_type_ const& source, iota_view<st
     return nvme_compact_drain_(plan_refine(source, rows, target, workspace, config, save), executor);
 }
 
-/** The one-shot @ref plan_build, drained over @p executor. */
+/**
+ *  The one-shot @c plan_build, drained over @p executor.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No source, sources holding no rows, or @p executor holds no pool or
+ *    workers.
+ *  - @c bad_alloc_k @p workspace cannot hold one row of some phase.
+ *  - @c invalid_argument_k A source, target part or manifest path that does not parse or names a
+ *    base off its medium's block, or an empty @p target.
+ *  - @c malformed_k A source manifest names no part, a manifest or header does not parse, or a
+ *    part or framed target header has no width or too many rows.
+ *  - @c config_mismatch_k A source part disagrees with the others or with this instantiation,
+ *    @p save names an alignment below the floor or not a power of two or a reserved provenance
+ *    field, a part rebuilt in RAM disagrees with its rows, a medium the engines cannot read, or a
+ *    part header does not fit before its data.
+ *  - @c unsupported_k A transport ID in a build without SPDK.
+ *  - @c unknown_kind_k A kernel the stored scalar's kits cannot finalize, or a part rebuilt in RAM
+ *    cannot finalize its kernel.
+ *  - @c overflow_k A target part of zero rows or past the node ID space, a part rebuilt in RAM
+ *    passing a bound, a staging region's byte count, or a write past a device's end.
+ *  - @c contended_k Another call holds @p executor, or its pool runs another dispatch.
+ */
 template <typename indexes_type_>
 expected<nvme_compact_result_t> build(std::span<std::string_view const> sources, std::string_view target,
                                       typename indexes_type_::executor_t& executor, bytes_span_t workspace,

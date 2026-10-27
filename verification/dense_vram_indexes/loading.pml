@@ -1,4 +1,7 @@
 /**
+ *  @file verification/dense_vram_indexes/loading.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief A load beside one batch and a searcher: the load closes every shard's dispenser first,
  *      checks under the closure that no row is visible, and writes each shard's key before the shard
  *      plan's `finish`.
@@ -9,18 +12,16 @@
  *  refused, so it never claims a row the load lands.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc load_closes=false: the load closes every shard before it appends at the
- *      watermarks; without the closure, the batch claims the row the load lands, and their keys
- *      collide
- *  @verify fail sc load_key_before_finish=false: the load writes each shard's key before its plan
- *      finishes, the order the RAM twin had already corrected; after it, the searcher reads the
- *      loaded shard's row before its key
+ *  @verify fail sc load_closes=false: without the closure, the batch claims the row the load lands,
+ *      and their keys collide
+ *  @verify fail sc load_key_before_finish=false: after it, the searcher reads the loaded shard's row
+ *      before its key
  */
 #define thread_count 3
 #define location_count 7
 #define history_depth 3
 #define mutators 1
-#include "protocol.pml"
+#include <dense_vram_indexes/protocol.pml>
 
 proctype mutator(byte t) { insert_batch(t) }
 

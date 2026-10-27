@@ -73,15 +73,15 @@ function (usearch_cpu_class class_ target_macro_)
     set(flags_ ${usearch_class_${arg_OVER}_flags_})
     set(advances_ FALSE)
     foreach (entry_ IN LISTS arg_UNPARSED_ARGUMENTS)
-        if (nk_target_${entry_}_compiles)
+        if (numkong_target_${entry_}_compiles)
             set(advances_ TRUE)
-            list(APPEND flags_ ${nk_target_${entry_}_flags})
-        elseif (fu_target_${entry_}_compiles OR usearch_target_${entry_}_compiles_)
+            list(APPEND flags_ ${numkong_target_${entry_}_flags})
+        elseif (forkunion_target_${entry_}_compiles OR usearch_target_${entry_}_compiles_)
             set(advances_ TRUE)
         endif ()
         # StringZilla's kernels of the same generation inlined into the class may need more, like Haswell's `lzcnt`.
-        if (sz_target_${entry_}_compiles)
-            list(APPEND flags_ ${sz_target_${entry_}_flags})
+        if (stringzilla_target_${entry_}_compiles)
+            list(APPEND flags_ ${stringzilla_target_${entry_}_flags})
         endif ()
     endforeach ()
     set(usearch_class_${class_}_exists_
@@ -168,8 +168,8 @@ usearch_cpu_class(
     serial
     rvv
     rvvbb
-    risc5_wrs
-    risc5_zacas
+    riscv64_wrs
+    riscv64_zacas
 )
 usearch_cpu_class(wasm32_v128 WASM32_V128 OVER serial v128)
 usearch_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed)
@@ -295,14 +295,14 @@ function (usearch_cuda_names output_)
 endfunction ()
 
 # Sets @p output_ to `capability_macro_=1` where every one of the architectures is one of NumKong's cached
-# `nk_target_<capability>_architectures`, with or without CMake's "-real" or "-virtual", and to `capability_macro_=0`
-# otherwise. NumKong's one-code units need any of them; a unit here compiles every listed code, and a kit compiled into
-# one pass is compiled into all.
+# `numkong_target_<capability>_architectures`, with or without CMake's "-real" or "-virtual", and to
+# `capability_macro_=0` otherwise. NumKong's one-code units need any of them; a unit here compiles every listed code,
+# and a kit compiled into one pass is compiled into all.
 function (usearch_cuda_capability capability_name_ capability_macro_ architectures_ output_)
     set(enabled_ 1)
     foreach (architecture_ IN LISTS architectures_)
         set(supported_ 0)
-        foreach (supported_architecture_ IN LISTS nk_target_${capability_name_}_architectures)
+        foreach (supported_architecture_ IN LISTS numkong_target_${capability_name_}_architectures)
             if (architecture_ MATCHES "^${supported_architecture_}(-real|-virtual)?$")
                 set(supported_ 1)
             endif ()

@@ -314,7 +314,7 @@ Telemetry travels through the reading rather than the return value, so `refine` 
 A reading is a pure output that each call fully overwrites, so one `DenseTraversalStats` handed to several calls holds the last of them, and a deferred call writes it once it settles.
 Use `accumulate` to fold readings together: `expansionFactor` buys recall in distance computations, and only the counters say how many, so a sweep reusing one arena allocates once and reads its cost between the points.
 
-### Filtering & Progress
+### Filtered Search
 
 A search stream pulls the next-nearest matches on the caller's own thread, which is how a JavaScript predicate filters without reserving a run wide enough to survive it:
 
@@ -332,7 +332,7 @@ for (let pulled = stream.next(16, arena); pulled.counts[0] && admitted.length < 
 
 The engine-side predicate and the progress handlers are not exposed, for the reason under [What This Binding Does Not Expose](#what-this-binding-does-not-expose).
 
-### Retrieval: Get, Cursors & Streams
+### Retrieval and Streaming
 
 `get` exports the rows stored under one key into the arena, as `f32` unless `scalar` names another kind:
 

@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date July 19, 2026
  *  @brief The SafeGraphs interchange - the self-describing JSON header in front of every
- *      `.safegraphs` file and the manifest beside it - read & written positionally through a
+ *      <tt>.safegraphs</tt> file and the manifest beside it - read & written positionally through a
  *      mapping, a buffer, or a file slice - all of them bytes - and yyjson.
  *
  *  Every backend serializes its payloads differently - volatile in-RAM snapshots, GPU-resident
@@ -47,7 +47,7 @@ namespace unum::usearch::utilities {
 
 #pragma region Configs
 
-/** One custom `__metadata__` entry: a producer's own key and its string value. */
+/** One custom @c __metadata__ entry: a producer's own key and its string value. */
 struct safegraphs_custom_field_t {
     std::string_view key;
     std::string_view value;
@@ -69,12 +69,18 @@ struct save_config_t {
      *  answer @c contended_k, @c immutable_k copies plain. */
     synchronization_t synchronization = synchronization_t::concurrent_k;
 
-    /** Free-form `__metadata__` strings - @c created_by, @c embedding_model, @c built_at;
+    /** Free-form @c __metadata__ strings - @c created_by, @c embedding_model, @c built_at;
      *  the metric and alignment are the writer's own. */
     std::span<safegraphs_custom_field_t const> provenance = {};
 
-    /** Whether this config can be written: a legal alignment, and no provenance key the
-     *  writer already owns. */
+    /**
+     *  Whether this config can be written: a legal alignment, and no provenance key the
+     *  writer already owns.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The alignment is below the floor or not a power of two.
+     *  - @c config_mismatch_k A provenance field names @c metric or @c alignment.
+     */
     constexpr status_t validate() const noexcept {
         if (alignment < safegraphs_alignment_floor_k || !std::has_single_bit(alignment))
             return status_t::config_mismatch_k;
@@ -398,10 +404,16 @@ inline expected<safegraphs_column_t> safegraphs_parse_column_(yyjson_val* object
  *      touching no payload.
  *  @param[in] monolith The checkpoint's bytes, from its magic onward.
  *  @param[in] allocator Backs the JSON text and the yyjson document.
- *  @param[in] per_custom_field Fires once per string-valued `__metadata__` entry; its views
+ *  @param[in] per_custom_field Fires once per string-valued @c __metadata__ entry; its views
  *      die with this call.
  *  @param[out] extra_columns Takes the producer columns, appended, which the header's
  *      @c extra_columns then views until the buffer grows; without it the header lists none.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The bytes are shorter than the prefix, carry another magic, or declare a
+ *    header past their end.
+ *  - @c malformed_k The JSON is not an object, declares an alignment that is not a power of two,
+ *    or holds a column that does not parse.
  */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_header_t> safegraphs_read_header(
@@ -470,7 +482,13 @@ expected<safegraphs_header_t> safegraphs_read_header(
     return {header, status_t::success_k};
 }
 
-/** Maps @p path read-only and parses its header. */
+/**
+ *  Maps @p path read-only and parses its header.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k The path does not parse.
+ *  - @c malformed_k The file is empty, or its header does not parse.
+ */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_header_t> safegraphs_read_header(
     std::string_view path, allocator_type_ allocator = {}, callback_type_&& per_custom_field = {},
@@ -547,8 +565,13 @@ status_t safegraphs_print_(yyjson_mut_doc* document, yyjson_alc const& allocator
     return consumed;
 }
 
-/** Where a header lands its data segment: the prefix and JSON rounded up to the declared
- *  alignment. */
+/**
+ *  Where a header lands its data segment: the prefix and JSON rounded up to the declared
+ *  alignment.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k The header's alignment is not a power of two.
+ */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<std::size_t> safegraphs_data_offset(safegraphs_header_t const& header,
                                              std::span<safegraphs_custom_field_t const> custom_fields = {},
@@ -565,9 +588,16 @@ expected<std::size_t> safegraphs_data_offset(safegraphs_header_t const& header,
             status_t::success_k};
 }
 
-/** Writes the prefix, the JSON, and space padding up to @c header.data_offset over the
- *  front of @p monolith - exactly the bytes @ref safegraphs_read_header consumes. Written
- *  last, it is what turns a run of bytes into a checkpoint. */
+/** Writes the prefix, the JSON, and space padding up to @c header.data_offset over the front of
+ *  @p monolith - exactly the bytes @ref unum::usearch::utilities::safegraphs_read_header consumes.
+ *  Written last, it is what turns a run of bytes into a checkpoint.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k @c header.data_offset falls inside the prefix.
+ *  - @c overflow_k @p monolith is shorter than @c header.data_offset.
+ *  - @c config_mismatch_k The JSON does not fit before @c header.data_offset.
+ *  - @c uninitialized_k A file-backed @p monolith names no file.
+ */
 template <typename bytes_type_, typename allocator_type_ = std::allocator<byte_t>>
 status_t safegraphs_write_header(bytes_type_ monolith, safegraphs_header_t const& header,
                                  std::span<safegraphs_custom_field_t const> custom_fields = {},
@@ -713,7 +743,7 @@ inline bool safegraphs_is_monolith(bytes_view_t bytes) noexcept {
            std::memcmp(bytes.data(), safegraphs_prefix_t::magic_k.data(), safegraphs_prefix_t::magic_k.size()) == 0;
 }
 
-/** Formats @c <stem>-00001-of-00002.safegraphs into @p buffer, measured first; parts
+/** Formats the stem and @c -00001-of-00002.safegraphs into @p buffer, measured first; parts
  *  count from one, as the interchange illustrates. */
 template <typename allocator_type_>
 expected<std::string_view> safegraphs_part_path(growing_buffer<char, allocator_type_>& buffer, std::string_view stem,
@@ -809,7 +839,14 @@ inline safegraphs_metadata_t safegraphs_metadata_of_(safegraphs_header_t const& 
 
 /** Reads a manifest: @p per_part fires once per entry in file order with a path that dies
  *  with this call, and the metadata comes from the first part's header, the one place a
- *  schema is written. Node counts sum over the entries that declare one. */
+ *  schema is written. Node counts sum over the entries that declare one.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k The manifest or first part path does not parse.
+ *  - @c malformed_k The manifest is empty or not a JSON object, an entry's counts are unreadable,
+ *    or no entry names a path.
+ *  - @c malformed_k The first part is empty, or its header does not parse.
+ */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, allocator_type_ allocator = {},
                                                          callback_type_&& per_part = {}) noexcept {
@@ -859,8 +896,14 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
     return {metadata, status_t::success_k};
 }
 
-/** Writes a manifest over @p parts entries drawn from @p part_at in order - the commit
- *  record a distributed save writes last. */
+/**
+ *  Writes a manifest over @p parts entries drawn from @p part_at in order - the commit
+ *  record a distributed save writes last.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k The path does not parse.
+ *  - @c overflow_k A device ends before its base plus the manifest.
+ */
 template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
 status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, callback_type_&& part_at,
                                    std::span<safegraphs_custom_field_t const> custom_fields = {},
@@ -881,7 +924,12 @@ status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, cal
 /** Lays @p parts monoliths, @p part_at answering each one's bytes and nodes, behind the manifest
  *  that leads one buffer: fills each part's offset into @p offsets, every one on an @p alignment
  *  boundary past the manifest and the zero byte that ends it, and answers the buffer's whole
- *  size. */
+ *  size.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k @p parts is zero, @p offsets holds fewer slots, or @p alignment is not
+ *    a power of two.
+ */
 template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
 expected<std::size_t> safegraphs_buffer_layout(std::size_t parts, callback_type_&& part_at, std::size_t alignment,
                                                std::span<std::size_t> offsets,
@@ -910,7 +958,13 @@ expected<std::size_t> safegraphs_buffer_layout(std::size_t parts, callback_type_
 
 /** Writes the manifest leading @p buffer over @p parts entries drawn from @p part_at, each naming
  *  its offset, and zeroes the bytes up to the first part, where a reader finds the manifest's end;
- *  @c overflow_k when it does not fit before that part. */
+ *  @c overflow_k when it does not fit before that part.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k @p parts is zero.
+ *  - @c overflow_k The first part starts past @p buffer.
+ *  - @c overflow_k The manifest and its zero byte do not fit before the first part.
+ */
 template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
 status_t safegraphs_write_manifest(bytes_span_t buffer, std::size_t parts, callback_type_&& part_at,
                                    allocator_type_ allocator = {}) noexcept {
@@ -930,7 +984,14 @@ status_t safegraphs_write_manifest(bytes_span_t buffer, std::size_t parts, callb
 
 /** Reads the manifest leading @p buffer, which ends at its first zero byte: @p per_part fires once
  *  per entry in file order with its offset, every part inside the buffer, and the metadata comes
- *  from the first part's header. */
+ *  from the first part's header.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k No zero byte ends the manifest.
+ *  - @c malformed_k The manifest is not a JSON object, an entry's offset or counts are unreadable
+ *    or fall outside @p buffer, or the first part is empty.
+ *  - @c malformed_k The first part's header does not parse.
+ */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_metadata_t> safegraphs_read_manifest(bytes_view_t buffer, allocator_type_ allocator = {},
                                                          callback_type_&& per_part = {}) noexcept {
@@ -977,8 +1038,13 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(bytes_view_t buffer, al
     return {metadata, status_t::success_k};
 }
 
-/** The metadata of the checkpoint held in @p monolith: a lone monolith, or the manifest leading a
- *  buffer of parts. */
+/**
+ *  The metadata of the checkpoint held in @p monolith: a lone monolith, or the manifest leading a
+ *  buffer of parts.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The manifest or the header does not parse.
+ */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
                                                          allocator_type_ allocator = {}) noexcept {
@@ -992,8 +1058,14 @@ expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
     return {safegraphs_metadata_of_(header, metric), status_t::success_k};
 }
 
-/** The metadata of a manifest or of a lone monolith at @p path - told apart by content,
- *  the monolith's magic, never by the extension. */
+/**
+ *  The metadata of a manifest or of a lone monolith at @p path - told apart by content,
+ *  the monolith's magic, never by the extension.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k A path does not parse.
+ *  - @c malformed_k The file is empty, or its manifest or header does not parse.
+ */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_metadata_t> safegraphs_read_metadata(std::string_view path,
                                                          allocator_type_ allocator = {}) noexcept {
@@ -1033,8 +1105,14 @@ status_t safegraphs_keep_path(growing_buffer<char, allocator_type_>& buffer, std
     return status_t::success_k;
 }
 
-/** Reads @p part 's header and metric token out of the bytes it carries, parsing on
- *  @p allocator, its producer columns appended to @p extra_columns. */
+/**
+ *  Reads @p part 's header and metric token out of the bytes it carries, parsing on
+ *  @p allocator, its producer columns appended to @p extra_columns.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The header does not parse.
+ *  - @c malformed_k The header spans more bytes than the part carries.
+ */
 template <typename allocator_type_>
 status_t safegraphs_describe_part(safegraphs_catalog_part_t& part,
                                   growing_buffer<safegraphs_named_column_t, allocator_type_>& extra_columns,
@@ -1050,7 +1128,13 @@ status_t safegraphs_describe_part(safegraphs_catalog_part_t& part,
     return status_t::success_k;
 }
 
-/** Lists @p monolith as a checkpoint's only part. */
+/**
+ *  Lists @p monolith as a checkpoint's only part.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The header does not parse, or spans more bytes than @p monolith.
+ *  - @c overflow_k The grown capacity of @p parts wraps.
+ */
 template <typename allocator_type_>
 status_t safegraphs_catalog_monolith(bytes_view_t monolith,
                                      growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
@@ -1084,6 +1168,12 @@ void safegraphs_bind_extra_columns(
  *
  *  The mappings land in @p mappings, which must outlive every read of the parts, and the producer
  *  columns in @p extra_columns, which every part's header views.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k The checkpoint or a part path does not parse.
+ *  - @c malformed_k The checkpoint or a part is empty, its manifest lists no part, or a header
+ *    does not parse or spans more bytes than its part.
+ *  - @c overflow_k The grown capacity of an output buffer wraps.
  */
 template <typename allocator_type_>
 status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t, allocator_type_>& mappings,
@@ -1131,9 +1221,16 @@ status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t,
     return status_t::success_k;
 }
 
-/** Lists the parts of the checkpoint held in @p buffer: the magic makes a lone monolith, anything
+/**
+ *  Lists the parts of the checkpoint held in @p buffer: the magic makes a lone monolith, anything
  *  else the manifest leading the buffer, whose every part's header is read now, its producer
- *  columns into @p extra_columns. */
+ *  columns into @p extra_columns.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The manifest does not parse or lists no part, or a header does not parse or
+ *    spans more bytes than its part.
+ *  - @c overflow_k The grown capacity of @p parts wraps.
+ */
 template <typename allocator_type_>
 status_t safegraphs_catalog(bytes_view_t buffer, growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
                             growing_buffer<safegraphs_named_column_t, allocator_type_>& extra_columns,
@@ -1196,10 +1293,17 @@ struct safegraphs_index_layout_t {
     std::size_t monolith_bytes = 0;
 };
 
-/** Lays out a columned index's monolith: keys regular; values regular when the codec's
+/**
+ *  Lays out a columned index's monolith: keys regular; values regular when the codec's
  *  shape is fixed and ragged with element prefix sums otherwise; neighbors ragged with
  *  prefix sums; each buffer on an @c alignment boundary. A fixed shape is held to the
- *  index's byte count, so a codec cannot claim a width its values do not have. */
+ *  index's byte count, so a codec cannot claim a width its values do not have.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k @p config does not validate.
+ *  - @c config_mismatch_k The key, node ID or value element has no interchange dtype.
+ *  - @c config_mismatch_k A fixed shape disagrees with @p value_bytes.
+ */
 template <typename key_type_, typename node_id_type_, typename codec_type_,
           typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
@@ -1276,7 +1380,15 @@ std::span<element_type_> safegraphs_typed_span_(std::span<byte_type_> segment, s
     return {reinterpret_cast<element_type_*>(segment.data() + start), count};
 }
 
-/** Bytes a save of @p index under @p config writes; @c contended_k while a plan is open. */
+/**
+ *  Bytes a save of @p index under @p config writes; @c contended_k while a plan is open.
+ *
+ *  @par Statuses:
+ *  - @c contended_k A mutator, a batch or an open plan holds @p index.
+ *  - @c config_mismatch_k On NVIDIA, the shard has no stream.
+ *  - @c config_mismatch_k @p config does not validate, the key, node ID or value element has no
+ *    interchange dtype, or a fixed shape disagrees with the value bytes.
+ */
 template <typename index_type_, typename codec_type_, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
 expected<std::size_t> safegraphs_storage_requirements(index_type_& index, codec_type_ const& codec,
@@ -1302,13 +1414,25 @@ expected<std::size_t> safegraphs_storage_requirements(index_type_& index, codec_
  *  segment and land re-expressed once every region finished. The header lands last, so a
  *  failed or cancelled save leaves no magic behind.
  *
- *  @param[inout] monolith The bytes the checkpoint lands in - a buffer, or a file's mapping.
+ *  @param[in,out] monolith The bytes the checkpoint lands in - a buffer, or a file's mapping.
  *  @param[in] index Anything with @c columns_extents, @c plan_save and their column types.
  *  @param[in] codec Encodes each stored value into its slice and names the column's dtype and shape.
- *  @param[inout] executor Runs one region per thread through @c for_tasks.
+ *  @param[in,out] executor Runs one region per thread through @c for_tasks.
  *  @param[in] config The alignment and provenance; the layout field is ignored, this is a monolith.
  *  @param[in] metric The token the graph was built for, recorded verbatim.
  *  @param[in] progress Fires per finished region; answering @c cancel_k stops the rest.
+ *  @param[in] allocator The allocator for the call's temporary storage.
+ *
+ *  A refusal of @p codec passes through.
+ *
+ *  @par Statuses:
+ *  - @c contended_k A mutator, a batch or an open plan holds @p index, or the pool of
+ *    @p executor runs another dispatch.
+ *  - @c config_mismatch_k On NVIDIA, the shard has no stream.
+ *  - @c config_mismatch_k @p config does not validate, an element has no interchange dtype, a
+ *    fixed shape or ragged sum disagrees with the value bytes, or the segment is misaligned.
+ *  - @c overflow_k @p monolith or a column is shorter than the layout needs.
+ *  - @c uninitialized_k The index's plan is spent, or the pool of @p executor has no workers.
  */
 template <typename index_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
@@ -1399,8 +1523,21 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec
     return safegraphs_write_header(monolith, header, to_span(fields), allocator);
 }
 
-/** Writes the monolith at @p path: sized from the index, created fresh, mapped, and flushed once
- *  every region landed. */
+/**
+ *  Writes the monolith at @p path: sized from the index, created fresh, mapped, and flushed once
+ *  every region landed. A refusal of @p codec passes through.
+ *
+ *  @par Statuses:
+ *  - @c contended_k A mutator, a batch or an open plan holds @p index, or the pool of
+ *    @p executor runs another dispatch.
+ *  - @c config_mismatch_k On NVIDIA, the shard has no stream.
+ *  - @c config_mismatch_k @p config does not validate, an element has no interchange dtype, a
+ *    fixed shape or ragged sum disagrees with the value bytes, or the segment is misaligned.
+ *  - @c invalid_argument_k The path does not parse.
+ *  - @c overflow_k A device ends before the monolith does, or a column is shorter than the
+ *    layout needs.
+ *  - @c uninitialized_k The index's plan is spent, or the pool of @p executor has no workers.
+ */
 template <typename index_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
@@ -1451,8 +1588,13 @@ struct safegraphs_index_metadata_t {
 
 /**
  *  @brief Reads a columned index's header from @p monolith into its metadata.
- *  @param[in] per_custom_field Fires once per string-valued `__metadata__` entry, the metric
+ *  @param[in] monolith The checkpoint's bytes - a buffer, or a file's mapping.
+ *  @param[in] allocator The allocator for the metadata's own storage.
+ *  @param[in] per_custom_field Fires once per string-valued @c __metadata__ entry, the metric
  *      included, for the parameters a modality records beside it; its views die with this call.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The header does not parse.
  */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_t monolith,
@@ -1478,9 +1620,17 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_
     return {metadata, status_t::success_k};
 }
 
-/** The metadata of the checkpoint at @p path, mapped read-only: a lone monolith's, or a manifest's
+/**
+ *  The metadata of the checkpoint at @p path, mapped read-only: a lone monolith's, or a manifest's
  *  with the counts summed over its parts and the custom fields read off the first one, which every
- *  part repeats. */
+ *  part repeats.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k The checkpoint or a part path does not parse.
+ *  - @c malformed_k The checkpoint or a part is empty, its manifest lists no part, or a header
+ *    does not parse or spans more bytes than its part.
+ *  - @c overflow_k The grown capacity of a catalog buffer wraps.
+ */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(std::string_view path,
                                                                      allocator_type_ allocator = {},
@@ -1512,11 +1662,27 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(std::string
  *  ones, whose sentinels, any ID at or past the node count, are skipped.
  *
  *  @param[in] monolith The checkpoint's bytes - a buffer, or a file's mapping.
- *  @param[inout] index Anything with @c capacity, @c reserve, @c plan_load and their column types.
+ *  @param[in,out] index Anything with @c capacity, @c reserve, @c plan_load and their column types.
  *  @param[in] codec Decodes each value slice into its record and names the expected dtype and shape.
- *  @param[inout] executor Runs one region per thread through @c for_tasks.
+ *  @param[in,out] executor Runs one region per thread through @c for_tasks.
  *  @param[in] config The reservation to take when the index has none; zero fits the monolith.
  *  @param[in] progress Fires per finished region; answering @c cancel_k stops the rest.
+ *  @param[in] allocator The allocator for the call's temporary storage.
+ *
+ *  A refusal of @p codec passes through.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The header does not parse, or a column's bytes, sums or extents disagree
+ *    with its rows or the monolith.
+ *  - @c config_mismatch_k A column's dtype, shape or key width differs from what @p index and
+ *    @p codec take, the segment is misaligned, @p index already holds rows, or a step's rows
+ *    fall outside the plan.
+ *  - @c overflow_k The rows pass the node IDs, the key multimap or the locator map of @p index.
+ *  - @c uninitialized_k On NVIDIA, no reserve froze the connectivity, or the pool of
+ *    @p executor has no workers.
+ *  - @c unsupported_k On NVIDIA, a row past every rung of the face's kits.
+ *  - @c contended_k A mutator, a batch, a load or a plan holds @p index, or the pool of
+ *    @p executor runs another dispatch.
  */
 template <typename index_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
@@ -1680,8 +1846,25 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     return planned.value.finish();
 }
 
-/** Restores a columned index from the monolith at @p path, mapped read-only; every value is
- *  decoded into its record, so nothing borrows the mapping once this returns. */
+/**
+ *  Restores a columned index from the monolith at @p path, mapped read-only; every value is
+ *  decoded into its record, so nothing borrows the mapping once this returns. A refusal of
+ *  @p codec passes through.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k The path does not parse.
+ *  - @c malformed_k The file is empty, the header does not parse, or a column's bytes, sums or
+ *    extents disagree with its rows or the monolith.
+ *  - @c config_mismatch_k A column's dtype, shape or key width differs from what @p index and
+ *    @p codec take, the segment is misaligned, @p index already holds rows, or a step's rows
+ *    fall outside the plan.
+ *  - @c overflow_k The rows pass the node IDs, the key multimap or the locator map of @p index.
+ *  - @c uninitialized_k On NVIDIA, no reserve froze the connectivity, or the pool of
+ *    @p executor has no workers.
+ *  - @c unsupported_k On NVIDIA, a row past every rung of the face's kits.
+ *  - @c contended_k A mutator, a batch, a load or a plan holds @p index, or the pool of
+ *    @p executor runs another dispatch.
+ */
 template <typename index_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
@@ -1735,13 +1918,21 @@ inline persisted_columns_t safegraphs_header_columns(safegraphs_header_t const& 
 }
 
 /**
- *  @brief The part whose monolith header @p header_bytes holds, as @ref safegraphs_header_columns
- *      lays it out, with its metric token and value shape.
+ *  @brief The part whose monolith header @p header_bytes holds, as
+ *      @ref unum::usearch::utilities::safegraphs_header_columns lays it out, with its metric token
+ *      and value shape.
  *
  *  Refuses with @c config_mismatch_k a graph no reader walks: keys other than one fixed element
  *  per row, and neighbors other than ragged single IDs or a fixed degree. A header whose columns
  *  disagree on their rows, or whose prefix sums cover other than them, answers @c malformed_k. The
  *  value dtype and shape, the key and node-ID widths, and the metric are the caller's to check.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The header does not parse.
+ *  - @c config_mismatch_k The keys are not one fixed element per row, or the neighbors are
+ *    neither ragged single IDs nor a fixed degree.
+ *  - @c malformed_k The columns disagree on their rows, the keys have no width, or a prefix sum
+ *    buffer covers other than the rows.
  */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_persisted_part_t> safegraphs_persisted_part(bytes_view_t header_bytes,

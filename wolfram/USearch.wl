@@ -1,9 +1,10 @@
 (* ::Package:: *)
 
 (* :Title: USearch *)
+(* :File: wolfram/USearch.wl *)
 (* :Context: USearch` *)
 (* :Author: Ash Vardanian *)
-(* :Date: 2023-05-04 *)
+(* :Date: May 4, 2023 *)
 (* :Summary: USearch for the Wolfram Language: managed handles and receivers over the LibraryLink
     verbs of `lib.c`. *)
 

@@ -9,18 +9,13 @@
  *  counter only, and a claim that fits, spelled line for line over the ForkUnion reference the
  *  index binds. The header itself runs under GenMC, but its first chunk is a thousand rows of
  *  sentinel stores, more events than the execution graph can hold, so the counters stand alone
- *  here.
+ *  here. The same scenario is @c growth.pml, which also runs it under far memory.
  *
- *  Thread 0 claims two rows, which grows the only chunk, and releases them; thread 1 claims one.
- *  Every claim's rows lie inside the chunks the claimer sees. The chunk directory is plain memory
- *  ordered only by the acquire on the subtract and the released store that returns the rows, and
- *  GenMC's race detector checks that chain. The same scenario is `growth.pml`, which also runs it
- *  under far memory.
+ *  - Every claim's rows lie inside the chunks the claimer sees.
  *
  *  @verify pass sc,rc11,imm growth
- *  @verify fail rc11,imm growth_return_order_relaxed: the stores that return rows to
- *      `remaining_capacity_` release the grower's plain directory write; relaxed, the directory
- *      read in the fitting claim races it
+ *  @verify fail rc11,imm growth_return_order_relaxed: relaxed, the directory read in the fitting
+ *      claim races it
  *  @verify pass sc growth_return_order_relaxed
  */
 #include <cstddef> // `std::size_t`, `std::ptrdiff_t` - the signed capacity word

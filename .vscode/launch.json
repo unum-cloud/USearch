@@ -5,7 +5,7 @@
       "name": "Unit Test C++",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build_host_debug/usearch_test",
+      "program": "${workspaceFolder}/build_debug/usearch_test",
       "cwd": "${workspaceFolder}",
       "environment": [
         {
@@ -25,14 +25,14 @@
       },
       "windows": {
         "type": "cppvsdbg",
-        "program": "${workspaceFolder}/build_host_debug/usearch_test.exe"
+        "program": "${workspaceFolder}/build_debug/usearch_test.exe"
       }
     },
     {
       "name": "Unit Test C++ Core",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build_host_debug/test/usearch_test_header_only",
+      "program": "${workspaceFolder}/build_debug/test/usearch_test_header_only",
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
       "preLaunchTask": "Build Host Debug",
@@ -45,7 +45,7 @@
       "name": "Unit Test C",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build_host_debug/test_c",
+      "program": "${workspaceFolder}/build_debug/test_c",
       "cwd": "${workspaceFolder}",
       "environment": [
         {
@@ -65,7 +65,7 @@
       },
       "windows": {
         "type": "cppvsdbg",
-        "program": "${workspaceFolder}/build_host_debug/test_c.exe"
+        "program": "${workspaceFolder}/build_debug/test_c.exe"
       }
     },
     {
@@ -82,7 +82,7 @@
       "name": "Benchmark C++ on Wiki 1M",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build_host_profile/usearch_bench",
+      "program": "${workspaceFolder}/build_profile/usearch_bench",
       "cwd": "${workspaceFolder}",
       "args": [
         "--base-vectors",
@@ -103,7 +103,7 @@
       "name": "Benchmark C++ on Deep 10M",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build_host_profile/usearch_bench",
+      "program": "${workspaceFolder}/build_profile/usearch_bench",
       "cwd": "${workspaceFolder}",
       "args": [
         "--base-vectors",

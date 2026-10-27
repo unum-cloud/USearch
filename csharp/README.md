@@ -14,10 +14,10 @@ The package targets `net10.0`, the long-term-support release supported through N
 Building from source compiles the C library first, then places it where the package looks for its native assets:
 
 ```sh
-cmake --preset host_relwithdebinfo -D USEARCH_BUILD_LIB_C=1
-cmake --build --preset host_relwithdebinfo
+cmake --preset relwithdebinfo -D USEARCH_BUILD_SHARED=1
+cmake --build --preset relwithdebinfo
 mkdir -p csharp/lib/runtimes/osx-arm64/native                   # Or linux-x64 with the .so
-cp build_host_relwithdebinfo/libusearch_shared.dylib csharp/lib/runtimes/osx-arm64/native
+cp build_relwithdebinfo/libusearch_shared.dylib csharp/lib/runtimes/osx-arm64/native
 cd csharp && dotnet test
 ```
 
@@ -248,7 +248,7 @@ foreach (int breadth in new[] { 16, 32, 64, 128 })
 }
 ```
 
-### Filtering
+### Filtered Search
 
 ```csharp
 Matches admitted = index.On(pool).Search(
@@ -261,7 +261,7 @@ The predicate runs on the executor's worker threads, so it must be safe for conc
 An exception it throws is captured, every later candidate is rejected, and the exception is rethrown with its own type once the call is final, never unwound through the native frames.
 A host predicate cannot narrow a device walk, so a VRAM handle refuses one with `Status.Device`.
 
-### Retrieval: Get, Cursors & Streams
+### Retrieval and Streaming
 
 ```csharp
 DenseVectors rows = index.On(pool).Get(key, arena, Scalar.F32);  // Every entry under the key, zero-copy

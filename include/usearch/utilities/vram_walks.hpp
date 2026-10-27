@@ -51,7 +51,8 @@ constexpr u32_t gpu_walk_breadth(u32_t expansion, u32_t count) noexcept { return
 
 /** IDs a converged walk keeping @p candidate_rows candidates claims: a row of @p connectivity
  *  neighbors or a draw of @p lanes landmarks per expansion, one expansion per rank, then a
- *  re-selecting walk's own node and row. A walk past it re-scores, see @ref vram_visited_set. */
+ *  re-selecting walk's own node and row. A walk past it re-scores, see
+ *  @ref unum::usearch::utilities::vram_visited_set. */
 constexpr u32_t gpu_walk_visits(u32_t candidate_rows, u32_t connectivity, u32_t lanes) noexcept {
     return (candidate_rows + 1) * max_of(connectivity, lanes) + connectivity + 1;
 }

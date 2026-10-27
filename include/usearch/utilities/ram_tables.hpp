@@ -30,10 +30,11 @@
 namespace unum::usearch::utilities {
 
 /**
- *  @brief Returns the sentinel that marks an unused slot in @ref growing_hash_set.
+ *  @brief Returns the sentinel that marks an unused slot in
+ *      @ref unum::usearch::utilities::growing_hash_set.
  *
  *  For integral types this is the all-ones bit pattern, which matches the
- *  @c 0xFF byte-fill emitted by @ref growing_hash_set::clear.
+ *  @c 0xFF byte-fill emitted by @c growing_hash_set::clear.
  */
 template <typename element_type_>
 inline element_type_ unused_hash_slot_value() noexcept {
@@ -204,7 +205,6 @@ class growing_hash_set {
 
     /**
      *  @brief Extends the capacity of the hash-set, rehashing every present element.
-     *  @return @c success_k when the capacity is available, @c bad_alloc_k otherwise.
      */
     status_t reserve(std::size_t new_capacity) noexcept {
         new_capacity = (new_capacity * 5u) / 3u;
@@ -273,7 +273,7 @@ class chunked_multimap {
     using slots_schedule_t = chunk_schedule<11, 41>;
 
     /** Lifecycle of one slot, advanced monotonically by its one claiming inserter; a published
-     *  slot holds its key's @ref probe_tag_of instead, and its key & value are immutable from then
+     *  slot holds its key's @c probe_tag_of instead, and its key & value are immutable from then
      *  on. */
     enum class slot_state_t : u8_t {
 
@@ -336,11 +336,22 @@ class chunked_multimap {
     /** Bytes the published chunks span. */
     std::size_t memory_usage() const noexcept { return states_.memory_usage() + slots_.memory_usage(); }
 
-    /** Publishes chunks for @p capacity seats - a hint, callable any time, alongside inserts. */
+    /**
+     *  Publishes chunks for @p capacity seats - a hint, callable any time, alongside inserts.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k @p capacity passes the seats the chunks can ever hold.
+     */
     status_t reserve(std::size_t capacity) noexcept { return cover_(capacity); }
 
-    /** Seats for @p count later inserts, covering their chunks - the only fallible step, so the inserts that consume
-     *  the seats never fail. A refused cover strands its seats, which only leaves their chunks emptier. */
+    /**
+     *  Seats for @p count later inserts, covering their chunks - the only fallible step, so the
+     *  inserts that consume the seats never fail. A refused cover strands its seats, which only
+     *  leaves their chunks emptier.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The claimed seats pass the seats the chunks can ever hold.
+     */
     expected<seats_t> claim(std::size_t count) noexcept {
         std::size_t const first = atomic_ref<std::size_t>(claimed_seats_).fetch_add(count, std::memory_order_relaxed);
         if (status_t const covered = cover_(first + count); failed(covered)) return {seats_t {}, covered};
@@ -370,16 +381,26 @@ class chunked_multimap {
         }
     }
 
-    /** One value stored under @p key, or @c malformed_k when absent. Duplicates surface in an unspecified order -
-     *  use @c find_each to see them all. */
+    /**
+     *  One value stored under @p key, or @c malformed_k when absent. Duplicates surface in an
+     *  unspecified order - use @c find_each to see them all.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k No value is stored under @p key.
+     */
     expected<value_t> find(key_t const& key) const noexcept {
         expected<value_t> result {value_t {}, status_t::malformed_k};
         find_each(key, [&](value_t value) noexcept { result = {value, status_t::success_k}; });
         return result;
     }
 
-    /** The first value stored under @p key in chunk and probe order, stopping there, or
-     *  @c malformed_k when absent; the same value every call once the key's inserts published. */
+    /**
+     *  The first value stored under @p key in chunk and probe order, stopping there, or
+     *  @c malformed_k when absent; the same value every call once the key's inserts published.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k No value is stored under @p key.
+     */
     expected<value_t> find_first(key_t const& key) const noexcept {
         u64_t const hash = mixed_hash_of(key);
         slot_state_t const tag = probe_tag_of(hash);

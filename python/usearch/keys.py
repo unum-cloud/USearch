@@ -3,6 +3,10 @@
 No NumPy dtype expresses a 128-bit integer, so batch identities travel as big-endian sixteen-byte
 rows in both directions. These two functions are the whole bridge; a scalar key needs neither,
 since `usearch.Key` reads an `int`, a `str`, a `uuid.UUID`, or sixteen raw bytes directly.
+
+File: python/usearch/keys.py
+Author: Ash Vardanian
+Date: August 16, 2026
 """
 
 from __future__ import annotations

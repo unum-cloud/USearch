@@ -1,5 +1,8 @@
 /**
- * The Java SDK: the dense modality over the C interface, reached through the FFM API.
+ *  @file java/cloud/unum/usearch/package-info.java
+ *  @author Ash Vardanian
+ *  @date September 10, 2026
+ *  @brief The Java SDK: the dense modality over the C interface, reached through the FFM API.
  *
  * <p>
  * Every type and member here is non-null unless a {@code @Nullable} says otherwise, which is what

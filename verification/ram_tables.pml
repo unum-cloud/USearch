@@ -1,40 +1,31 @@
 /**
+ *  @file verification/ram_tables.pml
+ *  @author Ash Vardanian
+ *  @date September 11, 2026
  *  @brief `chunked_multimap`'s probes: three inserters and a prober over one published chunk.
  *
  *  The insert-only linear-probe multimap from `include/usearch/utilities/ram_tables.hpp`, whose
  *  slot states advance `empty` → `building` → the key's probe tag once, whose entries each take a
  *  seat and cover its chunk before any slot is touched, and whose readers walk the control bytes
- *  with acquire loads, wait-free. `ram_tables_growth.pml` covers the chunks a claim publishes.
+ *  with acquire loads, wait-free. `ram_tables_growth.pml` covers the chunks a claim publishes. One
+ *  published chunk of two seats, two slots and the constant terminator at position 2.
  *
- *  One published chunk of two seats, two slots and the constant terminator at position 2. Every
- *  inserter hashes to chain 0; inserters 0 and 1 carry key A and inserter 2 key B, so the cover
- *  refuses one of them and the other two contend for the two slots. An inserter takes a seat with
- *  a relaxed add, and probes: a relaxed load of the state, an acquire compare-exchange from `empty`
- *  to `building`, the key and the value stored relaxed, and the state stored as the tag with a
- *  release. Both keys share one tag, the colliding case. The prober walks the chain with acquire
- *  loads until the terminator, and on a slot holding the tag and carrying key A reads the value.
- *
- *  Invariants:
- *  - bound: no inserter probes past the terminator, and no insert lands past the published seats;
- *  - visibility: the value a prober reads beside a matching key on a tagged slot is that key's
- *    value, never the slot half-written;
- *  - completeness, under `sc`: a key published before the prober started is found, since a
- *    `building` slot is occupied and never the end of a chain.
+ *  - Bound: no inserter probes past the terminator, and no insert lands past the published seats.
+ *  - Visibility: the value a prober reads beside a matching key is that key's value.
+ *  - Completeness, under `sc`: a key published before the prober started is found.
  *
  *  @verify pass sc,rc11,far
- *  @verify fail rc11 publish_order=order_relaxed: the release on the tag store carries
- *      the key and the value, plain stores the state alone publishes; without it, the prober reads
- *      the new key beside the slot's initial value
- *  @verify fail rc11 probe_order=order_relaxed: the acquire on each probe of a control byte pairs
- *      with that release; without it, the prober reads the new key beside the slot's initial value
- *  @verify fail sc cover_refusal=false: `claim` covers the seat's chunk before any slot is touched
- *      and refuses a seat past the directory's last chunk, so `insert` never fails; without the
- *      refusal, the seat lands in a chunk never published
+ *  @verify fail rc11 publish_order=order_relaxed: without it, the prober reads the new key beside the
+ *      slot's initial value
+ *  @verify fail rc11 probe_order=order_relaxed: without it, the prober reads the new key beside the
+ *      slot's initial value
+ *  @verify fail sc cover_refusal=false: without the refusal, the seat lands in a chunk never
+ *      published
  */
 #define thread_count 4
 #define location_count 7
 #define history_depth 4
-#include "weak_memory.pml"
+#include <weak_memory.pml>
 
 // The words: each slot's control byte, key and value, and the claimed seats; position 2 is the
 // constant terminator, never claimed and never a word.

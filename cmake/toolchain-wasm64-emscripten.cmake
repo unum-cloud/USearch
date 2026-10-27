@@ -2,8 +2,8 @@
 #
 # ~~~
 #   source /path/to/emsdk/emsdk_env.sh
-#   emcmake cmake -B build_wasm64_emscripten_release -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm64-emscripten.cmake -DUSEARCH_BUILD_LIB_C=1
-#   cmake --build build_wasm64_emscripten_release --target usearch_static
+#   emcmake cmake -B build_wasm64_emscripten -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm64-emscripten.cmake
+#   cmake --build build_wasm64_emscripten --target usearch_static
 # ~~~
 #
 # Relaxed SIMD, shared memory and 64-bit addressing are whole-module choices, so one file fixes all three: the pools

@@ -1,27 +1,26 @@
 /**
+ *  @file verification/dense_ram_indexes_generations/spanning.pml
+ *  @author Ash Vardanian
+ *  @date October 22, 2026
  *  @brief A planned batch spanning the open generation's last room and a fresh generation, beside a
  *      single-row insert and a snapshot.
  *
  *  The first generation's shard has one row of room. The planner reads `room()`, opens the next
  *  generation for the row that does not fit, claims a row on each shard, dispenses both ranges in
  *  one step, and commits them inside the bracket of the commit sequence word. The single-row insert
- *  probes the first shard and, finding it full, opens the next generation and claims there. When
- *  the insert takes the last row first, the planner's claim on the first shard is refused, or its
- *  whole batch goes to the fresh one. A snapshot acquires the word, reads `size()` past it, touches
- *  and acquires every shard's watermark it counts, and retries when the word moved; it holds the
- *  batch on every shard it landed in or on none.
+ *  probes the first shard and, finding it full, opens the next generation and claims there.
+ *
+ *  - A snapshot holds the batch on every shard it landed in or on none.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc,rc11 count_inside_sequence=false: `snapshot` reads `size()` past the sequence
- *      word, so a commit the word shows landed counts every generation it landed in; reading the
- *      count first, the snapshot counts the first shard alone, then accepts a word the batch's
- *      commit already closed, and holds the batch's row on the old shard without the one on the
- *      fresh shard it never counted
+ *  @verify fail sc,rc11 count_inside_sequence=false: reading the count first, the snapshot counts
+ *      the first shard alone, then accepts a word the batch's commit already closed, and holds the
+ *      batch's row on the old shard without the one on the fresh shard it never counted
  */
 #define thread_count 3
 #define location_count 6
 #define history_depth 3
-#include "protocol.pml"
+#include <dense_ram_indexes_generations/protocol.pml>
 
 proctype planner(byte t) {
     int count, seen, watermark, sequence;

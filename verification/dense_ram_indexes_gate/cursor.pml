@@ -1,27 +1,25 @@
 /**
+ *  @file verification/dense_ram_indexes_gate/cursor.pml
+ *  @author Ash Vardanian
+ *  @date October 22, 2026
  *  @brief A cursor reading one row, a clear landing, and the cursor reading the next row.
  *
  *  The index holds two rows on one shard. The cursor records the epoch and the watermark at
  *  construction, then reads one row per call; each read ends with `still_valid` against the epoch it
- *  recorded, and a moved epoch makes the read return zero rows with `contended_k`, then and on every
- *  later read. The clear takes the unique side, closes the shard, and inside its window forgets the
- *  rows in place: the watermark and the keys column go to zero, the memory stays. A row a read
- *  returns carries a live key.
+ *  recorded, and a moved epoch makes the read return zero rows with `contended_k`. The clear takes
+ *  the unique side, closes the shard, and inside its window forgets the rows in place: the
+ *  watermark and the keys column go to zero, the memory stays.
  *
- *  The plan also clamps each read to the shard's current `size()`; the model leaves the clamp out,
- *  since within one epoch a watermark only grows, and a read past the size after a window touches
- *  only memory retention kept, which the exit check then voids. The fences the exit check leans on
- *  are `epoch.pml`'s claim.
+ *  - A row a read returns carries a live key.
  *
  *  @verify pass sc
- *  @verify fail sc revalidate=false: a cursor read re-checks the epoch it recorded at construction;
- *      without it, the read after the clear indexes the forgotten shard with its stale watermark and
- *      returns a row whose key the clear wiped
+ *  @verify fail sc revalidate=false: without it, the read after the clear indexes the forgotten
+ *      shard with its stale watermark and returns a row whose key the clear wiped
  */
 #define thread_count 2
 #define location_count 7
 #define history_depth 1
-#include "protocol.pml"
+#include <dense_ram_indexes_gate/protocol.pml>
 
 // The words past the protocol's: the shard's keys column.
 #define key(row) (5 + (row))

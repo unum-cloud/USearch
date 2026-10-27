@@ -58,8 +58,8 @@ namespace unum::usearch::utilities {
 
 #if USEARCH_SANITIZE_THREAD
 
-inline constexpr bool thread_sanitizer_k = true;
-inline constexpr bool address_sanitizer_k = false;
+inline constexpr bool compiled_with_thread_sanitizer_k = true;
+inline constexpr bool compiled_with_address_sanitizer_k = false;
 
 /** Opens the bracket of a blocking @c lock; the verb's own atomics are ignored
  *  until the matching @c annotate_lock_acquired. */
@@ -127,8 +127,8 @@ inline void annotate_container(void const*, void const*, void const*, void const
 
 #elif USEARCH_SANITIZE_ADDRESS
 
-inline constexpr bool thread_sanitizer_k = false;
-inline constexpr bool address_sanitizer_k = true;
+inline constexpr bool compiled_with_thread_sanitizer_k = false;
+inline constexpr bool compiled_with_address_sanitizer_k = true;
 
 inline void annotate_lock_started(void*) noexcept {}
 inline void annotate_lock_acquired(void*) noexcept {}
@@ -157,8 +157,8 @@ inline void annotate_container(void const* storage_begin, void const* storage_en
 
 #else
 
-inline constexpr bool thread_sanitizer_k = false;
-inline constexpr bool address_sanitizer_k = false;
+inline constexpr bool compiled_with_thread_sanitizer_k = false;
+inline constexpr bool compiled_with_address_sanitizer_k = false;
 
 inline void annotate_lock_started(void*) noexcept {}
 inline void annotate_lock_acquired(void*) noexcept {}

@@ -1,15 +1,17 @@
 /**
- *  A basic index batch from `include/usearch/basic/ram_index.hpp`: one add dispenses its range, its
- *  rows land, and one watermark turn publishes the range whole, the keys landing after it. A row's
- *  walk admits the rows below its snapshot outright and, past it, only the rows an acquire of their
- *  `wired_k` bit shows wired, as `dispensed_admission_t` does; each row writes its value and
- *  neighbors plain, then sets its own `wired_k` with a release. Two batches of two rows each:
- *  `serial.pml` lands a batch on its inserter's thread, as `insert` does, and `planned.pml` fans one
- *  out over steppers, as `insert_plan_t` does, whose steps add their counts to the plan's `landed`
- *  tally for `finish`.
+ *  @file verification/basic_ram_index_batches/protocol.pml
+ *  @author Ash Vardanian
+ *  @date October 14, 2026
+ *  @brief A basic index batch: one add dispenses its range, its rows land, and one turn publishes it.
+ *
+ *  From `include/usearch/basic/ram_index.hpp`. A row's walk admits the rows below its snapshot
+ *  outright and, past it, only the rows an acquire of their `wired_k` bit shows wired, as
+ *  `dispensed_admission_t` does; each row writes its value and neighbors plain, then sets its own
+ *  `wired_k` with a release. Two batches of two rows each: `serial.pml` lands a batch on its
+ *  inserter's thread, as `insert` does, and `planned.pml` fans one out over steppers.
  */
-#include "../weak_memory.pml"
-#include "../watermark_turn.pml"
+#include <weak_memory.pml>
+#include <watermark_turn.pml>
 
 // The words, by the index member each stands for: the two counters, each row's state, wired or not,
 // each row's value and neighbors, written plain before the state, and a plan's `landed` tally.

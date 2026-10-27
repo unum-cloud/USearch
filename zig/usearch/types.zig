@@ -9,6 +9,10 @@
 //! The library's entry points are declared by hand rather than pulled through `@cImport`, so the
 //! module needs no include path from its dependents and no cast at a call site: an `extern struct`
 //! already has the library's layout, and an `enum(c_int)` already has its width.
+//!
+//! File: zig/usearch/types.zig
+//! Author: Ash Vardanian
+//! Date: September 7, 2026
 
 const std = @import("std");
 

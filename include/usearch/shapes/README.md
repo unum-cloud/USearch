@@ -4,7 +4,7 @@ Similarity search over 3D point clouds of any size: molecules, conformers, bindi
 Two entries never need the same point count, and no kind needs a correspondence between points, so a 20-atom ligand scores against a 60-atom one without padding, truncation or an atom mapping.
 Every kind is invariant to rotation, reflection and translation, and symmetric bit for bit, which is what lets one distance weigh a graph edge.
 
-## Residencies
+## Residency
 
 - `ram_metric.hpp` + `ram_index.hpp`: the CPU baseline, NumKong shape kits per capability tier from serial through NEON, Haswell, Skylake, RVV and WASM, under the `basic::ram_index` graph with each node owning one packed cloud.
 - `vram_nvidia_index.hpp` + `vram_nvidia_metric.cuh`: the NVIDIA sibling for Chamfer and Hausdorff, a block walking each query and a warp scoring each candidate.

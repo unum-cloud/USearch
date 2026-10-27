@@ -1,5 +1,7 @@
 /**
  *  @file explorer/modalities.js
+ *  @author Ash Vardanian
+ *  @date October 17, 2026
  *  @brief What differs between modalities, and nothing else: how a close-up draws one entry, how a development index
  *      fills from local data, and the arguments a search needs beyond the shared ones. Every flow - samples, zooms,
  *      hover arcs, hubs, selection and landmarks - stays shared in `explorer.js`, and every structure in `worker.js`.

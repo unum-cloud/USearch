@@ -1,28 +1,29 @@
 /**
+ *  @file verification/ram_tables_growth.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief `chunked_multimap`'s growth: two claims publish chunks a prober walks.
  *
  *  The multimap from `include/usearch/utilities/ram_tables.hpp`, whose chunks hold one seat and one
  *  slot apiece here. Two inserters claim one seat each from an empty map, and a prober walks every
  *  chunk it sees published. A claim covers every chunk up to its seat's: a missing one it
  *  allocates, zeroes from the allocation's garbage and publishes into the directory with a
- *  compare-exchange, and a peer that published first keeps its own; the insert then reaches its
- *  chunk through the directory. An inserter's chunk and a prober's are never read before their
- *  publisher zeroed them.
+ *  compare-exchange, and a peer that published first keeps its own.
+ *
+ *  - An inserter's chunk and a prober's are never read before their publisher zeroed them.
  *
  *  @verify pass sc,rc11,far
- *  @verify fail rc11 publish_chunk_order=order_acquire: the publishing compare-exchange releases
- *      the zeroing; without it, an inserter reads a control byte still holding the allocation's
- *      garbage
- *  @verify fail rc11 directory_order=order_relaxed publish_chunk_order=order_release: the directory
- *      loads acquire the zeroing that compare-exchange released; relaxed, and with the exchange
- *      releasing only, an inserter reads a control byte still holding the garbage
- *  @verify fail rc11 walk_order=order_relaxed: the prober's directory loads acquire the zeroing
- *      too; without it, the prober reads a control byte still holding the garbage
+ *  @verify fail rc11 publish_chunk_order=order_acquire: without it, an inserter reads a control byte
+ *      still holding the allocation's garbage
+ *  @verify fail rc11 directory_order=order_relaxed publish_chunk_order=order_release: relaxed, and
+ *      with the exchange releasing only, an inserter reads a control byte still holding the garbage
+ *  @verify fail rc11 walk_order=order_relaxed: without it, the prober reads a control byte still
+ *      holding the garbage
  */
 #define thread_count 3
 #define location_count 7
 #define history_depth 4
-#include "weak_memory.pml"
+#include <weak_memory.pml>
 
 // The words: the claimed seats, each chunk's directory entry, zero or one past the thread whose
 // allocation it holds, and each thread's own allocation of each chunk, one control byte apiece.

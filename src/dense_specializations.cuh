@@ -74,7 +74,7 @@ std::span<byte_t const* const> bundle_bounds() noexcept;
 
 /** The device code of one GPU class and dtype, between the bounds of the dtype's position. */
 template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
-static bytes_view_t bundled_code() noexcept {
+inline static bytes_view_t bundled_code() noexcept {
     std::span<byte_t const* const> const bounds = bundle_bounds<gpu_class_>();
     std::size_t const position = dense_dtypes_t::position_of(dtype_);
     return bytes_view_t {bounds[2 * position], bounds[2 * position + 1]};
@@ -189,7 +189,7 @@ struct dense_scratch<indexes_type_> {
 /** Bytes of cache each thread over @p topology keeps to itself: each core's share of the deepest
  *  cache a compute domain confines to its cores, at its smallest across domains, or zero where no
  *  platform source names one. */
-static std::size_t thread_cache_bytes(fu_topology_t topology) noexcept {
+inline static std::size_t thread_cache_bytes(fu_topology_t topology) noexcept {
     std::size_t domains = 0, smallest = 0;
     if (fu_compute_domains_count(topology, &domains) != fu_success_k) return 0;
     for (std::size_t domain = 0; domain != domains; ++domain) {
@@ -204,7 +204,7 @@ static std::size_t thread_cache_bytes(fu_topology_t topology) noexcept {
  *  gathering what the traversal @p config names hands them; the engine opens the family and
  *  reserves it for the widest round it settles. */
 template <typename index_type_>
-static expected<typename index_type_::search_result_t> search_with_expensive_predicate(
+inline static expected<typename index_type_::search_result_t> search_with_expensive_predicate(
     index_type_& index, dense::rows_view_t queries, typename index_type_::executor_t& executor,
     dense_scratch<index_type_>& scratch, typename index_type_::search_config_t config,
     nk::matrix_span<typename index_type_::key_t> keys, nk::matrix_span<f64_t> distances, std::span<std::size_t> counts,

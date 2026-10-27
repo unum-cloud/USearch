@@ -1,13 +1,16 @@
 /**
- *  The watermark turn every dense index takes once its rows land: a wait until the watermark holds
- *  the turn's first ID, acquired, then one store that moves it past the turn's last row. Turns go
- *  strictly in dispensed order, so the prefix below the watermark stays hole-free. The wait is the
- *  uncapped `wait_on` of `monitor_wait.pml`: a monitored line wakes its waiters on every store, so
- *  every store that ends a turn wakes the turns armed on the watermark. A component includes this
- *  file after the memory model and passes its watermark word, its store order, and a scratch for
- *  the loads.
+ *  @file verification/watermark_turn.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
+ *  @brief The watermark turn every dense index takes once its rows land.
+ *
+ *  A wait until the watermark holds the turn's first ID, acquired, then one store that moves it past
+ *  the turn's last row. Turns go strictly in dispensed order, so the prefix below the watermark
+ *  stays hole-free. The wait is the uncapped `wait_on` of `monitor_wait.pml`. A component includes
+ *  this file after the memory model and passes its watermark word, its store order, and a scratch
+ *  for the loads.
  */
-#include "monitor_wait.pml"
+#include <monitor_wait.pml>
 
 // The knob: the wake-up every store to a monitored watermark gives its armed waiters.
 #ifndef watermark_wakes

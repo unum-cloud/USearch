@@ -1,66 +1,47 @@
 /**
+ *  @file verification/dense_ram_indexes_commits.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief A batch's commit across the shards, behind one counted sequence word.
  *
  *  `include/usearch/dense/ram_indexes.hpp` makes a batch visible whole across shards. A commit
- *  lands a row on each shard, its ranges dispensed in one step as the dispensing mutex does, stores
- *  both keys, waits for every shard's turn, then stores the watermarks between one add on the
- *  index's commit sequence word and a second add of the unit less one, so the low part counts the
- *  commits between their stores. A searcher acquires the word, snapshots both shards' watermarks,
- *  re-reads the word, and retries while the low part is not zero or the word moved. An accepted
- *  snapshot holds each commit on both shards or on neither, and every ID below it has its key.
+ *  lands a row on each shard, stores both keys, waits for every shard's turn, then stores the
+ *  watermarks between one add on the index's commit sequence word and a second add of the unit
+ *  less one, so the low part counts the commits between their stores. A closer stands for a
+ *  refine, an absorb, a clear or a checkpoint load of the sharded index.
  *
- *  A closer stands for a refine, an absorb, a clear or a checkpoint load of the sharded index: it
- *  closes every shard's dispenser in shard order, each by one compare-exchange from the shard's
- *  watermark, which refuses while a commit sits between its dispense and its turn there, reopens
- *  the shards it closed when one refuses, and reopens every shard at the end, the last shard
- *  first. A commit's dispense refuses on a closed shard. The closed shards are always a prefix of
- *  the placement order, since the closer closes upward and reopens downward, so a commit refused
- *  on a shard met it closed at the first one and dispensed nothing in that step; holding them all,
- *  the closer finds no commit in flight on any shard, and once everyone is done every dispenser is
- *  open and level with its watermark.
+ *  - An accepted snapshot holds each commit on both shards or on neither.
+ *  - Every ID below an accepted snapshot has its key.
+ *  - Holding them all, the closer finds no commit in flight on any shard.
+ *  - Once everyone is done every dispenser is open and level with its watermark.
  *
  *  @verify pass sc,rc11
  *  @verify pass sc,rc11 closer=true
  *  @verify pass sc,rc11 commits=2 closer=true
- *  @verify fail sc closer=true close_in_shard_order=false: the closer and the dispenses walk the
- *      shards in one order; closing the last shard first, the closer holds it while a commit that
- *      already dispensed on the first shard reaches it, and the commit is refused with a range it
- *      can neither publish nor give back
- *  @verify fail sc closer=true reopen_in_reverse=false: the closer reopens the last shard first;
- *      reopening in placement order, it opens the first shard while still holding the second, and a
- *      commit dispensing on the first is refused on the second with that range stranded
+ *  @verify fail sc closer=true close_in_shard_order=false: the commit is refused with a range it can
+ *      neither publish nor give back
+ *  @verify fail sc closer=true reopen_in_reverse=false: a commit dispensing on the first is refused
+ *      on the second with that range stranded
  *  @verify pass sc,rc11 counted_sequence=false
  *  @verify pass sc,rc11 commits=2
- *  @verify fail sc,rc11 commits=2 counted_sequence=false: a parity word made odd before the stores
- *      and even after holds for one commit and fails for two: one commit's add makes it odd, the
- *      other's even again while both are inside their brackets, and the searcher accepts a
- *      snapshot holding one shard's part; the counted word returns to a multiple of the unit only
- *      once both are done
- *  @verify fail sc,rc11 commit_sequence=false: the sequence word brackets the watermark stores;
- *      without it, the searcher takes a snapshot between the commit's two stores
- *  @verify stuck sc,rc11 commits=2 dispensing_mutex=false: the waits sit outside the word's
- *      bracket, which is safe only because the dispensing mutex keeps two commits' ranges in one
- *      order on every shard; dispensing each shard on its own, the ranges cross between the
- *      shards, and each commit waits for a turn only the other's store gives
- *  @verify fail rc11 closing_order=order_relaxed: the closing add releases both watermark stores
- *      to a searcher that acquires it; relaxed, it only extends the opening add's release
- *      sequence, which carries neither, and the searcher accepts a closed word beside one shard's
- *      new watermark and the other's old one
- *  @verify fail rc11 before_order=order_relaxed: `snapshot_` acquires the word before the
- *      watermarks, so a closed word it reads carries both stores; relaxed, the searcher reads the
- *      closed word, then one shard's new watermark and the other's old one, and the unmoved word
- *      accepts the half
- *  @verify fail rc11 size_order=order_relaxed: each shard's `size()` acquires its watermark, which
- *      carries the opening add sequenced before the store; relaxed, the searcher reads one shard's
- *      new watermark beside the other's old one, re-reads the word as it was before the commit
- *      opened, and accepts the half
+ *  @verify fail sc,rc11 commits=2 counted_sequence=false: the searcher accepts a snapshot holding
+ *      one shard's part
+ *  @verify fail sc,rc11 commit_sequence=false: without it, the searcher takes a snapshot between the
+ *      commit's two stores
+ *  @verify stuck sc,rc11 commits=2 dispensing_mutex=false: dispensing each shard on its own, the
+ *      ranges cross between the shards, and each commit waits for a turn only the other's store gives
+ *  @verify fail rc11 closing_order=order_relaxed: the searcher accepts a closed word beside one
+ *      shard's new watermark and the other's old one
+ *  @verify fail rc11 before_order=order_relaxed: the unmoved word accepts the half
+ *  @verify fail rc11 size_order=order_relaxed: the searcher re-reads the word as it was before the
+ *      commit opened, and accepts the half
  */
 #define thread_count 3
 #define location_count 7
 #define history_depth 5
 #define shards 2
-#include "weak_memory.pml"
-#include "watermark_turn.pml"
+#include <weak_memory.pml>
+#include <watermark_turn.pml>
 
 // The words, by the index member each stands for, per shard; the first is `commit_sequence_`.
 #define sequence_word 0

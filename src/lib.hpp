@@ -130,8 +130,8 @@ inline void accumulate_stats(usearch_traversal_stats_t* stats, result_type_ cons
 }
 
 /** Places one shard per memory domain the process may allocate on through @p emplace, as
- *  `emplace(domain) → status_t`, over a transient topology; @c uninitialized_k where it names
- *  none. */
+ *  <tt>emplace(domain) → status_t</tt>, over a transient topology; @c uninitialized_k where it
+ *  names none. */
 template <typename emplace_type_>
 status_t emplace_on_every_domain(emplace_type_&& emplace) noexcept {
     fu_topology_t topology = nullptr;
@@ -520,7 +520,7 @@ struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
     using type = fu::arm64_wfet_t;
 };
 #endif
-#if FORKUNION_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISCV64_WRS
 template <>
 struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     using type = fu::risc5_wrs_t;
@@ -606,7 +606,7 @@ struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
     using type = fu::arm64_lse_atomic_ref<value_type_>;
 };
 #endif
-#if FORKUNION_TARGET_RISC5_ZACAS
+#if FORKUNION_TARGET_RISCV64_ZACAS
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     template <typename value_type_>

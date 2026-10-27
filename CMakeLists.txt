@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.28)
 project(
     usearch
     VERSION 3.0.0
@@ -10,12 +10,6 @@ project(
 # The file runs top to bottom: the options and the settings they validate, the defaults every target is created under,
 # the header-only targets, the dependencies, one `cmake/<dependency>.cmake` each, the install and export rules, the
 # wiring every compiled target shares, and the subdirectories.
-
-# Determine if USearch is built as a subproject (using `add_subdirectory`) or if it is the main project
-set(USEARCH_IS_MAIN_PROJECT OFF)
-if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
-    set(USEARCH_IS_MAIN_PROJECT ON)
-endif ()
 
 # Allow CMake 3.13+ to override options when using FetchContent / add_subdirectory
 if (POLICY CMP0077)
@@ -54,22 +48,24 @@ endif ()
 # Options
 option(USEARCH_INSTALL "Install CMake targets" OFF)
 
-option(USEARCH_USE_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
+option(USEARCH_WITH_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
 
-option(USEARCH_BUILD_TEST "Compile test/, and c/test.c alongside USEARCH_BUILD_LIB_C" ${USEARCH_IS_MAIN_PROJECT})
-option(USEARCH_BUILD_BENCH "Compile the benchmarks in bench/" ${USEARCH_IS_MAIN_PROJECT})
-option(USEARCH_BUILD_LIB_C "Compile a native library for the C 99 interface" OFF)
-option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 interface" OFF)
-option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
-option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
-option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
+option(USEARCH_BUILD_TEST "Compile test/, and c/test.c alongside USEARCH_BUILD_SHARED" OFF)
+option(USEARCH_BUILD_BENCH "Compile the benchmarks in bench/" OFF)
+option(USEARCH_BUILD_SHARED "Build and install the shared and static C 99 libraries by default" OFF)
+option(USEARCH_BUILD_STUB "Compile a brute-force stand-in for the C 99 interface" OFF)
+option(USEARCH_BUILD_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
+option(USEARCH_BUILD_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
+option(USEARCH_BUILD_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
+option(USEARCH_BUILD_SWIFT "Package the static library for SwiftPM, as an XCFramework or an artifact bundle" OFF)
 option(USEARCH_BUILD_TOOLS "Compile the command-line tools in tools/, and their MPI build where MPI is found" OFF)
 option(USEARCH_BUILD_CUDA "Compile the NVIDIA index variants, tests and benchmarks with NVCC"
        ${usearch_can_build_cuda_}
 )
 option(USEARCH_BUILD_ROCM "Compile the AMD index variants and tests with ROCm's Clang" ${usearch_can_build_rocm_})
 option(USEARCH_BUILD_METAL "Compile the Apple index variants and tests over Metal" ${usearch_can_build_metal_})
-option(USEARCH_BUILD_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
+option(USEARCH_WITH_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
+option(USEARCH_WERROR "Treat compiler warnings as errors" OFF)
 
 # Clang keeps a unit's host and device halves apart, through the host-only passes of its CUDA and HIP modes, where other
 # host compilers trip over mixed units.
@@ -133,21 +129,10 @@ set(USEARCH_MAX_ERRORS
     CACHE STRING "Diagnostics a compiler emits before giving up on a translation unit"
 )
 
-# Every consumer of the pre-instantiated library builds `src/`, the C interface included - its implementation is
-# `src/dense_index.cpp` and the per-dtype shards beside it - and acquires yyjson for it.
-set(usearch_build_punned_ OFF)
-if (USEARCH_BUILD_TEST
-    OR USEARCH_BUILD_BENCH
-    OR USEARCH_BUILD_LIB_C
-    OR USEARCH_BUILD_TOOLS
-)
-    set(usearch_build_punned_ ON)
-endif ()
-
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
 # execute code), so point `core.hooksPath` at `.githooks` here - configuring the build arms the `pre-commit` checks.
 # Skipped when built as a subproject or without `.git` (tarball / export builds).
-if (USEARCH_IS_MAIN_PROJECT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+if (PROJECT_IS_TOP_LEVEL AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     execute_process(
         COMMAND git config core.hooksPath .githooks
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -254,16 +239,19 @@ find_package(Threads REQUIRED)
 # engine rather than an option: every header reaches for them unguarded, so there is no build without them and no switch
 # pretending otherwise. Include directories are copied onto the interface target, because `usearch_setup_target` reads
 # `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target declares, not what its link
-# interface would carry - to keep the C++20 feature requirement off the pure-C targets.
+# interface would carry - to keep the C++20 feature requirement off the pure-C targets. Every sibling is a system
+# dependency, so its own warnings never fail a USearch build under `USEARCH_WERROR`, and builds only what a USearch
+# target links.
 function (usearch_sibling name_ link_target_ repository_ tag_)
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name_}/CMakeLists.txt")
-        add_subdirectory(${name_})
+        add_subdirectory(${name_} EXCLUDE_FROM_ALL SYSTEM)
     else ()
         message(STATUS "usearch: ${name_} submodule absent, fetching ${tag_}")
         FetchContent_Declare(
             ${name_}
             GIT_REPOSITORY ${repository_}
             GIT_TAG ${tag_}
+            EXCLUDE_FROM_ALL SYSTEM
         )
         FetchContent_MakeAvailable(${name_})
     endif ()
@@ -282,7 +270,7 @@ function (usearch_sibling name_ link_target_ repository_ tag_)
     )
 
     target_include_directories(
-        usearch_header INTERFACE $<TARGET_PROPERTY:${link_target_},INTERFACE_INCLUDE_DIRECTORIES>
+        usearch_header SYSTEM INTERFACE $<TARGET_PROPERTY:${link_target_},INTERFACE_INCLUDE_DIRECTORIES>
     )
 endfunction ()
 
@@ -291,19 +279,17 @@ include(numkong)
 include(forkunion)
 include(stringzilla)
 include(smashtable)
-if (usearch_build_punned_)
-    include(yyjson)
-endif ()
+include(yyjson)
 if (USEARCH_BUILD_TEST
     OR USEARCH_BUILD_BENCH
     OR USEARCH_BUILD_TOOLS
 )
     include(fmt)
 endif ()
-if (USEARCH_USE_JEMALLOC)
+if (USEARCH_WITH_JEMALLOC)
     include(jemalloc)
 endif ()
-if (USEARCH_BUILD_SPDK)
+if (USEARCH_WITH_SPDK)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(usearch_spdk REQUIRED spdk_nvme spdk_env_dpdk)
     pkg_check_modules(usearch_spdk_system REQUIRED spdk_syslibs)
@@ -364,6 +350,26 @@ else ()
     set(usearch_host_tuning_ "")
 endif ()
 
+# Warnings apply to USearch's own targets only, so fetched dependencies build with their own flags. The C interface
+# takes named arguments as partially designated structs, leaving the rest zeroed. CUDA sources take none, since NVCC
+# rejects the host spellings.
+add_library(usearch_warnings INTERFACE)
+if (MSVC)
+    if (USEARCH_WERROR)
+        target_compile_options(usearch_warnings INTERFACE /WX)
+    endif ()
+else ()
+    target_compile_options(
+        usearch_warnings
+        INTERFACE
+            "$<$<COMPILE_LANGUAGE:C,CXX>:-Wall;-Wextra;-Wpedantic;-Wno-conversion;-Wno-unknown-pragmas;-Wno-missing-field-initializers>"
+            "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<CXX_COMPILER_ID:Clang,AppleClang>>:-Wdocumentation>"
+    )
+    if (USEARCH_WERROR)
+        target_compile_options(usearch_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-Werror>")
+    endif ()
+endif ()
+
 # Debug builds take each sanitizer whose instrumented load the toolchain compiles and links; WASI links no sanitizer
 # runtime at all.
 set(usearch_sanitizers_ "")
@@ -396,17 +402,8 @@ function (usearch_setup_target target_)
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_options(
             ${target_}
-            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${usearch_sanitizers_}>
-                    -ffast-math
-                    -fno-finite-math-only
-                    -fPIC
-                    -Wall
-                    -Wextra
-                    -Wno-conversion
-                    -Wno-unknown-pragmas
-                    -fmax-errors=${USEARCH_MAX_ERRORS}
-                    -pedantic
-                    -fdiagnostics-color=always>
+            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${usearch_sanitizers_}> -ffast-math
+                    -fno-finite-math-only -fPIC -fmax-errors=${USEARCH_MAX_ERRORS} -fdiagnostics-color=always>
         )
         target_link_options(${target_} PRIVATE $<$<CONFIG:DEBUG>:-g ${usearch_sanitizers_}> -fPIC)
 
@@ -414,14 +411,8 @@ function (usearch_setup_target target_)
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(
-            ${target_}
-            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${usearch_sanitizers_}>
-                    -ffast-math
-                    -fno-finite-math-only
-                    -fPIC
-                    -pedantic
-                    -Wfatal-errors
-                    -fcolor-diagnostics>
+            ${target_} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${usearch_sanitizers_}> -ffast-math
+                               -fno-finite-math-only -fPIC -Wfatal-errors -fcolor-diagnostics>
         )
         target_link_options(${target_} PRIVATE $<$<CONFIG:DEBUG>:-g ${usearch_sanitizers_}> -fPIC)
 
@@ -442,10 +433,14 @@ function (usearch_setup_target target_)
                                /DEBUG>
         )
     endif ()
+    target_link_libraries(${target_} PRIVATE usearch_warnings)
 
     # One source of truth for header paths: whatever the interface target advertises, including what the dependencies
     # carry, without inheriting its compile features onto pure-C targets.
     target_include_directories(${target_} PRIVATE $<TARGET_PROPERTY:usearch_header,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_include_directories(
+        ${target_} SYSTEM PRIVATE $<TARGET_PROPERTY:usearch_header,INTERFACE_SYSTEM_INCLUDE_DIRECTORIES>
+    )
     # Host-tuned units read the compiler; every other unit takes each sibling's compiled capabilities and instantiates
     # its kits per CPU class, never by a template's default capability, so the class units and the dispatch unit name
     # the same rungs.
@@ -472,8 +467,8 @@ function (usearch_setup_target target_)
     target_link_libraries(${target_} PRIVATE numkong::header)
 
     # SPDK's transports, socket layers and DPDK drivers register from static constructors, so their archives link whole.
-    if (USEARCH_BUILD_SPDK)
-        target_compile_definitions(${target_} PRIVATE USEARCH_BUILD_SPDK=1)
+    if (USEARCH_WITH_SPDK)
+        target_compile_definitions(${target_} PRIVATE USEARCH_WITH_SPDK=1)
         target_include_directories(${target_} SYSTEM PRIVATE ${usearch_spdk_INCLUDE_DIRS})
         # An object library hands its link items to every consumer, which links the archives whole once already.
         if (NOT target_type_ STREQUAL "OBJECT_LIBRARY")
@@ -485,7 +480,7 @@ function (usearch_setup_target target_)
     endif ()
 
     # JeMalloc serves the processes this project starts, its executables; the C library links it in `c/`.
-    if (USEARCH_USE_JEMALLOC AND target_type_ STREQUAL "EXECUTABLE")
+    if (USEARCH_WITH_JEMALLOC AND target_type_ STREQUAL "EXECUTABLE")
         target_link_libraries(${target_} PRIVATE ${USEARCH_JEMALLOC_LIBRARY})
     endif ()
 endfunction ()
@@ -528,17 +523,16 @@ endfunction ()
 
 # Must be called before "add_subdirectory()", and only when USearch runs the show - a parent project decides its own
 # testing story. See https://stackoverflow.com/questions/30250494/ctest-not-detecting-tests.
-if (USEARCH_IS_MAIN_PROJECT)
+if (PROJECT_IS_TOP_LEVEL)
     enable_testing()
 endif ()
 
 # The variants, their dispatch and the suites below all read one ladder length.
 add_compile_definitions(USEARCH_DENSE_DTYPES=${USEARCH_DENSE_DTYPES})
 
-if (usearch_build_punned_)
-    add_subdirectory(src)
-endif ()
-if (USEARCH_BUILD_LIB_C_STUB)
+# The punned objects are the C interface's implementation, built only for the targets that link them.
+add_subdirectory(src EXCLUDE_FROM_ALL)
+if (USEARCH_BUILD_STUB)
     add_subdirectory(src_stub)
 endif ()
 if (USEARCH_BUILD_TEST)
@@ -547,19 +541,58 @@ endif ()
 if (USEARCH_BUILD_BENCH)
     add_subdirectory(bench)
 endif ()
-if (USEARCH_BUILD_LIB_WOLFRAM)
-    add_subdirectory(wolfram)
-endif ()
-if (USEARCH_BUILD_LIB_C)
-    add_subdirectory(c)
+add_subdirectory(c)
+if (USEARCH_BUILD_SHARED)
     add_subdirectory(cpp)
+endif ()
+# The C library as SwiftPM links it: an XCFramework on Apple platforms and an SE-0482 artifact bundle elsewhere, packed
+# by NumKong's script beside the C headers and their module map. Each build adds its target to the artifact in
+# USEARCH_SWIFT_DIRECTORY, so a release fills one artifact from a build per target.
+if (USEARCH_BUILD_SWIFT)
+    set(USEARCH_SWIFT_DIRECTORY
+        "${PROJECT_BINARY_DIR}"
+        CACHE PATH "Where the Swift artifact lands"
+    )
+    set(USEARCH_SWIFT_SDK
+        ""
+        CACHE STRING "The Apple SDK the archive targets, like `macosx` or `iphonesimulator`"
+    )
+    set(USEARCH_SWIFT_TRIPLES
+        "${CMAKE_SYSTEM_PROCESSOR}-unknown-linux-gnu"
+        CACHE STRING "Swift target triples the artifact bundle serves"
+    )
+    if (APPLE)
+        set(usearch_swift_target_ -D "NUMKONG_SWIFT_SDK=${USEARCH_SWIFT_SDK}" -D
+                                  "NUMKONG_SWIFT_ARCHITECTURE=${CMAKE_OSX_ARCHITECTURES}"
+        )
+    else ()
+        set(usearch_swift_target_ -D "NUMKONG_SWIFT_TRIPLES=$<JOIN:${USEARCH_SWIFT_TRIPLES},,>" -D
+                                  "NUMKONG_SWIFT_VERSION=${PROJECT_VERSION}"
+        )
+    endif ()
+    set(usearch_swift_headers_ "${PROJECT_BINARY_DIR}/swift_headers")
+    add_custom_target(
+        usearch_swift ALL
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${PROJECT_SOURCE_DIR}/c/usearch"
+                "${usearch_swift_headers_}/usearch"
+        COMMAND "${CMAKE_COMMAND}" -E copy "${PROJECT_SOURCE_DIR}/include/module.modulemap" "${usearch_swift_headers_}"
+        COMMAND
+            "${CMAKE_COMMAND}" -D NUMKONG_SWIFT_MODULE=USearchC -D "NUMKONG_SWIFT_ARCHIVE=$<TARGET_FILE:usearch_static>"
+            -D "NUMKONG_SWIFT_HEADERS=${usearch_swift_headers_}" -D "NUMKONG_SWIFT_DIRECTORY=${USEARCH_SWIFT_DIRECTORY}"
+            ${usearch_swift_target_} -P "${numkong_SOURCE_DIR}/cmake/numkong_swift_artifact.cmake"
+        DEPENDS usearch_static
+        VERBATIM
+    )
+endif ()
+if (USEARCH_BUILD_WOLFRAM)
+    add_subdirectory(wolfram)
 endif ()
 if (USEARCH_BUILD_TOOLS)
     add_subdirectory(tools)
 endif ()
-if (USEARCH_BUILD_LIB_PYTHON)
+if (USEARCH_BUILD_PYTHON)
     add_subdirectory(python)
 endif ()
-if (USEARCH_BUILD_LIB_NODE)
+if (USEARCH_BUILD_NODE)
     add_subdirectory(javascript)
 endif ()

@@ -1000,7 +1000,6 @@ public sealed class DenseIndexTests : IDisposable
     [Fact]
     public void LibraryProbesReportSomething()
     {
-        Assert.NotEmpty(USearchCapabilities.Version());
         Assert.NotEmpty(USearchCapabilities.CapabilitiesCompiled());
         Assert.NotEmpty(USearchCapabilities.CapabilitiesAvailable());
     }

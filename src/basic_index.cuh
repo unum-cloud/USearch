@@ -99,8 +99,8 @@ struct basic_refinement {
 template <typename arguments_type_>
 using handle_of = std::remove_pointer_t<std::remove_pointer_t<decltype(std::declval<arguments_type_&>().index)>>;
 
-/** Applies @p visitor to the variant @p handle picked, as `visitor(punned_basic_index<traits,
- *  home>)`. */
+/** Applies @p visitor to the variant @p handle picked, as <tt>visitor(punned_basic_index<traits,
+ *  home>)</tt>. */
 template <typename handle_type_, typename visitor_type_>
 void visit_basic(handle_type_ const& handle, visitor_type_&& visitor) noexcept {
     using traits_t = typename handle_type_::traits_t;
@@ -190,7 +190,7 @@ basic_verbs<traits_type_, dense_home_t::vram_nvidia_k> const* pick_basic_gpu_var
 /**
  *  @brief Lowers @p geometry, frozen with @p arguments, onto the RAM or NVMe variant of
  *      @p handle_type_ the ladder picks, then hands it to @p fill, as
- *      `fill(punned_basic_index) → bool`; null once @p outcome records why not.
+ *      <tt>fill(punned_basic_index) → bool</tt>; null once @p outcome records why not.
  *
  *  The variant's class is one the machine admits and @p ram 's pinned class holds, and it serves
  *  the geometry. A RAM variant places its shards as @p ram names before it freezes.
@@ -282,8 +282,8 @@ status_t place_shards(punned_basic_index<traits_type_, home_> const& punned,
 }
 
 /** Places the GPU variant of @p handle_type_ for @p geometry, frozen with @p arguments, one shard
- *  on every device they name, then hands it to @p fill, as `fill(punned_basic_index) → bool`; null
- *  once @p outcome records why not, as for a geometry no device kit serves.
+ *  on every device they name, then hands it to @p fill, as <tt>fill(punned_basic_index) →
+ *  bool</tt>; null once @p outcome records why not, as for a geometry no device kit serves.
  *
  *  The variant is the first on the modality's GPU ladder whose class the first device's
  *  capabilities admit, narrowed to the pinned class, and which serves the geometry; every named
@@ -616,7 +616,7 @@ void basic_refinement_init(arguments_type_* arguments) noexcept {
 }
 
 /** Visits the variant the refinement @p arguments name was opened on with its state, refusing a
- *  call naming another index or executor, as `visitor(variant, refining, executor)`. */
+ *  call naming another index or executor, as <tt>visitor(variant, refining, executor)</tt>. */
 template <typename arguments_type_, typename visitor_type_>
 void visit_refinement(arguments_type_ const& arguments, usearch_outcome_t* outcome, visitor_type_&& visitor) noexcept {
     auto* const refinement = arguments.refinement;

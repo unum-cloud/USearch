@@ -229,7 +229,9 @@ class max_heap {
 
     /**
      *  @brief Ensures the heap has enough capacity for @p new_capacity elements.
-     *  @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
      */
     status_t reserve(std::size_t new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
@@ -250,7 +252,9 @@ class max_heap {
 
     /**
      *  @brief Inserts an element into the heap, growing the storage when needed.
-     *  @return @c success_k, or whatever @ref reserve refused with.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
      */
     status_t insert(element_t&& element) noexcept {
         if (status_t const grown = reserve(size_ + 1); failed(grown)) return grown;
@@ -268,7 +272,6 @@ class max_heap {
 
     /**
      *  @brief Inserts @p count elements into the heap.
-     *  @return @c success_k, or whatever @ref reserve refused with.
      *
      *  Appends the batch at the tail, then heapifies. Picks between two strategies based on
      *  the ratio of new elements to existing size:
@@ -281,6 +284,9 @@ class max_heap {
      *  Crossover is at count ≈ (size + count) / log(size + count). In the HNSW hot
      *  path (batch of ~32, heap of ~128) incremental @c shift_up wins; for bulk init
      *  from empty, Floyd wins trivially.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
      */
     status_t insert_many(element_t const* new_elements, std::size_t count) noexcept {
         if (count == 0) return status_t::success_k;
@@ -300,6 +306,12 @@ class max_heap {
         return status_t::success_k;
     }
 
+    /**
+     *  Inserts a whole @p batch, as the pointer and count overload does.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
+     */
     template <std::size_t batch_size_>
     inline status_t insert_many(std::array<element_t, batch_size_> const& batch) noexcept {
         return insert_many(batch.data(), batch_size_);
@@ -317,7 +329,7 @@ class max_heap {
     /**
      *  @brief Pops the @c batch_size_ largest elements into a @c std::array, descending.
      *
-     *  Straightforward @c batch_size_ sequential @ref pop calls. There is no algorithmic
+     *  Straightforward @c batch_size_ sequential @c pop calls. There is no algorithmic
      *  savings over the loop - each pop still costs O(log size) - but a single call
      *  amortizes function-call overhead and matches the batch API shape of the rest of
      *  this header. Useful at HNSW search finalization when a top-k result list is
@@ -346,7 +358,7 @@ class max_heap {
     }
 
     /** Moves the element at @p i down until the heap property is restored - the
-     *  companion of displacing the root during @ref pop. */
+     *  companion of displacing the root during @c pop. */
     void shift_down(std::size_t i) noexcept {
         std::size_t max_idx = i;
 
@@ -464,7 +476,10 @@ class max_heap_dary {
         size_ = size;
     }
 
-    /** @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise. */
+    /**
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
+     */
     status_t reserve(std::size_t new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
         if (ceil2(new_capacity) == 0) return status_t::overflow_k;
@@ -480,6 +495,12 @@ class max_heap_dary {
         return status_t::success_k;
     }
 
+    /**
+     *  Inserts @p element, growing the storage when needed.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
+     */
     status_t insert(element_t&& element) noexcept {
         if (status_t const grown = reserve(size_ + 1); failed(grown)) return grown;
         insert_reserved(std::move(element));
@@ -492,9 +513,14 @@ class max_heap_dary {
         shift_up(size_ - 1);
     }
 
-    /** Inserts @p count elements via append-then-heapify, picking between
+    /**
+     *  Inserts @p count elements via append-then-heapify, picking between
      *  @b Floyd bulk rebuild (for batches at least half the existing size) and
-     *  incremental @c shift_up (for smaller batches). */
+     *  incremental @c shift_up (for smaller batches).
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
+     */
     status_t insert_many(element_t const* new_elements, std::size_t count) noexcept {
         if (count == 0) return status_t::success_k;
         if (status_t const grown = reserve(size_ + count); failed(grown)) return grown;
@@ -507,6 +533,12 @@ class max_heap_dary {
         return status_t::success_k;
     }
 
+    /**
+     *  Inserts a whole @p batch, as the pointer and count overload does.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
+     */
     template <std::size_t batch_size_>
     inline status_t insert_many(std::array<element_t, batch_size_> const& batch) noexcept {
         return insert_many(batch.data(), batch_size_);
@@ -654,7 +686,10 @@ class sorted_buffer {
     inline element_t const* end() const noexcept { return elements_ + size_; }
     inline void clear() noexcept { size_ = 0; }
 
-    /** @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise. */
+    /**
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
+     */
     status_t reserve(std::size_t new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
 
@@ -871,7 +906,9 @@ class growing_buffer {
     /**
      *  @brief Grows capacity to at least @p new_capacity, rounding up to a power of two and
      *      at least doubling, so a repeatedly-growing loop amortizes. Live elements survive.
-     *  @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
      */
     status_t reserve(std::size_t new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
@@ -951,8 +988,13 @@ class growing_buffer {
         ++size_;
     }
 
-    /** Appends @p element, doubling capacity when full. @ref push_back_reserved is the
-     *  form for a loop that reserved its whole extent up front. */
+    /**
+     *  Appends @p element, doubling capacity when full. @ref push_back_reserved is the
+     *  form for a loop that reserved its whole extent up front.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The rounded capacity wraps.
+     */
     inline status_t push_back(element_t element) noexcept {
         if (size_ == capacity_)
             if (status_t const grown = reserve(size_ + 1); failed(grown)) return grown;
@@ -1088,8 +1130,13 @@ class chunked_column {
     chunked_column& operator=(chunked_column const&) = delete;
     ~chunked_column() noexcept { reset(); }
 
-    /** Allocates, zeroes or builds, and publishes every chunk the first @p rows rows need and is
-     *  missing - safe on any thread. */
+    /**
+     *  Allocates, zeroes or builds, and publishes every chunk the first @p rows rows need and is
+     *  missing - safe on any thread.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k @p rows passes the directory's @c max_rows_.
+     */
     status_t cover(std::size_t rows) noexcept {
         if (rows > max_rows_) return status_t::overflow_k;
         for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(rows); chunk != chunks; ++chunk) {
@@ -1191,7 +1238,7 @@ class chunked_column {
 };
 
 /**
- *  @brief The matrix twin of @ref chunked_column: rows of one width, addressed by ID, that never
+ *  @brief The matrix twin of @c chunked_column: rows of one width, addressed by ID, that never
  *      move, each chunk allocated, filled and published by the first @ref cover reaching it, under
  *      the column's contract.
  *
@@ -1219,8 +1266,13 @@ class chunked_matrix {
     chunked_matrix& operator=(chunked_matrix const&) = delete;
     ~chunked_matrix() noexcept { reset(); }
 
-    /** Allocates every chunk the first @p rows rows of @p columns values need and is missing, sets
-     *  each of its bytes to @p fill, and publishes it - safe on any thread. */
+    /**
+     *  Allocates every chunk the first @p rows rows of @p columns values need and is missing, sets
+     *  each of its bytes to @p fill, and publishes it - safe on any thread.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k @p rows passes the directory's @c max_rows_.
+     */
     status_t cover(std::size_t rows, std::size_t columns, std::uint8_t fill = 0) noexcept {
         if (rows > max_rows_) return status_t::overflow_k;
         if (columns_ != columns) columns_ = columns;

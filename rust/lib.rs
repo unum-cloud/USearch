@@ -21,6 +21,12 @@
 //! let matches = index.on(&executor).search(&rows(&slab, 768)?, 10, &mut arena)?;
 //! # Ok::<(), usearch::Error>(())
 //! ```
+//!
+//! File: rust/lib.rs
+//! Author: Ash Vardanian
+//! Date: April 29, 2023
+
+#![warn(missing_docs)]
 
 mod dense_index;
 mod types;

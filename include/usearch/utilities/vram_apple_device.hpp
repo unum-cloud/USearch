@@ -7,12 +7,13 @@
  *
  *  Metal's API is Objective-C, reached here through @c objc_msgSend cast to each call's exact
  *  prototype, so a plain C++ unit drives it, with no SDK header: the few runtime prototypes are
- *  spelled here. Nothing links Metal, Foundation or the Objective-C runtime: @ref metal_api opens
- *  them at first use and resolves the few C entry points USearch calls into one table, which stays
- *  empty where any is absent, so Apple then lists no devices and the binary still loads. Kernels
- *  travel as source and compile on the device at first use, so no Metal toolchain is needed to
- *  build. Memory is unified and every buffer is shared, so the host reads and writes a matrix in
- *  place and a launch binds the same buffer by handle.
+ *  spelled here. Nothing links Metal, Foundation or the Objective-C runtime:
+ *  @ref unum::usearch::utilities::metal_api opens them at first use and resolves the few C entry
+ *  points USearch calls into one table, which stays empty where any is absent, so Apple then lists
+ *  no devices and the binary still loads. Kernels travel as source and compile on the device at
+ *  first use, so no Metal toolchain is needed to build. Memory is unified and every buffer is
+ *  shared, so the host reads and writes a matrix in place and a launch binds the same buffer by
+ *  handle.
  */
 #pragma once
 
@@ -220,11 +221,15 @@ struct metal_context_t {
     std::mutex lock;
     growing_buffer<metal_pipeline_t> pipelines {global_allocator};
 
-    /** Kernel @p name's pipeline from the library built out of @p source, built on first use; a
+    /**
+     *  Kernel @p name's pipeline from the library built out of @p source, built on first use; a
      *  caller meeting another index's build sleeps until it ends, as a module load waits in the
-     *  CUDA and HIP drivers, and gets @c device_error_k when the build fails. A pipeline whose
-     *  simdgroups are not the @c metal_simdgroup_width_k lanes every MSL source is written against
-     *  is refused with @c unsupported_k. */
+     *  CUDA and HIP drivers.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k The pipeline's simdgroups are not the @c metal_simdgroup_width_k lanes
+     *    every MSL source is written against.
+     */
     expected<metal_pipeline_state_t> pipeline(char const* source, char const* name) noexcept {
         std::lock_guard guard {lock};
         void* library = nullptr;
@@ -354,9 +359,15 @@ struct metal_device_specs_t {
      *  storage budget. */
     std::size_t working_set_bytes = 0;
 
-    /** Queries Metal and the I/O Registry for @p ordinal's specification, once a pipeline built for
-     *  the device reported its simdgroup width; meaningful only on @c success_k, and
-     *  @c unsupported_k for a device whose registry lists no core count. */
+    /**
+     *  Queries Metal and the I/O Registry for @p ordinal's specification, once a pipeline built for
+     *  the device reported its simdgroup width; meaningful only on @c success_k.
+     *
+     *  @par Statuses:
+     *  - @c device_error_k No device sits at @p ordinal, or no pipeline reported its simdgroup
+     *    width yet.
+     *  - @c unsupported_k The device's registry lists no core count.
+     */
     static expected<metal_device_specs_t> query(int ordinal) noexcept {
         metal_context_t const* const context = metal_context(ordinal);
         if (!context || !context->wave_lanes) return {{ordinal}, status_t::device_error_k};
@@ -517,7 +528,12 @@ struct metal_launch_t {
         metal_send<void>(encoder, "setBytes:length:atIndex:", arguments, bytes, index);
     }
 
-    /** Dispatches @p groups threadgroups of @p threads each and commits, without waiting. */
+    /**
+     *  Dispatches @p groups threadgroups of @p threads each and commits, without waiting.
+     *
+     *  @par Statuses:
+     *  - @c device_error_k The encoder is not open.
+     */
     status_t submit(std::size_t groups, std::size_t threads) noexcept {
         if (!encoder) return status_t::device_error_k;
         metal_send<void, metal_size_t, metal_size_t>(
@@ -529,8 +545,7 @@ struct metal_launch_t {
         return status_t::success_k;
     }
 
-    /** Polls the committed command buffer - @c success_k once it completed, @c deferred_k while it
-     *  runs, @c device_error_k when it failed - without blocking; nothing committed has nothing to
+    /** Polls the committed command buffer without blocking; nothing committed has nothing to
      *  run. */
     status_t landed() const noexcept {
         if (!commands || encoder) return status_t::success_k;
@@ -626,13 +641,23 @@ struct metal_executor_t {
         std::swap(scratch_limit_, other.scratch_limit_);
     }
 
-    /** Claims the executor for one call; a second concurrent caller gets @c contended_k. */
+    /**
+     *  Claims the executor for one call.
+     *
+     *  @par Statuses:
+     *  - @c contended_k Another call holds the executor.
+     */
     expected<claim_t> claim() noexcept {
         if (!held_.lock_if_free()) return {{}, status_t::contended_k};
         return {claim_t {held_, std::adopt_lock}, status_t::success_k};
     }
 
-    /** Takes over streams the caller already opened, owned and released here from now on. */
+    /**
+     *  Takes over streams the caller already opened, owned and released here from now on.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p streams are empty.
+     */
     static expected<metal_executor_t> acquire(growing_buffer<stream_t>&& streams) noexcept {
         if (streams.empty()) return {{}, status_t::config_mismatch_k};
         metal_executor_t executor;
@@ -640,8 +665,14 @@ struct metal_executor_t {
         return {std::move(executor), status_t::success_k};
     }
 
-    /** Opens one stream per entry of @p devices, whose scratch never grows past @p scratch_limit
-     *  bytes, zero for no ceiling. */
+    /**
+     *  Opens one stream per entry of @p devices, whose scratch never grows past @p scratch_limit
+     *  bytes, zero for no ceiling.
+     *
+     *  @par Statuses:
+     *  - @c device_error_k A device is not listed.
+     *  - @c config_mismatch_k The @p devices are empty.
+     */
     static expected<metal_executor_t> spawn(std::span<int const> devices, std::size_t scratch_limit = 0) noexcept {
         growing_buffer<stream_t> streams {global_allocator};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
@@ -657,9 +688,15 @@ struct metal_executor_t {
         return {std::move(executor), status};
     }
 
-    /** Claims @p bytes_per_stream of scratch on every stream, ahead of the fan-out that maps state
-     *  onto it, refusing more than the ceiling with @c bad_alloc_k; the old run lives on in
-     *  whichever command buffer still binds it. */
+    /**
+     *  Claims @p bytes_per_stream of scratch on every stream, ahead of the fan-out that maps state
+     *  onto it; the old run lives on in whichever command buffer still binds it.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The executor has no streams.
+     *  - @c bad_alloc_k The @p bytes_per_stream pass the scratch ceiling.
+     *  - @c device_error_k A stream's device is not listed.
+     */
     status_t reserve(std::size_t bytes_per_stream) noexcept {
         if (streams_.empty()) return status_t::uninitialized_k;
         if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_t::bad_alloc_k;
@@ -672,8 +709,13 @@ struct metal_executor_t {
         return status_t::success_k;
     }
 
-    /** Waits for every command buffer committed to every stream - the fleet's completion: one empty
-     *  command buffer per stream, which completes only after every one committed before it. */
+    /**
+     *  Waits for every command buffer committed to every stream - the fleet's completion: one empty
+     *  command buffer per stream, which completes only after every one committed before it.
+     *
+     *  @par Statuses:
+     *  - @c device_error_k A stream's device is not listed.
+     */
     status_t wait() noexcept {
         metal_api_t const& api = metal_api();
         constexpr std::size_t completed_k = 4; // `MTLCommandBufferStatusCompleted`
@@ -791,9 +833,8 @@ struct metal_traversal_context {
      *  executor's @c drain being the fleet's. */
     status_t wait() noexcept { return committed_.wait(); }
 
-    /** Polls whether the last command buffer this context committed finished - @c success_k once
-     *  it has, @c deferred_k while it runs - without blocking, so one host thread awaits whichever
-     *  of several streams lands first. */
+    /** Polls whether the last command buffer this context committed finished without blocking, so
+     *  one host thread awaits whichever of several streams lands first. */
     status_t landed() const noexcept { return committed_.landed(); }
 
     /** The telemetry of the last submission, zeroed when it was staged; read once it landed. */

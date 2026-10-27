@@ -1,26 +1,20 @@
 /**
- *  The sharded index's gate and epoch from `include/usearch/utilities/ram_shards.hpp` and
- *  `ram_indexes.hpp`: every mutator holds the gate's shared side for one call, every destructive
- *  window takes its unique side with `try_lock` and never waits, and every reader brackets its call
- *  with two loads of the epoch word instead of touching the gate. The gate is `basic::shared_mutex`,
- *  moved unchanged: the shared side is one acquire add of a holder and a generation step, backed off
- *  behind a unique holder, then a release fence; `unlock_shared` is a release subtract.
+ *  @file verification/dense_ram_indexes_gate/protocol.pml
+ *  @author Ash Vardanian
+ *  @date October 22, 2026
+ *  @brief The sharded index's gate and epoch.
  *
- *  A destructive window, under the unique side, closes every shard it empties through the
- *  claim-aware `close`, makes the epoch odd with a relaxed add followed by a release fence, rewrites
- *  in place, keeping every byte a reader may reach allocated, and makes the epoch even with a
- *  release add. A reader acquires an even epoch, waiting out an odd one through the capped waiter,
- *  reads, issues an acquire fence, and re-reads the epoch relaxed; a moved epoch retries once, then
- *  answers `contended_k`. `close` moves no epoch: it changes only dispensers, which no reader reads.
+ *  From `include/usearch/utilities/ram_shards.hpp` and `ram_indexes.hpp`: every mutator holds the
+ *  gate's shared side for one call, every destructive window takes its unique side with `try_lock`
+ *  and never waits, and every reader brackets its call with two loads of the epoch word instead of
+ *  touching the gate. The gate is `basic::shared_mutex`, moved unchanged. `close` moves no epoch:
+ *  it changes only dispensers, which no reader reads.
  *
- *  A shard's claim word, dispenser and closed bit are ghosts, each step on them one atomic step,
- *  `claim_capacity` and `close_` seen from outside; its watermark is a word. A dispense asserts
- *  that a claim still covers it, the invariant `claim_capacity` keeps: claims die only before the
- *  dispense.
+ *  - A dispense asserts that a claim still covers it, the invariant `claim_capacity` keeps.
  */
-#include "../weak_memory.pml"
-#include "../watermark_turn.pml"
-#include "../basic_gate.pml"
+#include <weak_memory.pml>
+#include <watermark_turn.pml>
+#include <basic_gate.pml>
 
 // The sizes: the shards a scenario may hold, and the rows one shard takes under the bound.
 #define shards 2

@@ -31,6 +31,10 @@ callback.
 
 Telemetry is a lent output. Every config of a verb that reports traversal statistics takes an
 optional `stats` pointer, which the engine overwrites whole on every call it is passed to.
+
+File: mojo/usearch/dense.mojo
+Author: Ash Vardanian
+Date: September 7, 2026
 """
 
 from std.ffi import c_int, c_size_t

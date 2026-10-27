@@ -14,7 +14,7 @@ The package links `libusearch_static` and includes the `usearch/` headers, so bo
 To build them from a checkout of the main repository and point cgo at them for the current shell:
 
 ```sh
-cmake --preset host_library -B build_release && cmake --build build_release
+cmake --preset library -B build_release && cmake --build build_release
 export CGO_CFLAGS="-I$PWD/include" CGO_LDFLAGS="-L$PWD/build_release"
 ```
 
@@ -394,7 +394,7 @@ for _, batch := range batches {
 fmt.Println(total.VisitedMembers, total.ComputedDistances, total.Restarts)
 ```
 
-### Filtering & Progress
+### Filtered Search
 
 A `Predicate` in the `DenseSearchConfig` admits only the keys it approves.
 Non-matching entries still route the traversal, so recall does not collapse at low selectivity.
@@ -423,7 +423,7 @@ A handler never runs on two threads at once, so it may carry a counter or a dead
 A panic inside a predicate, a handler or a value lookup is recovered where it is raised and read as a rejection, a stop or a missing row, since unwinding it through the library's frames would skip their unlocks.
 The first such panic becomes the call's error once the call is final, the panic itself when it is an `error`.
 
-### Retrieval: Get, Cursors & Streams
+### Retrieval and Streaming
 
 `Get` exports every entry stored under one key, converted to the scalar kind you name, in one call however many there turn out to be:
 

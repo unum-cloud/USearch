@@ -1,3 +1,10 @@
+//! Build script that compiles the Zig binding against the C library and checks the manifest's version
+//! against the tracked `VERSION` file.
+//!
+//! File: build.zig
+//! Author: Ash Vardanian
+//! Date: September 9, 2026
+
 const std = @import("std");
 const builtin = @import("builtin");
 

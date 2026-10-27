@@ -13,12 +13,13 @@ dependencies: [
 ```
 
 The package compiles the Swift surface only, and depends on NumKong as a source package.
-The engine itself is `libusearch_static`, built by CMake and linked by the package, so point the linker at the build directory or install the library system-wide.
+SwiftPM downloads the engine prebuilt, as the release's `USearchC` XCFramework on Apple platforms and as its artifact bundle on Linux, so no C++ toolchain is needed.
+A checkout builds its own with CMake and points `USEARCH_SWIFT_ARTIFACT` at it, relative to the package root, as `NUMKONG_SWIFT_ARTIFACT` points the `numkong/` dependency at its own build:
 
 ```sh
-cmake --preset host_library
-cmake --build --preset host_library --target usearch_static
-swift build -Xlinker -Lbuild_host_library
+cmake --preset swift
+cmake --build --preset swift
+USEARCH_SWIFT_ARTIFACT=build_swift/USearchC.xcframework swift build # USearchC.artifactbundle off Apple platforms
 ```
 
 ## Quickstart
@@ -249,7 +250,7 @@ print(stats.visitedMembers, stats.computedDistances, stats.restarts)
 The `insert`, `refine`, `search`, `maxsim`, `multiply` and `attend` configs take a `DenseTraversalStats`, and every call overwrites the stats it is handed rather than accumulating, so a sweep sums them itself.
 Insertions and searches overlap freely on one handle: searches read only entries published behind the visibility watermark, while insertions publish in order.
 
-### Filtering & Progress
+### Filtered Search
 
 The predicate runs on the executor's threads, so it must be `@Sendable` and safe for concurrent use; an error it throws rejects that key.
 Non-matching entries still route the traversal, so recall does not collapse at low selectivity.
@@ -271,7 +272,7 @@ try index.on(executor).refine(config: DenseRefineConfig(
     progress: { _, _ in ContinuousClock.now < deadline ? .continue : .cancel }))
 ```
 
-### Retrieval: Get, Cursors & Streams
+### Retrieval and Streaming
 
 `get` lands every vector stored under a key in its arena, one row per entry sharing the key, converted to the scalar kind `as:` names.
 

@@ -268,7 +268,7 @@ std.debug.print("{d} distances computed\n", .{stats.computed_distances});
 The breadth of the candidates rides the call rather than the handle, so a recall sweep is a loop over expansion factors against one immutable index, with no mutation and no synchronization between points.
 `.traversal = .scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle answers it with `Error.Unsupported`.
 
-### Filtering & Progress
+### Filtered Search
 
 A `Predicate` in the search config admits only the keys it approves, and non-matching entries still route the traversal, so recall does not collapse at low selectivity.
 `Predicate.of` takes a `comptime` function rather than a closure, so the trampoline that crosses the boundary is generated per call site and nothing is boxed.
@@ -317,7 +317,7 @@ Reports are denominated in whatever the verb consumes, such as rows for an inser
 An `insert` cannot be stopped: it claims every row before its first report and publishes the whole batch at once, so a batch is all-or-nothing with or without a handler.
 A stopped `refine` is not a failure but the time budget a whole-graph sweep is meant to run under: re-selection claims no identity, so the graph stays correct and merely less improved, and the next call sweeps again, so calling under a time budget still converges.
 
-### Retrieval: Get, Cursors & Streams
+### Retrieval and Streaming
 
 `get` lands every row stored under a key in the arena, one packed row per entry in insertion order, as the scalar you name; an absent key yields no rows.
 

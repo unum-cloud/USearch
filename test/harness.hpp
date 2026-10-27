@@ -317,7 +317,7 @@ using counting_allocator_t = counting_allocator<byte_t>;
  *  @brief Distinct levels one component of @p scalar_ draws from: a packed bit has two, since
  *      its proxy sets the bit for any nonzero and a wider draw would bias it toward ones; every
  *      other type keeps the eight levels the fixtures are built around.
- *  @see @c nk::fill_uniform, which ranges every dtype by its own @c finite_min & @c finite_max.
+ *  @sa @c nk::fill_uniform, which ranges every dtype by its own @c finite_min & @c finite_max.
  */
 template <typename scalar_>
 constexpr u32_t random_component_levels() noexcept {

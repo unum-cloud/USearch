@@ -1,37 +1,27 @@
 /**
+ *  @file verification/dense_ram_indexes_claims.pml
+ *  @author Ash Vardanian
+ *  @date October 10, 2026
  *  @brief The sharded index's claims: two planned batches, a dropped plan and a single-row insert on
  *      two shards, beside a snapshot.
  *
  *  `include/usearch/dense/ram_indexes.hpp` claims a batch's rows from every shard's own capacity
  *  counter in `plan_insert`, one shard at a time, and a refused claim releases every share granted
- *  as the claims die. Two shards of two rows each. Two planners bring one row per shard: `insert`
- *  dispenses both shards' ranges in one step under the dispensing mutex, consuming the claims, and
- *  a refused fan-out lands the rows on the calling thread; `finish` awaits each shard's turn, then
- *  stores the watermarks inside the bracket of the commit sequence word. A third planner drops its
- *  plan before `insert`, and a single-row `insert` probes the shards from its routing base and may
- *  be refused after its claim. A searcher takes `snapshot_`. The dispenser is a ghost, and a row's
- *  wiring writes no word watched here. Every batch routes an even count of rows, so the single-row
- *  insert's routing base is shard zero in every order, and `routed_rows_` is left out.
- *
- *  The shard's claim is `claim_capacity` seen from outside: it grows the shard on demand and
- *  refuses only past the rows one shard's IDs reach, the model's row limit.
+ *  as the claims die. Two shards of two rows each. A third planner drops its plan before `insert`.
  *  `dense_ram_index_capacity/` covers the counter itself, and `dense_ram_indexes_commits.pml` the
  *  bracket's orders.
  *
- *  Invariants:
- *  - quiescence, checked under `sc` alone: each shard's claim word and watermark equal its dispenser;
- *  - the snapshot: each planned batch is on both shards or on neither.
+ *  - Quiescence, checked under `sc` alone: each shard's claim word and watermark equal its dispenser.
+ *  - The snapshot: each planned batch is on both shards or on neither.
  *
+ *  @budget 2048
  *  @verify pass sc
- *  @verify stuck rc11 release_after_dispense=true: `insert` dispenses before its fan-out, so a
- *      refused fan-out lands the rows on the caller; releasing the claims there instead abandons
- *      dispensed IDs, and the next range on their shard waits for a turn no store gives; under `sc`
- *      the quiescence check finds the claim word below the dispenser first
- *  @verify stuck sc dispensing_mutex=false: the dispensing mutex keeps two batches' ranges in one
- *      order on every shard; dispensing each shard on its own, the ranges cross between the shards,
- *      and each `finish` waits for a turn only the other's stores give
- *  @verify fail sc claim_consume=false: the dispense consumes the claim it draws on; unconsumed,
- *      the claim releases its rows when the plan dies, and the claim word falls below the dispenser
+ *  @verify stuck rc11 release_after_dispense=true: releasing the claims there instead abandons
+ *      dispensed IDs, and the next range on their shard waits for a turn no store gives
+ *  @verify stuck sc dispensing_mutex=false: dispensing each shard on its own, the ranges cross
+ *      between the shards, and each `finish` waits for a turn only the other's stores give
+ *  @verify fail sc claim_consume=false: unconsumed, the claim releases its rows when the plan dies,
+ *      and the claim word falls below the dispenser
  */
 #define thread_count 5
 #define location_count 5
@@ -39,8 +29,8 @@
 #define shards 2
 #define row_limit 2
 #define planners 2
-#include "weak_memory.pml"
-#include "watermark_turn.pml"
+#include <weak_memory.pml>
+#include <watermark_turn.pml>
 
 // The words, by the index member each stands for, per shard; the last is `commit_sequence_`.
 #define claimed(shard) (shard)

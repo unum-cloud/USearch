@@ -13,7 +13,7 @@ Keys may be any hashable type, node IDs may be 32 or 64 bits wide, and every rec
 The plurals in `ram_indexes.hpp` and `vram_nvidia_indexes.hpp` are what the compiled library builds on top.
 Only they narrow the choice, to 32-bit shards whose rows a shard table locates in 8 bytes.
 
-## Residencies
+## Residency
 
 - `ram_index.hpp`: the in-memory index, with the metric contract, the selectors, the codec and the plans described below.
 - `nvme_index.hpp`: the read-only index of one saved part on block storage, opened from its `persisted_columns_t` and walked through the same storage engines as the dense tier.
