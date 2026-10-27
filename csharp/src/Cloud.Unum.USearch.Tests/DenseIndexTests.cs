@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Cloud.Unum.USearch.Tests;
 
@@ -42,6 +43,32 @@ public sealed class DenseIndexTests : IDisposable
     private static RowsView Rows(float[] values) => RowsView.RowsOf<float>(values, Dimensions);
 
     private static Key[] KeysOf(params ulong[] identities) => [.. identities.Select(identity => (Key)identity)];
+
+    #region Layouts
+
+    [Fact]
+    public void NativeStructsMatchTheirLayouts()
+    {
+        int word = IntPtr.Size;
+        Assert.Equal(2 * word, (int)Marshal.OffsetOf<NativeRamOptions>(nameof(NativeRamOptions.ShardCapacity)));
+        Assert.Equal(3 * word, (int)Marshal.OffsetOf<NativeRamOptions>(nameof(NativeRamOptions.CpuClass)));
+        Assert.Equal(4 * word, Unsafe.SizeOf<NativeRamOptions>());
+        Assert.Equal(3 * word, (int)Marshal.OffsetOf<NativeVramOptions>(nameof(NativeVramOptions.GpuClass)));
+        Assert.Equal(4 * word, Unsafe.SizeOf<NativeVramOptions>());
+        Assert.Equal(2 * word, (int)Marshal.OffsetOf<NativeNvmeOptions>(nameof(NativeNvmeOptions.CpuClass)));
+        Assert.Equal(3 * word, Unsafe.SizeOf<NativeNvmeOptions>());
+        Assert.Equal(7 * word, (int)Marshal.OffsetOf<NativeExecutorForNvme>(nameof(NativeExecutorForNvme.NvmeClass)));
+        Assert.Equal(3 * word, Unsafe.SizeOf<NativeDenseTraversalStats>());
+        int cpuClass = (int)Marshal.OffsetOf<NativeDenseDescription>(nameof(NativeDenseDescription.CpuClass));
+        Assert.Equal(Unsafe.SizeOf<NativeDenseMetadata>() + 3 * word, cpuClass);
+        Assert.Equal(cpuClass + 4, (int)Marshal.OffsetOf<NativeDenseDescription>(nameof(NativeDenseDescription.GpuClass)));
+        Assert.Equal(cpuClass + 8,
+                     (int)Marshal.OffsetOf<NativeDenseDescription>(nameof(NativeDenseDescription.ShardsCount)));
+        Assert.Equal(cpuClass + 8 + word, Unsafe.SizeOf<NativeDenseDescription>());
+        Assert.True(Unsafe.SizeOf<NativeDenseDescription>() <= 12 * sizeof(ulong), "the report landing holds it");
+    }
+
+    #endregion Layouts
 
     #region Keys
 
@@ -135,6 +162,37 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal("usearch: read-only: detail", failure.Message);
     }
 
+    /// <summary>Reads <paramref name="name"/> back through <paramref name="parse"/>.</summary>
+    private static int ReadBack(string name, Func<NativeBytesView, int> parse)
+    {
+        IntPtr data = Marshal.StringToCoTaskMemUTF8(name);
+        try
+        {
+            return parse(new NativeBytesView { Data = data, Length = (nuint)System.Text.Encoding.UTF8.GetByteCount(name) });
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(data);
+        }
+    }
+
+    [Fact]
+    public void EveryClassNameReadsBackThroughTheLibrary()
+    {
+        (Func<NativeBytesView, int> Parse, Func<int, IntPtr> Spell, int Last)[] classes =
+        [
+            (NativeMethods.usearch_cpu_class_from_name, NativeMethods.usearch_cpu_class_name, 17),
+            (NativeMethods.usearch_gpu_class_from_name, NativeMethods.usearch_gpu_class_name, 12),
+            (NativeMethods.usearch_nvme_class_from_name, NativeMethods.usearch_nvme_class_name, 6),
+        ];
+        foreach ((Func<NativeBytesView, int> parse, Func<int, IntPtr> spell, int last) in classes)
+        {
+            for (int code = 1; code <= last; ++code)
+                Assert.Equal(code, ReadBack(Marshal.PtrToStringUTF8(spell(code)) ?? string.Empty, parse));
+            Assert.Equal("unknown", Marshal.PtrToStringUTF8(spell(last + 1)));
+        }
+    }
+
     #endregion Names
 
     #region Constructors
@@ -150,7 +208,8 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal(DenseMetric.Euclidean, description.Metadata.Metric);
         Assert.Equal(Scalar.BF16, description.Metadata.Quantization);
         Assert.Equal(0UL, description.Size);
-        Assert.NotEmpty(description.Capabilities);
+        Assert.NotEmpty(description.CpuClass);
+        Assert.Equal("unknown", description.GpuClass);
     }
 
     [Fact]
@@ -402,18 +461,21 @@ public sealed class DenseIndexTests : IDisposable
     #region Geometry
 
     [Fact]
-    public void UnfrozenGeometryIsRefusedRatherThanSizedToZero()
+    public void ZeroDimensionsAreRefusedAtInit()
     {
-        using DenseIndex index = DenseIndex.InitRam(DenseOptions.Default);
+        Assert.Equal(
+            Status.ConfigMismatch,
+            Assert.Throws<USearchException>(() => DenseIndex.InitRam(DenseOptions.Default)).Status);
+    }
 
-        Assert.Equal(0UL, index.Describe().Metadata.Dimensions);
-        Assert.Equal(
-            Status.Uninitialized,
-            Assert.Throws<USearchException>(() => index.On(this._pool).Insert(KeysOf(1), Rows(RowOf(1f)))).Status);
-        Assert.Equal(
-            Status.Uninitialized,
-            Assert.Throws<USearchException>(
-                () => index.On(this._pool).Search(Rows(RowOf(1f)), wanted: 1, this._arena)).Status);
+    [Fact]
+    public void FreshIndexInsertsWithoutAReservation()
+    {
+        using DenseIndex index = DenseIndex.InitRam(SmallOptions());
+
+        index.On(this._pool).Insert(KeysOf(1), Rows(RowOf(1f)));
+        Assert.Equal(1UL, index.Describe().Size);
+        Assert.Equal(1UL, index.On(this._pool).Count(1UL));
     }
 
     [Fact]

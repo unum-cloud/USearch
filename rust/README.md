@@ -37,7 +37,7 @@ let options = DenseOptions {
     ..DenseOptions::default()
 };
 let index = DenseIndex::init_ram(&options, &[])?;
-index.reserve(1_000)?;
+index.reserve(1_000)?; // Optional capacity hint; inserts grow on demand
 
 let keys = [Key::from(42u64), Key::from(43u64)];
 let slab: [f32; 8] = [0.2, 0.1, 0.2, 0.1, 0.1, 0.2, 0.1, 0.2];
@@ -482,7 +482,7 @@ println!("{:?}", context.view()?.shape());
 ```rust
 let description = index.describe()?;
 println!("{} entries in {} bytes", description.size, description.memory_usage);
-println!("dispatched to {}", description.capabilities);
+println!("dispatched to {} and {}", description.cpu_class, description.gpu_class);
 println!("compiled for {}", usearch::capabilities_compiled());
 println!("available here {}", usearch::capabilities_available());
 

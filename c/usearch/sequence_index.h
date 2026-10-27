@@ -425,7 +425,8 @@ typedef struct usearch_sequence_reserve_t {
     size_t payload_bytes;
 } usearch_sequence_reserve_t;
 
-/** Reserves capacity for a number of incoming sequences ahead of insertion. */
+/** Grows the shards ahead of incoming entries - a capacity hint, since insertions grow them on
+ *  demand. */
 USEARCH_EXPORT void usearch_sequence_reserve(usearch_sequence_reserve_t* arguments);
 
 /** The arguments of @c usearch_sequence_clear. */

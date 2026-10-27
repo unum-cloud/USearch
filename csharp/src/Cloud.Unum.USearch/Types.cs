@@ -1357,7 +1357,7 @@ internal unsafe struct Landing
     public nuint Written;
     public nuint Required;
     public fixed ulong View[4];
-    public fixed ulong Report[8];
+    public fixed ulong Report[12];
 }
 
 /// <summary>
@@ -1628,6 +1628,10 @@ internal struct NativeRamOptions
     public IntPtr MemoryDomains;
     /// <summary>How many node IDs the list holds; zero derives.</summary>
     public nuint MemoryDomainsCount;
+    /// <summary>Rows one shard holds before another generation of shards opens; zero leaves it unbounded.</summary>
+    public nuint ShardCapacity;
+    /// <summary>The CPU class to dispatch as; zero derives the CPU's own.</summary>
+    public int CpuClass;
 }
 
 /// <summary>The devices a VRAM-resident index places its shards in, sharded and never replicated.</summary>
@@ -1638,6 +1642,10 @@ internal struct NativeVramOptions
     public IntPtr Devices;
     /// <summary>How many ordinals the list holds; zero derives.</summary>
     public nuint DevicesCount;
+    /// <summary>Rows one shard holds before another generation of shards opens; zero leaves it unbounded.</summary>
+    public nuint ShardCapacity;
+    /// <summary>The GPU class to dispatch as; zero derives the devices' own.</summary>
+    public int GpuClass;
 }
 
 /// <summary>The devices an NVMe-resident index serves its shards from, one shard per named path.</summary>
@@ -1649,6 +1657,8 @@ internal struct NativeNvmeOptions
     public IntPtr Paths;
     /// <summary>How many paths the list holds; zero derives.</summary>
     public nuint PathsCount;
+    /// <summary>The CPU class to dispatch as; zero derives the CPU's own.</summary>
+    public int CpuClass;
 }
 
 /// <summary>How a long call reports its advance, laid out as <c>usearch_progress_t</c>.</summary>
@@ -1718,6 +1728,8 @@ internal unsafe struct NativeExecutorForNvme
     public NativeNvmeOptions Nvme;
     public nuint Threads;
     public nuint DeferredLimit;
+    /// <summary>The NVMe class every ring submits through; zero derives the fastest the host admits.</summary>
+    public int NvmeClass;
 }
 
 /// <summary>The arguments of <c>usearch_arena_init</c>.</summary>
@@ -1766,6 +1778,30 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial IntPtr usearch_capabilities_available();
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial IntPtr usearch_cpu_class_name(int cpuClass);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int usearch_cpu_class_from_name(NativeBytesView name);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial IntPtr usearch_gpu_class_name(int gpuClass);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int usearch_gpu_class_from_name(NativeBytesView name);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial IntPtr usearch_nvme_class_name(int nvmeClass);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int usearch_nvme_class_from_name(NativeBytesView name);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

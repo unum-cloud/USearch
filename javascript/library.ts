@@ -66,7 +66,9 @@ export interface CompiledDescription {
   size: number;
   capacity: number;
   memoryUsage: number;
-  capabilities: string;
+  cpuClass: string;
+  gpuClass: string;
+  shardsCount: number;
 }
 
 /** A ranked run viewed inside its arena; every view is `null` over device memory. */

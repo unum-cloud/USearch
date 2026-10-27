@@ -316,20 +316,81 @@ usearch_mood_t usearch_mood_from_name(usearch_bytes_view_t name) {
     return named(name, "spinning") ? usearch_mood_spinning_k : usearch_mood_parked_k;
 }
 
-char const* usearch_cpu_class_name(usearch_cpu_class_t) { return "serial"; }
-
-usearch_cpu_class_t usearch_cpu_class_from_name(usearch_bytes_view_t name) {
-    return named(name, "serial") ? usearch_cpu_class_serial_k : usearch_cpu_class_unknown_k;
+char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class) {
+    switch (cpu_class) {
+    case usearch_cpu_class_serial_k: return "serial";
+    case usearch_cpu_class_intel_haswell_k: return "intel-haswell";
+    case usearch_cpu_class_intel_sierra_k: return "intel-sierra";
+    case usearch_cpu_class_intel_skylake_k: return "intel-skylake";
+    case usearch_cpu_class_intel_icelake_k: return "intel-icelake";
+    case usearch_cpu_class_amd_genoa_k: return "amd-genoa";
+    case usearch_cpu_class_intel_sapphire_k: return "intel-sapphire";
+    case usearch_cpu_class_intel_granite_k: return "intel-granite";
+    case usearch_cpu_class_intel_diamond_k: return "intel-diamond";
+    case usearch_cpu_class_aws_g2_k: return "aws-g2";
+    case usearch_cpu_class_apple_m2_k: return "apple-m2";
+    case usearch_cpu_class_apple_m4_k: return "apple-m4";
+    case usearch_cpu_class_aws_g5_k: return "aws-g5";
+    case usearch_cpu_class_nvidia_vera_k: return "nvidia-vera";
+    case usearch_cpu_class_alibaba_c930_k: return "alibaba-c930";
+    case usearch_cpu_class_wasm32_v128_k: return "wasm32-v128";
+    case usearch_cpu_class_wasm64_extended_k: return "wasm64-extended";
+    default: return "unknown";
+    }
 }
 
-char const* usearch_gpu_class_name(usearch_gpu_class_t) { return "none"; }
+usearch_cpu_class_t usearch_cpu_class_from_name(usearch_bytes_view_t name) {
+    for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_wasm64_extended_k; ++code) {
+        usearch_cpu_class_t const cpu_class = static_cast<usearch_cpu_class_t>(code);
+        if (named(name, usearch_cpu_class_name(cpu_class))) return cpu_class;
+    }
+    return usearch_cpu_class_unknown_k;
+}
 
-usearch_gpu_class_t usearch_gpu_class_from_name(usearch_bytes_view_t) { return usearch_gpu_class_unknown_k; }
+char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class) {
+    switch (gpu_class) {
+    case usearch_gpu_class_nvidia_ampere_k: return "nvidia-ampere";
+    case usearch_gpu_class_nvidia_ada_k: return "nvidia-ada";
+    case usearch_gpu_class_nvidia_hopper_k: return "nvidia-hopper";
+    case usearch_gpu_class_nvidia_blackwell_k: return "nvidia-blackwell";
+    case usearch_gpu_class_nvidia_blackwellrtx_k: return "nvidia-blackwellrtx";
+    case usearch_gpu_class_nvidia_rubin_k: return "nvidia-rubin";
+    case usearch_gpu_class_amd_cdna3_k: return "amd-cdna3";
+    case usearch_gpu_class_amd_cdna4_k: return "amd-cdna4";
+    case usearch_gpu_class_amd_cdna5_k: return "amd-cdna5";
+    case usearch_gpu_class_apple_metal7_k: return "apple-metal7";
+    case usearch_gpu_class_apple_metal9_k: return "apple-metal9";
+    case usearch_gpu_class_apple_metal10_k: return "apple-metal10";
+    default: return "unknown";
+    }
+}
 
-char const* usearch_nvme_class_name(usearch_nvme_class_t) { return "posix"; }
+usearch_gpu_class_t usearch_gpu_class_from_name(usearch_bytes_view_t name) {
+    for (int code = usearch_gpu_class_nvidia_ampere_k; code <= usearch_gpu_class_apple_metal10_k; ++code) {
+        usearch_gpu_class_t const gpu_class = static_cast<usearch_gpu_class_t>(code);
+        if (named(name, usearch_gpu_class_name(gpu_class))) return gpu_class;
+    }
+    return usearch_gpu_class_unknown_k;
+}
+
+char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class) {
+    switch (nvme_class) {
+    case usearch_nvme_class_posix_k: return "posix";
+    case usearch_nvme_class_linux_aio_k: return "linux-aio";
+    case usearch_nvme_class_linux_uring_k: return "linux-uring";
+    case usearch_nvme_class_linux_uring_passthrough_k: return "linux-uring-passthrough";
+    case usearch_nvme_class_linux_spdk_k: return "linux-spdk";
+    case usearch_nvme_class_windows_ioring_k: return "windows-ioring";
+    default: return "unknown";
+    }
+}
 
 usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_view_t name) {
-    return named(name, "posix") ? usearch_nvme_class_posix_k : usearch_nvme_class_unknown_k;
+    for (int code = usearch_nvme_class_posix_k; code <= usearch_nvme_class_windows_ioring_k; ++code) {
+        usearch_nvme_class_t const nvme_class = static_cast<usearch_nvme_class_t>(code);
+        if (named(name, usearch_nvme_class_name(nvme_class))) return nvme_class;
+    }
+    return usearch_nvme_class_unknown_k;
 }
 
 #pragma endregion Vocabulary

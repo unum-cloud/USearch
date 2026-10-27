@@ -164,7 +164,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /**
-         * The width of the indexed vectors.
+         * The width of the indexed vectors, which init freezes, refusing zero with CONFIG_MISMATCH.
          *
          * @throws USearchException INVALID_ARGUMENT on a negative width.
          */
@@ -280,10 +280,19 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * @param size the stored entries.
      * @param capacity the entries hosted without growing again.
      * @param memoryUsage the bytes the handle holds; traversal scratch is the executor's.
-     * @param capabilities the codename of the kernels the index dispatched to on this machine.
+     * @param cpuClass the CPU class dispatch picked on this machine, as {@code usearch_cpu_class_name}
+     *     spells it.
+     * @param gpuClass the GPU class dispatch picked on the index's devices; "unknown" for a host index.
+     * @param shardsCount the live shards.
      */
     public record DenseIndexDescription(
-            DenseMetadata metadata, long size, long capacity, long memoryUsage, String capabilities) {
+            DenseMetadata metadata,
+            long size,
+            long capacity,
+            long memoryUsage,
+            String cpuClass,
+            String gpuClass,
+            long shardsCount) {
 
         /** Lifts a {@code usearch_dense_index_description_t}. */
         static DenseIndexDescription lift(MemorySegment description) {
@@ -293,7 +302,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     description.get(Library.SIZE, Library.offset(DESCRIPTION, "size")),
                     description.get(Library.SIZE, Library.offset(DESCRIPTION, "capacity")),
                     description.get(Library.SIZE, Library.offset(DESCRIPTION, "memory_usage")),
-                    Library.string(description.get(Library.POINTER, Library.offset(DESCRIPTION, "capabilities"))));
+                    Library.text(CPU_CLASS_NAME, description.get(Library.ENUM, Library.offset(DESCRIPTION, "cpu_class"))),
+                    Library.text(GPU_CLASS_NAME, description.get(Library.ENUM, Library.offset(DESCRIPTION, "gpu_class"))),
+                    description.get(Library.SIZE, Library.offset(DESCRIPTION, "shards_count")));
         }
     }
 
@@ -1610,7 +1621,14 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             Library.SIZE.withName("size"),
             Library.SIZE.withName("capacity"),
             Library.SIZE.withName("memory_usage"),
-            Library.POINTER.withName("capabilities"));
+            Library.ENUM.withName("cpu_class"),
+            Library.ENUM.withName("gpu_class"),
+            Library.SIZE.withName("shards_count"));
+
+    /** Spells a {@code usearch_cpu_class_t} and a {@code usearch_gpu_class_t}. */
+    private static final MethodHandle CPU_CLASS_NAME = Library.namer("usearch_cpu_class_name");
+
+    private static final MethodHandle GPU_CLASS_NAME = Library.namer("usearch_gpu_class_name");
 
     /** {@code usearch_reachability_t}. */
     static final StructLayout REACHABILITY = MemoryLayout.structLayout(
@@ -1633,7 +1651,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                 Library.SIZE.withName("dimensions"),
                 Library.SIZE.withName("connectivity"),
                 Library.SIZE.withName("values_per_key"),
-                Library.PLACEMENT.withName(placement));
+                Library.placement(placement));
     }
 
     /** {@code usearch_dense_load_*_t}, reading {@code source} into the placement named {@code placement}. */
@@ -1641,7 +1659,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         return Library.opening(
                 Library.padding(),
                 Library.BYTES_VIEW.withName(source),
-                Library.PLACEMENT.withName(placement),
+                Library.placement(placement),
                 Library.SIZE.withName("values_per_key"),
                 PROGRESS);
     }
@@ -1674,7 +1692,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     static final Verb VIEW_NVME = new Verb(
             "usearch_dense_view_nvme",
             Library.opening(
-                    Library.padding(), Library.BYTES_VIEW.withName("path"), Library.PLACEMENT.withName("nvme")));
+                    Library.padding(), Library.BYTES_VIEW.withName("path"), Library.placement("nvme")));
 
     static final Verb RESERVE =
             new Verb("usearch_dense_reserve", Library.opening(Library.padding(), Library.SIZE.withName("capacity")));

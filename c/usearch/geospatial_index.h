@@ -439,7 +439,8 @@ typedef struct usearch_geospatial_reserve_t {
     size_t entries;
 } usearch_geospatial_reserve_t;
 
-/** Reserves capacity ahead of insertion. */
+/** Grows the shards ahead of incoming entries - a capacity hint, since insertions grow them on
+ *  demand. */
 USEARCH_EXPORT void usearch_geospatial_reserve(usearch_geospatial_reserve_t* arguments);
 
 /** The arguments of @c usearch_geospatial_clear. */

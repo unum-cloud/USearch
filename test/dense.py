@@ -55,12 +55,14 @@ from usearch import (
     DenseTraversalStats,
     DenseVectors,
     Executor,
+    GPUClass,
     InvalidArgumentError,
     Key,
     Match,
     Matches,
     Monolith,
     Mood,
+    NVMeClass,
     On,
     ReadOnlyError,
     Residency,
@@ -103,6 +105,13 @@ def test_construction_takes_a_pinned_class():
     index.reserve(2)
     index.insert([1, 2], np.ones((2, 8), dtype=np.float32))
     assert len(index) == 2 and index.cpu_class is CPUClass.SERIAL
+
+
+def test_fresh_index_inserts_without_a_reservation():
+    """Init freezes the geometry, so a fresh index takes rows and grows for them with no `reserve`."""
+    index = DenseIndex.init_ram(dimensions=8)
+    index.insert(np.arange(100), np.random.default_rng(42).random((100, 8), dtype=np.float32))
+    assert len(index) == 100 and index.count(7) == 1
 
 
 @pytest.mark.parametrize(
@@ -177,6 +186,27 @@ def test_drain_takes_a_mood():
         pool.drain("parked")
     with pytest.raises(ValueError):
         pool.drain(7)
+
+
+def test_class_enums_carry_the_library_spellings():
+    """Every class member is named by the library's spelling of its value, in value order, from one up."""
+    spellings = {
+        CPUClass: "serial intel-haswell intel-sierra intel-skylake intel-icelake amd-genoa intel-sapphire intel-granite"
+        " intel-diamond aws-g2 apple-m2 apple-m4 aws-g5 nvidia-vera alibaba-c930 wasm32-v128 wasm64-extended",
+        GPUClass: "nvidia-ampere nvidia-ada nvidia-hopper nvidia-blackwell nvidia-blackwellrtx nvidia-rubin amd-cdna3"
+        " amd-cdna4 amd-cdna5 apple-metal7 apple-metal9 apple-metal10",
+        NVMeClass: "posix linux-aio linux-uring linux-uring-passthrough linux-spdk windows-ioring",
+    }
+    for enum, spelled in spellings.items():
+        expected = [(code, name.upper().replace("-", "_")) for code, name in enumerate(spelled.split(), start=1)]
+        assert [(member.value, member.name) for member in enum] == expected
+
+
+def test_nvme_executor_takes_an_nvme_class():
+    """The engine an NVMe executor submits through is an `NVMeClass`, and nothing else is guessed at."""
+    assert Executor.for_nvme(threads=1, nvme_class=NVMeClass.POSIX).residency is Residency.NVME
+    with pytest.raises(TypeError):
+        Executor.for_nvme(threads=1, nvme_class="posix")
 
 
 def test_borrowed_pool_must_be_named():

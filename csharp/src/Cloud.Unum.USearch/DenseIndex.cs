@@ -71,8 +71,8 @@ public static partial class Names
 /// </remarks>
 public readonly struct DenseOptions
 {
-    /// <summary>The width of the indexed vectors; zero leaves the geometry unfrozen, so the index
-    /// admits no rows.</summary>
+    /// <summary>The width of the indexed vectors, which init freezes; zero is refused with
+    /// <see cref="Status.ConfigMismatch"/>.</summary>
     public ulong Dimensions { get; init; }
 
     /// <summary>The distance kind used between vectors.</summary>
@@ -150,8 +150,14 @@ public readonly struct DenseIndexDescription
     /// <summary>The bytes the handle holds; traversal scratch is the executor's.</summary>
     public ulong MemoryUsage { get; init; }
 
-    /// <summary>The codename of the kernels the index dispatched to on this machine.</summary>
-    public string Capabilities { get; init; }
+    /// <summary>The CPU class dispatch picked on this machine, as <c>usearch_cpu_class_name</c> spells it.</summary>
+    public string CpuClass { get; init; }
+
+    /// <summary>The GPU class dispatch picked on the index's devices; "unknown" for a host index.</summary>
+    public string GpuClass { get; init; }
+
+    /// <summary>The live shards.</summary>
+    public ulong ShardsCount { get; init; }
 }
 
 /// <summary>
@@ -597,8 +603,8 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <returns>The receiver, holding nothing but the two references.</returns>
     public DenseIndexDeferredOn Deferred(Executor executor) => new(this, executor);
 
-    /// <summary>Claims capacity for incoming vectors, counting the entries already stored. Calls
-    /// <c>usearch_dense_reserve</c>.</summary>
+    /// <summary>Claims capacity for incoming vectors, counting the entries already stored - a hint,
+    /// since insertions grow the index on demand. Calls <c>usearch_dense_reserve</c>.</summary>
     /// <param name="capacity">The desired total capacity.</param>
     public void Reserve(ulong capacity) => Calls.Block(new DenseReserveCall(new(this._handle, null), capacity));
 
@@ -1149,7 +1155,9 @@ internal unsafe struct DenseDescribeCall(CallHandles handles) : ICall<DenseIndex
             Size = lowered->Size,
             Capacity = lowered->Capacity,
             MemoryUsage = lowered->MemoryUsage,
-            Capabilities = Marshal.PtrToStringUTF8(lowered->Capabilities) ?? string.Empty,
+            CpuClass = Marshal.PtrToStringUTF8(NativeMethods.usearch_cpu_class_name(lowered->CpuClass)) ?? "unknown",
+            GpuClass = Marshal.PtrToStringUTF8(NativeMethods.usearch_gpu_class_name(lowered->GpuClass)) ?? "unknown",
+            ShardsCount = lowered->ShardsCount,
         };
     }
 }
@@ -2213,7 +2221,9 @@ internal struct NativeDenseDescription
     public nuint Size;
     public nuint Capacity;
     public nuint MemoryUsage;
-    public IntPtr Capabilities;
+    public int CpuClass;
+    public int GpuClass;
+    public nuint ShardsCount;
 }
 
 /// <summary>Traversal telemetry, fully overwritten by the call it is passed to.</summary>

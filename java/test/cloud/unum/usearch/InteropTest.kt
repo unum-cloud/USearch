@@ -36,8 +36,8 @@ class InteropTest {
         val options: DenseOptions = DenseOptions().dimensions(2).quantization(Scalar.BF16)
         val index: DenseIndex = DenseIndex.initRam(options, intArrayOf())
         index.use {
-            val capabilities: String = it.describe().capabilities()
-            assertTrue(capabilities.isNotEmpty())
+            val cpuClass: String = it.describe().cpuClass()
+            assertTrue(cpuClass.isNotEmpty())
         }
     }
 

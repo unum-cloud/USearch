@@ -1824,6 +1824,17 @@ void test_sequence_vram(void) {
     int32_t const devices[1] = {0};
     usearch_vram_options_t const vram = {.devices = devices, .devices_count = 1};
 
+    usearch_sequence_index_t index = NULL;
+    usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &index,
+                                                                .outcome = &outcome,
+                                                                .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                                .vram = vram});
+    if (outcome.status == usearch_status_device_k) {
+        printf("Test: Sequence VRAM - SKIPPED: %s\n", outcome.message);
+        return;
+    }
+    expect(!outcome.message, outcome.message);
+
     usearch_sequence_index_t refused = NULL;
     usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &refused,
                                                                 .outcome = &outcome,
@@ -1837,16 +1848,6 @@ void test_sequence_vram(void) {
                                                                 .vram = vram});
     expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU sequence index bounds no key's entries");
 
-    usearch_sequence_index_t index = NULL;
-    usearch_sequence_init_vram(&(usearch_sequence_init_vram_t) {.index = &index,
-                                                                .outcome = &outcome,
-                                                                .metric = usearch_sequence_metric_levenshtein_bytes_k,
-                                                                .vram = vram});
-    if (outcome.status == usearch_status_device_k) {
-        printf("Test: Sequence VRAM - SKIPPED: %s\n", outcome.message);
-        return;
-    }
-    expect(!outcome.message, outcome.message);
     usearch_executor_t executor = NULL;
     usearch_executor_for_vram(
         &(usearch_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = vram});
@@ -2186,15 +2187,6 @@ void test_shapes_vram(void) {
     int32_t const devices[1] = {0};
     usearch_vram_options_t const vram = {.devices = devices, .devices_count = 1};
 
-    usearch_shapes_index_t refused = NULL;
-    usearch_shapes_init_vram(&(usearch_shapes_init_vram_t) {.index = &refused,
-                                                            .outcome = &outcome,
-                                                            .metric = usearch_shapes_metric_wasserstein_procrustes_k,
-                                                            .quantization = usearch_scalar_f16_k,
-                                                            .vram = vram});
-    expect_eq(outcome.status, usearch_status_unsupported_k, "Only Chamfer and Hausdorff serve a GPU");
-    expect(refused == NULL, "A refused initialization returns no handle");
-
     usearch_shapes_index_t index = NULL;
     usearch_shapes_init_vram(&(usearch_shapes_init_vram_t) {.index = &index,
                                                             .outcome = &outcome,
@@ -2206,6 +2198,16 @@ void test_shapes_vram(void) {
         return;
     }
     expect(!outcome.message, outcome.message);
+
+    usearch_shapes_index_t refused = NULL;
+    usearch_shapes_init_vram(&(usearch_shapes_init_vram_t) {.index = &refused,
+                                                            .outcome = &outcome,
+                                                            .metric = usearch_shapes_metric_wasserstein_procrustes_k,
+                                                            .quantization = usearch_scalar_f16_k,
+                                                            .vram = vram});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "Only Chamfer and Hausdorff serve a GPU");
+    expect(refused == NULL, "A refused initialization returns no handle");
+
     usearch_executor_t executor = NULL;
     usearch_executor_for_vram(
         &(usearch_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = vram});
@@ -2655,6 +2657,15 @@ void test_geospatial_vram(void) {
     int32_t const devices[1] = {0};
     usearch_vram_options_t const vram = {.devices = devices, .devices_count = 1};
 
+    usearch_geospatial_index_t index = NULL;
+    usearch_geospatial_init_vram(
+        &(usearch_geospatial_init_vram_t) {.index = &index, .outcome = &outcome, .vram = vram});
+    if (outcome.status == usearch_status_device_k) {
+        printf("Test: Geospatial VRAM - SKIPPED: %s\n", outcome.message);
+        return;
+    }
+    expect(!outcome.message, outcome.message);
+
     usearch_geospatial_terrain_t const terrain = {.rows = 1,
                                                   .columns = 1,
                                                   .row_step_degrees = 1,
@@ -2666,14 +2677,6 @@ void test_geospatial_vram(void) {
     expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU terrain needs its heights, not a callback");
     expect(refused == NULL, "A refused initialization returns no handle");
 
-    usearch_geospatial_index_t index = NULL;
-    usearch_geospatial_init_vram(
-        &(usearch_geospatial_init_vram_t) {.index = &index, .outcome = &outcome, .vram = vram});
-    if (outcome.status == usearch_status_device_k) {
-        printf("Test: Geospatial VRAM - SKIPPED: %s\n", outcome.message);
-        return;
-    }
-    expect(!outcome.message, outcome.message);
     usearch_executor_t executor = NULL;
     usearch_executor_for_vram(
         &(usearch_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = vram});
@@ -3433,18 +3436,6 @@ void test_library_probes(void) {
     expect(usearch_version_name() != NULL, "The version must be reported");
     expect(usearch_capabilities_compiled() != NULL, "The compiled capabilities must be reported");
     expect(usearch_capabilities_available() != NULL, "The available capabilities must be reported");
-    usearch_status_t const unnamed = usearch_status_from_name((usearch_bytes_view_t) {(uint8_t const*)"no-such", 7});
-    expect_eq(unnamed, usearch_status_invalid_argument_k, "An unrecognized status name is an invalid argument");
-    expect(strcmp(usearch_status_name(usearch_status_deferred_k), "deferred") == 0,
-           "The non-final status spells deferred");
-    expect(strcmp(usearch_status_name((usearch_status_t)999), "unrecognized") == 0,
-           "A value no status carries spells unrecognized");
-    usearch_mood_t const spinning = usearch_mood_from_name((usearch_bytes_view_t) {(uint8_t const*)"spinning", 8});
-    expect_eq(spinning, usearch_mood_spinning_k, "A mood reads back from its name");
-    expect(strcmp(usearch_mood_name(usearch_mood_parked_k), "parked") == 0, "A mood spells its name");
-    usearch_traversal_t const scan = usearch_traversal_from_name((usearch_bytes_view_t) {(uint8_t const*)"scan", 4});
-    expect_eq(scan, usearch_traversal_scan_k, "A traversal reads back from its name");
-    expect(strcmp(usearch_traversal_name(usearch_traversal_walk_k), "walk") == 0, "A traversal spells its name");
 
     // A machine without GPUs lists none, so the call succeeds everywhere and names what it lists.
     usearch_gpu_device_t devices[8];
@@ -3464,6 +3455,195 @@ void test_library_probes(void) {
                (unsigned long long)(devices[position].memory_bytes >> 20));
     }
     printf("Test: Library Probes - PASSED\n");
+}
+
+/** One enumerator and the spelling its `_name` function answers: a row of the naming contract. */
+typedef struct named_value_t {
+    int value;
+    char const* spelling;
+} named_value_t;
+
+/** The bytes of @p text, viewed for a `_from_name` function. */
+static usearch_bytes_view_t text_view(char const* text, size_t length) {
+    return (usearch_bytes_view_t) {(uint8_t const*)text, length};
+}
+
+/** Fails, naming @p what and @p spelling, unless @p holds. */
+static void expect_named(bool holds, char const* what, char const* spelling, char const* claim) {
+    char message[160];
+    snprintf(message, sizeof(message), "%s \"%s\": %s", what, spelling, claim);
+    expect(holds, message);
+}
+
+/**
+ *  @brief Checks one `_name` and `_from_name` pair against @p table, the enumerators it spells.
+ *
+ *  Every spelling names its value and reads back to it, and no two rows share a spelling. A near
+ *  miss of a spelling - upper case, a trailing space or letter, the last letter dropped - and an
+ *  empty or null view read back as @p unknown. Every value from @p unknown to eight past the
+ *  largest row that no row lists spells @p fallback, which reads back as @p unknown.
+ */
+static void expect_names(char const* what, named_value_t const* table, size_t count, int unknown, char const* fallback,
+                         char const* (*name_of)(int), int (*from_name)(usearch_bytes_view_t)) {
+    int largest = unknown;
+    for (size_t row = 0; row != count; ++row) {
+        char const* const spelling = table[row].spelling;
+        size_t const length = strlen(spelling);
+        largest = table[row].value > largest ? table[row].value : largest;
+        expect_named(strcmp(name_of(table[row].value), spelling) == 0, what, spelling, "the value spells it");
+        expect_named(from_name(text_view(spelling, length)) == table[row].value, what, spelling, "it reads back");
+        for (size_t other = 0; other != row; ++other)
+            expect_named(strcmp(table[other].spelling, spelling) != 0, what, spelling, "no other row spells it");
+
+        char near_miss[64];
+        expect_named(length + 1 < sizeof(near_miss), what, spelling, "it fits the near-miss buffer");
+        for (size_t letter = 0; letter != length; ++letter)
+            near_miss[letter] = spelling[letter] >= 'a' && spelling[letter] <= 'z'
+                                    ? (char)(spelling[letter] - 'a' + 'A')
+                                    : spelling[letter];
+        expect_named(from_name(text_view(near_miss, length)) == unknown, what, spelling, "upper case is unknown");
+        memcpy(near_miss, spelling, length);
+        near_miss[length] = ' ';
+        expect_named(from_name(text_view(near_miss, length + 1)) == unknown, what, spelling,
+                     "a trailing space is unknown");
+        near_miss[length] = 'x';
+        expect_named(from_name(text_view(near_miss, length + 1)) == unknown, what, spelling,
+                     "a trailing letter is unknown");
+        expect_named(from_name(text_view(spelling, length - 1)) == unknown, what, spelling,
+                     "a dropped last letter is unknown");
+    }
+    expect_named(from_name(text_view("", 0)) == unknown, what, "", "an empty view is unknown");
+    expect_named(from_name(text_view(NULL, 0)) == unknown, what, "", "a null view is unknown");
+    for (int value = unknown; value <= largest + 8; ++value) {
+        bool listed = false;
+        for (size_t row = 0; row != count; ++row) listed = listed || table[row].value == value;
+        if (!listed) expect_named(strcmp(name_of(value), fallback) == 0, what, fallback, "an unlisted value spells it");
+    }
+    expect_named(from_name(text_view(fallback, strlen(fallback))) == unknown, what, fallback, "it reads back unknown");
+}
+
+static char const* status_name_of(int value) { return usearch_status_name((usearch_status_t)value); }
+static int status_from_name(usearch_bytes_view_t name) { return (int)usearch_status_from_name(name); }
+static char const* scalar_name_of(int value) { return usearch_scalar_name((usearch_scalar_t)value); }
+static int scalar_from_name(usearch_bytes_view_t name) { return (int)usearch_scalar_from_name(name); }
+static char const* residency_name_of(int value) { return usearch_residency_name((usearch_residency_t)value); }
+static int residency_from_name(usearch_bytes_view_t name) { return (int)usearch_residency_from_name(name); }
+static char const* traversal_name_of(int value) { return usearch_traversal_name((usearch_traversal_t)value); }
+static int traversal_from_name(usearch_bytes_view_t name) { return (int)usearch_traversal_from_name(name); }
+static char const* mood_name_of(int value) { return usearch_mood_name((usearch_mood_t)value); }
+static int mood_from_name(usearch_bytes_view_t name) { return (int)usearch_mood_from_name(name); }
+static char const* cpu_class_name_of(int value) { return usearch_cpu_class_name((usearch_cpu_class_t)value); }
+static int cpu_class_from_name(usearch_bytes_view_t name) { return (int)usearch_cpu_class_from_name(name); }
+static char const* gpu_class_name_of(int value) { return usearch_gpu_class_name((usearch_gpu_class_t)value); }
+static int gpu_class_from_name(usearch_bytes_view_t name) { return (int)usearch_gpu_class_from_name(name); }
+static char const* nvme_class_name_of(int value) { return usearch_nvme_class_name((usearch_nvme_class_t)value); }
+static int nvme_class_from_name(usearch_bytes_view_t name) { return (int)usearch_nvme_class_from_name(name); }
+static char const* dense_metric_name_of(int value) { return usearch_dense_metric_name((usearch_dense_metric_t)value); }
+static int dense_metric_from_name(usearch_bytes_view_t name) { return (int)usearch_dense_metric_from_name(name); }
+
+/** Every `_name` and `_from_name` pair against the spellings its enumerators carry. */
+void test_names(void) {
+    printf("Test: Names\n");
+    named_value_t const statuses[] = {
+        {usearch_status_success_k, "success"},
+        {usearch_status_deferred_k, "deferred"},
+        {usearch_status_out_of_memory_k, "out-of-memory"},
+        {usearch_status_shape_mismatch_k, "shape-mismatch"},
+        {usearch_status_unsupported_layout_k, "unsupported-layout"},
+        {usearch_status_unknown_kind_k, "unknown-kind"},
+        {usearch_status_read_only_k, "read-only"},
+        {usearch_status_io_k, "io"},
+        {usearch_status_device_k, "device"},
+        {usearch_status_malformed_k, "malformed"},
+        {usearch_status_internal_k, "internal"},
+        {usearch_status_overflow_k, "overflow"},
+        {usearch_status_uninitialized_k, "uninitialized"},
+        {usearch_status_config_mismatch_k, "config-mismatch"},
+        {usearch_status_contended_k, "contended"},
+        {usearch_status_cancelled_k, "cancelled"},
+        {usearch_status_unsupported_k, "unsupported"},
+        {usearch_status_invalid_argument_k, "invalid-argument"},
+    };
+    named_value_t const scalars[] = {
+        {usearch_scalar_f64_k, "f64"},   {usearch_scalar_f32_k, "f32"},   {usearch_scalar_bf16_k, "bf16"},
+        {usearch_scalar_f16_k, "f16"},   {usearch_scalar_e5m2_k, "e5m2"}, {usearch_scalar_e4m3_k, "e4m3"},
+        {usearch_scalar_e3m2_k, "e3m2"}, {usearch_scalar_e2m3_k, "e2m3"}, {usearch_scalar_i8_k, "i8"},
+        {usearch_scalar_i4x2_k, "i4x2"}, {usearch_scalar_i32_k, "i32"},   {usearch_scalar_u8_k, "u8"},
+        {usearch_scalar_u4x2_k, "u4x2"}, {usearch_scalar_u1x8_k, "u1x8"},
+    };
+    named_value_t const residencies[] = {
+        {usearch_residency_ram_k, "ram"},
+        {usearch_residency_vram_k, "vram"},
+        {usearch_residency_nvme_k, "nvme"},
+    };
+    named_value_t const traversals[] = {{usearch_traversal_walk_k, "walk"}, {usearch_traversal_scan_k, "scan"}};
+    named_value_t const moods[] = {{usearch_mood_parked_k, "parked"}, {usearch_mood_spinning_k, "spinning"}};
+    named_value_t const cpu_classes[] = {
+        {usearch_cpu_class_serial_k, "serial"},
+        {usearch_cpu_class_intel_haswell_k, "intel-haswell"},
+        {usearch_cpu_class_intel_sierra_k, "intel-sierra"},
+        {usearch_cpu_class_intel_skylake_k, "intel-skylake"},
+        {usearch_cpu_class_intel_icelake_k, "intel-icelake"},
+        {usearch_cpu_class_amd_genoa_k, "amd-genoa"},
+        {usearch_cpu_class_intel_sapphire_k, "intel-sapphire"},
+        {usearch_cpu_class_intel_granite_k, "intel-granite"},
+        {usearch_cpu_class_intel_diamond_k, "intel-diamond"},
+        {usearch_cpu_class_aws_g2_k, "aws-g2"},
+        {usearch_cpu_class_apple_m2_k, "apple-m2"},
+        {usearch_cpu_class_apple_m4_k, "apple-m4"},
+        {usearch_cpu_class_aws_g5_k, "aws-g5"},
+        {usearch_cpu_class_nvidia_vera_k, "nvidia-vera"},
+        {usearch_cpu_class_alibaba_c930_k, "alibaba-c930"},
+        {usearch_cpu_class_wasm32_v128_k, "wasm32-v128"},
+        {usearch_cpu_class_wasm64_extended_k, "wasm64-extended"},
+    };
+    named_value_t const gpu_classes[] = {
+        {usearch_gpu_class_nvidia_ampere_k, "nvidia-ampere"},
+        {usearch_gpu_class_nvidia_ada_k, "nvidia-ada"},
+        {usearch_gpu_class_nvidia_hopper_k, "nvidia-hopper"},
+        {usearch_gpu_class_nvidia_blackwell_k, "nvidia-blackwell"},
+        {usearch_gpu_class_nvidia_blackwellrtx_k, "nvidia-blackwellrtx"},
+        {usearch_gpu_class_nvidia_rubin_k, "nvidia-rubin"},
+        {usearch_gpu_class_amd_cdna3_k, "amd-cdna3"},
+        {usearch_gpu_class_amd_cdna4_k, "amd-cdna4"},
+        {usearch_gpu_class_amd_cdna5_k, "amd-cdna5"},
+        {usearch_gpu_class_apple_metal7_k, "apple-metal7"},
+        {usearch_gpu_class_apple_metal9_k, "apple-metal9"},
+        {usearch_gpu_class_apple_metal10_k, "apple-metal10"},
+    };
+    named_value_t const nvme_classes[] = {
+        {usearch_nvme_class_posix_k, "posix"},
+        {usearch_nvme_class_linux_aio_k, "linux-aio"},
+        {usearch_nvme_class_linux_uring_k, "linux-uring"},
+        {usearch_nvme_class_linux_uring_passthrough_k, "linux-uring-passthrough"},
+        {usearch_nvme_class_linux_spdk_k, "linux-spdk"},
+        {usearch_nvme_class_windows_ioring_k, "windows-ioring"},
+    };
+    named_value_t const dense_metrics[] = {
+        {usearch_dense_metric_inner_k, "inner"},         {usearch_dense_metric_angular_k, "angular"},
+        {usearch_dense_metric_euclidean_k, "euclidean"}, {usearch_dense_metric_hamming_k, "hamming"},
+        {usearch_dense_metric_jaccard_k, "jaccard"},
+    };
+    size_t const row_bytes = sizeof(named_value_t);
+    expect_names("status", statuses, sizeof(statuses) / row_bytes, usearch_status_invalid_argument_k, "unrecognized",
+                 status_name_of, status_from_name);
+    expect_names("scalar", scalars, sizeof(scalars) / row_bytes, usearch_scalar_unknown_k, "unknown", scalar_name_of,
+                 scalar_from_name);
+    expect_names("residency", residencies, sizeof(residencies) / row_bytes, usearch_residency_ram_k, "unknown",
+                 residency_name_of, residency_from_name);
+    expect_names("traversal", traversals, sizeof(traversals) / row_bytes, usearch_traversal_walk_k, "unknown",
+                 traversal_name_of, traversal_from_name);
+    expect_names("mood", moods, sizeof(moods) / row_bytes, usearch_mood_parked_k, "unknown", mood_name_of,
+                 mood_from_name);
+    expect_names("CPU class", cpu_classes, sizeof(cpu_classes) / row_bytes, usearch_cpu_class_unknown_k, "unknown",
+                 cpu_class_name_of, cpu_class_from_name);
+    expect_names("GPU class", gpu_classes, sizeof(gpu_classes) / row_bytes, usearch_gpu_class_unknown_k, "unknown",
+                 gpu_class_name_of, gpu_class_from_name);
+    expect_names("NVMe class", nvme_classes, sizeof(nvme_classes) / row_bytes, usearch_nvme_class_unknown_k, "unknown",
+                 nvme_class_name_of, nvme_class_from_name);
+    expect_names("dense metric", dense_metrics, sizeof(dense_metrics) / row_bytes, usearch_dense_metric_unknown_k,
+                 "unknown", dense_metric_name_of, dense_metric_from_name);
+    printf("Test: Names - PASSED\n");
 }
 
 enum { deferred_rows = 128, deferred_dimensions = 16, deferred_wanted = 4 };
@@ -3736,6 +3916,10 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
                                                           .quantization = usearch_scalar_bf16_k,
                                                           .dimensions = dimensions,
                                                           .vram = thrice});
+    if (outcome.status == usearch_status_device_k) {
+        printf("Test: VRAM Parts Share a Device - SKIPPED: %s\n", outcome.message);
+        return;
+    }
     expect(!outcome.message, outcome.message);
     usearch_executor_t executor = NULL;
     usearch_executor_for_vram(
@@ -3852,6 +4036,10 @@ void test_vram_scan(size_t const collection_size, size_t const dimensions) {
                                                           .quantization = usearch_scalar_bf16_k,
                                                           .dimensions = dimensions,
                                                           .vram = vram});
+    if (outcome.status == usearch_status_device_k) {
+        printf("Test: VRAM Scan - SKIPPED: %s\n", outcome.message);
+        return;
+    }
     expect(!outcome.message, outcome.message);
     usearch_executor_t executor = NULL;
     usearch_executor_for_vram(
@@ -3926,6 +4114,7 @@ int main(int argc, char* argv[]) {
     printf("- Filter: %s\n", test_filter ? test_filter : "none");
 
     if (selected("library_probes")) test_library_probes();
+    if (selected("names")) test_names();
     if (selected("outcome_contract")) test_outcome_contract(64);
 
     size_t const collection_sizes[] = {11, 512};

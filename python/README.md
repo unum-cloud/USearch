@@ -38,7 +38,7 @@ index = DenseIndex.init_ram(
 )
 
 vectors = np.random.rand(10_000, 256).astype(np.float32)
-index.reserve(len(vectors))
+index.reserve(len(vectors))  # Optional capacity hint; inserts grow on demand
 index.insert(np.arange(len(vectors)), vectors)  # On the calling thread
 
 pool = usearch.Executor.for_ram()  # The workers a receiver names
@@ -397,9 +397,9 @@ Each of its rows holds one query's largest logit and the softmax denominator tak
 index.count(42)  # entries sharing this key
 42 in index  # the same question, as a membership test
 len(index)  # stored entries
-index.describe()  # a DenseIndexDescription: .metadata, .size, .capacity, .memory_usage, .capabilities
+index.describe()  # a DenseIndexDescription: .metadata, .size, .capacity, .memory_usage, .cpu_class, .gpu_class, .shards_count
 index.health()  # a DenseReachability: .audited, .reachable, .sweeps
-index.capabilities  # the kernel family dispatch picked on this machine
+index.cpu_class  # the CPU class dispatch picked on this machine
 usearch.capabilities_compiled()  # the kernel families this build carries
 usearch.capabilities_available()  # the ones this machine can run
 ```

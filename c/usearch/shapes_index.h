@@ -431,7 +431,8 @@ typedef struct usearch_shapes_reserve_t {
     size_t points;
 } usearch_shapes_reserve_t;
 
-/** Reserves capacity ahead of insertion. */
+/** Grows the shards ahead of incoming entries - a capacity hint, since insertions grow them on
+ *  demand. */
 USEARCH_EXPORT void usearch_shapes_reserve(usearch_shapes_reserve_t* arguments);
 
 /** The arguments of @c usearch_shapes_clear. */

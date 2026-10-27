@@ -130,10 +130,38 @@ final class Library {
                     POINTER.withName("keys"), POINTER.withName("scores"), POINTER.withName("offsets"))
             .withName("usearch_matches_tape_view_t");
 
-    /** @c usearch_ram_options_t, @c usearch_vram_options_t and @c usearch_nvme_options_t all pair
-     *      a borrowed run with its count, so one layout serves the three. */
-    static final StructLayout PLACEMENT = MemoryLayout.structLayout(POINTER.withName("data"), SIZE.withName("count"))
-            .withName("usearch_placement_options_t");
+    /** @c usearch_ram_options_t - the memory domains shards go to, their capacity, and the CPU class pinned. */
+    static final StructLayout RAM_OPTIONS = MemoryLayout.structLayout(
+                    POINTER.withName("data"),
+                    SIZE.withName("count"),
+                    SIZE.withName("shard_capacity"),
+                    ENUM.withName("cpu_class"),
+                    padding())
+            .withName("usearch_ram_options_t");
+
+    /** @c usearch_vram_options_t - the devices shards go to, their capacity, and the GPU class pinned. */
+    static final StructLayout VRAM_OPTIONS = MemoryLayout.structLayout(
+                    POINTER.withName("data"),
+                    SIZE.withName("count"),
+                    SIZE.withName("shard_capacity"),
+                    ENUM.withName("gpu_class"),
+                    padding())
+            .withName("usearch_vram_options_t");
+
+    /** @c usearch_nvme_options_t - the paths shards serve from, and the CPU class pinned. */
+    static final StructLayout NVME_OPTIONS = MemoryLayout.structLayout(
+                    POINTER.withName("data"), SIZE.withName("count"), ENUM.withName("cpu_class"), padding())
+            .withName("usearch_nvme_options_t");
+
+    /** The placement layout a residency's verbs take, named @p residency : ram, vram or nvme. */
+    static StructLayout placement(String residency) {
+        StructLayout layout = switch (residency) {
+            case "ram" -> RAM_OPTIONS;
+            case "vram" -> VRAM_OPTIONS;
+            default -> NVME_OPTIONS;
+        };
+        return layout.withName(residency);
+    }
 
     /** @c usearch_keys_tape_view_t - a ragged run of keys a call wrote into its arena. */
     static final StructLayout KEYS_TAPE_VIEW = MemoryLayout.structLayout(

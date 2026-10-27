@@ -251,6 +251,8 @@ impl usearch_keys_tape_view_t {
 pub struct usearch_ram_options_t {
     pub memory_domains: *const i32,
     pub memory_domains_count: usize,
+    pub shard_capacity: usize,
+    pub cpu_class: usearch_cpu_class_t,
 }
 
 #[repr(C)]
@@ -258,6 +260,8 @@ pub struct usearch_ram_options_t {
 pub struct usearch_vram_options_t {
     pub devices: *const i32,
     pub devices_count: usize,
+    pub shard_capacity: usize,
+    pub gpu_class: usearch_gpu_class_t,
 }
 
 #[repr(C)]
@@ -265,7 +269,17 @@ pub struct usearch_vram_options_t {
 pub struct usearch_nvme_options_t {
     pub paths: *const usearch_bytes_view_t,
     pub paths_count: usize,
+    pub cpu_class: usearch_cpu_class_t,
 }
+
+/// The CPU class a placement dispatches as; zero derives the CPU's own.
+pub type usearch_cpu_class_t = c_int;
+
+/// The GPU class a placement dispatches as; zero derives the devices' own.
+pub type usearch_gpu_class_t = c_int;
+
+/// The NVMe class an executor submits through; zero derives the fastest the host admits.
+pub type usearch_nvme_class_t = c_int;
 
 /// Admits or rejects a batch of candidate keys, one admission per key.
 pub type usearch_predicate_callback_t =
@@ -349,6 +363,7 @@ pub struct usearch_executor_for_nvme_t {
     pub nvme: usearch_nvme_options_t,
     pub threads: usize,
     pub deferred_limit: usize,
+    pub nvme_class: usearch_nvme_class_t,
 }
 
 pub type usearch_mood_t = c_int;
@@ -388,6 +403,12 @@ extern "C" {
     pub fn usearch_version_name() -> *const c_char;
     pub fn usearch_capabilities_compiled() -> *const c_char;
     pub fn usearch_capabilities_available() -> *const c_char;
+    pub fn usearch_cpu_class_name(cpu_class: usearch_cpu_class_t) -> *const c_char;
+    pub fn usearch_cpu_class_from_name(name: usearch_bytes_view_t) -> usearch_cpu_class_t;
+    pub fn usearch_gpu_class_name(gpu_class: usearch_gpu_class_t) -> *const c_char;
+    pub fn usearch_gpu_class_from_name(name: usearch_bytes_view_t) -> usearch_gpu_class_t;
+    pub fn usearch_nvme_class_name(nvme_class: usearch_nvme_class_t) -> *const c_char;
+    pub fn usearch_nvme_class_from_name(name: usearch_bytes_view_t) -> usearch_nvme_class_t;
 }
 
 // endregion: Raw Declarations
@@ -1043,6 +1064,8 @@ pub(crate) fn ram_options(memory_domains: &[i32]) -> usearch_ram_options_t {
     usearch_ram_options_t {
         memory_domains: memory_domains.as_ptr(),
         memory_domains_count: memory_domains.len(),
+        shard_capacity: 0,
+        cpu_class: 0,
     }
 }
 
@@ -1051,6 +1074,8 @@ pub(crate) fn vram_options(devices: &[i32]) -> usearch_vram_options_t {
     usearch_vram_options_t {
         devices: devices.as_ptr(),
         devices_count: devices.len(),
+        shard_capacity: 0,
+        gpu_class: 0,
     }
 }
 
@@ -1059,6 +1084,7 @@ pub(crate) fn nvme_options(views: &[usearch_bytes_view_t]) -> usearch_nvme_optio
     usearch_nvme_options_t {
         paths: views.as_ptr(),
         paths_count: views.len(),
+        cpu_class: 0,
     }
 }
 
@@ -1445,6 +1471,7 @@ impl Executor {
                 nvme: nvme_options(&views),
                 threads,
                 deferred_limit,
+                nvme_class: 0,
             })
         };
         let executor = Executor::adopt(handle, Residency::Nvme);
@@ -1827,6 +1854,8 @@ impl<Verb: Calling> Future for Wait<'_, Verb> {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::{offset_of, size_of};
+
     use super::*;
 
     #[test]
@@ -1843,6 +1872,24 @@ mod tests {
         }
         // Dashes are cosmetic, so a bare hex run parses too.
         assert_eq!(Key::from_str("0000000000000000000000000000002a"), Ok(Key::from(42u64)));
+    }
+
+    #[test]
+    fn class_names_read_back() {
+        type FromName = unsafe extern "C" fn(usearch_bytes_view_t) -> c_int;
+        type Name = unsafe extern "C" fn(c_int) -> *const c_char;
+        let classes: [(FromName, Name, c_int); 3] = [
+            (usearch_cpu_class_from_name, usearch_cpu_class_name, 17),
+            (usearch_gpu_class_from_name, usearch_gpu_class_name, 12),
+            (usearch_nvme_class_from_name, usearch_nvme_class_name, 6),
+        ];
+        for (from_name, name, last) in classes {
+            for code in 1..=last {
+                let spelled = spelling(name, code);
+                assert_eq!(read_spelling(spelled, from_name, name, Some), Ok(code), "{spelled}");
+            }
+            assert_eq!(spelling(name, last + 1), "unknown");
+        }
     }
 
     #[test]
@@ -2041,6 +2088,22 @@ mod tests {
         let drives = nvme_options(&views);
         assert_eq!(drives.paths_count, 2);
         assert_eq!(unsafe { (*drives.paths).length }, "/mnt/nvme0".len());
+    }
+
+    #[test]
+    fn layouts() {
+        let word = size_of::<usize>();
+        assert_eq!(offset_of!(usearch_ram_options_t, shard_capacity), 2 * word);
+        assert_eq!(offset_of!(usearch_ram_options_t, cpu_class), 3 * word);
+        assert_eq!(size_of::<usearch_ram_options_t>(), 4 * word);
+        assert_eq!(offset_of!(usearch_vram_options_t, shard_capacity), 2 * word);
+        assert_eq!(offset_of!(usearch_vram_options_t, gpu_class), 3 * word);
+        assert_eq!(size_of::<usearch_vram_options_t>(), 4 * word);
+        assert_eq!(offset_of!(usearch_nvme_options_t, cpu_class), 2 * word);
+        assert_eq!(size_of::<usearch_nvme_options_t>(), 3 * word);
+        assert_eq!(offset_of!(usearch_executor_for_nvme_t, threads), 5 * word);
+        assert_eq!(offset_of!(usearch_executor_for_nvme_t, nvme_class), 7 * word);
+        assert_eq!(size_of::<usearch_executor_for_nvme_t>(), 8 * word);
     }
 }
 

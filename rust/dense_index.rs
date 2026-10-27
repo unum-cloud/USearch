@@ -29,12 +29,13 @@ use numkong::MatrixView;
 use crate::types::{
     arena_slice, check, fail, lower_predicate, lower_progress, nvme_options, path_view, path_views, ram_options,
     read_spelling, spelling, static_string, usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k,
-    usearch_completion_t, usearch_executor_t, usearch_key_t, usearch_keys_tape_view_t, usearch_keys_view_t,
-    usearch_matches_tape_view_t, usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t,
-    usearch_predicate_t, usearch_progress_t, usearch_ram_options_t, usearch_rows_view_t, usearch_scalar_t,
-    usearch_traversal_t, usearch_vram_options_t, values_of, vram_options, Accepts, Arena, Blocking, Callbacks, Calling,
-    Completion, Deferring, Element, Error, Executor, Exported, Handles, Key, Matches, MatchesRow, On, Predicate,
-    ProgressCallback, Residency, Result, RowsView, Scalar, Status, Traversal,
+    usearch_completion_t, usearch_cpu_class_name, usearch_cpu_class_t, usearch_executor_t, usearch_gpu_class_name,
+    usearch_gpu_class_t, usearch_key_t, usearch_keys_tape_view_t, usearch_keys_view_t, usearch_matches_tape_view_t,
+    usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t, usearch_progress_t,
+    usearch_ram_options_t, usearch_rows_view_t, usearch_scalar_t, usearch_traversal_t, usearch_vram_options_t,
+    values_of, vram_options, Accepts, Arena, Blocking, Callbacks, Calling, Completion, Deferring, Element, Error,
+    Executor, Exported, Handles, Key, Matches, MatchesRow, On, Predicate, ProgressCallback, Residency, Result,
+    RowsView, Scalar, Status, Traversal,
 };
 
 // region: Raw Declarations
@@ -345,7 +346,9 @@ pub struct usearch_dense_index_description_t {
     pub size: usize,
     pub capacity: usize,
     pub memory_usage: usize,
-    pub capabilities: *const c_char,
+    pub cpu_class: usearch_cpu_class_t,
+    pub gpu_class: usearch_gpu_class_t,
+    pub shards_count: usize,
 }
 
 impl Default for usearch_dense_index_description_t {
@@ -355,7 +358,9 @@ impl Default for usearch_dense_index_description_t {
             size: 0,
             capacity: 0,
             memory_usage: 0,
-            capabilities: ptr::null(),
+            cpu_class: 0,
+            gpu_class: 0,
+            shards_count: 0,
         }
     }
 }
@@ -547,8 +552,8 @@ impl FromStr for DenseMetric {
 /// Rust-only; the fields `usearch_dense_init_ram_t` and `usearch_dense_init_vram_t` share.
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct DenseOptions {
-    /// The number of indexed dimensions; zero leaves the geometry unfrozen, so the index admits
-    /// no rows.
+    /// The number of indexed dimensions, which init freezes; zero is refused with
+    /// `Status::ConfigMismatch`.
     pub dimensions: usize,
     /// The metric kind used for distance calculations.
     pub metric: DenseMetric,
@@ -620,8 +625,12 @@ pub struct DenseIndexDescription {
     pub capacity: usize,
     /// Bytes the handle holds; traversal scratch is the executor's.
     pub memory_usage: usize,
-    /// The capability codename the index dispatched to on this machine.
-    pub capabilities: &'static str,
+    /// The CPU class dispatch picked on this machine, as `usearch_cpu_class_name` spells it.
+    pub cpu_class: &'static str,
+    /// The GPU class dispatch picked on the index's devices; "unknown" for a host index.
+    pub gpu_class: &'static str,
+    /// Live shards.
+    pub shards_count: usize,
 }
 
 // endregion: Geometry
@@ -1623,7 +1632,8 @@ pub trait DenseVerbs<'index>: Copy {
     /// The index this receiver reaches and the executor its calls run on.
     fn handles(&self) -> Handles;
 
-    /// Reserves capacity for a number of incoming vectors ahead of insertion.
+    /// Reserves capacity for a number of incoming vectors ahead of insertion, a hint, since
+    /// insertions grow the index on demand.
     ///
     /// Calls `usearch_dense_reserve`.
     fn reserve(self, capacity: usize) -> Answer<'index, Self, DenseReserve> {
@@ -2064,7 +2074,7 @@ pub struct DenseDescribe {
     description: usearch_dense_index_description_t,
 }
 
-// Safety: the only pointer the description holds is the static capabilities name.
+// Safety: the description holds no pointers, only counters and class enumerators.
 unsafe impl Send for DenseDescribe {}
 
 impl Calling for DenseDescribe {
@@ -2094,7 +2104,9 @@ impl Calling for DenseDescribe {
             size: self.description.size,
             capacity: self.description.capacity,
             memory_usage: self.description.memory_usage,
-            capabilities: unsafe { static_string(self.description.capabilities) },
+            cpu_class: unsafe { static_string(usearch_cpu_class_name(self.description.cpu_class)) },
+            gpu_class: unsafe { static_string(usearch_gpu_class_name(self.description.gpu_class)) },
+            shards_count: self.description.shards_count,
         })
     }
 }
@@ -3004,6 +3016,28 @@ mod tests {
     // region: Metadata Marshalling
 
     #[test]
+    fn layouts() {
+        use std::mem::{offset_of, size_of};
+
+        let word = size_of::<usize>();
+        assert_eq!(offset_of!(DenseTraversalStats, restarts), 2 * word);
+        assert_eq!(size_of::<DenseTraversalStats>(), 3 * word);
+        let cpu_class = offset_of!(usearch_dense_index_description_t, cpu_class);
+        assert_eq!(offset_of!(usearch_dense_index_description_t, metadata), 0);
+        assert_eq!(
+            offset_of!(usearch_dense_index_description_t, size),
+            size_of::<usearch_dense_metadata_t>()
+        );
+        assert_eq!(cpu_class, size_of::<usearch_dense_metadata_t>() + 3 * word);
+        assert_eq!(offset_of!(usearch_dense_index_description_t, gpu_class), cpu_class + 4);
+        assert_eq!(
+            offset_of!(usearch_dense_index_description_t, shards_count),
+            cpu_class + 8
+        );
+        assert_eq!(size_of::<usearch_dense_index_description_t>(), cpu_class + 8 + word);
+    }
+
+    #[test]
     fn metadata_lifts_the_four_fields_a_checkpoint_froze() -> Result<()> {
         let raw = usearch_dense_metadata_t {
             metric: DenseMetric::Euclidean as i32,
@@ -3113,25 +3147,20 @@ mod tests {
         Ok(())
     }
 
-    /// A zeroed width freezes nothing, and the first batch has no width the index would trust.
+    /// Init freezes the geometry, so a zeroed width is refused there rather than at the first batch.
     #[test]
-    fn an_unfrozen_geometry_admits_no_rows() -> Result<()> {
+    fn zero_dimensions_are_refused_at_init() {
         let options = DenseOptions {
             dimensions: 0,
             ..DenseOptions::default()
         };
-        let index = DenseIndex::init_ram(&options, &[])?;
-        assert_eq!(index.describe()?.metadata.dimensions, 0);
-
-        let slab = seeded_rows(1, 12, SEED);
         assert!(matches!(
-            index.insert(sequential_keys(1), &rows(&slab, 12)?),
+            DenseIndex::init_ram(&options, &[]),
             Err(Error {
-                status: Status::Uninitialized,
+                status: Status::ConfigMismatch,
                 ..
             })
         ));
-        Ok(())
     }
 
     /// The handle is one pointer, so a move must not disturb it and two threads may share it.

@@ -279,7 +279,7 @@ typedef struct usearch_py_enum_t {
 } usearch_py_enum_t;
 
 extern usearch_py_enum_t usearch_py_status, usearch_py_mood, usearch_py_dense_metric, usearch_py_scalar,
-    usearch_py_residency, usearch_py_traversal;
+    usearch_py_residency, usearch_py_traversal, usearch_py_cpu_class, usearch_py_gpu_class, usearch_py_nvme_class;
 
 /**
  *  @brief Builds every mirrored enum's class from `enum.IntEnum` and adds it to @p module, one
@@ -642,10 +642,12 @@ PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t c
 extern char const doc_version[];
 extern char const doc_capabilities_compiled[];
 extern char const doc_capabilities_available[];
+extern char const doc_layouts[];
 
 PyObject* api_version(PyObject* self, PyObject* unused);
 PyObject* api_capabilities_compiled(PyObject* self, PyObject* unused);
 PyObject* api_capabilities_available(PyObject* self, PyObject* unused);
+PyObject* api_layouts(PyObject* self, PyObject* unused);
 
 #pragma endregion Shared Helpers
 

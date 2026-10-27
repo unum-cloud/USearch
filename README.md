@@ -95,13 +95,14 @@ The [benchmark tables](bench/README.md#10m) record the configuration & checkpoin
 ## Architecture
 
 An index dispatches on its Modality, Residency, stored scalar type, metric, & available hardware.
-The build selects the kernel families it includes; runtime detection selects the newest eligible kit under the caller's capability ceiling.
+The build selects the kernel families it includes; runtime detection picks the newest CPU, GPU, & NVMe classes the machine admits, unless the caller pins one.
+A description reports the classes an index dispatches as & the `shards_count` it spans.
 The graph & its traversal are templated on those kits, so a walk carries the matching vector loads, dot-products, norms, atomics, & wait instructions together.
 
 ### Residencies
 
 __RAM__ shards follow memory domains, __VRAM__ shards follow devices, & __NVMe__ views follow checkpoint parts.
-Sharding partitions the indexed rows rather than replicating the entire graph.
+Sharding partitions the indexed entries rather than replicating the entire graph.
 [SafeGraphs](docs/format.md) carries the keys, vectors, norms, & links between those layers.
 
 The useful unit of parallelism changes with residency.
@@ -120,17 +121,47 @@ See the [C++ guide](include/usearch/dense/README.md) for the layers & the [C gui
 | Modality            | Inputs                                              | Similarities & Distances                                                  | Status                                   |
 | :------------------ | :-------------------------------------------------- | :------------------------------------------------------------------------ | :--------------------------------------- |
 | __Dense Vectors__   | Equal-width numeric rows or packed bit sets         | Inner-Product, Angular, Euclidean, Hamming, & Jaccard                     | RAM, VRAM, & NVMe engines                |
-| __Sequences__       | Variable-length byte strings & UTF-8 text           | Levenshtein & overlap; declared global & local alignment                  | Experimental C++ engine & C interface    |
+| __Sequences__       | Variable-length byte strings & UTF-8 text           | Levenshtein, overlap, & Needleman-Wunsch global alignment                 | Experimental C++ engine & C interface    |
 | __Shapes__          | 3D point clouds of any size                         | Chamfer, Hausdorff, Wasserstein-Procrustes, & Gromov-Wasserstein          | Experimental C++ engine & C interface    |
 | __Geospatial Sets__ | WGS-84 points, point sets, & sampled paths          | Point proximity; declared Overlap, Shape, Coverage, & Route               | Experimental C++ engine & C interface    |
 
 The experimental geospatial C interface currently uses a brute-force stand-in while its native engine & bindings develop.
 
+### Building Indexes
+
+Indexes are built in two very different regimes, & USearch keeps them as separate operations.
+Insertion is online & greedy: each entry commits to its neighbors once, against the graph as it stands.
+Refinement & absorption are macro-level: they revisit entries already in the graph, judge the graph as a whole, & may spend more compute per entry in exchange for throughput.
+A workflow that bulk-indexes first & bulk-serves later should run both; a workflow that streams entries into a live index may never refine at all.
+
+#### Incremental Insertions
+
+`insert` walks the graph from its entry points with a beam as wide as the expansion, picks a diverse subset of what the walk scored, & back-links each pick to the new entry.
+It answers one question per entry - the approximate nearest neighbors of a new point in a fixed graph - so its cost is one latency-bound walk per entry, & entries become searchable as soon as their batch publishes.
+The greediness is the price: the first entries chose their neighbors from a small graph, & no insertion revisits them.
+A narrow insertion expansion ingests cheaply & leaves picks a wider walk would improve on.
+An index grows as it inserts; `reserve` is only a hint of the capacity to come.
+
+#### Macro-Level Refinements
+
+`refine` re-selects neighbors for entries already in the graph, against the finished graph.
+It solves a different problem from insertion: building an approximate nearest-neighbor graph over every entry at once, plus the global properties no single walk can see.
+Its audit sweeps the graph from landmarks, finds islands no search reaches, & heals them.
+Like compaction in a database, refinement is optional & never changes what the index contains, only how well it is connected, & it must never lower recall.
+Because nothing waits on its answers, refinement can use bandwidth-oriented kernels a search cannot afford: on GPUs, a two-hop pass scores an entry's neighbors-of-neighbors as one Gram matrix on Tensor Cores, trading per-entry latency for many more distances per byte loaded.
+
+#### Absorption & Compaction
+
+`absorb` moves every entry of one or more donor indexes into a recipient, keeps their links, & re-selects only the entries across the new seams; the donors end empty.
+Shards hold at most about 4 billion entries, so a collection past that size grows by adding shards, & `compact` absorbs small shards into larger ones while each stays under the bound.
+Absorption also crosses residencies: GPU shards link to each other on their devices, then land in RAM as one graph.
+NVMe parts are immutable, so their compaction writes new parts from old ones & leaves the sources untouched.
+
 ## Dense Modality
 
 Each shard supports up to roughly __4 billion entries__ through 32-bit internal node IDs.
 Public keys remain 128-bit UUIDs; adjacency lists store those compact node IDs rather than repeating UUIDs on every edge.
-Several shards extend the collection beyond one shard's address space.
+Several shards extend the collection beyond one shard's address space: `shard_capacity` bounds each, & a full generation of shards opens a new one on the same memory domains or devices.
 
 The number of compiled storage types is controllable.
 The default four are `bf16`, `u1`, `i8`, & `e4m3`; the full eleven add `f16`, `u8`, `e5m2`, `i4`, `u4`, `e3m2`, & `e2m3`.
@@ -139,7 +170,7 @@ Bit sets suit fingerprints; byte integers suit quantized embeddings; `e4m3` & `b
 
 Most dense measures reuse a dot-product & precomputed norms.
 Squared Euclidean distance is $\lVert a\rVert^2 + \lVert b\rVert^2 - 2\langle a,b\rangle$; Angular distance derives from the normalized product; packed-bit intersections yield Hamming & Jaccard distances.
-Geometry stays fixed once reserved, while the graph's population grows.
+Geometry freezes when the index opens, while the graph's population grows.
 `refine` improves its links & `health` audits reachability, making disconnected regions visible in the same reports that measure recall & throughput.
 
 ### Search & MaxSim
@@ -190,11 +221,7 @@ Construction & maintenance have their own cost, & neither arbitrary data nor arb
 
 ## Sequence Modality
 
-> [!WARNING]
-> Experimental: the C interface declares alignment kinds the native engine does not serve yet.
-
-The C++ RAM index works with variable-length byte sequences & UTF-8 text, using [StringZilla][stringzilla] for Levenshtein & overlap kernels, & the C interface exports it.
-The declared C surface also covers Needleman-Wunsch global alignment, Smith-Waterman local alignment, & Gotoh affine gaps, which the engine refuses for now.
+The C++ RAM index works with variable-length byte sequences & UTF-8 text, using [StringZilla][stringzilla] for Levenshtein & overlap kernels and its own for Needleman-Wunsch global alignment, & the C interface exports it.
 Sequence search is useful when edit operations & local matches carry more meaning than a dense embedding's geometry.
 
 ## Geospatial Modality

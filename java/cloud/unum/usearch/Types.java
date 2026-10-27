@@ -1808,7 +1808,7 @@ public final class Types {
             MemoryLayout.structLayout(
                     Library.POINTER.withName("executor"),
                     Library.POINTER.withName("outcome"),
-                    Library.PLACEMENT.withName("ram"),
+                    Library.placement("ram"),
                     Library.SIZE.withName("threads"),
                     Library.SIZE.withName("deferred_limit")));
 
@@ -1818,7 +1818,7 @@ public final class Types {
             MemoryLayout.structLayout(
                     Library.POINTER.withName("executor"),
                     Library.POINTER.withName("outcome"),
-                    Library.PLACEMENT.withName("ram"),
+                    Library.placement("ram"),
                     Library.POINTER.withName("pool"),
                     Library.SIZE.withName("deferred_limit")));
 
@@ -1828,7 +1828,7 @@ public final class Types {
             MemoryLayout.structLayout(
                     Library.POINTER.withName("executor"),
                     Library.POINTER.withName("outcome"),
-                    Library.PLACEMENT.withName("vram"),
+                    Library.placement("vram"),
                     Library.POINTER.withName("streams"),
                     Library.SIZE.withName("scratch_limit"),
                     Library.SIZE.withName("deferred_limit")));
@@ -1839,9 +1839,11 @@ public final class Types {
             MemoryLayout.structLayout(
                     Library.POINTER.withName("executor"),
                     Library.POINTER.withName("outcome"),
-                    Library.PLACEMENT.withName("nvme"),
+                    Library.placement("nvme"),
                     Library.SIZE.withName("threads"),
-                    Library.SIZE.withName("deferred_limit")));
+                    Library.SIZE.withName("deferred_limit"),
+                    Library.ENUM.withName("nvme_class"),
+                    Library.padding()));
 
     /** {@code usearch_executor_drain_t}. */
     private static final Verb DRAIN = new Verb(

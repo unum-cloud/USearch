@@ -76,7 +76,7 @@ public class Main {
                 Arena arena = new Arena(pool);
                 DenseIndex index = DenseIndex.initRam(options, new int[0])) {
 
-            index.reserve(100);
+            index.reserve(100); // Optional capacity hint; inserts grow on demand
             index.insert(
                 new Key[] {Key.of(42), Key.of(43)},
                 RowsView.of(new float[] {0.1f, 0.2f, 0.3f, 0.3f, 0.2f, 0.1f}, 3));

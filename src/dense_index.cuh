@@ -672,6 +672,16 @@ extern "C" {
 
 #pragma region Lifetime
 
+/** Freezes the geometry @p handle was created with on every shard through a reservation of no
+ *  rows, so a fresh index takes rows without one, and a later reservation only hints capacity. */
+static status_t freeze_geometry(usearch_dense_index_handle_t const& handle) noexcept {
+    return std::visit(
+        [&](auto const* verbs) noexcept {
+            return verbs->reserve(handle.index, 0, handle.requested_connectivity, handle.requested_dimensions);
+        },
+        handle.tables);
+}
+
 USEARCH_EXPORT void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
@@ -679,6 +689,8 @@ USEARCH_EXPORT void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) 
                                              arguments->connectivity};
     usearch_dense_index_t const index = with_variant(geometry, arguments->ram, outcome);
     if (!index) return;
+    if (status_t const frozen = freeze_geometry(*index); failed(frozen))
+        return delete index, propagate_error(frozen, outcome), void();
     *arguments->index = index;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
@@ -690,6 +702,8 @@ USEARCH_EXPORT void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments
                                              arguments->connectivity};
     usearch_dense_index_t const index = with_variant(geometry, arguments->vram, outcome);
     if (!index) return;
+    if (status_t const frozen = freeze_geometry(*index); failed(frozen))
+        return delete index, propagate_error(frozen, outcome), void();
     *arguments->index = index;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }

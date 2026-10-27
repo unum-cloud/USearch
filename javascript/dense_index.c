@@ -154,7 +154,11 @@ static napi_value usearch_js_finish_describe(napi_env env, usearch_js_call_t* ca
     napi_set_named_property(env, object, "size", usearch_js_number(env, description->size));
     napi_set_named_property(env, object, "capacity", usearch_js_number(env, description->capacity));
     napi_set_named_property(env, object, "memoryUsage", usearch_js_number(env, description->memory_usage));
-    napi_set_named_property(env, object, "capabilities", usearch_js_static_string(env, description->capabilities));
+    napi_set_named_property(env, object, "cpuClass",
+                            usearch_js_static_string(env, usearch_cpu_class_name(description->cpu_class)));
+    napi_set_named_property(env, object, "gpuClass",
+                            usearch_js_static_string(env, usearch_gpu_class_name(description->gpu_class)));
+    napi_set_named_property(env, object, "shardsCount", usearch_js_number(env, description->shards_count));
     return object;
 }
 

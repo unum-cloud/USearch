@@ -57,6 +57,7 @@ static PyMethodDef module_methods[] = {
     {"version", (PyCFunction)api_version, METH_NOARGS, doc_version},                                              //
     {"capabilities_compiled", (PyCFunction)api_capabilities_compiled, METH_NOARGS, doc_capabilities_compiled},    //
     {"capabilities_available", (PyCFunction)api_capabilities_available, METH_NOARGS, doc_capabilities_available}, //
+    {"layouts", (PyCFunction)api_layouts, METH_NOARGS, doc_layouts},                                              //
     {NULL, NULL, 0, NULL},
 };
 

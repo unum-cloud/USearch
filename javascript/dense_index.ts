@@ -249,8 +249,12 @@ export interface DenseIndexDescription {
   capacity: number;
   /** Bytes the handle holds; traversal scratch is the executor's. */
   memoryUsage: number;
-  /** The capability codename the index dispatched to on this machine. */
-  capabilities: string;
+  /** The CPU class dispatch picked on this machine, as `usearch_cpu_class_name` spells it. */
+  cpuClass: string;
+  /** The GPU class dispatch picked on the index's devices; "unknown" for a host index. */
+  gpuClass: string;
+  /** Live shards. */
+  shardsCount: number;
 }
 
 /** One reachability audit: the population it judged, and how much of it a search reaches. Mirrors `usearch_reachability_t`. */
@@ -549,7 +553,8 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   ): Answer<Receiving, Answered>;
 
   /**
-   * Claims room for a total entry count ahead of insertion. Calls `usearch_dense_reserve`.
+   * Claims room for a total entry count ahead of insertion, a hint, since insertions grow the index
+   * on demand. Calls `usearch_dense_reserve`.
    * @param {number} capacity - The desired total capacity, the current size included.
    */
   reserve(capacity: number): Answer<Receiving, void> {

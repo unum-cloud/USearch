@@ -54,7 +54,7 @@ static struct {
     {usearch_status_overflow_k, "usearch.CapacityOverflowError", &PyExc_OverflowError,
      "A hard design ceiling was reached; a smaller request cannot help."},
     {usearch_status_uninitialized_k, "usearch.UninitializedError", NULL,
-     "The handle is not ready for the verb - unfrozen, absorbed as a donor, or closed."},
+     "The handle is not ready for the verb - absorbed as a donor, or closed."},
     {usearch_status_config_mismatch_k, "usearch.ConfigMismatchError", &PyExc_ValueError,
      "The request contradicts an already-frozen configuration."},
     {usearch_status_contended_k, "usearch.ContendedError", NULL,
@@ -171,6 +171,9 @@ static char const* spell_dense_metric(int value) { return usearch_dense_metric_n
 static char const* spell_scalar(int value) { return usearch_scalar_name((usearch_scalar_t)value); }
 static char const* spell_residency(int value) { return usearch_residency_name((usearch_residency_t)value); }
 static char const* spell_traversal(int value) { return usearch_traversal_name((usearch_traversal_t)value); }
+static char const* spell_cpu_class(int value) { return usearch_cpu_class_name((usearch_cpu_class_t)value); }
+static char const* spell_gpu_class(int value) { return usearch_gpu_class_name((usearch_gpu_class_t)value); }
+static char const* spell_nvme_class(int value) { return usearch_nvme_class_name((usearch_nvme_class_t)value); }
 
 usearch_py_enum_t usearch_py_status = {"Status", usearch_status_success_k, usearch_status_invalid_argument_k,
                                        spell_status, NULL};
@@ -182,6 +185,12 @@ usearch_py_enum_t usearch_py_residency = {"Residency", usearch_residency_ram_k, 
                                           spell_residency, NULL};
 usearch_py_enum_t usearch_py_traversal = {"Traversal", usearch_traversal_walk_k, usearch_traversal_scan_k,
                                           spell_traversal, NULL};
+usearch_py_enum_t usearch_py_cpu_class = {"CPUClass", usearch_cpu_class_serial_k, usearch_cpu_class_wasm64_extended_k,
+                                          spell_cpu_class, NULL};
+usearch_py_enum_t usearch_py_gpu_class = {"GPUClass", usearch_gpu_class_nvidia_ampere_k,
+                                          usearch_gpu_class_apple_metal10_k, spell_gpu_class, NULL};
+usearch_py_enum_t usearch_py_nvme_class = {"NVMeClass", usearch_nvme_class_posix_k, usearch_nvme_class_windows_ioring_k,
+                                           spell_nvme_class, NULL};
 
 /** The C spelling of @p value, or NULL when C names no member by it. */
 static char const* enum_spelling(usearch_py_enum_t const* mirrored, long value) {
@@ -218,8 +227,9 @@ static int enum_register(PyObject* module, PyObject* int_enum, PyObject* keyword
 }
 
 int usearch_py_register_enums(PyObject* module) {
-    usearch_py_enum_t* const mirrored[] = {&usearch_py_status, &usearch_py_mood,      &usearch_py_dense_metric,
-                                           &usearch_py_scalar, &usearch_py_residency, &usearch_py_traversal};
+    usearch_py_enum_t* const mirrored[] = {&usearch_py_status,    &usearch_py_mood,      &usearch_py_dense_metric,
+                                           &usearch_py_scalar,    &usearch_py_residency, &usearch_py_traversal,
+                                           &usearch_py_cpu_class, &usearch_py_gpu_class, &usearch_py_nvme_class};
     PyObject* const enum_module = PyImport_ImportModule("enum");
     PyObject* const int_enum = enum_module ? PyObject_GetAttrString(enum_module, "IntEnum") : NULL;
     PyObject* keywords = int_enum ? PyDict_New() : NULL;
@@ -1932,37 +1942,43 @@ static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py
     return executor_adopt(type, handle, usearch_residency_vram_k);
 }
 
-static char const doc_Executor_for_nvme[] =                                             //
-    "for_nvme(threads=0, *, paths=None, deferred_limit=0) -> Executor\n"                //
-    "\n"                                                                                //
-    "Opens one submission ring per worker for an NVMe-resident index.\n"                //
-    "Calls `usearch_executor_for_nvme`.\n"                                              //
-    "\n"                                                                                //
-    "Args:\n"                                                                           //
-    "  threads (int, optional): Rings to open; 0 derives from the hardware.\n"          //
-    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to\n" //
-    "    stripe shards across; None leaves every shard where its manifest points. A\n"  //
-    "    path may name a kernel device, a transport identifier, or a FUSE mount.\n"     //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a\n"     //
-    "    default.\n"                                                                    //
-    "\n"                                                                                //
-    "Example:\n"                                                                        //
+static char const doc_Executor_for_nvme[] =                                               //
+    "for_nvme(threads=0, *, paths=None, deferred_limit=0, nvme_class=None) -> Executor\n" //
+    "\n"                                                                                  //
+    "Opens one submission ring per worker for an NVMe-resident index.\n"                  //
+    "Calls `usearch_executor_for_nvme`.\n"                                                //
+    "\n"                                                                                  //
+    "Args:\n"                                                                             //
+    "  threads (int, optional): Rings to open; 0 derives from the hardware.\n"            //
+    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to\n"   //
+    "    stripe shards across; None leaves every shard where its manifest points. A\n"    //
+    "    path may name a kernel device, a transport identifier, or a FUSE mount.\n"       //
+    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a\n"       //
+    "    default.\n"                                                                      //
+    "  nvme_class (NVMeClass, optional): The engine to submit through; None derives\n"    //
+    "    the newest the host and the media admit.\n"                                      //
+    "\n"                                                                                  //
+    "Example:\n"                                                                          //
     "  >>> pool = usearch.Executor.for_nvme(threads=8, paths=['/mnt/nvme0'])  # doctest: +SKIP";
 
 static PyObject* Executor_for_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
-    PyObject *threads_object, *paths_object, *deferred_limit_object;
+    PyObject *threads_object, *paths_object, *deferred_limit_object, *nvme_class_object;
     usearch_py_argument_t const arguments[] = {
         {"threads", &threads_object},
         {"paths", &paths_object},
         {"deferred_limit", &deferred_limit_object},
+        {"nvme_class", &nvme_class_object},
     };
     size_t threads = 0, deferred_limit = 0;
+    int nvme_class = usearch_nvme_class_unknown_k;
     usearch_py_paths_t paths;
     if (usearch_py_arguments_parse("for_nvme", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         usearch_py_size_from_object(threads_object, "threads", &threads) != 0 ||
         usearch_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
+        (nvme_class_object && nvme_class_object != Py_None &&
+         usearch_py_enum_from_object(nvme_class_object, "nvme_class", &usearch_py_nvme_class, &nvme_class) != 0) ||
         usearch_py_paths_from_object(paths_object, &paths) != 0)
         return NULL;
 
@@ -1972,7 +1988,8 @@ static PyObject* Executor_for_nvme(PyTypeObject* type, PyObject* const* args, Py
                                                       .outcome = &outcome,
                                                       .nvme = {paths.views, paths.count},
                                                       .threads = threads,
-                                                      .deferred_limit = deferred_limit};
+                                                      .deferred_limit = deferred_limit,
+                                                      .nvme_class = (usearch_nvme_class_t)nvme_class};
     Py_BEGIN_ALLOW_THREADS;
     usearch_executor_for_nvme(&executor_arguments);
     Py_END_ALLOW_THREADS;
@@ -2702,6 +2719,91 @@ PyObject* api_capabilities_compiled(PyObject* self, PyObject* unused) {
 
 PyObject* api_capabilities_available(PyObject* self, PyObject* unused) {
     return PyUnicode_FromString(usearch_capabilities_available());
+}
+
+char const doc_layouts[] =                                                                      //
+    "layouts() -> dict[str, tuple[int, dict[str, int]]]\n"                                      //
+    "\n"                                                                                        //
+    "The size and field offsets of every argument struct the other bindings lay out by hand,\n" //
+    "as this build's compiler laid them out, keyed by the struct's name.";
+
+/** One field of a probed struct: its name and its byte offset. */
+typedef struct layout_field_t {
+    char const* name;
+    size_t offset;
+} layout_field_t;
+
+/** Adds `name: (size, {field: offset})` to @p layouts; returns 0, or -1 with an exception set. */
+static int layout_add(PyObject* layouts, char const* name, size_t size, layout_field_t const* fields, size_t count) {
+    PyObject* offsets = PyDict_New();
+    for (size_t field = 0; offsets && field != count; ++field)
+        if (usearch_py_dict_steal_item(offsets, fields[field].name, PyLong_FromSize_t(fields[field].offset)) != 0)
+            Py_CLEAR(offsets);
+    PyObject* const size_object = offsets ? PyLong_FromSize_t(size) : NULL;
+    PyObject* const layout = size_object ? PyTuple_New(2) : NULL;
+    if (!layout) {
+        Py_XDECREF(size_object);
+        Py_XDECREF(offsets);
+        return usearch_py_dict_steal_item(layouts, name, NULL);
+    }
+    PyTuple_SET_ITEM(layout, 0, size_object);
+    PyTuple_SET_ITEM(layout, 1, offsets);
+    return usearch_py_dict_steal_item(layouts, name, layout);
+}
+
+PyObject* api_layouts(PyObject* self, PyObject* unused) {
+    layout_field_t const ram[] = {
+        {"memory_domains", offsetof(usearch_ram_options_t, memory_domains)},
+        {"memory_domains_count", offsetof(usearch_ram_options_t, memory_domains_count)},
+        {"shard_capacity", offsetof(usearch_ram_options_t, shard_capacity)},
+        {"cpu_class", offsetof(usearch_ram_options_t, cpu_class)},
+    };
+    layout_field_t const vram[] = {
+        {"devices", offsetof(usearch_vram_options_t, devices)},
+        {"devices_count", offsetof(usearch_vram_options_t, devices_count)},
+        {"shard_capacity", offsetof(usearch_vram_options_t, shard_capacity)},
+        {"gpu_class", offsetof(usearch_vram_options_t, gpu_class)},
+    };
+    layout_field_t const nvme[] = {
+        {"paths", offsetof(usearch_nvme_options_t, paths)},
+        {"paths_count", offsetof(usearch_nvme_options_t, paths_count)},
+        {"cpu_class", offsetof(usearch_nvme_options_t, cpu_class)},
+    };
+    layout_field_t const executor_for_nvme[] = {
+        {"nvme", offsetof(usearch_executor_for_nvme_t, nvme)},
+        {"threads", offsetof(usearch_executor_for_nvme_t, threads)},
+        {"deferred_limit", offsetof(usearch_executor_for_nvme_t, deferred_limit)},
+        {"nvme_class", offsetof(usearch_executor_for_nvme_t, nvme_class)},
+    };
+    layout_field_t const stats[] = {
+        {"visited_members", offsetof(usearch_traversal_stats_t, visited_members)},
+        {"computed_distances", offsetof(usearch_traversal_stats_t, computed_distances)},
+        {"restarts", offsetof(usearch_traversal_stats_t, restarts)},
+    };
+    layout_field_t const description[] = {
+        {"metadata", offsetof(usearch_dense_index_description_t, metadata)},
+        {"size", offsetof(usearch_dense_index_description_t, size)},
+        {"capacity", offsetof(usearch_dense_index_description_t, capacity)},
+        {"memory_usage", offsetof(usearch_dense_index_description_t, memory_usage)},
+        {"cpu_class", offsetof(usearch_dense_index_description_t, cpu_class)},
+        {"gpu_class", offsetof(usearch_dense_index_description_t, gpu_class)},
+        {"shards_count", offsetof(usearch_dense_index_description_t, shards_count)},
+    };
+    PyObject* layouts = PyDict_New();
+    if (layouts && (layout_add(layouts, "usearch_ram_options_t", sizeof(usearch_ram_options_t), ram,
+                               usearch_py_table_size_(ram)) != 0 ||
+                    layout_add(layouts, "usearch_vram_options_t", sizeof(usearch_vram_options_t), vram,
+                               usearch_py_table_size_(vram)) != 0 ||
+                    layout_add(layouts, "usearch_nvme_options_t", sizeof(usearch_nvme_options_t), nvme,
+                               usearch_py_table_size_(nvme)) != 0 ||
+                    layout_add(layouts, "usearch_executor_for_nvme_t", sizeof(usearch_executor_for_nvme_t),
+                               executor_for_nvme, usearch_py_table_size_(executor_for_nvme)) != 0 ||
+                    layout_add(layouts, "usearch_traversal_stats_t", sizeof(usearch_traversal_stats_t), stats,
+                               usearch_py_table_size_(stats)) != 0 ||
+                    layout_add(layouts, "usearch_dense_index_description_t", sizeof(usearch_dense_index_description_t),
+                               description, usearch_py_table_size_(description)) != 0))
+        Py_CLEAR(layouts);
+    return layouts;
 }
 
 #pragma endregion Paths and Library Probes

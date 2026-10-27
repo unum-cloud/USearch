@@ -30,6 +30,10 @@ def capabilities_available() -> str:
     """The kernel families this machine can run. Calls `usearch_capabilities_available`."""
     ...
 
+def layouts() -> dict[str, tuple[int, dict[str, int]]]:
+    """The size and field offsets of every argument struct the other bindings lay out by hand."""
+    ...
+
 # endregion: Library Probes
 
 # region: Shared Vocabulary
@@ -102,6 +106,53 @@ class Traversal(IntEnum):
     WALK = 0
     SCAN = 1
 
+class CPUClass(IntEnum):
+    """The CPU families dispatch picks from, valued as `usearch_cpu_class_t`; a placement may pin one."""
+
+    SERIAL = 1
+    INTEL_HASWELL = 2
+    INTEL_SIERRA = 3
+    INTEL_SKYLAKE = 4
+    INTEL_ICELAKE = 5
+    AMD_GENOA = 6
+    INTEL_SAPPHIRE = 7
+    INTEL_GRANITE = 8
+    INTEL_DIAMOND = 9
+    AWS_G2 = 10
+    APPLE_M2 = 11
+    APPLE_M4 = 12
+    AWS_G5 = 13
+    NVIDIA_VERA = 14
+    ALIBABA_C930 = 15
+    WASM32_V128 = 16
+    WASM64_EXTENDED = 17
+
+class GPUClass(IntEnum):
+    """The GPU families dispatch picks from, valued as `usearch_gpu_class_t`; a placement may pin one."""
+
+    NVIDIA_AMPERE = 1
+    NVIDIA_ADA = 2
+    NVIDIA_HOPPER = 3
+    NVIDIA_BLACKWELL = 4
+    NVIDIA_BLACKWELLRTX = 5
+    NVIDIA_RUBIN = 6
+    AMD_CDNA3 = 7
+    AMD_CDNA4 = 8
+    AMD_CDNA5 = 9
+    APPLE_METAL7 = 10
+    APPLE_METAL9 = 11
+    APPLE_METAL10 = 12
+
+class NVMeClass(IntEnum):
+    """The I/O engines NVMe executors submit through, valued as `usearch_nvme_class_t`; an executor may pin one."""
+
+    POSIX = 1
+    LINUX_AIO = 2
+    LINUX_URING = 3
+    LINUX_URING_PASSTHROUGH = 4
+    LINUX_SPDK = 5
+    WINDOWS_IORING = 6
+
 class Error(RuntimeError):
     """The base of every failure the library reports, one subclass per status shared with the C API."""
 
@@ -138,7 +189,7 @@ class CapacityOverflowError(Error, OverflowError):
     """A hard design ceiling was reached; a smaller request cannot help."""
 
 class UninitializedError(Error):
-    """The handle is not ready for the verb - unfrozen, absorbed as a donor, or closed."""
+    """The handle is not ready for the verb - absorbed as a donor, or closed."""
 
 class ConfigMismatchError(Error, ValueError):
     """The request contradicts an already-frozen configuration."""
@@ -200,7 +251,12 @@ class Executor:
 
     @classmethod
     def for_nvme(
-        cls, threads: int = 0, *, paths: Sequence[_PathLike] | None = None, deferred_limit: int = 0
+        cls,
+        threads: int = 0,
+        *,
+        paths: Sequence[_PathLike] | None = None,
+        deferred_limit: int = 0,
+        nvme_class: NVMeClass | None = None,
     ) -> Executor:
         """Opens one submission ring per worker for an NVMe-resident index. Calls `usearch_executor_for_nvme`."""
         ...
@@ -632,10 +688,18 @@ class DenseMetadata(structseq[Any], tuple[int, DenseMetric, Scalar, int]):
         ...
 
 @final
-class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, str]):
+class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, CPUClass | None, GPUClass | None, int]):
     """A live index's frozen metadata and current counters, as `usearch_dense_index_description_t` holds them."""
 
-    __match_args__: Final = ("metadata", "size", "capacity", "memory_usage", "capabilities")
+    __match_args__: Final = (
+        "metadata",
+        "size",
+        "capacity",
+        "memory_usage",
+        "cpu_class",
+        "gpu_class",
+        "shards_count",
+    )
 
     @property
     def metadata(self) -> DenseMetadata:
@@ -658,8 +722,18 @@ class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, 
         ...
 
     @property
-    def capabilities(self) -> str:
-        """The codename of the kernels the index dispatched to on this machine."""
+    def cpu_class(self) -> CPUClass | None:
+        """The `CPUClass` dispatch picked on this machine, or None."""
+        ...
+
+    @property
+    def gpu_class(self) -> GPUClass | None:
+        """The `GPUClass` dispatch picked on the index's devices, or None for a host index."""
+        ...
+
+    @property
+    def shards_count(self) -> int:
+        """Live shards."""
         ...
 
 @final
@@ -773,6 +847,7 @@ class DenseIndex:
         connectivity: int = 0,
         values_per_key: int = 0,
         memory_domains: Sequence[int] | None = None,
+        cpu_class: CPUClass | None = None,
     ) -> DenseIndex:
         """Starts an empty, mutable graph in host memory. Calls `usearch_dense_init_ram`."""
         ...
@@ -787,6 +862,7 @@ class DenseIndex:
         connectivity: int = 0,
         values_per_key: int = 0,
         devices: Sequence[int] | None = None,
+        gpu_class: GPUClass | None = None,
     ) -> DenseIndex:
         """Starts an empty, mutable graph on CUDA devices. Calls `usearch_dense_init_vram`."""
         ...
@@ -802,6 +878,7 @@ class DenseIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
+        cpu_class: CPUClass | None = None,
     ) -> DenseIndex:
         """Copies a checkpoint into a new, mutable index in host memory. Calls `usearch_dense_load_ram`."""
         ...
@@ -817,6 +894,7 @@ class DenseIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
+        cpu_class: CPUClass | None = None,
     ) -> DenseIndex:
         """Copies a monolith out of a buffer into host memory. Calls `usearch_dense_load_ram_buffer`."""
         ...
@@ -832,6 +910,7 @@ class DenseIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
+        gpu_class: GPUClass | None = None,
     ) -> DenseIndex:
         """Copies a checkpoint into a new, mutable index on CUDA devices. Calls `usearch_dense_load_vram`."""
         ...
@@ -847,6 +926,7 @@ class DenseIndex:
         values_per_key: int = 0,
         progress: _Progress | None = None,
         progress_steps: int = 0,
+        gpu_class: GPUClass | None = None,
     ) -> DenseIndex:
         """Copies a monolith out of a buffer onto CUDA devices. Calls `usearch_dense_load_vram_buffer`."""
         ...
@@ -886,7 +966,10 @@ class DenseIndex:
         ...
 
     def reserve(self, capacity: int, /) -> None:
-        """Grows the index to host at least `capacity` entries. Calls `usearch_dense_reserve`."""
+        """Grows the index to host at least `capacity` entries, a hint, since insertions grow it on demand.
+
+        Calls `usearch_dense_reserve`.
+        """
         ...
 
     def clear(self) -> None:
@@ -1049,8 +1132,18 @@ class DenseIndex:
         ...
 
     @property
-    def capabilities(self) -> str:
-        """The kernel family dispatch picked. Calls `usearch_dense_describe`."""
+    def cpu_class(self) -> CPUClass | None:
+        """The `CPUClass` dispatch picked on this machine, or None. Calls `usearch_dense_describe`."""
+        ...
+
+    @property
+    def gpu_class(self) -> GPUClass | None:
+        """The `GPUClass` dispatch picked on the index's devices, or None. Calls `usearch_dense_describe`."""
+        ...
+
+    @property
+    def shards_count(self) -> int:
+        """Live shards. Calls `usearch_dense_describe`."""
         ...
 
     def __len__(self) -> int:

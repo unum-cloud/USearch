@@ -443,7 +443,7 @@ Its two floats travel in one row because a maximum without its partition is a nu
 ### Introspection
 
 ```js
-const { metadata, size, capacity, memoryUsage, capabilities } = index.describe();
+const { metadata, size, capacity, memoryUsage, cpuClass, gpuClass, shardsCount } = index.describe();
 metadata.dimensions;                                   // The frozen geometry, as a checkpoint reports it
 const containsKey = index.contains(42n);               // Whether a key is in the index
 const count = index.count(42n);                        // The number of vectors under a key

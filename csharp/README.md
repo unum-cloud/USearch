@@ -30,13 +30,13 @@ DenseOptions options = DenseOptions.Default with  // Angular metric, BF16 quanti
 {
     Metric = DenseMetric.Angular,                 // Or Inner, Euclidean, Hamming, Jaccard
     Quantization = Scalar.BF16,                   // Or F16, E5M2, E4M3, E3M2, E2M3, I8, U8, U1x8
-    Dimensions = 3,                               // Zero leaves the geometry unfrozen
+    Dimensions = 3,                               // Frozen at init; zero is refused
     Connectivity = 16,                            // Connections per node in the graph, optional
     ValuesPerKey = 1,                             // Upper bound on entries sharing one key, optional
 };
 
 using DenseIndex index = DenseIndex.InitRam(options);
-index.Reserve(1_000);
+index.Reserve(1_000);                             // Optional capacity hint; inserts grow on demand
 
 Key[] keys = [42UL];
 float[] vector = [0.2f, 0.6f, 0.4f];

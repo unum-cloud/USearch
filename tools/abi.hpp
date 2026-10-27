@@ -1022,13 +1022,6 @@ struct dense_verbs_t {
         arguments.count = count, arguments.donors = donors;
         usearch_dense_absorb(&arguments);
     }
-    static void reserve(index_t index, usearch_executor_t executor, std::size_t entries,
-                        usearch_outcome_t* outcome) noexcept {
-        usearch_dense_reserve_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.capacity = entries;
-        usearch_dense_reserve(&arguments);
-    }
     static void free(index_t index) noexcept { usearch_dense_free(index); }
 };
 
@@ -1161,13 +1154,6 @@ struct sequence_verbs_t {
         arguments.count = count, arguments.donors = donors;
         usearch_sequence_absorb(&arguments);
     }
-    static void reserve(index_t index, usearch_executor_t executor, std::size_t entries,
-                        usearch_outcome_t* outcome) noexcept {
-        usearch_sequence_reserve_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.entries = entries;
-        usearch_sequence_reserve(&arguments);
-    }
     static void free(index_t index) noexcept { usearch_sequence_free(index); }
 };
 
@@ -1276,13 +1262,6 @@ struct shapes_verbs_t {
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.donors = donors;
         usearch_shapes_absorb(&arguments);
-    }
-    static void reserve(index_t index, usearch_executor_t executor, std::size_t entries,
-                        usearch_outcome_t* outcome) noexcept {
-        usearch_shapes_reserve_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.entries = entries;
-        usearch_shapes_reserve(&arguments);
     }
     static void free(index_t index) noexcept { usearch_shapes_free(index); }
 };
@@ -1411,13 +1390,6 @@ struct geospatial_verbs_t {
         arguments.count = count, arguments.donors = donors;
         usearch_geospatial_absorb(&arguments);
     }
-    static void reserve(index_t index, usearch_executor_t executor, std::size_t entries,
-                        usearch_outcome_t* outcome) noexcept {
-        usearch_geospatial_reserve_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.entries = entries;
-        usearch_geospatial_reserve(&arguments);
-    }
     static void free(index_t index) noexcept { usearch_geospatial_free(index); }
 };
 
@@ -1493,11 +1465,6 @@ usearch_outcome_t insert_entries(handle<verbs_type_>& index, typename verbs_type
                                  std::size_t first_row, std::size_t batch, std::size_t expansion,
                                  usearch_traversal_stats_t& totals, progress_type_&& progress = {}) {
     usearch_outcome_t outcome {};
-    typename verbs_type_::description_t described {};
-    verbs_type_::describe(index.get(), index.executor(), &described, &outcome);
-    if (outcome.status == usearch_status_success_k)
-        verbs_type_::reserve(index.get(), index.executor(), described.size + count, &outcome);
-    if (outcome.status != usearch_status_success_k) return outcome;
     std::size_t const batch_rows = std::max<std::size_t>(1, std::min(batch, count));
     std::vector<usearch_key_t> keys(batch_rows);
     for (std::size_t first = 0; first < count; first += batch_rows) {

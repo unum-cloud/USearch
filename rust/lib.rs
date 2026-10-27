@@ -12,7 +12,7 @@
 //!     ..DenseOptions::default()
 //! };
 //! let index = DenseIndex::init_ram(&options, &[])?;
-//! index.reserve(1_000_000)?;
+//! index.reserve(1_000_000)?; // Optional capacity hint; inserts grow on demand
 //!
 //! let executor = Executor::for_ram(&[], 0, 0)?;
 //! let mut arena = Arena::new_in(&executor)?;

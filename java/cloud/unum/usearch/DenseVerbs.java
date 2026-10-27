@@ -66,8 +66,9 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     }
 
     /**
-     * Claims capacity for a number of incoming vectors ahead of insertion. The capacity is the
-     * desired total, including the current size. Calls {@code usearch_dense_reserve}.
+     * Claims capacity for a number of incoming vectors ahead of insertion, a hint, since insertions
+     * grow the index on demand. The capacity is the desired total, including the current size.
+     * Calls {@code usearch_dense_reserve}.
      *
      * @throws USearchException OUT_OF_MEMORY when the capacity cannot be claimed, READ_ONLY on a
      *     view, and OVERFLOW past the identity space's ceiling.
@@ -135,8 +136,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * Calls {@code usearch_dense_insert}.
      *
      * @throws USearchException SHAPE_MISMATCH when the key count and the row count disagree or the
-     *     rows are not as wide as the frozen geometry, UNINITIALIZED while the geometry is unfrozen,
-     *     UNKNOWN_KIND on a scalar the engine cannot convert, READ_ONLY on a view, and
+     *     rows are not as wide as the frozen geometry, UNKNOWN_KIND on a scalar the engine cannot convert, READ_ONLY on a view, and
      *     OUT_OF_MEMORY when the batch cannot be accommodated.
      */
     public void insert(Key[] keys, RowsView vectors, DenseInsertConfig config) {

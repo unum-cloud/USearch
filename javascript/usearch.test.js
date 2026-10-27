@@ -222,6 +222,8 @@ test("Single-entry operations", async (t) => {
       connectivity: 16,
     });
     assert.equal(index.describe().size, 0, "initial size should be 0");
+    assert.equal(typeof index.describe().cpuClass, "string", "a host index names its CPU class");
+    assert.equal(index.describe().gpuClass, "unknown", "a host index names no GPU class");
   });
 
   await t.test("insert", () => {

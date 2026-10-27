@@ -189,7 +189,7 @@ static char const doc_DenseIndex[] =                                            
     "\n"                                                                                        //
     "Example:\n"                                                                                //
     "  >>> index = usearch.DenseIndex.init_ram(256, usearch.DenseMetric.ANGULAR)\n"             //
-    "  >>> index.capabilities is not None\n"                                                    //
+    "  >>> index.cpu_class is not None\n"                                                       //
     "  True";
 
 /** The geometry both creation verbs freeze, read before the factory's residency arm. */
@@ -200,6 +200,20 @@ typedef struct dense_geometry_t {
     size_t connectivity;
     size_t values_per_key;
 } dense_geometry_t;
+
+/** The keyword a verb names its pinned class by: `cpu_class` for host placements, `gpu_class` for
+ *  devices. */
+static char const* pinned_name(usearch_py_enum_t const* pinned_classes) {
+    return pinned_classes == &usearch_py_gpu_class ? "gpu_class" : "cpu_class";
+}
+
+/** Reads the class a placement pins, a member of @p pinned_classes, leaving zero for none; returns
+ *  0, or -1 with an exception set. */
+static int pinned_parse(PyObject* object, usearch_py_enum_t const* pinned_classes, int* pinned) {
+    *pinned = 0;
+    if (!object || object == Py_None) return 0;
+    return usearch_py_enum_from_object(object, pinned_name(pinned_classes), pinned_classes, pinned);
+}
 
 /**
  *  @brief Reads the geometry both creation verbs take: three settings positionally or by name, then
@@ -212,12 +226,17 @@ typedef struct dense_geometry_t {
  */
 static int geometry_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
                           PyObject* args_names_tuple, char const* arm_name, PyObject** arm,
-                          dense_geometry_t* geometry) {
+                          usearch_py_enum_t const* pinned_classes, int* pinned, dense_geometry_t* geometry) {
     PyObject *dimensions_object, *metric_object, *quantization_object, *connectivity_object, *values_per_key_object;
+    PyObject* pinned_object;
     usearch_py_argument_t const arguments[] = {
-        {"dimensions", &dimensions_object},         {"metric", &metric_object},
-        {"quantization", &quantization_object},     {"connectivity", &connectivity_object},
-        {"values_per_key", &values_per_key_object}, {arm_name, arm},
+        {"dimensions", &dimensions_object},
+        {"metric", &metric_object},
+        {"quantization", &quantization_object},
+        {"connectivity", &connectivity_object},
+        {"values_per_key", &values_per_key_object},
+        {arm_name, arm},
+        {pinned_name(pinned_classes), &pinned_object},
     };
     memset(geometry, 0, sizeof(*geometry));
     int metric = usearch_dense_metric_angular_k;
@@ -233,7 +252,8 @@ static int geometry_parse(char const* verb, PyObject* const* args, Py_ssize_t po
          usearch_py_enum_from_object(metric_object, "metric", &usearch_py_dense_metric, &metric) != 0) ||
         usearch_py_scalar_from_object(quantization_object, "quantization", &geometry->quantization) != 0 ||
         usearch_py_size_from_object(connectivity_object, "connectivity", &geometry->connectivity) != 0 ||
-        usearch_py_size_from_object(values_per_key_object, "values_per_key", &geometry->values_per_key) != 0)
+        usearch_py_size_from_object(values_per_key_object, "values_per_key", &geometry->values_per_key) != 0 ||
+        pinned_parse(pinned_object, pinned_classes, pinned) != 0)
         return -1;
     geometry->metric = (usearch_dense_metric_t)metric;
     if (geometry->quantization == usearch_scalar_unknown_k) geometry->quantization = usearch_scalar_bf16_k;
@@ -280,7 +300,7 @@ static PyObject* DenseIndex_tp_new(PyTypeObject* type, PyObject* args, PyObject*
 
 static char const doc_DenseIndex_init_ram[] =                                                         //
     "init_ram(dimensions, metric=DenseMetric.ANGULAR, quantization=Scalar.BF16, *, connectivity=0,\n" //
-    "    values_per_key=0, memory_domains=None) -> DenseIndex\n"                                      //
+    "    values_per_key=0, memory_domains=None, cpu_class=None) -> DenseIndex\n"                      //
     "\n"                                                                                              //
     "Starts an empty, mutable graph in host memory, one shard per named NUMA node.\n"                 //
     "Calls `usearch_dense_init_ram`.\n"                                                               //
@@ -293,6 +313,7 @@ static char const doc_DenseIndex_init_ram[] =                                   
     "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"                  //
     "  memory_domains (Sequence[int], optional): NUMA node IDs to shard across, so a\n"               //
     "    dual-socket box naming two gets two graphs; None derives every node.\n"                      //
+    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"       //
     "\n"                                                                                              //
     "Example:\n"                                                                                      //
     "  >>> index = usearch.DenseIndex.init_ram(256, usearch.DenseMetric.ANGULAR)\n"                   //
@@ -305,8 +326,9 @@ static PyObject* DenseIndex_init_ram(PyTypeObject* type, PyObject* const* args, 
     PyObject* memory_domains_object;
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
+    int cpu_class = 0;
     if (geometry_parse("init_ram", args, positional_args_count, args_names_tuple, "memory_domains",
-                       &memory_domains_object, &geometry) != 0 ||
+                       &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &geometry) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
         return NULL;
@@ -321,7 +343,7 @@ static PyObject* DenseIndex_init_ram(PyTypeObject* type, PyObject* const* args, 
         .dimensions = geometry.dimensions,
         .connectivity = geometry.connectivity,
         .values_per_key = geometry.values_per_key,
-        .ram = {memory_domains, memory_domains_count},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_init_ram(&arguments);
@@ -332,7 +354,7 @@ static PyObject* DenseIndex_init_ram(PyTypeObject* type, PyObject* const* args, 
 
 static char const doc_DenseIndex_init_vram[] =                                                         //
     "init_vram(dimensions, metric=DenseMetric.ANGULAR, quantization=Scalar.BF16, *, connectivity=0,\n" //
-    "    values_per_key=0, devices=None) -> DenseIndex\n"                                              //
+    "    values_per_key=0, devices=None, gpu_class=None) -> DenseIndex\n"                              //
     "\n"                                                                                               //
     "Starts an empty, mutable graph on CUDA devices, one shard per named ordinal.\n"                   //
     "Calls `usearch_dense_init_vram`.\n"                                                               //
@@ -349,6 +371,7 @@ static char const doc_DenseIndex_init_vram[] =                                  
     "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"                   //
     "  devices (Sequence[int], optional): CUDA ordinals to shard across; None derives one\n"           //
     "    free device.\n"                                                                               //
+    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n"     //
     "\n"                                                                                               //
     "Example:\n"                                                                                       //
     "  >>> index = usearch.DenseIndex.init_vram(256, devices=[0, 1])   # doctest: +SKIP";
@@ -359,8 +382,9 @@ static PyObject* DenseIndex_init_vram(PyTypeObject* type, PyObject* const* args,
     PyObject* devices_object;
     int32_t* devices = NULL;
     size_t devices_count = 0;
+    int gpu_class = 0;
     if (geometry_parse("init_vram", args, positional_args_count, args_names_tuple, "devices", &devices_object,
-                       &geometry) != 0 ||
+                       &usearch_py_gpu_class, &gpu_class, &geometry) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         return NULL;
 
@@ -374,7 +398,7 @@ static PyObject* DenseIndex_init_vram(PyTypeObject* type, PyObject* const* args,
         .dimensions = geometry.dimensions,
         .connectivity = geometry.connectivity,
         .values_per_key = geometry.values_per_key,
-        .vram = {devices, devices_count},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_init_vram(&arguments);
@@ -457,8 +481,9 @@ static PyObject* DenseTraversalStats_tp_new(PyTypeObject* type, PyObject* args, 
 static void DenseTraversalStats_dealloc(DenseTraversalStats* self) { Py_TYPE(self)->tp_free((PyObject*)self); }
 
 static PyObject* DenseTraversalStats_repr(DenseTraversalStats* self) {
-    return PyUnicode_FromFormat("DenseTraversalStats(visited_members=%zu, computed_distances=%zu, restarts=%zu)",
-                                self->stats.visited_members, self->stats.computed_distances, self->stats.restarts);
+    char const* const format = "DenseTraversalStats(visited_members=%zu, computed_distances=%zu, restarts=%zu)";
+    return PyUnicode_FromFormat(format, self->stats.visited_members, self->stats.computed_distances,
+                                self->stats.restarts);
 }
 
 /** Adds another reading's counters into this one, fenced like the overwrite a verb performs. */
@@ -526,14 +551,16 @@ static PyStructSequence_Field DenseIndexDescription_fields[] = {
     {"size", "Stored entries."},
     {"capacity", "Entries hosted without growing again."},
     {"memory_usage", "Bytes the handle holds; traversal scratch is the executor's."},
-    {"capabilities", "The codename of the kernels the index dispatched to on this machine."},
+    {"cpu_class", "The `CPUClass` dispatch picked on this machine, or None."},
+    {"gpu_class", "The `GPUClass` dispatch picked on the index's devices, or None for a host index."},
+    {"shards_count", "Live shards."},
     {NULL, NULL},
 };
 
 PyStructSequence_Desc usearch_py_dense_index_description_desc = {
     "usearch.DenseIndexDescription",
     "A live index's frozen metadata and current counters, as `usearch_dense_index_description_t` holds them.",
-    DenseIndexDescription_fields, 5};
+    DenseIndexDescription_fields, 7};
 
 PyTypeObject DenseIndexDescriptionType;
 
@@ -550,6 +577,12 @@ PyStructSequence_Desc usearch_py_dense_reachability_desc = {
     DenseReachability_fields, 4};
 
 PyTypeObject DenseReachabilityType;
+
+/** A new member of @p mirrored for @p value, or None for the zero value the enumeration calls
+ *  unknown. */
+static PyObject* class_to_object(usearch_py_enum_t const* mirrored, int value) {
+    return value ? usearch_py_enum_to_object(mirrored, value) : Py_NewRef(Py_None);
+}
 
 /** A new @c DenseMetadata of @p metadata, or NULL with an exception set. */
 static PyObject* metadata_to_object(usearch_dense_metadata_t const* metadata) {
@@ -570,6 +603,7 @@ static PyObject* metadata_to_object(usearch_dense_metadata_t const* metadata) {
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 static int index_describe(usearch_dense_index_t handle, usearch_dense_index_description_t* description) {
+    memset(description, 0, sizeof(*description));
     usearch_outcome_t outcome = {0};
     usearch_dense_describe_t arguments = {.index = handle, .outcome = &outcome, .description = description};
     Py_BEGIN_ALLOW_THREADS;
@@ -600,13 +634,15 @@ static void describe_submit(void* call) { usearch_dense_describe(&((describe_cal
 
 static PyObject* describe_answer(void* erased) {
     usearch_dense_index_description_t const* const description = &((describe_call_t*)erased)->description;
-    PyObject* fields[5] = {NULL, NULL, NULL, NULL, NULL};
+    PyObject* fields[7] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL};
     (void)((fields[0] = metadata_to_object(&description->metadata)) &&
            (fields[1] = PyLong_FromSize_t(description->size)) &&
            (fields[2] = PyLong_FromSize_t(description->capacity)) &&
            (fields[3] = PyLong_FromSize_t(description->memory_usage)) &&
-           (fields[4] = PyUnicode_FromString(description->capabilities ? description->capabilities : "")));
-    return usearch_py_struct_sequence_steal(&DenseIndexDescriptionType, fields, 5);
+           (fields[4] = class_to_object(&usearch_py_cpu_class, (int)description->cpu_class)) &&
+           (fields[5] = class_to_object(&usearch_py_gpu_class, (int)description->gpu_class)) &&
+           (fields[6] = PyLong_FromSize_t(description->shards_count)));
+    return usearch_py_struct_sequence_steal(&DenseIndexDescriptionType, fields, 7);
 }
 
 static usearch_py_verb_t const describe_verb = {sizeof(describe_call_t), describe_submit, describe_answer,
@@ -694,14 +730,24 @@ static char const doc_DenseIndex_dimensions[] = "Scalars per vector. Calls `usea
 static char const doc_DenseIndex_connectivity[] = "Connections per node in the graph. Calls `usearch_dense_describe`.";
 static char const doc_DenseIndex_memory_usage[] =
     "Bytes the handle holds; traversal scratch is the executor's. Calls `usearch_dense_describe`.";
-static char const doc_DenseIndex_capabilities[] =
-    "The kernel family dispatch picked for this geometry. Calls `usearch_dense_describe`.";
+static char const doc_DenseIndex_cpu_class[] =
+    "The `CPUClass` dispatch picked on this machine, or None. Calls `usearch_dense_describe`.";
+static char const doc_DenseIndex_gpu_class[] =
+    "The `GPUClass` dispatch picked on the index's devices, or None for a host index. Calls `usearch_dense_describe`.";
+static char const doc_DenseIndex_shards_count[] = "Live shards. Calls `usearch_dense_describe`.";
 
-static PyObject* DenseIndex_get_capabilities(DenseIndex* self, void* closure) {
+static PyObject* DenseIndex_get_cpu_class(DenseIndex* self, void* closure) {
     usearch_dense_index_description_t description;
     usearch_dense_index_t const handle = index_handle(self);
     if (!handle || index_describe(handle, &description) != 0) return NULL;
-    return PyUnicode_FromString(description.capabilities ? description.capabilities : "");
+    return class_to_object(&usearch_py_cpu_class, (int)description.cpu_class);
+}
+
+static PyObject* DenseIndex_get_gpu_class(DenseIndex* self, void* closure) {
+    usearch_dense_index_description_t description;
+    usearch_dense_index_t const handle = index_handle(self);
+    if (!handle || index_describe(handle, &description) != 0) return NULL;
+    return class_to_object(&usearch_py_gpu_class, (int)description.gpu_class);
 }
 
 static Py_ssize_t DenseIndex_length(DenseIndex* self) {
@@ -715,7 +761,7 @@ static PyObject* DenseIndex_repr(DenseIndex* self) {
     if (!self->handle) return PyUnicode_FromString("DenseIndex(<consumed>)");
     // No exception is raised here: `tp_repr` runs inside `PyErr_Format("%R", ...)` chains, where
     // raising would destroy the caller's.
-    usearch_dense_index_description_t description;
+    usearch_dense_index_description_t description = {0};
     usearch_outcome_t outcome = {0};
     usearch_dense_describe_t arguments = {.index = self->handle, .outcome = &outcome, .description = &description};
     Py_BEGIN_ALLOW_THREADS;
@@ -730,13 +776,14 @@ static PyObject* DenseIndex_repr(DenseIndex* self) {
 
 #pragma region Ingest
 
-static char const doc_DenseIndex_reserve[] =                 //
-    "reserve(capacity) -> None\n"                            //
-    "\n"                                                     //
-    "Grows the index to host at least `capacity` entries.\n" //
-    "Calls `usearch_dense_reserve`.\n"                       //
-    "\n"                                                     //
-    "Args:\n"                                                //
+static char const doc_DenseIndex_reserve[] =                         //
+    "reserve(capacity) -> None\n"                                    //
+    "\n"                                                             //
+    "Grows the index to host at least `capacity` entries, a hint,\n" //
+    "since insertions grow the index on demand.\n"                   //
+    "Calls `usearch_dense_reserve`.\n"                               //
+    "\n"                                                             //
+    "Args:\n"                                                        //
     "  capacity (int): Entries the index must accept without growing again.";
 
 /** A @c usearch_dense_reserve call. */
@@ -2597,17 +2644,22 @@ static PyObject* DenseIndex_save_buffer(PyObject* self, PyObject* const* args, P
  */
 static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
                       PyObject* args_names_tuple, char const* source_name, PyObject** source, char const* arm_name,
-                      PyObject** arm, usearch_executor_t* executor, size_t* values_per_key, usearch_py_call_t* call,
+                      PyObject** arm, usearch_py_enum_t const* pinned_classes, int* pinned,
+                      usearch_executor_t* executor, size_t* values_per_key, usearch_py_call_t* call,
                       usearch_py_callback_t* progress, size_t* progress_steps) {
-    PyObject *executor_object, *values_per_key_object, *progress_object, *progress_steps_object;
+    PyObject *executor_object, *values_per_key_object, *progress_object, *progress_steps_object, *pinned_object;
     usearch_py_argument_t const arguments[] = {
-        {source_name, source},          {arm_name, arm},
-        {"executor", &executor_object}, {"values_per_key", &values_per_key_object},
-        {"progress", &progress_object}, {"progress_steps", &progress_steps_object},
+        {source_name, source},
+        {arm_name, arm},
+        {"executor", &executor_object},
+        {"values_per_key", &values_per_key_object},
+        {"progress", &progress_object},
+        {"progress_steps", &progress_steps_object},
+        {pinned_name(pinned_classes), &pinned_object},
     };
     if (usearch_py_arguments_parse(verb, args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        executor_optional(executor_object, executor) != 0 ||
+        pinned_parse(pinned_object, pinned_classes, pinned) != 0 || executor_optional(executor_object, executor) != 0 ||
         usearch_py_size_from_object(values_per_key_object, "values_per_key", values_per_key) != 0 ||
         usearch_py_size_from_object(progress_steps_object, "progress_steps", progress_steps) != 0)
         return -1;
@@ -2616,7 +2668,7 @@ static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positi
 
 static char const doc_DenseIndex_load_ram[] =                                                     //
     "load_ram(path, /, *, memory_domains=None, executor=None, values_per_key=0, progress=None,\n" //
-    "    progress_steps=0) -> DenseIndex\n"                                                       //
+    "    progress_steps=0, cpu_class=None) -> DenseIndex\n"                                       //
     "\n"                                                                                          //
     "Copies a checkpoint into a new, mutable index in host memory, its geometry read from the\n"  //
     "checkpoint's own headers. Name the `.safegraphs.json` manifest, never one of the parts\n"    //
@@ -2627,6 +2679,7 @@ static char const doc_DenseIndex_load_ram[] =                                   
     "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                   //
     "  memory_domains (Sequence[int], optional): NUMA node IDs to place the parts on;\n"          //
     "    None derives every node.\n"                                                              //
+    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"   //
     "  executor (Executor, optional): The workers the read fans out over, one shard per\n"        //
     "    thread; None reads on the calling thread.\n"                                             //
     "  values_per_key (int, optional): Entries sharing one key, which no checkpoint\n"            //
@@ -2646,8 +2699,10 @@ static PyObject* DenseIndex_load_ram(PyTypeObject* type, PyObject* const* args, 
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     PyObject* result = NULL;
+    int cpu_class = 0;
     if (load_parse("load_ram", args, positional_args_count, args_names_tuple, "path", &path_object, "memory_domains",
-                   &memory_domains_object, &executor, &values_per_key, &call, &progress, &progress_steps) != 0 ||
+                   &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor, &values_per_key, &call,
+                   &progress, &progress_steps) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
@@ -2659,7 +2714,7 @@ static PyObject* DenseIndex_load_ram(PyTypeObject* type, PyObject* const* args, 
         .executor = executor,
         .outcome = &call.outcome,
         .path = path,
-        .ram = {memory_domains, memory_domains_count},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(&progress, progress_steps),
     };
@@ -2675,22 +2730,23 @@ release:
     return result;
 }
 
-static char const doc_DenseIndex_load_ram_buffer[] =                                        //
-    "load_ram_buffer(buffer, /, *, memory_domains=None, executor=None, values_per_key=0,\n" //
-    "    progress=None, progress_steps=0) -> DenseIndex\n"                                  //
-    "\n"                                                                                    //
-    "Copies a monolith out of a buffer into a new, mutable index in host memory, as\n"      //
-    "`load_ram` does from a path; the monolith lands whole on the first memory domain.\n"   //
-    "Calls `usearch_dense_load_ram_buffer`.\n"                                              //
-    "\n"                                                                                    //
-    "Args:\n"                                                                               //
-    "  buffer (buffer): One serialized monolith, such as `save_buffer` returns.\n"          //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs to place shards on.\n"       //
-    "  executor (Executor, optional): The workers the copy fans out over; None copies on\n" //
-    "    the calling thread.\n"                                                             //
-    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"        //
-    "  progress (callable, optional): Called with (completed, total) bytes; returning\n"    //
-    "    False stops the read and raises `CancelledError`, creating no index.\n"            //
+static char const doc_DenseIndex_load_ram_buffer[] =                                            //
+    "load_ram_buffer(buffer, /, *, memory_domains=None, executor=None, values_per_key=0,\n"     //
+    "    progress=None, progress_steps=0, cpu_class=None) -> DenseIndex\n"                      //
+    "\n"                                                                                        //
+    "Copies a monolith out of a buffer into a new, mutable index in host memory, as\n"          //
+    "`load_ram` does from a path; the monolith lands whole on the first memory domain.\n"       //
+    "Calls `usearch_dense_load_ram_buffer`.\n"                                                  //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  buffer (buffer): One serialized monolith, such as `save_buffer` returns.\n"              //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs to place shards on.\n"           //
+    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n" //
+    "  executor (Executor, optional): The workers the copy fans out over; None copies on\n"     //
+    "    the calling thread.\n"                                                                 //
+    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"            //
+    "  progress (callable, optional): Called with (completed, total) bytes; returning\n"        //
+    "    False stops the read and raises `CancelledError`, creating no index.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
 
 static PyObject* DenseIndex_load_ram_buffer(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -2704,9 +2760,10 @@ static PyObject* DenseIndex_load_ram_buffer(PyTypeObject* type, PyObject* const*
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     PyObject* result = NULL;
+    int cpu_class = 0;
     if (load_parse("load_ram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "memory_domains", &memory_domains_object, &executor, &values_per_key, &call, &progress,
-                   &progress_steps) != 0 ||
+                   "memory_domains", &memory_domains_object, &usearch_py_cpu_class, &cpu_class, &executor,
+                   &values_per_key, &call, &progress, &progress_steps) != 0 ||
         checkpoint_borrow(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                         &memory_domains_count) != 0)
@@ -2718,7 +2775,7 @@ static PyObject* DenseIndex_load_ram_buffer(PyTypeObject* type, PyObject* const*
         .executor = executor,
         .outcome = &call.outcome,
         .buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len},
-        .ram = {memory_domains, memory_domains_count},
+        .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(&progress, progress_steps),
     };
@@ -2734,22 +2791,23 @@ release:
     return result;
 }
 
-static char const doc_DenseIndex_load_vram[] =                                                  //
-    "load_vram(path, /, *, devices=None, executor=None, values_per_key=0, progress=None,\n"     //
-    "    progress_steps=0) -> DenseIndex\n"                                                     //
-    "\n"                                                                                        //
-    "Copies a checkpoint into a new, mutable index on CUDA devices, with the placement rules\n" //
-    "of `load_ram`: part `p` lands whole on device `p` modulo the device count.\n"              //
-    "Calls `usearch_dense_load_vram`.\n"                                                        //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                 //
-    "  devices (Sequence[int], optional): CUDA ordinals to place the parts on.\n"               //
-    "  executor (Executor, optional): The streams the upload runs on, one per device; None\n"   //
-    "    uploads from the calling thread.\n"                                                    //
-    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"            //
-    "  progress (callable, optional): Called with (completed, total) shards; returning\n"       //
-    "    False stops the read and raises `CancelledError`, creating no index.\n"                //
+static char const doc_DenseIndex_load_vram[] =                                                     //
+    "load_vram(path, /, *, devices=None, executor=None, values_per_key=0, progress=None,\n"        //
+    "    progress_steps=0, gpu_class=None) -> DenseIndex\n"                                        //
+    "\n"                                                                                           //
+    "Copies a checkpoint into a new, mutable index on CUDA devices, with the placement rules\n"    //
+    "of `load_ram`: part `p` lands whole on device `p` modulo the device count.\n"                 //
+    "Calls `usearch_dense_load_vram`.\n"                                                           //
+    "\n"                                                                                           //
+    "Args:\n"                                                                                      //
+    "  path (str | bytes | os.PathLike): The manifest, or a single monolith.\n"                    //
+    "  devices (Sequence[int], optional): CUDA ordinals to place the parts on.\n"                  //
+    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n" //
+    "  executor (Executor, optional): The streams the upload runs on, one per device; None\n"      //
+    "    uploads from the calling thread.\n"                                                       //
+    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"               //
+    "  progress (callable, optional): Called with (completed, total) shards; returning\n"          //
+    "    False stops the read and raises `CancelledError`, creating no index.\n"                   //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
 
 static PyObject* DenseIndex_load_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -2763,8 +2821,10 @@ static PyObject* DenseIndex_load_vram(PyTypeObject* type, PyObject* const* args,
     int32_t* devices = NULL;
     size_t devices_count = 0;
     PyObject* result = NULL;
+    int gpu_class = 0;
     if (load_parse("load_vram", args, positional_args_count, args_names_tuple, "path", &path_object, "devices",
-                   &devices_object, &executor, &values_per_key, &call, &progress, &progress_steps) != 0 ||
+                   &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &call, &progress,
+                   &progress_steps) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         goto release;
@@ -2775,7 +2835,7 @@ static PyObject* DenseIndex_load_vram(PyTypeObject* type, PyObject* const* args,
         .executor = executor,
         .outcome = &call.outcome,
         .path = path,
-        .vram = {devices, devices_count},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(&progress, progress_steps),
     };
@@ -2791,22 +2851,23 @@ release:
     return result;
 }
 
-static char const doc_DenseIndex_load_vram_buffer[] =                                         //
-    "load_vram_buffer(buffer, /, *, devices=None, executor=None, values_per_key=0,\n"         //
-    "    progress=None, progress_steps=0) -> DenseIndex\n"                                    //
-    "\n"                                                                                      //
-    "Copies a monolith out of a host or device buffer into a new, mutable index on CUDA\n"    //
-    "devices; the monolith lands whole on the first device.\n"                                //
-    "Calls `usearch_dense_load_vram_buffer`.\n"                                               //
-    "\n"                                                                                      //
-    "Args:\n"                                                                                 //
-    "  buffer (buffer): One serialized monolith.\n"                                           //
-    "  devices (Sequence[int], optional): CUDA ordinals to place shards on.\n"                //
-    "  executor (Executor, optional): The streams the upload runs on, one per device; None\n" //
-    "    uploads from the calling thread.\n"                                                  //
-    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"          //
-    "  progress (callable, optional): Called with (completed, total) bytes; returning\n"      //
-    "    False stops the read and raises `CancelledError`, creating no index.\n"              //
+static char const doc_DenseIndex_load_vram_buffer[] =                                              //
+    "load_vram_buffer(buffer, /, *, devices=None, executor=None, values_per_key=0,\n"              //
+    "    progress=None, progress_steps=0, gpu_class=None) -> DenseIndex\n"                         //
+    "\n"                                                                                           //
+    "Copies a monolith out of a host or device buffer into a new, mutable index on CUDA\n"         //
+    "devices; the monolith lands whole on the first device.\n"                                     //
+    "Calls `usearch_dense_load_vram_buffer`.\n"                                                    //
+    "\n"                                                                                           //
+    "Args:\n"                                                                                      //
+    "  buffer (buffer): One serialized monolith.\n"                                                //
+    "  devices (Sequence[int], optional): CUDA ordinals to place shards on.\n"                     //
+    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n" //
+    "  executor (Executor, optional): The streams the upload runs on, one per device; None\n"      //
+    "    uploads from the calling thread.\n"                                                       //
+    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"               //
+    "  progress (callable, optional): Called with (completed, total) bytes; returning\n"           //
+    "    False stops the read and raises `CancelledError`, creating no index.\n"                   //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
 
 static PyObject* DenseIndex_load_vram_buffer(PyTypeObject* type, PyObject* const* args,
@@ -2820,8 +2881,10 @@ static PyObject* DenseIndex_load_vram_buffer(PyTypeObject* type, PyObject* const
     int32_t* devices = NULL;
     size_t devices_count = 0;
     PyObject* result = NULL;
+    int gpu_class = 0;
     if (load_parse("load_vram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "devices", &devices_object, &executor, &values_per_key, &call, &progress, &progress_steps) != 0 ||
+                   "devices", &devices_object, &usearch_py_gpu_class, &gpu_class, &executor, &values_per_key, &call,
+                   &progress, &progress_steps) != 0 ||
         checkpoint_borrow(buffer_object, &backing) != 0 ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         goto release;
@@ -2832,7 +2895,7 @@ static PyObject* DenseIndex_load_vram_buffer(PyTypeObject* type, PyObject* const
         .executor = executor,
         .outcome = &call.outcome,
         .buffer = {(uint8_t const*)backing.buffer.buf, (size_t)backing.buffer.len},
-        .vram = {devices, devices_count},
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
         .values_per_key = values_per_key,
         .progress = usearch_py_progress_registered(&progress, progress_steps),
     };
@@ -3111,7 +3174,10 @@ static PyGetSetDef DenseIndex_getset[] = {
      (void*)offsetof(usearch_dense_index_description_t, metadata.connectivity)},
     {"memory_usage", (getter)DenseIndex_get_counter, NULL, doc_DenseIndex_memory_usage,
      (void*)offsetof(usearch_dense_index_description_t, memory_usage)},
-    {"capabilities", (getter)DenseIndex_get_capabilities, NULL, doc_DenseIndex_capabilities, NULL},
+    {"cpu_class", (getter)DenseIndex_get_cpu_class, NULL, doc_DenseIndex_cpu_class, NULL},
+    {"gpu_class", (getter)DenseIndex_get_gpu_class, NULL, doc_DenseIndex_gpu_class, NULL},
+    {"shards_count", (getter)DenseIndex_get_counter, NULL, doc_DenseIndex_shards_count,
+     (void*)offsetof(usearch_dense_index_description_t, shards_count)},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

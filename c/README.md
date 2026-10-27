@@ -680,12 +680,11 @@ usearch_sequence_search(&(usearch_sequence_search_t) {.index = sequences,
                                                       .wanted = 3});
 ```
 
-The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch and Smith-Waterman with linear gaps, their Gotoh forms with affine gaps, and overlap, the share of fixed-width windows one side misses of the other.
-The alignment kinds take `usearch_sequence_weights_t`, a 256×256 substitution matrix with gap costs, and the overlap kind takes `window_widths` in bytes, each refused by every other kind with `usearch_status_config_mismatch_k`.
-The local Smith-Waterman kinds only rank: each is served from an index built under its global counterpart, which the library picks.
+The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch with a linear gap, and overlap, the share of fixed-width windows one side misses of the other.
+Needleman-Wunsch takes `usearch_sequence_weights_t`, a 256×256 substitution matrix with a gap cost, and the overlap kind takes `window_widths` in bytes, each refused by every other kind with `usearch_status_config_mismatch_k`.
 The verbs mirror the dense ones: `init_ram`, `init_vram`, `load_ram`, `load_vram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` writing tapes into an arena, `cursor_next` writing keys and their links, `absorb`, `split`, `save`, `metadata_read` and `describe`, while `count` also reports a key's total and largest byte lengths.
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.
-The engine serves the Levenshtein and overlap kinds, and answers the alignment kinds, `view_ram`, `sample`, `split`, a cursor opened at `starts` and a pull asking for `links` with `usearch_status_unsupported_k`; `refine` and `absorb` serve RAM indexes.
+The engine serves every kind, and answers `view_ram`, `sample`, `split`, a cursor opened at `starts` and a pull asking for `links` with `usearch_status_unsupported_k`; `refine` and `absorb` serve RAM indexes.
 The stand-in serves every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
 
 ## Shape Indexes

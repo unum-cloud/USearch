@@ -101,6 +101,25 @@ public class DenseIndexTest {
     }
 
     @Test
+    public void layoutsMatchTheirStructs() {
+        long word = ValueLayout.ADDRESS.byteSize();
+        assertEquals(2 * word, Library.offset(Library.RAM_OPTIONS, "shard_capacity"));
+        assertEquals(3 * word, Library.offset(Library.RAM_OPTIONS, "cpu_class"));
+        assertEquals(4 * word, Library.RAM_OPTIONS.byteSize());
+        assertEquals(3 * word, Library.offset(Library.VRAM_OPTIONS, "gpu_class"));
+        assertEquals(4 * word, Library.VRAM_OPTIONS.byteSize());
+        assertEquals(2 * word, Library.offset(Library.NVME_OPTIONS, "cpu_class"));
+        assertEquals(3 * word, Library.NVME_OPTIONS.byteSize());
+        assertEquals(2 * word, Library.offset(Library.TRAVERSAL_STATS, "restarts"));
+        assertEquals(3 * word, Library.TRAVERSAL_STATS.byteSize());
+        long cpuClass = Library.offset(DenseIndex.DESCRIPTION, "cpu_class");
+        assertEquals(DenseIndex.METADATA.byteSize() + 3 * word, cpuClass);
+        assertEquals(cpuClass + 4, Library.offset(DenseIndex.DESCRIPTION, "gpu_class"));
+        assertEquals(cpuClass + 8, Library.offset(DenseIndex.DESCRIPTION, "shards_count"));
+        assertEquals(cpuClass + 8 + word, DenseIndex.DESCRIPTION.byteSize());
+    }
+
+    @Test
     public void keyRendersAsDashedUuid() {
         assertEquals("00000000-0000-0000-0000-00000000002a", Key.of(42).toString());
         assertEquals(Key.NIL, Key.of(0));
@@ -370,16 +389,10 @@ public class DenseIndexTest {
     }
 
     @Test
-    public void unfrozenGeometryRefusesRows() {
-        try (DenseIndex index = empty(new DenseOptions())) {
-            assertEquals(0, index.describe().metadata().dimensions());
-            assertEquals(
-                    Status.UNINITIALIZED,
-                    assertThrows(
-                                    USearchException.class,
-                                    () -> index.insert(new Key[] {Key.of(1)}, RowsView.of(new float[] {0, 1}, 2)))
-                            .status());
-        }
+    public void zeroDimensionsAreRefusedAtInit() {
+        assertEquals(
+                Status.CONFIG_MISMATCH,
+                assertThrows(USearchException.class, () -> empty(new DenseOptions())).status());
     }
 
     @Test
@@ -825,7 +838,8 @@ public class DenseIndexTest {
         assertFalse(Types.capabilitiesAvailable().isEmpty());
         try (DenseIndex index = populated()) {
             DenseIndexDescription description = index.on(POOL).describe();
-            assertFalse(description.capabilities().isEmpty());
+            assertFalse(description.cpuClass().isEmpty());
+            assertEquals("unknown", description.gpuClass());
             assertEquals(2, description.size());
             assertTrue(description.capacity() >= description.size());
             assertTrue(description.memoryUsage() > 0);

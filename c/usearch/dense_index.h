@@ -43,7 +43,7 @@
  *
  *  A VRAM handle builds and searches on the devices its placement names, its shards spread over
  *  them, several to a device when asked, and never replicated, so capacity is what those devices
- *  host together: the geometry freezes at the first reservation, and rows grow only up to that.
+ *  host together: the geometry freezes at init, and rows grow on demand up to what they hold.
  *  Planes stay device-resident and never migrate, so an index outgrowing its devices fails rather
  *  than paging to the host - the answer to a dataset past one accelerator is to name more of them.
  *
@@ -257,8 +257,8 @@ USEARCH_EXPORT char const* usearch_dense_metric_name(usearch_dense_metric_t metr
 USEARCH_EXPORT usearch_dense_metric_t usearch_dense_metric_from_name(usearch_bytes_view_t name);
 
 /**
- *  @brief The arguments of @c usearch_dense_init_ram - the geometry and metric an empty index
- *      freezes, and where its shards live.
+ *  @brief The arguments of @c usearch_dense_init_ram - the geometry and metric the empty index
+ *      freezes at init, and where its shards live.
  *
  *  Stored rows round up to whole steps of the distance kit the build picked, zero-tailed, so no
  *  step load straddles a row's alignment; the memory is slightly larger for it, and that is not a
@@ -294,7 +294,14 @@ typedef struct usearch_dense_init_ram_t {
     usearch_ram_options_t ram;
 } usearch_dense_init_ram_t;
 
-/** Creates an empty, mutable index in host memory. */
+/**
+ *  @brief Creates an empty, mutable index in host memory, its geometry frozen, so it takes rows
+ *      without a reservation.
+ *
+ *  @retval usearch_status_config_mismatch_k Zero @c dimensions, @c dimensions a packed
+ *      quantization like @c usearch_scalar_u1x8_k leaves a storage value partly filled by, or a
+ *      @c connectivity that is not a power of two.
+ */
 USEARCH_EXPORT void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments);
 
 /** The arguments of @c usearch_dense_init_vram, which match @c usearch_dense_init_ram_t but for
@@ -326,7 +333,14 @@ typedef struct usearch_dense_init_vram_t {
     usearch_vram_options_t vram;
 } usearch_dense_init_vram_t;
 
-/** Creates an empty, mutable index in device memory. @ref dense_index_gpu_acceleration */
+/**
+ *  @brief Creates an empty, mutable index in device memory, its geometry frozen, so it takes rows
+ *      without a reservation. @ref dense_index_gpu_acceleration
+ *
+ *  @retval usearch_status_config_mismatch_k Zero @c dimensions, a @c connectivity that is not a
+ *      power of two, or on NVIDIA and AMD a geometry whose walks cannot fit the device's shared
+ *      memory.
+ */
 USEARCH_EXPORT void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments);
 
 /** The arguments of @c usearch_dense_load_ram. */
@@ -562,7 +576,8 @@ typedef struct usearch_dense_reserve_t {
     size_t capacity;
 } usearch_dense_reserve_t;
 
-/** Reserves capacity for a number of incoming vectors ahead of insertion. */
+/** Grows the shards ahead of a number of incoming vectors - a capacity hint, since insertions grow
+ *  them on demand and init froze the geometry already. */
 USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_reserve_t* arguments);
 
 /** The arguments of @c usearch_dense_clear. */

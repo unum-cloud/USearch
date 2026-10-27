@@ -51,6 +51,7 @@
 #include <cmath> // `std::sqrt`, `std::exp`
 
 #include <algorithm>     // `std::stable_sort`, `std::min`, `std::max`, `std::find`
+#include <bit>           // `std::has_single_bit` - the connectivity init accepts
 #include <limits>        // `std::numeric_limits`
 #include <memory>        // `std::unique_ptr` - a finished refinement's handle
 #include <optional>      // `std::optional`
@@ -158,12 +159,6 @@ static bool reject_unstored(usearch_scalar_t quantization, usearch_outcome_t* ou
             return reject_if(rung >= USEARCH_DENSE_DTYPES, usearch_status_unsupported_k,
                              "This build's USEARCH_DENSE_DTYPES leaves the quantization out", outcome);
     return reject_if(true, usearch_status_unknown_kind_k, "Unsupported quantization", outcome);
-}
-
-/** Whether the geometry is frozen; a zeroed width makes every derived extent zero. */
-static bool reject_unfrozen(dense_index_t const& index, usearch_outcome_t* outcome) {
-    return reject_if(!index.options.dimensions, usearch_status_uninitialized_k, "The geometry was never frozen",
-                     outcome);
 }
 
 /** Whether a receiver frozen at @p receiver takes a part of an index frozen at @p index: the same
@@ -414,9 +409,14 @@ usearch_dense_metric_t usearch_dense_metric_from_name(usearch_bytes_view_t name)
 void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    // Init freezes the geometry, so it refuses one the engine cannot store: no width, a packed
+    // width leaving a storage value partly filled, or a connectivity off the powers of two.
     if (reject_if(!known_metric(arguments->metric), usearch_status_unknown_kind_k,
                   "The stand-in does not implement that metric", outcome) ||
-        reject_unstored(arguments->quantization, outcome))
+        reject_unstored(arguments->quantization, outcome) ||
+        reject_if(!arguments->dimensions || arguments->dimensions % dimensions_per_value(arguments->quantization) ||
+                      (arguments->connectivity && !std::has_single_bit(arguments->connectivity)),
+                  usearch_status_config_mismatch_k, "The geometry cannot be stored", outcome))
         return;
     usearch_dense_index_handle_t* const index = new (std::nothrow) usearch_dense_index_handle_t();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
@@ -547,7 +547,6 @@ void usearch_dense_insert(usearch_dense_insert_t* arguments) {
     reset(arguments->stats);
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
-    if (reject_unfrozen(index, outcome)) return;
     std::size_t const count = arguments->count;
     usearch_rows_view_t const& vectors = arguments->vectors;
     if (reject_view(vectors, count, index, outcome)) return;
@@ -613,7 +612,6 @@ void usearch_dense_search(usearch_dense_search_t* arguments) {
     reset(arguments->stats);
     *arguments->matches = {};
     usearch_dense_index_handle_t& index = *arguments->index;
-    if (reject_unfrozen(index, outcome)) return;
     std::size_t const count = arguments->count;
     if (reject_view(arguments->queries, count, index, outcome)) return;
     usearch_traversal_t const traversal = arguments->traversal;
@@ -892,7 +890,6 @@ void usearch_dense_sample(usearch_dense_sample_t* arguments) {
     *arguments->links = {};
     *arguments->written = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
-    if (reject_unfrozen(index, outcome)) return;
     std::size_t const anchors_count = arguments->anchors_count;
     usearch_rows_view_t const& anchors = arguments->anchors;
     if (anchors_count && reject_view(anchors, anchors_count, index, outcome)) return;
@@ -930,7 +927,6 @@ void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* argume
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->stream = nullptr;
     usearch_dense_index_handle_t& index = *arguments->index;
-    if (reject_unfrozen(index, outcome)) return;
     usearch_rows_view_t const& query = arguments->query;
     if (reject_view(query, 1, index, outcome)) return;
     usearch_dense_search_stream_handle_t* const stream = new (std::nothrow) usearch_dense_search_stream_handle_t();
@@ -1050,7 +1046,6 @@ void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
     if (arguments->written) *arguments->written = 0;
     if (arguments->required) *arguments->required = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
-    if (reject_unfrozen(index, outcome)) return;
     if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_status_config_mismatch_k,
                   "A product is a dot, so the kind must be inner product", outcome))
         return;
@@ -1101,7 +1096,6 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     reset(stats);
     *arguments->outputs = {};
     usearch_dense_index_handle_t& index = *arguments->index;
-    if (reject_unfrozen(index, outcome)) return;
     if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_status_config_mismatch_k,
                   "A softmax weighs logits, so the kind must be inner product", outcome))
         return;
@@ -1181,7 +1175,6 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     if (arguments->written) *arguments->written = 0;
     if (arguments->required) *arguments->required = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
-    if (reject_unfrozen(index, outcome)) return;
     if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_status_config_mismatch_k,
                   "Late interaction sums maxima over logits, so the kind must be inner product", outcome))
         return;
