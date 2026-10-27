@@ -194,7 +194,9 @@ def test_engine_round_trips_when_present() raises:
     assert_equal(Int(description.metadata.dimensions), 3, "the geometry froze at three")
     assert_true(description.metadata.quantization == ScalarKind.BF16, "an index left alone stores bf16")
     assert_true(description.metadata.metric == DenseMetric.ANGULAR, "and scores angular distances")
-    assert_true(description.capabilities.byte_length() != 0, "the dispatch codename crosses as text")
+    assert_true(
+        library.cpu_class_name(description.cpu_class) != "unknown", "a host index names the class it dispatched to"
+    )
 
     var query = [Float32(1), 0, 0]
     var arena = Arena(executor)

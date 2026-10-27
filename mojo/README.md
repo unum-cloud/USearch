@@ -360,7 +360,7 @@ A `carry` of one `DenseSoftmaxState` per query row, lent by you, folds this bran
 
 ```mojo
 var description = index.describe()
-print(description.size, description.memory_usage, description.capabilities)  # the kernels dispatch picked
+print(description.size, description.memory_usage, library.cpu_class_name(description.cpu_class))  # the class dispatch picked
 print(index.count(Key(integer=42)))  # entries sharing one key
 
 var reachability = index.health()

@@ -4,8 +4,8 @@
  *
  *  `seek` acquires slot zero exactly once per try and waits out a sentinel on the index's monitor,
  *  then reads the tail relaxed. The follower's own seek waits out the stale sentinel a traversal
- *  would trip on, and the row it follows rides the back-link fence into even a relaxed watermark
- *  store, so only the searcher reads a row stale when the watermark's release goes.
+ *  would trip on, and the row it follows rides the back-link's release unlock into even a relaxed
+ *  watermark store, so only the searcher reads a row stale when the watermark's release goes.
  *
  *  A back-link names a row once it is published, but a reader reaches the row's hosting chunk only
  *  behind the ID's dispense, which the watermark above the ID carries and a relaxed tail read does

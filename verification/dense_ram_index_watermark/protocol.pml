@@ -49,7 +49,10 @@
 #define covered_order order_release
 #endif
 #ifndef back_link_fence
-#define back_link_fence true
+#define back_link_fence false
+#endif
+#ifndef finish_fence
+#define finish_fence false
 #endif
 #ifndef key_before_turn
 #define key_before_turn true
@@ -139,7 +142,7 @@ inline insert_dispensed(t, id, first_invisible, seen, displaced, watermark) {
         store(t, row_lock(id), order_release, published(id));
         published_at[id] = newest_write(row_lock(id))
     };
-    // back_link_neighbors: the fence, then the row lock, the tail, the unlock
+    // back_link_neighbors: the row lock, the tail, the unlock, behind a release fence only under its knob
     if
     :: first_invisible > 0 ->
         if
@@ -243,15 +246,18 @@ inline reopen_dispenser(t, visible, expected, reopened) {
 
 // `refine_one_` on row 0, without its walk, which writes nothing: the lock, the tail rewritten
 // relaxed, and the unlock with the first neighbor the re-selection kept, the value the lock
-// displaced; then `back_link_neighbors` into row 1, which names row 0 already: the release fence,
-// the lock, and the unlock with the value it held
+// displaced; then `back_link_neighbors` into row 1, which names row 0 already: the lock, and the
+// unlock with the value it held
 inline refine(t) {
     int displaced;
     lock(t, 0, displaced);
     store(t, row_tail(0), order_relaxed, refined(0));
     store(t, second_tail, order_relaxed, refined(0));
     unlock(t, 0, displaced);
-    fence_release(t);
+    if
+    :: back_link_fence -> fence_release(t)
+    :: else
+    fi;
     lock(t, 1, displaced);
     unlock(t, 1, displaced)
 }
@@ -274,8 +280,7 @@ inline copy_row(t, id, lock_copy, tail_copy, second_copy) {
 }
 
 // `plan_save` and `finish` under `concurrent_k`: three acquire loads, every row copied under its
-// lock, the acquire fence that pairs with the one heading `back_link_neighbors`, and the relaxed
-// re-check
+// lock, and the relaxed re-check, which the row locks' acquires order after every edit a copy saw
 inline save(t) {
     byte covered_rows;
     int visible, dispensed, allocated, again;
@@ -298,9 +303,12 @@ inline save(t) {
     :: visible > 1 -> copy_row(t, 1, lock_copy_1, tail_copy_1, second_copy); covered_rows++
     :: else
     fi;
-    // finish: the tally whole, then the fence, then the re-check
+    // finish: the tally whole, then the re-check
     assert(covered_rows == visible);
-    fence_acquire(t);
+    if
+    :: finish_fence -> fence_acquire(t)
+    :: else
+    fi;
     load(t, last_visible_id, order_relaxed, again);
     if
     :: again != visible -> goto contended

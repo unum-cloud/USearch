@@ -30,7 +30,6 @@
 
 #include <algorithm> // `std::sort`, `std::unique`, `std::all_of`, `std::rotate`
 #include <array>     // `std::array`
-#include <atomic>    // `std::atomic`
 #include <bit>       // `std::bit_cast` - the ULP distance of the oracle audits; `std::bit_floor` - a cell's ceiling
 #include <chrono>    // `std::chrono::microseconds`
 #include <memory>    // `std::allocator` - the part path buffer, `std::unique_ptr` - every scenario's index
@@ -298,9 +297,9 @@ struct counting_device_allocator {
     status_t commit(std::size_t bytes) noexcept {
         status_t const status = virtual_memory_.commit(bytes);
         if (ledger_ && virtual_memory_.committed_bytes() > tallied_bytes_) {
-            ledger_->live_bytes.fetch_add(
-                static_cast<std::ptrdiff_t>(virtual_memory_.committed_bytes() - tallied_bytes_));
-            ledger_->total_allocations.fetch_add(1);
+            fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes)
+                .add(static_cast<std::ptrdiff_t>(virtual_memory_.committed_bytes() - tallied_bytes_));
+            fu::standard_atomic_ref<std::size_t>(ledger_->total_allocations).add(1);
             tallied_bytes_ = virtual_memory_.committed_bytes();
         }
         return status;
@@ -313,7 +312,9 @@ struct counting_device_allocator {
     bool shared_with(int device) const noexcept { return virtual_memory_.shared_with(device); }
     status_t grant(std::bitset<gpu_devices_capacity_k> devices) noexcept { return virtual_memory_.grant(devices); }
     void release() noexcept {
-        if (ledger_ && tallied_bytes_) ledger_->live_bytes.fetch_sub(static_cast<std::ptrdiff_t>(tallied_bytes_));
+        if (ledger_ && tallied_bytes_)
+            fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes)
+                .sub(static_cast<std::ptrdiff_t>(tallied_bytes_));
         tallied_bytes_ = 0;
         virtual_memory_.release();
     }
@@ -586,7 +587,7 @@ template <typename index_type_, typename make_index_type_>
 std::size_t test_dense_guards(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_guards<index_type_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** The classic smoke scenario: three vectors in, each finds itself first, and a narrower
@@ -635,7 +636,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_three_vectors(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_three_vectors<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** Growth across several doubling chunks, then sampled self-recall on the big graph,
@@ -681,7 +682,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_growth_and_recall(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_growth_and_recall<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 #pragma endregion Foundations
@@ -821,7 +822,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_predicated_search(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_predicated_search<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** Single-index scans against the one-to-one oracle of @ref test_dense_indexes_scan: over a store
@@ -914,7 +915,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_scan(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_scan<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** A float dot against its oracle, within accumulation rounding. */
@@ -1084,7 +1085,7 @@ std::size_t test_dense_indexer_search(make_index_type_ const& make_index, u64_t 
     else {
         allocation_ledger_t ledger;
         std::size_t const failures = dense_expect_indexer_search<index_type_, kernel_>(make_index, ledger, seed);
-        return failures + expect_eq(ledger.live_bytes.load(), 0);
+        return failures + expect_eq(ledger.live_bytes, 0);
     }
 }
 
@@ -1317,19 +1318,20 @@ std::size_t dense_expect_pooled_save(index_type_& index, typename index_type_::s
                                           synchronization_t::immutable_k);
     failures += expect(succeeded(status));
     std::size_t const widest = dense_plan_widest_step(plan);
-    std::atomic<std::size_t> cursor {0};
-    std::atomic<std::size_t> lane_failures {0};
+    std::size_t cursor_position = 0, lane_failures_count = 0;
+    fu::standard_atomic_ref<std::size_t> const cursor {cursor_position};
+    fu::standard_atomic_ref<std::size_t> const lane_failures {lane_failures_count};
     constexpr std::size_t lanes_count = 3;
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(lanes_count))) return failures + expect(false);
     pool.for_threads([&](std::size_t) noexcept {
         auto scratch = nk::matrix<node_id_type_>::zeros({widest, shape.connectivity}).value;
-        if (scratch.empty()) return void(lane_failures.fetch_add(1));
+        if (scratch.empty()) return lane_failures.add(1);
         auto const steps = plan.steps();
         for (std::size_t position = cursor.fetch_add(1); position < steps.size(); position = cursor.fetch_add(1))
-            if (failed(plan.save(steps[position], scratch.span()))) lane_failures.fetch_add(1);
+            if (failed(plan.save(steps[position], scratch.span()))) lane_failures.add(1);
     });
-    failures += expect_eq(lane_failures.load(), 0u);
+    failures += expect_eq(lane_failures_count, 0u);
     failures += expect_eq(plan.finish(), status_t::success_k);
     failures += expect(std::memcmp(pooled_vectors.data(), saved_vectors.data(),
                                    dense_rows_bytes(saved_vectors.view(), shape.nodes)) == 0);
@@ -1417,7 +1419,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_save_load_roundtrip(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_save_load_roundtrip<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** Columns one row short of the rows asked for are refused before planning, so no step ever
@@ -1603,7 +1605,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_load_hostile(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_load_hostile<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** Loads append: an ID space past the source's rows lands nothing, the same payload landed twice
@@ -1699,7 +1701,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_load_append(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_load_append<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 #pragma endregion Snapshots
@@ -1765,31 +1767,31 @@ std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allo
     auto const [first_refinement, first_status] = index.refine({0, published}, context);
     failures += expect(first_status == status_t::success_k);
     // Every pass heals what it strands, so islands add their re-selections to the range's, and only then.
-    failures += expect(first_refinement.visited_nodes >= dense_growth_nodes_k &&
-                       (first_refinement.visited_nodes == dense_growth_nodes_k) == !first_refinement.islands_found);
+    failures += expect(first_refinement.reselected_nodes >= dense_growth_nodes_k &&
+                       (first_refinement.reselected_nodes == dense_growth_nodes_k) == !first_refinement.islands_found);
     failures += expect(first_refinement.changed_nodes > 0 &&
-                       first_refinement.changed_nodes <= first_refinement.visited_nodes);
-    failures += expect(first_refinement.computed_distances > 0 && first_refinement.visited_members > 0);
-    if constexpr (requires { first_refinement.computed_distances_in_refines; })
-        failures += expect(first_refinement.computed_distances_in_refines +
-                               first_refinement.computed_distances_in_reverse_refines <=
-                           first_refinement.computed_distances);
+                       first_refinement.changed_nodes <= first_refinement.reselected_nodes);
+    traversal_telemetry_t const& spent = first_refinement.telemetry;
+    failures += expect(spent.computed_distances > 0 && spent.visited_members > 0);
+    failures += expect(spent.computed_distances_in_refines + spent.computed_distances_in_reverse_refines <=
+                       spent.computed_distances);
 
     auto const [second_refinement, second_status] = index.refine({0, published}, context);
     failures += expect(second_status == status_t::success_k);
-    failures += expect(second_refinement.visited_nodes >= dense_growth_nodes_k &&
-                       (second_refinement.visited_nodes == dense_growth_nodes_k) == !second_refinement.islands_found);
+    failures += expect(second_refinement.reselected_nodes >= dense_growth_nodes_k &&
+                       (second_refinement.reselected_nodes == dense_growth_nodes_k) ==
+                           !second_refinement.islands_found);
     failures += expect(second_refinement.changed_nodes < first_refinement.changed_nodes);
 
     // A range past the end re-selects only islands, and one straddling it stops at the watermark.
     auto const [beyond, beyond_status] = index.refine({published, published + 16}, context);
     failures += expect(beyond_status == status_t::success_k);
-    failures += expect((beyond.visited_nodes == 0) == !beyond.islands_found);
+    failures += expect((beyond.reselected_nodes == 0) == !beyond.islands_found);
     auto const [straddling, straddling_status] = index.refine({published / 2, published * 2}, context);
     failures += expect(straddling_status == status_t::success_k);
     std::size_t const straddled = dense_growth_nodes_k - dense_growth_nodes_k / 2;
-    failures += expect(straddling.visited_nodes >= straddled &&
-                       (straddling.visited_nodes == straddled) == !straddling.islands_found);
+    failures += expect(straddling.reselected_nodes >= straddled &&
+                       (straddling.reselected_nodes == straddled) == !straddling.islands_found);
 
     // A sweep is a build step, so what it must never do is cost the graph its answers.
     if constexpr (kernel_ != nk_kernel_dot_k)
@@ -1803,7 +1805,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_refine_settles(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_refine_settles<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** Builds and refines distinct rows of which every stride-th repeats the first, a duplicate class
@@ -1881,7 +1883,7 @@ std::size_t test_dense_duplicate_basin(make_index_type_ const& make_index, u64_t
             members_found += context.results[match].distance < dense_self_match_tolerance_k;
         failures += expect(members_found > 1);
     }
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** The audit's contract on a graph nothing stranded: an empty index reaches nothing, a
@@ -1928,7 +1930,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_health_audits(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_health_audits<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** Strands the rows from @p first_island on: every reference to the tail leaves the graph,
@@ -2023,7 +2025,7 @@ template <typename index_type_, typename make_index_type_>
 std::size_t test_dense_heal_islands(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_heal_islands<index_type_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** Of the ten nearest rows by @p index 's own exact scan, how many its walks return, summed over
@@ -2181,7 +2183,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_split(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_split<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 #pragma endregion Refinement
@@ -2360,7 +2362,7 @@ std::size_t test_dense_multiply(make_index_type_ const& make_index, u64_t seed) 
     else {
         allocation_ledger_t ledger;
         std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger, seed);
-        return failures + expect_eq(ledger.live_bytes.load(), 0);
+        return failures + expect_eq(ledger.live_bytes, 0);
     }
 }
 
@@ -2450,7 +2452,7 @@ std::size_t test_dense_attend(make_index_type_ const& make_index, u64_t seed) {
     else {
         allocation_ledger_t ledger;
         std::size_t const failures = dense_expect_attend<index_type_, kernel_>(make_index, ledger, seed);
-        return failures + expect_eq(ledger.live_bytes.load(), 0);
+        return failures + expect_eq(ledger.live_bytes, 0);
     }
 }
 
@@ -2776,7 +2778,7 @@ std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, al
                                                    dense_dimensions_for<scalar_t>(dense_values_k),
                                                    stream_key(seed, "concurrent_build"));
     std::vector<node_id_t> assigned_ids(nodes_count);
-    std::atomic<std::size_t> thread_failures {0};
+    std::size_t thread_failures = 0;
 
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread >= writer_threads_count) return;
@@ -2787,11 +2789,11 @@ std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, al
                                  {assigned_ids.data() + thread * dense_thread_nodes_k, dense_thread_nodes_k},
                                  threads.contexts[thread])
                          .status;
-        if (status != status_t::success_k) thread_failures.fetch_add(1);
+        if (status != status_t::success_k) fu::standard_atomic_ref<std::size_t>(thread_failures).add(1);
         assert_no_locks_held();
     });
 
-    failures += expect_eq(thread_failures.load(), 0u);
+    failures += expect_eq(thread_failures, 0u);
     failures += expect_eq(index.size(), nodes_count);
     // One batch's IDs come from one dispense: contiguous, in the order of its rows.
     std::size_t scattered_ids = 0;
@@ -2814,7 +2816,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_concurrent_build(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_concurrent_build<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /**
@@ -2853,16 +2855,17 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
     auto query_vectors = make_vectors<scalar_t>(queries_count, dense_dimensions_for<scalar_t>(dense_values_k),
                                                 stream_key(seed, "concurrent_search", 1));
 
-    std::atomic<std::size_t> writer_lanes_remaining {writer_threads_count};
-    std::atomic<std::size_t> thread_failures {0};
+    std::size_t writer_lanes_remaining_count = writer_threads_count, thread_failures_count = 0;
+    fu::standard_atomic_ref<std::size_t> const writer_lanes_remaining {writer_lanes_remaining_count};
+    fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
 
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread != 0 && thread <= writer_threads_count) {
             status_t status = status_t::contended_k;
             while (status == status_t::contended_k)
                 status = index.insert(threads.slices[thread].view(), {}, threads.contexts[thread]).status;
-            if (status != status_t::success_k) thread_failures.fetch_add(1);
-            writer_lanes_remaining.fetch_sub(1, std::memory_order_release);
+            if (status != status_t::success_k) thread_failures.add(1);
+            writer_lanes_remaining.sub(1, std::memory_order_release);
             assert_no_locks_held();
             return;
         }
@@ -2888,14 +2891,14 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
             auto query = query_vectors.view().row(step % queries_count).as_vector();
             bool const predicated = predicable && step % 2 == 1;
             auto const [result, status] = search_step(query, predicated);
-            if (status != status_t::success_k) thread_failures.fetch_add(1);
-            thread_failures.fetch_add(
+            if (status != status_t::success_k) thread_failures.add(1);
+            thread_failures.add(
                 scored_failures(threads.contexts[0].results.data(), result.count, index.size(), expansion_bound));
             // Every writer inserts its slice as one batch, which publishes whole.
-            if (index.size() % dense_thread_nodes_k) thread_failures.fetch_add(1);
+            if (index.size() % dense_thread_nodes_k) thread_failures.add(1);
             if (predicated)
                 for (std::size_t match = 0; match != result.count; ++match)
-                    if (threads.contexts[0].results[match].node_id % 2 != 1) thread_failures.fetch_add(1);
+                    if (threads.contexts[0].results[match].node_id % 2 != 1) thread_failures.add(1);
         }
         assert_no_locks_held();
     });
@@ -2910,7 +2913,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_concurrent_search(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_concurrent_search<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** The sharded index's refusal surface, all deterministic: verbs before placement,
@@ -3059,7 +3062,7 @@ std::size_t test_dense_indexes_refine(u64_t seed, placement_types_&... placement
 
     auto const [first, first_status] = indexes.refine(executor);
     failures += expect(succeeded(first_status));
-    failures += expect(first.visited_nodes >= rows && first.changed_nodes <= first.visited_nodes);
+    failures += expect(first.reselected_nodes >= rows && first.changed_nodes <= first.reselected_nodes);
     failures += expect(first.changed_nodes > 0);
     failures += expect(first.health.reachable_nodes <= rows &&
                        first.health.reachable_nodes + first.islands_found >= rows);
@@ -3337,7 +3340,7 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
     failures += expect_eq(relay.size(), 0u);
     failures += dense_indexes_expect_restored(recipient, vectors, keys, dimensions, executor, seed);
     // Every appended row re-selects, whatever shard it landed in.
-    failures += expect(absorbed.visited_nodes >= rows - half && absorbed.changed_nodes > 0);
+    failures += expect(absorbed.reselected_nodes >= rows - half && absorbed.changed_nodes > 0);
     // The refine heals while its island count shrinks, which a dot graph's hubs can stall short of
     // every row.
     auto const [health, health_status] = recipient.health(executor);
@@ -3412,11 +3415,9 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
         }
     };
     // Re-selection reports from every worker at once, so the furthest count wins.
-    std::atomic<std::size_t> reported {0};
-    auto note = [&](std::size_t visited) noexcept {
-        std::size_t seen = reported.load();
-        while (seen < visited && !reported.compare_exchange_weak(seen, visited)) {}
-    };
+    std::size_t reported_count = 0;
+    fu::standard_atomic_ref<std::size_t> const reported {reported_count};
+    auto note = [&](std::size_t visited) noexcept { reported.max(visited); };
     auto cancel = [&](std::size_t visited, std::size_t) noexcept { return note(visited), continuation_t::cancel_k; };
     auto proceed = [&](std::size_t visited, std::size_t) noexcept { return note(visited), continuation_t::continue_k; };
 
@@ -3470,7 +3471,7 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
         auto const [absorbed, finish_status] = drive_finish(plan, driver);
         failures += expect_eq(finish_status, status_t::success_k);
         failures += expect_eq(reported.load(), baseline_visited);
-        failures += expect(absorbed.visited_nodes >= baseline_visited);
+        failures += expect(absorbed.reselected_nodes >= baseline_visited);
     }
     failures += expect_eq(recipient.size(), rows);
     // Donor shards differ by a row at most, and each lands on the recipient shard with the fewest.
@@ -3828,17 +3829,18 @@ std::size_t test_dense_indexes_pooled_save(u64_t seed) {
     auto const steps = plan.steps();
     failures += expect(steps.size() >= indexes.shards_count());
 
-    std::atomic<std::size_t> cursor {0};
-    std::atomic<std::size_t> lane_failures {0};
+    std::size_t cursor_position = 0, lane_failures_count = 0;
+    fu::standard_atomic_ref<std::size_t> const cursor {cursor_position};
+    fu::standard_atomic_ref<std::size_t> const lane_failures {lane_failures_count};
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(3))) return failures + expect(false);
     pool.for_threads([&](std::size_t) noexcept {
         auto scratch = nk::matrix<node_id_t>::zeros({rows, connectivity_16_k}).value;
-        if (scratch.empty()) return void(lane_failures.fetch_add(1));
+        if (scratch.empty()) return lane_failures.add(1);
         for (std::size_t position = cursor.fetch_add(1); position < steps.size(); position = cursor.fetch_add(1))
-            if (failed(plan.save(steps[position], scratch.span()))) lane_failures.fetch_add(1);
+            if (failed(plan.save(steps[position], scratch.span()))) lane_failures.add(1);
     });
-    failures += expect_eq(lane_failures.load(), 0u);
+    failures += expect_eq(lane_failures_count, 0u);
     failures += expect_eq(plan.finish(), status_t::success_k);
 
     indexes_type_ restored {kernel_, forkunion_allocator_t {no_memory_domain_k}};
@@ -4164,15 +4166,17 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
 
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(2))) return failures + expect(false);
-    std::atomic<bool> writer_done {false};
-    std::atomic<std::size_t> thread_failures {0};
+    bool writer_done_word = false;
+    fu::standard_atomic_ref<bool> const writer_done {writer_done_word};
+    std::size_t thread_failures_count = 0;
+    fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread == 0) {
             for (std::size_t first = 0; first != nodes_count; first += dense_thread_nodes_k) {
                 auto [result, status] = indexes.insert(
                     std::span<key_t const> {keys.data() + first, dense_thread_nodes_k},
                     vectors(nk::range(first, first + dense_thread_nodes_k), nk::slice), executor);
-                if (status != status_t::success_k) thread_failures.fetch_add(1);
+                if (status != status_t::success_k) thread_failures.add(1);
             }
             writer_done.store(true, std::memory_order_release);
             assert_no_locks_held();
@@ -4180,7 +4184,7 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
         }
         dense_indexes_row_driver<indexes_type_> rows_driver {indexes, driver};
         if (failed(rows_driver.status)) {
-            thread_failures.fetch_add(1);
+            thread_failures.add(1);
             writer_done.store(true, std::memory_order_release);
             return;
         }
@@ -4192,13 +4196,13 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
                                                          rows_driver.handle(), {}, std::span<key_t> {found_keys},
                                                          std::span {found_distances});
             if (status != status_t::success_k) {
-                thread_failures.fetch_add(1);
+                thread_failures.add(1);
                 break;
             }
             for (std::size_t match = 0; match != result.count; ++match)
                 if (dense_key_number(found_keys[match]) < 1 || dense_key_number(found_keys[match]) > nodes_count)
-                    thread_failures.fetch_add(1);
-            if (indexes.size() % dense_thread_nodes_k) thread_failures.fetch_add(1);
+                    thread_failures.add(1);
+            if (indexes.size() % dense_thread_nodes_k) thread_failures.add(1);
         }
         assert_no_locks_held();
     });
@@ -4253,8 +4257,12 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
     std::vector<recorded_payload_t> recorded_payloads;
     recorded_payloads.reserve(4);
 
-    std::atomic<std::size_t> inserter_threads_remaining {inserter_threads_count};
-    std::atomic<std::size_t> contended_saves {0}, settled_saves {0}, thread_failures {0};
+    std::size_t inserter_threads_remaining_count = inserter_threads_count;
+    std::size_t contended_saves_count = 0, settled_saves_count = 0, thread_failures_count = 0;
+    fu::standard_atomic_ref<std::size_t> const inserter_threads_remaining {inserter_threads_remaining_count};
+    fu::standard_atomic_ref<std::size_t> const contended_saves {contended_saves_count};
+    fu::standard_atomic_ref<std::size_t> const settled_saves {settled_saves_count};
+    fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
 
     auto attempt_save = [&]() noexcept {
         auto [plan, status] = index.plan_save({dense_matrix_bytes(saver_vectors), dense_matrix_bytes(saver_neighbors)},
@@ -4280,8 +4288,8 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
         return true;
     };
     auto record_settled = [&](std::size_t nodes) noexcept {
-        settled_saves.fetch_add(1);
-        if (!audit_settled(nodes)) thread_failures.fetch_add(1);
+        settled_saves.add(1);
+        if (!audit_settled(nodes)) thread_failures.add(1);
         if (recorded_payloads.size() == recorded_payloads.capacity()) return;
         recorded_payload_t recorded {nk::matrix<scalar_t>::zeros({nodes, dimensions}).value,
                                      nk::matrix<node_id_t>::zeros({nodes, connectivity_16_k}).value, nodes};
@@ -4292,36 +4300,35 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
     };
     auto saver_thread = [&]() noexcept { // Classify, audit, and record every settled payload.
         for (std::size_t attempts = 0; inserter_threads_remaining.load(std::memory_order_acquire) != 0; ++attempts) {
-            if (attempts == spin_limit_k) return void(thread_failures.fetch_add(1)); // A stuck racer.
+            if (attempts == spin_limit_k) return thread_failures.add(1); // A stuck racer.
             auto const [nodes, save_status] = attempt_save();
-            if (save_status == status_t::contended_k) contended_saves.fetch_add(1);
+            if (save_status == status_t::contended_k) contended_saves.add(1);
             else if (save_status == status_t::success_k) record_settled(nodes);
-            else thread_failures.fetch_add(1);
+            else thread_failures.add(1);
         }
         // The settle phase: with every racer done, a save must soon succeed.
         for (std::size_t attempts = 0; attempts != attempt_limit_k; ++attempts) {
             auto const [nodes, save_status] = attempt_save();
             if (save_status == status_t::success_k) return record_settled(nodes);
-            if (save_status != status_t::contended_k) return void(thread_failures.fetch_add(1));
+            if (save_status != status_t::contended_k) return thread_failures.add(1);
         }
-        thread_failures.fetch_add(1); // The settle phase starved.
+        thread_failures.add(1); // The settle phase starved.
     };
     auto inserter_thread = [&](std::size_t thread) noexcept { // A slice, then spare singles
                                                               // until the saver has contended.
         auto slice = threads.slices[thread].view();
         auto main_rows = slice(nk::range(0, dense_thread_nodes_k), nk::slice);
-        if (index.insert(main_rows, {}, threads.contexts[thread]).status != status_t::success_k)
-            thread_failures.fetch_add(1);
+        if (index.insert(main_rows, {}, threads.contexts[thread]).status != status_t::success_k) thread_failures.add(1);
         for (std::size_t spare = 0; spare != spare_rows_count && //
                                     contended_saves.load(std::memory_order_acquire) == 0;
              ++spare) {
             auto spare_row = slice(nk::range(dense_thread_nodes_k + spare, dense_thread_nodes_k + spare + 1),
                                    nk::slice);
             if (index.insert(spare_row, {}, threads.contexts[thread]).status != status_t::success_k)
-                thread_failures.fetch_add(1);
+                thread_failures.add(1);
             std::this_thread::yield();
         }
-        inserter_threads_remaining.fetch_sub(1, std::memory_order_release);
+        inserter_threads_remaining.sub(1, std::memory_order_release);
         assert_no_locks_held();
     };
     auto searcher_thread = [&](std::size_t thread) noexcept { // The reader-thread invariants.
@@ -4332,8 +4339,8 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
              ++step) {
             auto query = query_slice.row(step % dense_thread_nodes_k).as_vector();
             auto const [result, status] = index.search(query, threads.contexts[thread]);
-            if (status != status_t::success_k) thread_failures.fetch_add(1);
-            thread_failures.fetch_add(
+            if (status != status_t::success_k) thread_failures.add(1);
+            thread_failures.add(
                 scored_failures(threads.contexts[thread].results.data(), result.count, index.size(), expansion_bound));
         }
         assert_no_locks_held();
@@ -4372,7 +4379,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_save_race(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_save_race<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 #pragma endregion Races
@@ -4427,7 +4434,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_immutable_parity(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_immutable_parity<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** The external reader's cursor, exercised across chunk seams: full-prefix parity
@@ -4502,15 +4509,16 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
     // snapshot, and the parked cursor re-anchors past the end after the race.
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(2))) return failures + expect(false);
-    std::atomic<std::size_t> thread_failures {0};
-    std::atomic<bool> writer_done {false};
+    std::size_t thread_failures_count = 0;
+    fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
+    bool writer_done_word = false;
+    fu::standard_atomic_ref<bool> const writer_done {writer_done_word};
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread == 0) {
             typename index_type_::traversal_context_t lane_context {{}};
             for (std::size_t ordinal = 0; ordinal != racing_inserts_count; ++ordinal) {
                 auto racing_row = vectors(nk::range(nodes_count + 1 + ordinal, nodes_count + 2 + ordinal), nk::slice);
-                if (index.insert(racing_row, {}, lane_context).status != status_t::success_k)
-                    thread_failures.fetch_add(1);
+                if (index.insert(racing_row, {}, lane_context).status != status_t::success_k) thread_failures.add(1);
                 std::this_thread::yield();
             }
             writer_done.store(true, std::memory_order_release);
@@ -4520,15 +4528,15 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
         if (thread != 1) return;
         concurrent_cursor_type_ racing_cursor {index};
         if (racing_cursor.reserve(counting_allocator<byte_t> {ledger}) != status_t::success_k)
-            return void(thread_failures.fetch_add(1));
+            return thread_failures.add(1);
         std::size_t sweeps = 0;
         do {
-            if (sweeps++ == attempt_limit_k) return void(thread_failures.fetch_add(1)); // A stuck writer.
+            if (sweeps++ == attempt_limit_k) return thread_failures.add(1); // A stuck writer.
             racing_cursor.refresh();
             node_id_t const snapshot = racing_cursor.visible_count();
-            if (failed(racing_cursor.seek(0))) return void(thread_failures.fetch_add(1));
+            if (failed(racing_cursor.seek(0))) return thread_failures.add(1);
             for (; racing_cursor; ++racing_cursor)
-                if (racing_cursor.id() >= snapshot) thread_failures.fetch_add(1);
+                if (racing_cursor.id() >= snapshot) thread_failures.add(1);
         } while (!writer_done.load(std::memory_order_acquire));
     });
     failures += expect_eq(thread_failures.load(), 0u);
@@ -4564,7 +4572,7 @@ std::size_t test_dense_cursor(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_cursor<index_type_, concurrent_cursor_type_, immutable_cursor_type_>(
         make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 #pragma endregion Readers
@@ -4582,10 +4590,10 @@ std::size_t dense_expect_starved_load(make_index_type_ const& make_index, alloca
     auto [starved_capacity, starved_status] = starved.reserve({1, connectivity_16_k, dimensions});
     failures += expect(starved_status == status_t::success_k);
     failures += expect(starved_capacity < nodes_count); // The growth is genuine.
-    ledger.byte_budget.store(ledger.live_bytes.load());
+    ledger.byte_budget = ledger.live_bytes;
     failures += expect_eq(starved.load(source, nodes_count, local), status_t::bad_alloc_k);
     failures += expect_eq(starved.size(), 0u);
-    ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
+    ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
     return failures;
 }
 
@@ -4613,12 +4621,12 @@ std::size_t dense_expect_allocation_budget(make_index_type_ const& make_index, a
     failures += expect(index.insert(fill_rows, {}, context).status == status_t::success_k);
 
     // Freeze the budget: the growth election must refuse, all-or-nothing.
-    ledger.byte_budget.store(ledger.live_bytes.load());
+    ledger.byte_budget = ledger.live_bytes;
     failures += expect(index.insert(extra_rows, {}, context).status == status_t::bad_alloc_k);
     failures += expect_eq(index.size(), fill_rows_count);
 
     // Lift it: the identical batch is retryable.
-    ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
+    ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
     failures += expect(index.insert(extra_rows, {}, context).status == status_t::success_k);
     std::size_t const nodes_count = fill_rows_count + extra_rows_count;
     failures += expect_eq(index.size(), nodes_count);
@@ -4652,7 +4660,7 @@ template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_ty
 std::size_t test_dense_allocation_budget(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_allocation_budget<index_type_, kernel_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** Shedding the frontier past the radius of full candidates is lossless: a walk whose frontier
@@ -4700,7 +4708,7 @@ template <typename index_type_, typename make_index_type_>
 std::size_t test_dense_frontier_shedding(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_frontier_shedding<index_type_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** A refused re-table saturates the walk, it never fails it: under a frozen budget a
@@ -4726,7 +4734,7 @@ std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocatio
     config.expansion_factor = narrow.expansion_factor;
     typename index_type_::traversal_context_t starved {counting_allocator_t(ledger)};
     failures += expect(succeeded(index.reserve_traversal(starved, narrow)));
-    ledger.byte_budget.store(ledger.live_bytes.load());
+    ledger.byte_budget = ledger.live_bytes;
 
     auto const [search_result, search_status] = index.search(vectors.view().row(dense_growth_nodes_k).as_vector(),
                                                              starved, config);
@@ -4740,7 +4748,7 @@ std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocatio
     failures += expect_eq(insert_status, status_t::success_k);
     failures += expect_eq(insert_result.saturated_walks, 1u);
     failures += expect_eq(index.size(), dense_growth_nodes_k + 1);
-    ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
+    ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
     return failures;
 }
 
@@ -4749,7 +4757,7 @@ template <typename index_type_, typename make_index_type_>
 std::size_t test_dense_saturated(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_saturated<index_type_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** A refine over two parts is atomic by construction: under every budget short of its plan's needs
@@ -4789,7 +4797,7 @@ std::size_t dense_expect_refine_atomic(make_index_type_ const& make_index, alloc
     failures += expect_eq(index.reserve_traversal(context, {}), status_t::success_k);
     std::size_t refusals = 0;
     for (std::ptrdiff_t slack = 0;; slack = slack * 2 + 64) {
-        ledger.byte_budget.store(ledger.live_bytes.load() + slack);
+        ledger.byte_budget = ledger.live_bytes + slack;
         auto [plan, status] = index.plan_refine(every_node, {}, part_bases);
         if (failed(status)) {
             failures += expect_eq(status, status_t::bad_alloc_k);
@@ -4798,17 +4806,17 @@ std::size_t dense_expect_refine_atomic(make_index_type_ const& make_index, alloc
             ++refusals;
             continue;
         }
-        ledger.byte_budget.store(ledger.live_bytes.load());
+        ledger.byte_budget = ledger.live_bytes;
         do
             for (typename index_type_::refine_plan_t::step_t const step : plan.steps())
                 failures += expect_eq(plan.run(step, context), status_t::success_k);
         while (plan.advance());
         auto const [refined, refined_status] = plan.finish();
         failures += expect_eq(refined_status, status_t::success_k);
-        failures += expect(refined.visited_nodes >= rows && refined.changed_nodes > 0);
+        failures += expect(refined.reselected_nodes >= rows && refined.changed_nodes > 0);
         break;
     }
-    ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
+    ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
     failures += expect(refusals > 0);
     return failures;
 }
@@ -4818,7 +4826,7 @@ template <typename index_type_, typename make_index_type_>
 std::size_t test_dense_refine_atomic(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_refine_atomic<index_type_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** Racing a bounded arena: with the budget frozen at exactly two batches of spare
@@ -4855,7 +4863,7 @@ std::size_t dense_expect_overflow_race(make_index_type_ const& make_index, alloc
                                                    stream_key(seed, "overflow_race"));
     std::vector<node_id_t> assigned_ids(racing_threads_count * batch_rows_count, node_id_unknown_k);
     std::array<status_t, 4> thread_statuses {};
-    ledger.byte_budget.store(ledger.live_bytes.load()); // No growth: the arena is the arena.
+    ledger.byte_budget = ledger.live_bytes; // No growth: the arena is the arena.
 
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread >= racing_threads_count) return;
@@ -4893,7 +4901,7 @@ std::size_t dense_expect_overflow_race(make_index_type_ const& make_index, alloc
                               status_t::overflow_k);
 
     // A lifted budget makes a refused batch retryable.
-    ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
+    ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
     failures += expect(refused_thread != racing_threads_count);
     failures += expect(index
                            .insert(threads.slices[refused_thread].view(), {}, //
@@ -4908,7 +4916,7 @@ template <typename index_type_, typename make_index_type_>
 std::size_t test_dense_overflow_race(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_overflow_race<index_type_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 #pragma endregion Allocation Budgets

@@ -10,7 +10,6 @@
  *  observed value must be filed under, so a torn or misfiled slot is always detectable.
  */
 #include <algorithm>     // `std::sort`
-#include <atomic>        // `std::atomic`
 #include <memory>        // `std::allocator` - every map names its allocator
 #include <unordered_map> // The reference oracle of the growth-parity audit
 #include <vector>        // `std::vector`
@@ -175,7 +174,7 @@ std::size_t check_multimap_growth_parity(u64_t seed) noexcept {
             }
         }
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 
@@ -211,16 +210,17 @@ std::size_t check_multimap_concurrent_insert() noexcept {
 
         fu::flat_pool_t pool;
         if (fu::failed(pool.spawn(lanes_k))) return failures + expect(false);
-        std::atomic<std::size_t> failed_inserts {0};
+        std::size_t failed_inserts = 0;
         pool.for_threads([&](std::size_t lane) noexcept {
             if (lane >= lanes_k) return;
             for (std::size_t insertion = 0; insertion != inserts_per_lane_k; ++insertion) {
                 u32_t const value = static_cast<u32_t>(lane * inserts_per_lane_k + insertion);
-                if (failed(insert_one(multimap, value % keys_alphabet_k, value))) failed_inserts.fetch_add(1);
+                if (failed(insert_one(multimap, value % keys_alphabet_k, value)))
+                    fu::standard_atomic_ref<std::size_t>(failed_inserts).add(1);
             }
         });
 
-        failures += expect_eq(failed_inserts.load(), 0u);
+        failures += expect_eq(failed_inserts, 0u);
         std::vector<u32_t> observed;
         for (u64_t key = 0; key != keys_alphabet_k; ++key) {
             std::size_t const before = observed.size();
@@ -233,7 +233,7 @@ std::size_t check_multimap_concurrent_insert() noexcept {
         for (std::size_t position = 0; position != observed.size(); ++position)
             failures += expect_eq(observed[position], static_cast<u32_t>(position));
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 
@@ -251,39 +251,39 @@ std::size_t check_multimap_reader_during_writers() noexcept {
 
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(writers_k + 1))) return failures + expect(false);
-    std::atomic<std::size_t> writers_done {0};
-    std::atomic<std::size_t> torn_observations {0};
-    std::atomic<std::size_t> shrinking_counts {0};
+    std::size_t writers_done = 0, torn_observations = 0, shrinking_counts = 0;
 
     pool.for_threads([&](std::size_t lane) noexcept {
         if (lane >= writers_k + 1) return;
         if (lane != writers_k) {
             for (std::size_t insertion = 0; insertion != inserts_per_writer_k; ++insertion) {
                 u32_t const value = static_cast<u32_t>(lane * inserts_per_writer_k + insertion);
-                if (failed(insert_one(multimap, value % keys_alphabet_k, value))) torn_observations.fetch_add(1);
+                if (failed(insert_one(multimap, value % keys_alphabet_k, value)))
+                    fu::standard_atomic_ref<std::size_t>(torn_observations).add(1);
             }
-            writers_done.fetch_add(1);
+            fu::standard_atomic_ref<std::size_t>(writers_done).add(1);
             return;
         }
         std::size_t previous_counts[keys_alphabet_k] = {};
         std::size_t sweeps = 0;
-        while (writers_done.load(std::memory_order_acquire) != writers_k || sweeps < reader_minimal_sweeps_k) {
+        while (fu::standard_atomic_ref<std::size_t>(writers_done).load(std::memory_order_acquire) != writers_k ||
+               sweeps < reader_minimal_sweeps_k) {
             for (u64_t key = 0; key != keys_alphabet_k; ++key) {
                 std::size_t observed_count = 0;
                 multimap.find_each(key, [&](u32_t value) noexcept {
                     ++observed_count;
                     bool const planted = value < writers_k * inserts_per_writer_k && value % keys_alphabet_k == key;
-                    if (!planted) torn_observations.fetch_add(1);
+                    if (!planted) fu::standard_atomic_ref<std::size_t>(torn_observations).add(1);
                 });
-                if (observed_count < previous_counts[key]) shrinking_counts.fetch_add(1);
+                if (observed_count < previous_counts[key]) ++shrinking_counts;
                 previous_counts[key] = observed_count;
             }
             ++sweeps;
         }
     });
 
-    failures += expect_eq(torn_observations.load(), 0u);
-    failures += expect_eq(shrinking_counts.load(), 0u);
+    failures += expect_eq(torn_observations, 0u);
+    failures += expect_eq(shrinking_counts, 0u);
     std::size_t landed = 0;
     for (u64_t key = 0; key != keys_alphabet_k; ++key) landed += multimap.count(key);
     failures += expect_eq(landed, writers_k * inserts_per_writer_k);
@@ -300,16 +300,16 @@ std::size_t check_multimap_starved_growth() noexcept {
         std::size_t const capacity = multimap.capacity();
         for (u32_t entry = 0; entry != 16; ++entry) failures += expect(succeeded(insert_one(multimap, entry, entry)));
 
-        ledger.byte_budget.store(ledger.live_bytes.load());
+        ledger.byte_budget = ledger.live_bytes;
         failures += expect_eq(multimap.reserve(capacity + 1), status_t::bad_alloc_k);
         failures += expect_eq(multimap.capacity(), capacity);
         for (u64_t key = 0; key != 16; ++key) failures += expect(multimap.contains(key));
 
-        ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
+        ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
         failures += expect(succeeded(multimap.reserve(capacity + 1)));
         for (u64_t key = 0; key != 16; ++key) failures += expect(multimap.contains(key));
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 

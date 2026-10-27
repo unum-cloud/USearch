@@ -24,6 +24,8 @@
 #include <span>             // `std::span` - the caller's row offsets, a snapshot's columns
 #include <utility>          // `std::exchange` - a moved-from plan forgets its index
 
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the published words
+
 #include <numkong/capabilities.h> // `nk_kernel_kind_t` - the records carry the kernel kind
 #include <numkong/tensor.hpp>     // `nk::matrix_span` - the matches' landing
 
@@ -259,8 +261,6 @@ struct vram_ragged_graph {
     using distance_t = distance_t;
     using small_size_t = u32_t;
 
-    static_assert(sizeof(std::size_t) == sizeof(u64_t), "The caller's offsets cross as the device's words");
-
     /** The node-ID space, less the sentinel. */
     inline static constexpr std::size_t max_node_count_k = std::size_t {std::numeric_limits<node_id_t>::max()} - 1u;
 
@@ -281,17 +281,17 @@ struct vram_ragged_graph {
     /** Rows visible to searches: the watermark every walk samples below and filters neighbors
      *  by. */
     std::size_t size() const noexcept {
-        return standard_atomic_ref<std::size_t const>(last_visible_id_).load(std::memory_order_acquire);
+        return fu::standard_atomic_ref<std::size_t const>(last_visible_id_).load(std::memory_order_acquire);
     }
 
     /** The first failure that left claimed rows unpublished, kept for the index's lifetime. */
     status_t status() const noexcept {
-        return standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
+        return fu::standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
     }
 
     /** Neighbors per row, zero until the first @c reserve freezes it. */
     std::size_t connectivity() const noexcept {
-        return standard_atomic_ref<std::size_t const>(connectivity_).load(std::memory_order_acquire);
+        return fu::standard_atomic_ref<std::size_t const>(connectivity_).load(std::memory_order_acquire);
     }
 
     /** Rows mapped across the offsets column and the neighbors matrix, the smaller of their
@@ -380,7 +380,7 @@ struct vram_ragged_graph {
                 values_tape_.reserve_range(max_of(config.bytes, budget_bytes) + tape_margin_k) != status_t::success_k)
                 return {0, status_t::bad_alloc_k};
             ceiling_rows_ = ceiling_rows;
-            standard_atomic_ref<std::size_t>(connectivity_).store(config.connectivity, std::memory_order_release);
+            fu::standard_atomic_ref<std::size_t>(connectivity_).store(config.connectivity, std::memory_order_release);
         }
         if (status_t const mapped = map_rows_(config.capacity); failed(mapped)) return {capacity(), mapped};
         status_t const mapped_bytes = values_tape_.commit(config.bytes + tape_margin_k);
@@ -531,7 +531,9 @@ struct vram_ragged_graph {
     /** Drops the watermark to zero and touches no row, key or claim: what a plural makes of a shard
      *  it retires with its claims closed for good, so a reader still walking it reads rows nothing
      *  frees, and every walk below the watermark finds none. */
-    void retire_() noexcept { standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release); }
+    void retire_() noexcept {
+        fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
+    }
 
   private:
 
@@ -554,7 +556,7 @@ struct vram_ragged_graph {
     /** Turns every row below @p rows visible, the end of a batch @ref launch_ drained, which also
      *  frees the claim word for the next batch. */
     void publish_(std::size_t rows) noexcept {
-        standard_atomic_ref<std::size_t>(last_visible_id_).store(rows, std::memory_order_release);
+        fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(rows, std::memory_order_release);
     }
 
     /** Launches the rows claimed from @p first_id, as @ref insert describes, without publishing
@@ -1016,7 +1018,7 @@ struct vram_ragged_graph {
                 return phase_ != phase_t::done_k;
             }
             if (phase_ == phase_t::reselect_k) {
-                tally_.visited_nodes += nodes_.size();
+                tally_.reselected_nodes += nodes_.size();
                 phase_ = phase_t::audit_k;
                 return true;
             }
@@ -1067,7 +1069,7 @@ struct vram_ragged_graph {
         std::size_t part_capacity() const noexcept { return split_.part_capacity; }
 
         /** Nodes re-selected so far. */
-        std::size_t visited() const noexcept { return tally_.visited_nodes; }
+        std::size_t visited() const noexcept { return tally_.reselected_nodes; }
 
         /** The pass: its telemetry read from the last landing on @p context, complete once
          *  @ref advance answered false, otherwise @c cancelled_k; a failure a phase kept answers
@@ -1076,7 +1078,7 @@ struct vram_ragged_graph {
             if (!landing_) return {{}, status_t::uninitialized_k};
             refine_result_t result = tally_;
             vram_telemetry_block_t const spent = context.spent();
-            result.changed_nodes = min_of<std::size_t>(spent.changed_nodes, result.visited_nodes);
+            result.changed_nodes = spent.changed_nodes;
             result.telemetry = {.computed_distances = spent.scored,
                                 .visited_members = spent.hops,
                                 .restarts = spent.restarts,
@@ -1140,10 +1142,11 @@ struct vram_ragged_graph {
                 vram_ragged_graph& receiver = *split_.receivers[index];
                 receiver.tape_bytes_ = part.bytes, receiver.longest_row_ = part.longest;
                 receiver.span_bytes_ = source.span_bytes_;
-                standard_atomic_ref<std::size_t>(receiver.last_visible_id_).store(part.rows, std::memory_order_release);
+                fu::standard_atomic_ref<std::size_t>(receiver.last_visible_id_)
+                    .store(part.rows, std::memory_order_release);
             }
             source.tape_bytes_ = 0, source.longest_row_ = 0, source.span_bytes_ = 0, source.filled_rows_ = 0;
-            standard_atomic_ref<std::size_t>(source.last_visible_id_).store(0, std::memory_order_release);
+            fu::standard_atomic_ref<std::size_t>(source.last_visible_id_).store(0, std::memory_order_release);
             source.reopen_();
         }
 
@@ -1345,11 +1348,11 @@ struct vram_ragged_graph {
         for (owner_type_* const donor : donors) {
             vram_ragged_graph& source = donor->*graph;
             source.tape_bytes_ = 0, source.longest_row_ = 0, source.span_bytes_ = 0, source.filled_rows_ = 0;
-            standard_atomic_ref<std::size_t>(source.last_visible_id_).store(0, std::memory_order_release);
+            fu::standard_atomic_ref<std::size_t>(source.last_visible_id_).store(0, std::memory_order_release);
         }
         reopen_donors();
         tape_bytes_ = tape_bytes, longest_row_ = longest, span_bytes_ = span_bytes;
-        standard_atomic_ref<std::size_t>(last_visible_id_).store(rows, std::memory_order_release);
+        fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(rows, std::memory_order_release);
         return {std::move(plan), status_t::success_k};
     }
 
@@ -1840,7 +1843,7 @@ struct vram_ragged_graph {
             index.tape_bytes_ = tape_first_ + stored_offsets_[rows];
             index.longest_row_ = max_of(index.longest_row_, longest_);
             index.span_bytes_ = max_of(index.span_bytes_, span_bytes_);
-            standard_atomic_ref<std::size_t>(index.last_visible_id_).store(base + rows, std::memory_order_release);
+            fu::standard_atomic_ref<std::size_t>(index.last_visible_id_).store(base + rows, std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -2142,8 +2145,8 @@ struct vram_ragged_graph {
      *  report. */
     status_t fail_(status_t failure) noexcept {
         status_t expected = status_t::success_k;
-        standard_atomic_ref<status_t>(status_).compare_exchange_strong(expected, failure, std::memory_order_acq_rel,
-                                                                       std::memory_order_acquire);
+        fu::standard_atomic_ref<status_t>(status_).compare_exchange_strong(expected, failure, std::memory_order_acq_rel,
+                                                                           std::memory_order_acquire);
         return failure;
     }
 

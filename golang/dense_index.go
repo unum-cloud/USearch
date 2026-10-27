@@ -161,8 +161,12 @@ type DenseIndexDescription struct {
 	Capacity uint
 	// MemoryUsage is the bytes the handle holds; traversal scratch is the executor's.
 	MemoryUsage uint
-	// Capabilities is the codename of the kernels the index dispatched to on this machine.
-	Capabilities string
+	// CPUClass is the CPU class dispatch picked on this machine, as usearch_cpu_class_name spells it.
+	CPUClass string
+	// GPUClass is the GPU class dispatch picked on the index's devices; "unknown" for a host index.
+	GPUClass string
+	// ShardsCount is the number of live shards.
+	ShardsCount uint
 }
 
 // endregion: Geometry
@@ -1224,11 +1228,13 @@ func (receiver denseReceiver) describe(completion C.usearch_completion_t) *lent[
 	})
 	lent.result = func() DenseIndexDescription {
 		return DenseIndexDescription{
-			Metadata:     denseMetadataFromRaw(&raw.metadata),
-			Size:         uint(raw.size),
-			Capacity:     uint(raw.capacity),
-			MemoryUsage:  uint(raw.memory_usage),
-			Capabilities: C.GoString(raw.capabilities),
+			Metadata:    denseMetadataFromRaw(&raw.metadata),
+			Size:        uint(raw.size),
+			Capacity:    uint(raw.capacity),
+			MemoryUsage: uint(raw.memory_usage),
+			CPUClass:    C.GoString(C.usearch_cpu_class_name(raw.cpu_class)),
+			GPUClass:    C.GoString(C.usearch_gpu_class_name(raw.gpu_class)),
+			ShardsCount: uint(raw.shards_count),
 		}
 	}
 	return lent

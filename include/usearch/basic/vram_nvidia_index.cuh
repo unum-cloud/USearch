@@ -29,6 +29,9 @@
 
 namespace unum::usearch::basic {
 
+// Checked where only CUDA builds compile, since wasm32 hosts carry the header but never a device.
+static_assert(sizeof(std::size_t) == sizeof(u64_t), "The caller's offsets cross as the device's words");
+
 /**
  *  @brief Scores each round of a walk's rows with the whole block: warp zero posts the query and a
  *      row per lane, and every warp scores its share on @p rung_ of @p kit_, @c lanes_per_row_k

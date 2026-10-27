@@ -591,12 +591,12 @@ struct ram_indexes {
     struct [[nodiscard]] refine_plan_t {
 
         /** One step: the shard whose plan runs it, and its position among that plan's steps.
-         *  Sixteen bytes. */
+         *  Two words. */
         struct step_t {
             std::size_t shard = 0;
             std::size_t position = 0;
         };
-        static_assert(sizeof(step_t) == 16);
+        static_assert(sizeof(step_t) == 2 * sizeof(std::size_t));
 
         /** What the shard plans' audits judge, summed: the published rows a driver's progress
          *  counts against. */

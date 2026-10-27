@@ -26,7 +26,6 @@
 
 #include <limits>      // `std::numeric_limits` - the addressable ceiling a 32-bit host refuses past
 #include <array>       // `std::array` - the prefix magic
-#include <atomic>      // `std::atomic` - the first failure across regions
 #include <bit>         // `std::bit_cast`, `std::endian`, `std::has_single_bit`
 #include <concepts>    // `std::unsigned_integral`
 #include <memory>      // `std::allocator_traits`
@@ -37,6 +36,8 @@
 #include <variant>     // `std::variant` - the interchange's three row shapes
 
 #include <yyjson.h> // The JSON reader & writer - exceptions-free C
+
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the shared outcome
 
 #include "usearch/utilities/blocking_files.hpp" // `mapped_file_t`, `file_span_t`, `copy_bytes`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - path formatting & header images
@@ -1361,9 +1362,10 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec
     // One region per thread, so nothing allocates and the fan-out needs no scratch.
     std::size_t const regions = max_of<std::size_t>(executor.size(), 1);
     std::size_t const per_region = divide_round_up(nodes, regions);
+    using outcome_ref_t = fu::standard_atomic_ref<status_t>;
     status_t outcome = status_t::success_k;
     auto save_region = [&](std::size_t region, std::size_t, std::size_t) noexcept {
-        if (failed(standard_atomic_ref<status_t>(outcome).load(std::memory_order_relaxed))) return;
+        if (failed(outcome_ref_t(outcome).load(std::memory_order_relaxed))) return;
         std::size_t const first = min_of(region * per_region, nodes);
         std::size_t const bound = min_of(first + per_region, nodes);
         status_t saved = planned.value.save(
@@ -1371,12 +1373,11 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec
         if (succeeded(saved) && progress(region) == continuation_t::cancel_k) saved = status_t::cancelled_k;
         status_t expected_status = status_t::success_k;
         if (failed(saved))
-            standard_atomic_ref<status_t>(outcome).compare_exchange_strong(
-                expected_status, saved, std::memory_order_relaxed, std::memory_order_relaxed);
+            outcome_ref_t(outcome).compare_exchange_strong(expected_status, saved, std::memory_order_relaxed,
+                                                           std::memory_order_relaxed);
     };
     if (status_t const fanned = executor.for_tasks(regions, save_region); failed(fanned)) return fanned;
-    if (status_t const settled = standard_atomic_ref<status_t>(outcome).load(std::memory_order_relaxed);
-        failed(settled))
+    if (status_t const settled = outcome_ref_t(outcome).load(std::memory_order_relaxed); failed(settled))
         return settled;
     if (status_t const finished = planned.value.finish(); failed(finished)) return finished;
 
@@ -1659,9 +1660,10 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
 
     std::size_t const regions = max_of<std::size_t>(executor.size(), 1);
     std::size_t const per_region = divide_round_up(nodes, regions);
+    using outcome_ref_t = fu::standard_atomic_ref<status_t>;
     status_t outcome = status_t::success_k;
     auto load_region = [&](std::size_t region, std::size_t, std::size_t) noexcept {
-        if (failed(standard_atomic_ref<status_t>(outcome).load(std::memory_order_relaxed))) return;
+        if (failed(outcome_ref_t(outcome).load(std::memory_order_relaxed))) return;
         std::size_t const first = min_of(region * per_region, nodes);
         std::size_t const bound = min_of(first + per_region, nodes);
         status_t loaded = planned.value.load(
@@ -1669,12 +1671,11 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
         if (succeeded(loaded) && progress(region) == continuation_t::cancel_k) loaded = status_t::cancelled_k;
         status_t expected_status = status_t::success_k;
         if (failed(loaded))
-            standard_atomic_ref<status_t>(outcome).compare_exchange_strong(
-                expected_status, loaded, std::memory_order_relaxed, std::memory_order_relaxed);
+            outcome_ref_t(outcome).compare_exchange_strong(expected_status, loaded, std::memory_order_relaxed,
+                                                           std::memory_order_relaxed);
     };
     if (status_t const fanned = executor.for_tasks(regions, load_region); failed(fanned)) return fanned;
-    if (status_t const settled = standard_atomic_ref<status_t>(outcome).load(std::memory_order_relaxed);
-        failed(settled))
+    if (status_t const settled = outcome_ref_t(outcome).load(std::memory_order_relaxed); failed(settled))
         return settled;
     return planned.value.finish();
 }

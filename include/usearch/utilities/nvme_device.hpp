@@ -92,7 +92,6 @@
 #include <cstdint> // `std::uintptr_t`
 #include <cstring> // `std::memcpy`, `std::memset`
 
-#include <atomic>      // `std::atomic`, `std::atomic_ref`
 #include <bit>         // `std::countr_zero`
 #include <concepts>    // `std::same_as`
 #include <limits>      // `std::numeric_limits`, for the longest read a result counts
@@ -105,8 +104,9 @@
 #include <utility>     // `std::exchange`, `std::swap`, `std::move`
 #include <variant>     // `std::variant`, `std::visit`, `std::get_if`, `std::in_place_index`
 
-#include <forkunion.h>         // `fu_pool_new`, `fu_pool_spawn`, `fu_pool_delete`
-#include <forkunion/types.hpp> // `fu::standard_yield_t`, `fu::wait_capped_t`, `fu::spin_mutex_t`
+#include <forkunion.h>           // `fu_pool_new`, `fu_pool_spawn`, `fu_pool_delete`
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the holder counts
+#include <forkunion/types.hpp>   // `fu::standard_yield_t`, `fu::wait_capped_t`, `fu::spin_mutex_t`
 
 #include "usearch/utilities/blocking_files.hpp" // `NOMINMAX` ahead of `<windows.h>`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer`
@@ -516,13 +516,13 @@ class linux_spdk_driver_t {
 
     linux_spdk_driver_t() noexcept = default;
     linux_spdk_driver_t(linux_spdk_driver_t const& other) noexcept : shared_(other.shared_) {
-        if (shared_) shared_->holders.fetch_add(1, std::memory_order_relaxed);
+        if (shared_) fu::standard_atomic_ref<std::size_t>(shared_->holders).add(1, std::memory_order_relaxed);
     }
     linux_spdk_driver_t& operator=(linux_spdk_driver_t const& other) noexcept {
         if (shared_ == other.shared_) return *this;
         forget_();
         shared_ = other.shared_;
-        if (shared_) shared_->holders.fetch_add(1, std::memory_order_relaxed);
+        if (shared_) fu::standard_atomic_ref<std::size_t>(shared_->holders).add(1, std::memory_order_relaxed);
         return *this;
     }
     linux_spdk_driver_t(linux_spdk_driver_t&& other) noexcept : shared_(std::exchange(other.shared_, nullptr)) {}
@@ -541,7 +541,7 @@ class linux_spdk_driver_t {
         linux_spdk_driver_t driver;
         std::unique_lock<fu::spin_mutex_t> const opening {process_mutex_};
         if (process_shared_) {
-            process_shared_->holders.fetch_add(1, std::memory_order_relaxed);
+            fu::standard_atomic_ref<std::size_t>(process_shared_->holders).add(1, std::memory_order_relaxed);
             driver.shared_ = process_shared_;
             return {std::move(driver), status_t::success_k};
         }
@@ -608,7 +608,7 @@ class linux_spdk_driver_t {
     struct shared_t {
 
         /** Copies still holding the environment. */
-        std::atomic<std::size_t> holders {1};
+        std::size_t holders {1};
 
         /** Held while one view connects, so a controller is attached once. */
         fu::spin_mutex_t connecting;
@@ -624,7 +624,7 @@ class linux_spdk_driver_t {
         // Under the process lock, so an `open` never shares an environment its last holder is
         // finishing.
         std::unique_lock<fu::spin_mutex_t> const forgetting {process_mutex_};
-        if (shared_->holders.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        if (fu::standard_atomic_ref<std::size_t>(shared_->holders).fetch_sub(1, std::memory_order_acq_rel) == 1) {
             for (connected_t const& connected : shared_->controllers) spdk_nvme_detach(connected.controller);
             delete shared_;
             process_shared_ = nullptr;
@@ -1532,7 +1532,7 @@ class linux_uring_ring_t {
      *  in consecutive slots before one publication. */
     struct io_uring_sqe* next_submission() noexcept {
         if (outstanding_ == queue_depth_) return nullptr;
-        u32_t const head = std::atomic_ref<u32_t>(*submissions_.head).load(std::memory_order_acquire);
+        u32_t const head = fu::standard_atomic_ref<u32_t>(*submissions_.head).load(std::memory_order_acquire);
         if (pending_tail_ - head == submissions_.mask + 1) return nullptr;
         u32_t const index = pending_tail_ & submissions_.mask;
         submissions_.order[index] = index;
@@ -1568,7 +1568,7 @@ class linux_uring_ring_t {
             io_buffer_id_t const buffer = static_cast<io_buffer_id_t>(entry->user_data);
             completions[polled] = io_completion_t {buffer, entry->res, request_contexts[buffer]};
         }
-        std::atomic_ref<u32_t>(*completions_.head).store(head, std::memory_order_release);
+        fu::standard_atomic_ref<u32_t>(*completions_.head).store(head, std::memory_order_release);
         outstanding_ -= polled;
         return polled;
     }
@@ -1579,11 +1579,11 @@ class linux_uring_ring_t {
      *  completion demand; @p min_complete of zero submits without blocking. */
     status_t enter_(u32_t min_complete) noexcept {
         if (pending_tail_ != *submissions_.tail)
-            std::atomic_ref<u32_t>(*submissions_.tail).store(pending_tail_, std::memory_order_release);
+            fu::standard_atomic_ref<u32_t>(*submissions_.tail).store(pending_tail_, std::memory_order_release);
         // Everything the kernel has not consumed, so a short or refused enter resubmits it next
         // time.
         u32_t const to_submit = pending_tail_ -
-                                std::atomic_ref<u32_t>(*submissions_.head).load(std::memory_order_acquire);
+                                fu::standard_atomic_ref<u32_t>(*submissions_.head).load(std::memory_order_acquire);
         // Polled rings only harvest device completions inside the syscall, and deferred task-run
         // rings only post them there, so both must ask for events every time.
         bool const getevents = min_complete || posting_ == linux_uring_posting_t::deferred_k ||
@@ -1618,22 +1618,22 @@ class linux_uring_ring_t {
     /** Withdraws the SQEs the kernel never consumed, waits out the reads it did, and drops every
      *  CQE; the outstanding count keeps only the reads the kernel refused to wait for. */
     void abandon_() noexcept {
-        u32_t const consumed = std::atomic_ref<u32_t>(*submissions_.head).load(std::memory_order_acquire);
+        u32_t const consumed = fu::standard_atomic_ref<u32_t>(*submissions_.head).load(std::memory_order_acquire);
         // Without SQPOLL the kernel reads the tail only inside `io_uring_enter`, so it may move
         // back.
         outstanding_ -= pending_tail_ - consumed;
         pending_tail_ = consumed;
-        std::atomic_ref<u32_t>(*submissions_.tail).store(consumed, std::memory_order_release);
+        fu::standard_atomic_ref<u32_t>(*submissions_.tail).store(consumed, std::memory_order_release);
         for (;;) {
             u32_t const tail = completion_tail_seen_();
             outstanding_ -= tail - *completions_.head;
-            std::atomic_ref<u32_t>(*completions_.head).store(tail, std::memory_order_release);
+            fu::standard_atomic_ref<u32_t>(*completions_.head).store(tail, std::memory_order_release);
             if (!outstanding_ || failed(enter_(static_cast<u32_t>(outstanding_)))) return;
         }
     }
 
     u32_t completion_tail_seen_() const noexcept {
-        return std::atomic_ref<u32_t>(*completions_.tail).load(std::memory_order_acquire);
+        return fu::standard_atomic_ref<u32_t>(*completions_.tail).load(std::memory_order_acquire);
     }
 
     /** True only when CQEs land in shared memory between syscalls: immediate posting under
@@ -2669,13 +2669,15 @@ class nvme_executor {
     /** Runs @p callback on every thread, answering the first failure any of them reported. */
     template <typename callback_type_>
     status_t on_every_thread_(callback_type_&& callback) noexcept {
-        std::atomic<status_t> failure {status_t::success_k};
+        status_t failure = status_t::success_k;
         status_t const dispatched = threads_.for_threads([&](std::size_t thread, std::size_t) noexcept {
             status_t const status = callback(thread);
             status_t unset = status_t::success_k;
-            if (failed(status)) failure.compare_exchange_strong(unset, status, std::memory_order_relaxed);
+            if (failed(status))
+                fu::standard_atomic_ref<status_t>(failure).compare_exchange_strong(unset, status,
+                                                                                   std::memory_order_relaxed);
         });
-        return failed(dispatched) ? dispatched : failure.load(std::memory_order_relaxed);
+        return failed(dispatched) ? dispatched : failure;
     }
 
     /** Detaches every engine, each on its own thread. */

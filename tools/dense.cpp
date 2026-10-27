@@ -437,9 +437,7 @@ static bool dense_insert_setup(world_t const& world, dense_settings_t const& set
     engine.residency = !settings.residency.empty()
                            ? usearch_residency_from_name(bytes_view(settings.residency))
                            : (devices_count ? usearch_residency_vram_k : usearch_residency_ram_k);
-    // Unknown spellings read back as ram, so only a round trip proves the name.
-    bool const named = settings.residency.empty() || usearch_residency_name(engine.residency) == settings.residency;
-    if (!named || engine.residency == usearch_residency_nvme_k ||
+    if (engine.residency == usearch_residency_unknown_k || engine.residency == usearch_residency_nvme_k ||
         (engine.residency == usearch_residency_vram_k && !devices_count)) {
         fmt::println(stderr, "{}--residency=\"{}\" is neither ram nor vram over a listed GPU", rank,
                      settings.residency.empty() ? "vram" : settings.residency);

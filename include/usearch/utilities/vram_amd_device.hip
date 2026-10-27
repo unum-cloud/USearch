@@ -17,6 +17,10 @@
 
 namespace unum::usearch::utilities {
 
+// Checked where only HIP builds compile, since 32-bit hosts such as wasm32 never load the runtime.
+static_assert(sizeof(hip_allocation_properties_t) == 32 && sizeof(hip_access_descriptor_t) == 12,
+              "HIP's 64-bit layouts");
+
 /**
  *  @brief The AMD warp policy the shared walk code is written against, the twin of
  *      @c cuda_warp_t: wavefronts of @p width_ lanes and agent-scope atomics.

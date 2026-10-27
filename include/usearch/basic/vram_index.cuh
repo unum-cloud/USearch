@@ -673,6 +673,18 @@ __device__ __forceinline__ void vram_reselect_one( //
 
     u32_t const selected_count = vram_select_neighbors<kit_, selector_>( //
         storage, schedule, query, pivot_span, view.selection_rows, selection, context, lane);
+    // Changed means the set gained a member the row lacked;
+    // a reordering or a loss alone never counts.
+    bool gained = false;
+    for (u32_t slot_base = 0; slot_base < selected_count; slot_base += warp_t::width_k) {
+        u32_t const slot = slot_base + lane;
+        node_id_type_ const member = slot < selected_count ? selection.selected_ids[slot] : unknown_k;
+        bool lacked = member != unknown_k;
+        for (u32_t old_slot = 0; lacked && old_slot != storage.connectivity; ++old_slot)
+            lacked = own_neighbors.load_slot(old_slot) != member;
+        gained |= warp_t::any(lacked);
+    }
+    context.telemetry.changed_nodes += gained;
     for (u32_t slot = lane; slot < storage.connectivity; slot += warp_t::width_k)
         if (slot) own_neighbors.store_slot(slot, slot < selected_count ? selection.selected_ids[slot] : unknown_k);
     warp_t::sync();
@@ -791,7 +803,6 @@ __device__ __forceinline__ void vram_back_link_one( //
         warp_t::sync();
         if (lane == 0) live_row.unlock(candidate_ids[kept_positions[0]]);
         warp_t::sync();
-        ++telemetry.changed_nodes;
     }
 }
 

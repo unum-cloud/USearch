@@ -431,11 +431,11 @@ struct Residency(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
     var code: c_int
     """The raw `usearch_residency_t` value the ABI exchanges."""
-    comptime RAM = Self(0)
+    comptime RAM = Self(1)
     """Volatile memory traversed by CPU threads - the concurrent baseline."""
-    comptime VRAM = Self(1)
+    comptime VRAM = Self(2)
     """Accelerator memory traversed by GPU warps on the chosen devices."""
-    comptime NVME = Self(2)
+    comptime NVME = Self(3)
     """Persisted storage traversed through pluggable I/O engines, sized past RAM."""
 
 
@@ -445,9 +445,9 @@ struct Traversal(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
     var code: c_int
     """The raw `usearch_traversal_t` value the ABI exchanges."""
-    comptime WALK = Self(0)
+    comptime WALK = Self(1)
     """Walk the graph, scoring the rows the expansion reaches - approximate, the default."""
-    comptime SCAN = Self(1)
+    comptime SCAN = Self(2)
     """Score every row published when the query's scan starts - exact, on RAM and NVMe handles."""
 
 
@@ -457,10 +457,40 @@ struct Mood(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
     var code: c_int
     """The raw `usearch_mood_t` value the ABI exchanges."""
-    comptime PARKED = Self(0)
+    comptime PARKED = Self(1)
     """Idle threads sleep; the next call pays a wake-up."""
-    comptime SPINNING = Self(1)
+    comptime SPINNING = Self(2)
     """Idle threads stay hot, trading power for the next call's latency."""
+
+
+@fieldwise_init
+struct CpuClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """The CPU family dispatch picks, or a placement pins - `usearch_cpu_class_t`."""
+
+    var code: c_int
+    """The raw `usearch_cpu_class_t` value the ABI exchanges."""
+    comptime UNKNOWN = Self(0)
+    """Derives the CPU's own class."""
+
+
+@fieldwise_init
+struct GpuClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """The GPU family dispatch picks, or a placement pins - `usearch_gpu_class_t`."""
+
+    var code: c_int
+    """The raw `usearch_gpu_class_t` value the ABI exchanges."""
+    comptime UNKNOWN = Self(0)
+    """Derives the devices' own class."""
+
+
+@fieldwise_init
+struct NvmeClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """The NVMe I/O engine family an executor drives - `usearch_nvme_class_t`."""
+
+    var code: c_int
+    """The raw `usearch_nvme_class_t` value the ABI exchanges."""
+    comptime UNKNOWN = Self(0)
+    """Derives the devices' own class."""
 
 
 @fieldwise_init
@@ -940,11 +970,17 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """The `int32_t` node ids to place shards on; `NULL_ADDRESS` derives every node the process may use."""
     var memory_domains_count: c_size_t
     """How many ids the array holds; zero derives."""
+    var shard_capacity: c_size_t
+    """Entries one shard holds before the index opens another shard generation; zero derives."""
+    var cpu_class: CpuClass
+    """The class to dispatch as; `UNKNOWN` derives the CPU's own."""
 
     def __init__(out self):
         """Derives every memory domain the process may allocate on."""
         self.memory_domains = NULL_ADDRESS
         self.memory_domains_count = c_size_t(0)
+        self.shard_capacity = c_size_t(0)
+        self.cpu_class = CpuClass.UNKNOWN
 
     @staticmethod
     def on[domains_origin: ImmOrigin, //](memory_domains: Span[Int32, domains_origin]) -> RamOptions[domains_origin]:
@@ -959,7 +995,9 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         Returns:
             Options naming exactly those nodes, one shard apiece.
         """
-        return RamOptions[domains_origin](Int(memory_domains.unsafe_ptr()), c_size_t(len(memory_domains)))
+        return RamOptions[domains_origin](
+            Int(memory_domains.unsafe_ptr()), c_size_t(len(memory_domains)), c_size_t(0), CpuClass.UNKNOWN
+        )
 
     def untracked(self) -> RamOptions[ImmUntrackedOrigin]:
         """The same options with the borrow erased - the one instantiation the ABI signature names.
@@ -967,7 +1005,9 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         Returns:
             Options naming the same array, whose type no longer keeps it alive.
         """
-        return RamOptions[ImmUntrackedOrigin](self.memory_domains, self.memory_domains_count)
+        return RamOptions[ImmUntrackedOrigin](
+            self.memory_domains, self.memory_domains_count, self.shard_capacity, self.cpu_class
+        )
 
 
 @fieldwise_init
@@ -986,11 +1026,17 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """The CUDA ordinals to place shards on; `NULL_ADDRESS` derives one free device."""
     var devices_count: c_size_t
     """How many ordinals the array holds; zero derives."""
+    var shard_capacity: c_size_t
+    """Entries one shard holds before the index opens another shard generation; zero derives."""
+    var gpu_class: GpuClass
+    """The class to dispatch as; `UNKNOWN` derives the devices' own."""
 
     def __init__(out self):
         """Derives one free device."""
         self.devices = NULL_ADDRESS
         self.devices_count = c_size_t(0)
+        self.shard_capacity = c_size_t(0)
+        self.gpu_class = GpuClass.UNKNOWN
 
     @staticmethod
     def on[devices_origin: ImmOrigin, //](devices: Span[Int32, devices_origin]) -> VramOptions[devices_origin]:
@@ -1005,7 +1051,9 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         Returns:
             Options naming exactly those devices, one shard apiece.
         """
-        return VramOptions[devices_origin](Int(devices.unsafe_ptr()), c_size_t(len(devices)))
+        return VramOptions[devices_origin](
+            Int(devices.unsafe_ptr()), c_size_t(len(devices)), c_size_t(0), GpuClass.UNKNOWN
+        )
 
     def untracked(self) -> VramOptions[ImmUntrackedOrigin]:
         """The same options with the borrow erased - the one instantiation the ABI signature names.
@@ -1013,7 +1061,7 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         Returns:
             Options naming the same array, whose type no longer keeps it alive.
         """
-        return VramOptions[ImmUntrackedOrigin](self.devices, self.devices_count)
+        return VramOptions[ImmUntrackedOrigin](self.devices, self.devices_count, self.shard_capacity, self.gpu_class)
 
 
 @fieldwise_init
@@ -1033,11 +1081,14 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """A `usearch_bytes_view_t` array; `NULL_ADDRESS` leaves every shard where its manifest points."""
     var paths_count: c_size_t
     """How many paths the array holds; zero derives."""
+    var cpu_class: CpuClass
+    """The class to dispatch as; `UNKNOWN` derives the CPU's own."""
 
     def __init__(out self):
         """Leaves every shard where its own manifest points."""
         self.paths = NULL_ADDRESS
         self.paths_count = c_size_t(0)
+        self.cpu_class = CpuClass.UNKNOWN
 
     @staticmethod
     def on[
@@ -1054,7 +1105,7 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         Returns:
             Options naming exactly those paths, one shard apiece.
         """
-        return NvmeOptions[paths_origin](Int(paths.unsafe_ptr()), c_size_t(len(paths)))
+        return NvmeOptions[paths_origin](Int(paths.unsafe_ptr()), c_size_t(len(paths)), CpuClass.UNKNOWN)
 
     def untracked(self) -> NvmeOptions[ImmUntrackedOrigin]:
         """The same options with the borrow erased - the one instantiation the ABI signature names.
@@ -1062,7 +1113,7 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         Returns:
             Options naming the same array, whose type no longer keeps it alive.
         """
-        return NvmeOptions[ImmUntrackedOrigin](self.paths, self.paths_count)
+        return NvmeOptions[ImmUntrackedOrigin](self.paths, self.paths_count, self.cpu_class)
 
 
 # endregion Placement
@@ -1113,6 +1164,7 @@ struct ExecutorForNvmeArguments(ImplicitlyCopyable):
     var nvme: NvmeOptions[ImmUntrackedOrigin]
     var threads: c_size_t
     var deferred_limit: c_size_t
+    var nvme_class: NvmeClass
 
 
 @fieldwise_init
@@ -1311,7 +1363,7 @@ struct Executor:
         outcome[unsafe_offset=0] = Outcome()
         var arguments = stack_allocation[1, ExecutorForNvmeArguments]()
         arguments[unsafe_offset=0] = ExecutorForNvmeArguments(
-            Int(created), Int(outcome), nvme.untracked(), c_size_t(threads), c_size_t(deferred_limit)
+            Int(created), Int(outcome), nvme.untracked(), c_size_t(threads), c_size_t(deferred_limit), NvmeClass.UNKNOWN
         )
         library.symbols().executor_for_nvme(arguments.unsafe_origin_cast[MutAnyOrigin]())
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_for_nvme")

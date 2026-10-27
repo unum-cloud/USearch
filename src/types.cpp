@@ -15,7 +15,6 @@
  */
 #include <cstdio> // `std::snprintf`
 
-#include <atomic>      // `std::atomic_ref`
 #include <string_view> // `std::string_view` - a name compared without a terminator
 
 #include <numkong/numkong.h>
@@ -84,10 +83,6 @@ USEARCH_EXPORT char const* usearch_capabilities_available(void) {
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = 0;
     return render_capabilities(rendered, sizeof(rendered), available);
-}
-
-USEARCH_EXPORT usearch_status_t usearch_outcome_status(usearch_outcome_t* outcome) {
-    return std::atomic_ref<usearch_status_t> {outcome->status}.load(std::memory_order_acquire);
 }
 
 USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status) {
@@ -166,9 +161,11 @@ USEARCH_EXPORT char const* usearch_residency_name(usearch_residency_t residency)
 }
 
 USEARCH_EXPORT usearch_residency_t usearch_residency_from_name(usearch_bytes_view_t name) {
-    if (named(name, "vram")) return usearch_residency_vram_k;
-    if (named(name, "nvme")) return usearch_residency_nvme_k;
-    return usearch_residency_ram_k;
+    for (int code = usearch_residency_ram_k; code <= usearch_residency_nvme_k; ++code) {
+        usearch_residency_t const residency = static_cast<usearch_residency_t>(code);
+        if (named(name, usearch_residency_name(residency))) return residency;
+    }
+    return usearch_residency_unknown_k;
 }
 
 USEARCH_EXPORT char const* usearch_traversal_name(usearch_traversal_t traversal) {
@@ -180,7 +177,8 @@ USEARCH_EXPORT char const* usearch_traversal_name(usearch_traversal_t traversal)
 }
 
 USEARCH_EXPORT usearch_traversal_t usearch_traversal_from_name(usearch_bytes_view_t name) {
-    return named(name, "scan") ? usearch_traversal_scan_k : usearch_traversal_walk_k;
+    if (named(name, "walk")) return usearch_traversal_walk_k;
+    return named(name, "scan") ? usearch_traversal_scan_k : usearch_traversal_unknown_k;
 }
 
 USEARCH_EXPORT char const* usearch_mood_name(usearch_mood_t mood) {
@@ -192,7 +190,8 @@ USEARCH_EXPORT char const* usearch_mood_name(usearch_mood_t mood) {
 }
 
 USEARCH_EXPORT usearch_mood_t usearch_mood_from_name(usearch_bytes_view_t name) {
-    return named(name, "spinning") ? usearch_mood_spinning_k : usearch_mood_parked_k;
+    if (named(name, "parked")) return usearch_mood_parked_k;
+    return named(name, "spinning") ? usearch_mood_spinning_k : usearch_mood_unknown_k;
 }
 
 USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class) {

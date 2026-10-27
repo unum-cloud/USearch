@@ -171,8 +171,12 @@ pub const DenseIndexDescription = struct {
     capacity: usize,
     /// Bytes the handle holds; traversal scratch is the executor's.
     memory_usage: usize,
-    /// Codename of the kernels the index dispatched to on this machine; empty where none was named.
-    capabilities: [:0]const u8,
+    /// The CPU class dispatch picked on this machine, as `usearch_cpu_class_name` spells it.
+    cpu_class: [:0]const u8,
+    /// The GPU class dispatch picked on the index's devices; "unknown" for a host index.
+    gpu_class: [:0]const u8,
+    /// Live shards.
+    shards_count: usize,
 };
 
 /// Traversal telemetry, fully overwritten by the call it is passed to.
@@ -673,7 +677,9 @@ const usearch_dense_index_description_t = extern struct {
     size: usize = 0,
     capacity: usize = 0,
     memory_usage: usize = 0,
-    capabilities: ?[*:0]const u8 = null,
+    cpu_class: types.usearch_cpu_class_t = 0,
+    gpu_class: types.usearch_gpu_class_t = 0,
+    shards_count: usize = 0,
 };
 
 const usearch_dense_describe_t = extern struct {
@@ -1388,7 +1394,9 @@ pub const DenseDescribe = struct {
             .size = raw.size,
             .capacity = raw.capacity,
             .memory_usage = raw.memory_usage,
-            .capabilities = if (raw.capabilities) |capabilities| std.mem.span(capabilities) else "",
+            .cpu_class = std.mem.span(types.usearch_cpu_class_name(raw.cpu_class)),
+            .gpu_class = std.mem.span(types.usearch_gpu_class_name(raw.gpu_class)),
+            .shards_count = raw.shards_count,
         };
     }
 };
@@ -2293,8 +2301,8 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     defer copy.deinit();
     try std.testing.expectEqual(@as(usize, 3), (try copy.describe()).size);
 
-    // An absorbed donor is consumed and nulled in place, and a stop between donors leaves the rest
-    // live, so freeing every donor afterwards is safe either way.
+    // A cancel stops only the closing refinement, so every donor is consumed and nulled in place,
+    // and freeing them afterwards is a no-op.
     var donors = [_]DenseIndex{ try DenseIndex.loadRamBuffer(monolith, .{}), try DenseIndex.loadRamBuffer(monolith, .{}) };
     defer for (&donors) |*donor| donor.deinit();
     const Stop = struct {
@@ -2303,10 +2311,7 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
         }
     };
     try std.testing.expectError(Error.Cancelled, copy.on(executor).absorb(&donors, .{ .progress = .of({}, Stop.afterFirst) }));
-    try std.testing.expectEqual(DenseIndex{ .handle = null }, donors[0]);
-    try std.testing.expect(donors[1].handle != null);
-    try copy.on(executor).absorb(donors[1..], .{});
-    try std.testing.expectEqual(DenseIndex{ .handle = null }, donors[1]);
+    for (donors) |donor| try std.testing.expectEqual(DenseIndex{ .handle = null }, donor);
     try std.testing.expectEqual(@as(usize, 3), try copy.count(keys[0]));
 
     const reachability = try index.on(executor).health();
@@ -2502,7 +2507,7 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
     try std.testing.expectError(Error.ShapeMismatch, index.maxsim(try .of(f32, &left, dimensions), 3, 4, &arena, .{}));
 }
 
-test "a reporting batch counts what it published, and a stopped sweep is no failure" {
+test "a reporting batch counts what it published, and a stopped sweep answers the cancel" {
     const dimensions = 3;
     var executor = try Executor.forRam(.{ .threads = 2 });
     defer executor.deinit();
@@ -2545,9 +2550,9 @@ test "a reporting batch counts what it published, and a stopped sweep is no fail
     try index.on(executor).insert(&more, try .of(f32, &slab, dimensions), .{ .progress = .of(&ignored, Watch.stop) });
     try std.testing.expectEqual(@as(usize, 6), (try index.on(executor).describe()).size);
 
-    // Stopping a sweep is the time budget rather than a failure, so no status comes back.
+    // A stopped sweep still heals what it re-selected, and answers the cancel.
     var swept: Watch = .{};
-    _ = try index.on(executor).refine(.{ .progress = .of(&swept, Watch.stop) });
+    try std.testing.expectError(Error.Cancelled, index.on(executor).refine(.{ .progress = .of(&swept, Watch.stop) }));
     try std.testing.expect(swept.ordered);
     try std.testing.expectEqual(@as(usize, 6), swept.total);
 }

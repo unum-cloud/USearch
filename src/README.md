@@ -64,7 +64,7 @@ A `usearch_progress_t` with a handler slices a batch into its `steps`, ten unles
    - RAM walks `cpu_ladder_t` newest first, asking each compiled rung whose NumKong and ForkUnion capabilities the machine reports for its variant of the dtype, and ending on the serial floor.
      On x86 it reads `intel_diamond` → `intel_granite` → `intel_sapphire` → `amd_genoa` → `intel_icelake` → `intel_skylake` → `intel_sierra` → `intel_haswell`, on Arm `nvidia_vera` → `apple_m4` → `aws_g5` → `apple_m2` → `aws_g2`, then `alibaba_c930` on RISC-V and `wasm64_extended` → `wasm32_v128` on WebAssembly.
    - A class pinned in `usearch_ram_options_t::cpu_class` admits every rung whose NumKong and ForkUnion masks are subsets of its own, so pinning a class behaves as deriving on a machine of it.
-   - NVMe walks the same ladder over the classes that compiled an NVMe unit, and asks only for kits, since a storage walk carries no waiter or atomic reference.
+   - NVMe walks the same ladder over the classes that compiled an NVMe unit; a storage walk shares a few counters and never waits, so a class advancing only by its waiter or reference compiles no NVMe unit and its parent serves.
    - VRAM reads the named USearch ordinals off the process device listing and takes the class every device shares, `nvidia-ampere` through `apple-metal10`; mixed vendors refuse with `config_mismatch_k`, mixed generations with `device_k`.
 
 A CPU class is its parent plus a delta.

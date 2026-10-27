@@ -14,17 +14,15 @@
 #include <cassert> // `assert` - a per-thread family is opened before it is asked
 #include <cstddef> // `std::size_t`
 
-#include <array>              // `std::array` - the predicate's batch
-#include <atomic>             // `std::atomic`, `std::atomic_ref` - the arena's holder and the outcome's status word
-#include <bit>                // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
-#include <condition_variable> // `std::condition_variable` - waiting out deferred calls other threads run
-#include <initializer_list>   // `std::initializer_list` - the inputs a call checks against its arena
-#include <memory>             // `std::unique_ptr` - the executor's topology
-#include <mutex>              // `std::lock_guard` over the ticks' lock and the deferred tables
-#include <span>               // `std::span` - key batches crossing the ABI
-#include <string_view>        // `std::string_view` - checkpoint paths
-#include <type_traits>        // `std::is_same_v` - the residency discrimination
-#include <variant>            // `std::variant`, `std::visit`
+#include <array>            // `std::array` - the predicate's batch
+#include <bit>              // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
+#include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
+#include <memory>           // `std::unique_ptr` - the executor's topology
+#include <mutex>            // `std::lock_guard` over the ticks' lock and the deferred tables
+#include <span>             // `std::span` - key batches crossing the ABI
+#include <string_view>      // `std::string_view` - checkpoint paths
+#include <type_traits>      // `std::is_same_v` - the residency discrimination
+#include <variant>          // `std::variant`, `std::visit`
 
 #include <forkunion.h>                // `fu_topology_new` - the executor factories' discovery
 #include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` & kin - the classes' atomic references
@@ -76,10 +74,31 @@ inline usearch_scalar_t usearch_scalar_of(nk_dtype_t dtype) noexcept {
  *  call apart. */
 inline constexpr std::size_t default_progress_steps_k = 10;
 
+/** The verbs over the words a call's waiters watch - its outcome's status and the deferred
+ *  registry's count of finished calls - lowered onto one CPU class's reference and waiter. A
+ *  release store is the same instruction on every class; the wait is what differs, and it watches
+ *  the address, so no store notifies. */
+struct outcome_verbs_t {
+    void (*publish)(usearch_outcome_t*, usearch_status_t, std::memory_order) noexcept;
+    usearch_status_t (*load)(usearch_outcome_t const*) noexcept;
+
+    /** Loops on the class waiter while the status reads deferred. */
+    usearch_status_t (*wait)(usearch_outcome_t const*) noexcept;
+
+    /** Counts one more finished call, with a release. */
+    void (*count_finished)(u32_t*) noexcept;
+
+    /** Waits while the count still reads the value seen. */
+    void (*wait_finished)(u32_t const*, u32_t) noexcept;
+};
+
+/** The row of the newest class this machine admits, picked once by the CPU ladder walk. */
+inline outcome_verbs_t const& host_outcome_verbs() noexcept;
+
 /** Marks @p outcome as running; no waiter watches for this store, so it is relaxed. */
 inline void propagate_pending(usearch_outcome_t* outcome) noexcept {
     outcome->message = nullptr;
-    std::atomic_ref<usearch_status_t> {outcome->status}.store(usearch_status_deferred_k, std::memory_order_relaxed);
+    host_outcome_verbs().publish(outcome, usearch_status_deferred_k, std::memory_order_relaxed);
 }
 
 /** The one final write to @p outcome: the message, then the status every waiter acquires. The call
@@ -87,9 +106,7 @@ inline void propagate_pending(usearch_outcome_t* outcome) noexcept {
 inline bool propagate_error(usearch_status_t status, usearch_outcome_t* outcome, char const* message) noexcept {
     bool const succeeded = status == usearch_status_success_k;
     outcome->message = succeeded ? nullptr : message;
-    std::atomic_ref<usearch_status_t> final_status {outcome->status};
-    final_status.store(status, std::memory_order_release);
-    final_status.notify_all();
+    host_outcome_verbs().publish(outcome, status, std::memory_order_release);
     return succeeded;
 }
 
@@ -104,10 +121,12 @@ inline bool propagate_error(status_t status, usearch_outcome_t* outcome, char co
  *  whole call rather than the last chunk. */
 template <typename result_type_>
 inline void accumulate_stats(usearch_traversal_stats_t* stats, result_type_ const& result) noexcept {
-    if (!stats) return;
-    stats->visited_members += result.visited_members;
-    stats->computed_distances += result.computed_distances;
-    stats->restarts += result.restarts;
+    if constexpr (requires { result.telemetry.visited_members; }) accumulate_stats(stats, result.telemetry);
+    else if (stats) {
+        stats->visited_members += result.visited_members;
+        stats->computed_distances += result.computed_distances;
+        stats->restarts += result.restarts;
+    }
 }
 
 /** Places one shard per memory domain the process may allocate on through @p emplace, as
@@ -137,7 +156,8 @@ status_t emplace_on_every_domain(emplace_type_&& emplace) noexcept {
 
 /** Whether a result carries traversal telemetry - one probe both crossings read. */
 template <typename value_type_>
-concept carries_telemetry = requires(value_type_ const& value) { value.visited_members; };
+concept carries_telemetry = requires(value_type_ const& value) { value.visited_members; } ||
+                            requires(value_type_ const& value) { value.telemetry.visited_members; };
 
 /** The one crossing for a fallible step: folds telemetry into @p stats when the payload carries
  *  any, finishes @p outcome only on failure, and answers whether @c .value is readable. */
@@ -842,10 +862,55 @@ using cpu_ladder_t = cpu_ladder<cpu_class_t::wasm64_extended_k, cpu_class_t::was
 using cpu_ladder_t = cpu_ladder<cpu_class_t::serial_k>;
 #endif
 
+/** One class's outcome row: its reference over the status and the finish count, its waiter between
+ *  their loads. */
+template <cpu_class_t cpu_class_>
+outcome_verbs_t outcome_verbs_of() noexcept {
+    using status_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<usearch_status_t>;
+    using status_reader_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<usearch_status_t const>;
+    using count_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t>;
+    using count_reader_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t const>;
+    using wait_t = waiter_of<cpu_class_>;
+    return {
+        [](usearch_outcome_t* outcome, usearch_status_t status, std::memory_order order) noexcept {
+            status_ref_t(outcome->status).store(status, order);
+        },
+        [](usearch_outcome_t const* outcome) noexcept {
+            return status_reader_t(outcome->status).load(std::memory_order_acquire);
+        },
+        [](usearch_outcome_t const* outcome) noexcept {
+            status_reader_t const status {outcome->status};
+            usearch_status_t seen = status.load(std::memory_order_acquire);
+            for (; seen == usearch_status_deferred_k; seen = status.load(std::memory_order_acquire))
+                wait_t {}(&outcome->status, seen, 0u, fu::wait_capped_t {});
+            return seen;
+        },
+        [](u32_t* count) noexcept { count_ref_t(*count).add(1, std::memory_order_release); },
+        [](u32_t const* count, u32_t seen) noexcept {
+            count_reader_t const finished {*count};
+            while (finished.load(std::memory_order_acquire) == seen) wait_t {}(count, seen, 0u, fu::wait_capped_t {});
+        },
+    };
+}
+
+inline outcome_verbs_t const& host_outcome_verbs() noexcept {
+    static outcome_verbs_t const picked = []<cpu_class_t... classes_>(cpu_ladder<classes_...>) noexcept {
+        outcome_verbs_t row = outcome_verbs_of<cpu_class_t::serial_k>();
+        bool found = false;
+        auto rung = [&]<cpu_class_t class_>() noexcept {
+            if constexpr (class_ != cpu_class_t::serial_k)
+                if (!found && forkunion_admits<class_>()) row = outcome_verbs_of<class_>(), found = true;
+        };
+        (rung.template operator()<classes_>(), ...);
+        return row;
+    }(cpu_ladder_t {});
+    return picked;
+}
+
 /** Whether the dense NVMe variants compiled a unit for @p cpu_class, as
- *  @c usearch_dense_nvme_classes_ in @c src/CMakeLists.txt lists them: a storage walk carries no
- *  waiter or atomic reference, so the classes advancing by those alone take none, and a WebAssembly
- *  module reads no storage. */
+ *  @c usearch_dense_nvme_classes_ in @c src/CMakeLists.txt lists them: a storage walk shares a few
+ *  counters and never waits, so the classes advancing by their waiter or reference alone take none
+ *  and their parent's unit serves, and a WebAssembly module reads no storage. */
 constexpr bool nvme_class_compiled(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
     case cpu_class_t::aws_g5_k:
@@ -1252,11 +1317,13 @@ inline typename multi_type_::executor_t* executor_of(multi_type_& variant, usear
 /** The device an arena of host pages names, which no GPU ordinal does. */
 inline constexpr int host_device_k = -1;
 
-/** Whether @p traversal names a walk or a scan, and @p predicate leaves @p device 's walks alone,
- *  since a host callback cannot narrow a device walk; false once @p outcome records why not. */
+/** Whether @p traversal names a walk, a scan, or nothing, which derives the walk, and @p predicate
+ *  leaves @p device 's walks alone, since a host callback cannot narrow a device walk; false once
+ *  @p outcome records why not. */
 inline bool accepts_traversal(int device, usearch_traversal_t traversal, usearch_predicate_t predicate,
                               usearch_outcome_t* outcome) noexcept {
-    if (traversal != usearch_traversal_walk_k && traversal != usearch_traversal_scan_k)
+    if (traversal != usearch_traversal_unknown_k && traversal != usearch_traversal_walk_k &&
+        traversal != usearch_traversal_scan_k)
         return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown traversal");
     if (predicate.callback && device != host_device_k)
         return propagate_error(usearch_status_unsupported_k, outcome, "A host predicate cannot narrow a device walk");
@@ -1279,8 +1346,9 @@ struct usearch_arena_handle_t {
     int device = host_device_k;
 
     /** The outcome of the call holding the arena, from its claim or deferred submission until just
-     *  before its final store; atomic, since a held call finishes on whichever thread runs it. */
-    std::atomic<usearch_outcome_t const*> holder {nullptr};
+     *  before its final store; touched through a reference, since a held call finishes on whichever
+     *  thread runs it. */
+    usearch_outcome_t const* holder = nullptr;
 };
 
 /** Holds @p arena for the call whose outcome is @p call, answering whether it was free or already
@@ -1288,12 +1356,16 @@ struct usearch_arena_handle_t {
 inline bool hold_arena(usearch_arena_t arena, usearch_outcome_t const* call) noexcept {
     if (!arena) return true;
     usearch_outcome_t const* holder = nullptr;
-    return arena->holder.compare_exchange_strong(holder, call, std::memory_order_acquire) || holder == call;
+    return fu::standard_atomic_ref<usearch_outcome_t const*>(arena->holder)
+               .compare_exchange_strong(holder, call, std::memory_order_acquire, std::memory_order_acquire) ||
+           holder == call;
 }
 
 /** Lets go of @p arena when the call whose outcome is @p call holds it. */
 inline void release_arena(usearch_arena_t arena, usearch_outcome_t const* call) noexcept {
-    if (arena) arena->holder.compare_exchange_strong(call, nullptr, std::memory_order_release);
+    if (arena)
+        fu::standard_atomic_ref<usearch_outcome_t const*>(arena->holder)
+            .compare_exchange_strong(call, nullptr, std::memory_order_release, std::memory_order_relaxed);
 }
 
 /** Whether @p address lies in memory @p arena handed out, which its next rewind reuses or frees. */
@@ -1472,8 +1544,8 @@ inline bytes_view_t as_bytes(usearch_bytes_view_t bytes) noexcept {
 struct deferred_registry_t {
     std::mutex guard;
 
-    /** Signalled whenever a taken call becomes final. */
-    std::condition_variable finished;
+    /** Counted up as each taken call becomes final, under @c guard; waiters read it unlocked. */
+    u32_t finished = 0;
 
     /** The last ticket handed out. */
     std::size_t tickets = 0;
@@ -1551,19 +1623,25 @@ inline void run_held(usearch_executor_handle_t& executor, std::size_t last) noex
             oldest->arguments);
         std::lock_guard<std::mutex> lock(deferred_registry.guard);
         oldest->stage = deferred_stage_t::free_k;
-        deferred_registry.finished.notify_all();
+        host_outcome_verbs().count_finished(&deferred_registry.finished);
     }
 }
 
 /** Waits until no call @p executor took with a ticket up to @p last still runs on another
  *  thread. */
 inline void wait_running(usearch_executor_handle_t& executor, std::size_t last) noexcept {
-    std::unique_lock<std::mutex> lock(deferred_registry.guard);
-    deferred_registry.finished.wait(lock, [&]() noexcept {
-        for (deferred_call_t const& slot : executor.deferred)
-            if (slot.stage == deferred_stage_t::running_k && slot.ticket <= last) return false;
-        return true;
-    });
+    for (;;) {
+        u32_t seen = 0;
+        {
+            std::lock_guard<std::mutex> lock(deferred_registry.guard);
+            bool running = false;
+            for (deferred_call_t const& slot : executor.deferred)
+                running = running || (slot.stage == deferred_stage_t::running_k && slot.ticket <= last);
+            if (!running) return;
+            seen = deferred_registry.finished;
+        }
+        host_outcome_verbs().wait_finished(&deferred_registry.finished, seen);
+    }
 }
 
 /** Returns once no deferred call reads or writes @p handle, running the held ones on this thread
@@ -1587,7 +1665,12 @@ inline void finish_calls_using(void const* handle) noexcept {
             run_held(*holding, last);
             lock.lock();
         }
-        else if (running) deferred_registry.finished.wait(lock);
+        else if (running) {
+            u32_t const seen = deferred_registry.finished;
+            lock.unlock();
+            host_outcome_verbs().wait_finished(&deferred_registry.finished, seen);
+            lock.lock();
+        }
         else return;
     }
 }

@@ -23,13 +23,14 @@ struct counting_metal_allocator_t {
     metal_buffer_t allocate(std::size_t bytes) noexcept {
         metal_buffer_t buffer = shared_.allocate(bytes);
         if (ledger_ && buffer) {
-            ledger_->live_bytes.fetch_add(static_cast<std::ptrdiff_t>(buffer.bytes));
-            ledger_->total_allocations.fetch_add(1);
+            fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes).add(static_cast<std::ptrdiff_t>(buffer.bytes));
+            fu::standard_atomic_ref<std::size_t>(ledger_->total_allocations).add(1);
         }
         return buffer;
     }
     void deallocate(metal_buffer_t& buffer) noexcept {
-        if (ledger_ && buffer) ledger_->live_bytes.fetch_sub(static_cast<std::ptrdiff_t>(buffer.bytes));
+        if (ledger_ && buffer)
+            fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes).sub(static_cast<std::ptrdiff_t>(buffer.bytes));
         shared_.deallocate(buffer);
     }
     int device() const noexcept { return shared_.device(); }

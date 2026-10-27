@@ -13,7 +13,6 @@
  */
 #pragma once
 
-#include <atomic>      // `std::atomic_flag` - a cursor's one pull at a time
 #include <memory>      // `std::unique_ptr` - a finished refinement's handle and state
 #include <new>         // `std::nothrow`
 #include <span>        // `std::span` - the listed devices, a view's paths and rows
@@ -21,6 +20,8 @@
 #include <type_traits> // `std::remove_pointer_t`
 #include <utility>     // `std::exchange` - a landed donor's slot
 #include <variant>     // `std::variant`, `std::visit`
+
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the cursors' busy bits
 
 #include "basic_punned.cuh"
 
@@ -66,7 +67,7 @@ struct basic_cursor {
     handle_type_* index = nullptr;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    std::atomic_flag busy;
+    u32_t busy = 0;
 
     ~basic_cursor() noexcept {
         if (cursor) std::visit([&](auto const* verbs) noexcept { verbs->cursor_free(cursor); }, tables);
@@ -851,7 +852,7 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
                void();
     if (arguments->links)
         return propagate_error(usearch_status_unsupported_k, outcome, "No residency pulls graph links yet"), void();
-    if (cursor.busy.test_and_set(std::memory_order_acquire))
+    if (fu::standard_atomic_ref<u32_t>(cursor.busy).fetch_test_and_set_bit(0, std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull holds the cursor"), void();
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                       host_device_k, {}, outcome);
@@ -859,7 +860,7 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
         visit_basic(*arguments->index, [&](auto punned) noexcept {
             punned.verbs.cursor_next(punned.variant, cursor.cursor, *arguments, arena->memory, outcome);
         });
-    cursor.busy.clear(std::memory_order_release);
+    fu::standard_atomic_ref<u32_t>(cursor.busy).clear_bits(1, std::memory_order_release);
 }
 
 template <auto verb_, typename arguments_type_>

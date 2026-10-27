@@ -122,9 +122,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
     using warp_t = typename schedule_t::warp_t;
     constexpr u32_t resident_blocks = hip_resident_blocks<capability_, dtype_>(kernel_, slots_);
     vram_graph_t const& graph = arguments.graph;
-    if constexpr (kernel_ == vram_dense_kernel_t::percolate_k)
-        vram_percolate<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.refine));
-    else if constexpr (kernel_ == vram_dense_kernel_t::search_indexer_k) {
+    if constexpr (kernel_ == vram_dense_kernel_t::search_indexer_k) {
         // Only the floating dtypes take indexer heads; others export a plain walk never launched.
         if constexpr (floating_scalar<typename kit_t::scalar_t>)
             vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.search),

@@ -32,6 +32,7 @@
 #include <type_traits> // `std::is_trivially_copyable_v` - a launch's arguments travel as bytes
 #include <utility>     // `std::move`, `std::exchange`, `std::swap`
 
+#include <forkunion/atomics.hpp>  // `fu::standard_atomic_ref` - the mapped and committed byte counts
 #include <forkunion/topology.hpp> // `fu::volume_ram` - the managed storage's host-memory budget
 #include <forkunion/types.hpp>    // `fu::round_up_to_multiple`, `fu::spin_mutex_t` - the hold
 
@@ -174,11 +175,6 @@ inline constexpr int cuda_granularity_minimum_k = 0;
 inline constexpr int cuda_pointer_memory_type_k = 2;
 inline constexpr int cuda_pointer_device_ordinal_k = 9;
 inline constexpr unsigned cuda_memory_type_device_k = 2;
-
-static_assert(sizeof(cuda_allocation_properties_t) == 32 && sizeof(cuda_access_descriptor_t) == 12 &&
-                  sizeof(cuda_copy_2d_t) == 128 && sizeof(cuda_launch_config_t) == 56 &&
-                  sizeof(cuda_launch_attribute_t) == 72 && sizeof(cuda_tensor_map_t) == 128,
-              "The driver's 64-bit layouts");
 
 #pragma endregion Driver ABI
 
@@ -647,7 +643,7 @@ struct cuda_virtual_memory_allocator {
                                     cuda_success_k;
             api.memory_release(handle);
             if (!mapped) return status_t::device_error_k;
-            standard_atomic_ref<std::size_t>(mapped_bytes_)
+            fu::standard_atomic_ref<std::size_t>(mapped_bytes_)
                 .store(mapped_bytes_ + slab_bytes_, std::memory_order_release);
         }
         return status_t::success_k;
@@ -656,7 +652,7 @@ struct cuda_virtual_memory_allocator {
     value_type* base() const noexcept { return reinterpret_cast<value_type*>(static_cast<std::uintptr_t>(base_)); }
     std::size_t reserved_bytes() const noexcept { return virtual_address_bytes_; }
     std::size_t committed_bytes() const noexcept {
-        return standard_atomic_ref<std::size_t const>(mapped_bytes_).load(std::memory_order_acquire);
+        return fu::standard_atomic_ref<std::size_t const>(mapped_bytes_).load(std::memory_order_acquire);
     }
     int device() const noexcept { return device_; }
 
@@ -754,14 +750,14 @@ struct cuda_managed_allocator {
         if (cuda_api().fill(cuda_address(reinterpret_cast<byte_t*>(base_) + committed_bytes_), 0,
                             bytes - committed_bytes_) != cuda_success_k)
             return status_t::device_error_k;
-        standard_atomic_ref<std::size_t>(committed_bytes_).store(bytes, std::memory_order_release);
+        fu::standard_atomic_ref<std::size_t>(committed_bytes_).store(bytes, std::memory_order_release);
         return status_t::success_k;
     }
 
     value_type* base() const noexcept { return base_; }
     std::size_t reserved_bytes() const noexcept { return virtual_address_bytes_; }
     std::size_t committed_bytes() const noexcept {
-        return standard_atomic_ref<std::size_t const>(committed_bytes_).load(std::memory_order_acquire);
+        return fu::standard_atomic_ref<std::size_t const>(committed_bytes_).load(std::memory_order_acquire);
     }
     int device() const noexcept { return device_; }
 

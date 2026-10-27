@@ -376,7 +376,7 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
                                       : resumed();
     failures += expect_eq(status, status_t::success_k);
     failures += expect(result.source_shards == shards_count && result.target_shards == 1 && result.moved_rows == rows);
-    failures += expect(result.graph.visited_nodes > 0);
+    failures += expect(result.graph.reselected_nodes > 0);
     failures += expect_eq(source.size(), 0u);
     failures += expect_eq(target.size(), rows);
     failures += expect(target.dimensions() == dimensions && target.connectivity() == connectivity_16_k);

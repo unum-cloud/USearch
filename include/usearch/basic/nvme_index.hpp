@@ -26,7 +26,6 @@
 #include <cstring> // `std::memcmp`, `std::memset`
 
 #include <array>       // `std::array` - a quad's distances, scored rows and verdicts
-#include <atomic>      // `std::atomic_ref` - the first failure and the counts across threads
 #include <concepts>    // `std::same_as`
 #include <limits>      // `std::numeric_limits` - the node ID ceiling
 #include <memory>      // `std::uninitialized_value_construct_n` - the lock stripes of `get`
@@ -36,6 +35,8 @@
 #include <type_traits> // `std::remove_cvref_t`, `std::invoke_result_t`, `std::is_same_v`, `std::is_constructible_v`
 #include <utility>     // `std::move`
 
+#include <forkunion/atomics.hpp>               // `fu::standard_atomic_ref` - the default reference
+#include <forkunion/types.hpp>                 // `fu::standard_yield_t` - the default waiter
 #include <smashtable/immutable_elias_fano.hpp> // `st::immutable_elias_fano` - the row directories
 
 #include "usearch/utilities/types.hpp"
@@ -68,7 +69,9 @@ namespace unum::usearch::basic {
  */
 template <typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t,
           typename distance_type_ = f64_t, typename engine_type_ = default_io_engine_t,
-          typename row_kit_type_ = st::serial_row_kit_t>
+          typename row_kit_type_ = st::serial_row_kit_t,
+          template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
+          typename wait_type_ = fu::standard_yield_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
 class nvme_parts_catalog {
     template <typename, typename, typename>
@@ -82,6 +85,12 @@ class nvme_parts_catalog {
     using executor_t = nvme_executor<engine_t>;
     using medium_t = typename engine_t::medium_t;
     using arena_t = typename executor_t::arena_t;
+
+    /** The CPU class's reference over the words one call's threads share, and its waiter, as
+     *  @c src/ picked them. */
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
+    using wait_t = wait_type_;
 
     /** Node identifier within one part. */
     using node_id_t = node_id_type_;
@@ -320,7 +329,7 @@ class nvme_parts_catalog {
             status_t resolved = status_t::success_k;
             auto resolve_key = [&](std::size_t match, std::size_t thread, std::size_t) noexcept {
                 if (match % wanted >= counts[match / wanted]) return;
-                if (failed(std::atomic_ref<status_t>(resolved).load(std::memory_order_relaxed))) return;
+                if (failed(atomic_ref<status_t>(resolved).load(std::memory_order_relaxed))) return;
                 locator_t const locator = ranked[match];
                 part_t const& part = parts_[locator.shard];
                 auto const [key_row, key_status] = read_(executor, thread, locator.shard,
@@ -331,8 +340,8 @@ class nvme_parts_catalog {
                     return;
                 }
                 status_t unset = status_t::success_k;
-                std::atomic_ref<status_t>(resolved).compare_exchange_strong(
-                    unset, key_status, std::memory_order_relaxed, std::memory_order_relaxed);
+                atomic_ref<status_t>(resolved).compare_exchange_strong(unset, key_status, std::memory_order_relaxed,
+                                                                       std::memory_order_relaxed);
             };
             if (status_t const fanned = executor.for_tasks(count * wanted, resolve_key); failed(fanned)) return fanned;
             return resolved;
@@ -423,7 +432,7 @@ class nvme_parts_catalog {
         auto [call, call_status] = begin_scans_(executor);
         if (failed(call_status)) return call_status;
         return scan_keys_(keys, executor, [&](std::size_t position, locator_t) noexcept {
-            std::atomic_ref<std::size_t>(entries[position]).fetch_add(1, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(entries[position]).add(1, std::memory_order_relaxed);
         });
     }
 
@@ -487,7 +496,7 @@ class nvme_parts_catalog {
         auto read_value = [&](std::size_t read, std::size_t thread, std::size_t) noexcept {
             std::size_t const position = read / wanted, rank = read % wanted;
             if (rank >= min_of(entries[position], wanted)) return;
-            if (failed(std::atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
+            if (failed(atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
             locator_t const locator = kept[read];
             part_t const& part = parts_[locator.shard];
             std::size_t const bytes = static_cast<std::size_t>(
@@ -499,8 +508,8 @@ class nvme_parts_catalog {
                 return;
             }
             status_t unset = status_t::success_k;
-            std::atomic_ref<status_t>(failure).compare_exchange_strong(unset, read_status, std::memory_order_relaxed,
-                                                                       std::memory_order_relaxed);
+            atomic_ref<status_t>(failure).compare_exchange_strong(unset, read_status, std::memory_order_relaxed,
+                                                                  std::memory_order_relaxed);
         };
         if (status_t const fanned = executor.for_tasks(keys.size() * wanted, read_value); failed(fanned)) return fanned;
         return failure;
@@ -528,7 +537,7 @@ class nvme_parts_catalog {
         if (failed(call_status)) return call_status;
         status_t failure = status_t::success_k;
         auto read_row = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
-            if (failed(std::atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
+            if (failed(atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
             u32_t shard = 0;
             std::size_t node = first + row;
             while (node >= parts_[shard].nodes) node -= parts_[shard].nodes, ++shard;
@@ -549,8 +558,8 @@ class nvme_parts_catalog {
                 }
             }
             status_t unset = status_t::success_k;
-            std::atomic_ref<status_t>(failure).compare_exchange_strong(unset, read_status, std::memory_order_relaxed,
-                                                                       std::memory_order_relaxed);
+            atomic_ref<status_t>(failure).compare_exchange_strong(unset, read_status, std::memory_order_relaxed,
+                                                                  std::memory_order_relaxed);
         };
         if (status_t const fanned = executor.for_tasks(keys.size(), read_row); failed(fanned)) return fanned;
         return failure;
@@ -1329,7 +1338,7 @@ class nvme_parts_catalog {
         for (part_t const& part : parts_) tasks += divide_round_up<std::size_t>(part.nodes, run_rows_(part));
         status_t failure = status_t::success_k;
         auto scan_run = [&](std::size_t task, std::size_t thread, std::size_t) noexcept {
-            if (failed(std::atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
+            if (failed(atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) return;
             u32_t shard = 0;
             while (task >= divide_round_up<std::size_t>(parts_[shard].nodes, run_rows_(parts_[shard])))
                 task -= divide_round_up<std::size_t>(parts_[shard].nodes, run_rows_(parts_[shard])), ++shard;
@@ -1341,8 +1350,8 @@ class nvme_parts_catalog {
                 u64_t(rows) * part.key_row_bytes);
             if (failed(read_status)) {
                 status_t unset = status_t::success_k;
-                std::atomic_ref<status_t>(failure).compare_exchange_strong(
-                    unset, read_status, std::memory_order_relaxed, std::memory_order_relaxed);
+                atomic_ref<status_t>(failure).compare_exchange_strong(unset, read_status, std::memory_order_relaxed,
+                                                                      std::memory_order_relaxed);
                 return;
             }
             for (std::size_t row = 0; row != rows; ++row) {
@@ -1508,14 +1517,16 @@ class nvme_parts_catalog {
  */
 template <typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t,
           typename distance_type_ = f64_t, typename engine_type_ = default_io_engine_t,
-          typename row_kit_type_ = st::serial_row_kit_t>
+          typename row_kit_type_ = st::serial_row_kit_t,
+          template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
+          typename wait_type_ = fu::standard_yield_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
 class nvme_index {
   public:
 
     /** The walks every verb runs over this index's one part. */
-    using catalog_t =
-        nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, engine_type_, row_kit_type_>;
+    using catalog_t = nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, engine_type_,
+                                         row_kit_type_, atomic_ref_template_, wait_type_>;
 
     using codec_t = typename catalog_t::codec_t;
     using key_t = typename catalog_t::key_t;

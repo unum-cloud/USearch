@@ -29,6 +29,8 @@
 #include <type_traits> // `std::is_same_v` - the codec's dtype
 #include <utility>     // `std::move`
 
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
+
 #include <numkong/shapes.hpp> // `nk::shapes_packed`
 #include <numkong/tensor.hpp> // `nk::matrix_view` - a row's borrowed cloud
 
@@ -123,7 +125,7 @@ struct codec {
  *      rebound, every value.
  */
 template <typename kit_type_, typename key_type_ = uuid_t, typename wait_type_ = dummy_waiter_t,
-          template <typename> class atomic_ref_template_ = standard_atomic_ref,
+          template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename allocator_type_ = forkunion_allocator_t, typename cache_hints_type_ = dummy_cache_hints_t>
 using ram_index = basic::ram_index<
     value<typename kit_type_::scalar_t, typename std::allocator_traits<allocator_type_>::template rebind_alloc<char>>,

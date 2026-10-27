@@ -1,4 +1,4 @@
 # ForkUnion: the thread pools, the memory topology, and the ISA-specific waiters and atomic references.
 usearch_sibling(
-    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 4d4bda36f65511a5281984b58df2c87795b98076
+    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 9d1a4876d6b8fffb0d5c9bdda4b6ab5165e351a3
 )

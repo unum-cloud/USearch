@@ -11,7 +11,6 @@
  *  across templates most characters do - giving the graph structure to navigate.
  */
 #include <array>       // `std::array` - the vocabulary & handmade triple
-#include <atomic>      // `std::atomic` - the parked batch's rendezvous
 #include <span>        // `std::span` - the metric's drain surface
 #include <string>      // `std::string` - the stored payload
 #include <string_view> // `std::string_view` - the transparent query form
@@ -96,7 +95,8 @@ struct sentences_handmade_t {
 
 template <typename wait_type_ = fu::standard_yield_t>
 struct sentences_fixture {
-    using index_t = ram_index<std::string, u64_t, u32_t, u64_t, wait_type_, standard_atomic_ref, counting_allocator_t>;
+    using index_t =
+        ram_index<std::string, u64_t, u32_t, u64_t, wait_type_, fu::standard_atomic_ref, counting_allocator_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
@@ -184,7 +184,7 @@ static std::size_t check_sentences_transparent_search(u64_t seed) {
         failures += expect(result.count > 0);
         failures += expect_eq(context.results[0].distance, u64_t {0});
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 
@@ -228,7 +228,7 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
         failures += expect_eq(poisoned.degree_of(0).value, 1u);
         failures += expect_eq(poisoned.health(context).status, status_t::success_k);
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 
@@ -247,35 +247,37 @@ static std::size_t check_sentences_whole_batch(u64_t seed) {
                                                        counting_allocator_t {ledger});
         std::array<u64_t, 2> const keys {sentences_fixture_t::make_key(0), sentences_fixture_t::make_key(1)};
         failures += expect(bool(index.reserve(values.size())));
-        std::atomic<bool> entered {false}, released {false};
-        std::atomic<std::size_t> thread_failures {0};
+        bool entered_word = false, released_word = false;
+        fu::standard_atomic_ref<bool> const entered {entered_word}, released {released_word};
+        std::size_t thread_failures_count = 0;
+        fu::standard_atomic_ref<std::size_t> const thread_failures {thread_failures_count};
         fu::flat_pool_t pool;
         if (fu::failed(pool.spawn(2))) return failures + expect(false);
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
-                basic_gated_metric<levenshtein_metric_t, u64_t> gated {sentences_fixture_t::make_metric(), &entered,
-                                                                       &released};
+                basic_gated_metric<levenshtein_metric_t, u64_t> gated {sentences_fixture_t::make_metric(),
+                                                                       &entered_word, &released_word};
                 context_t context {stream_key(seed, "whole_batch", 1), counting_allocator_t {ledger}};
                 auto const [result, status] = index.insert(std::span(values), std::span(keys), gated, {}, context,
                                                            keep_diverse_t {4});
-                if (status != status_t::success_k) thread_failures.fetch_add(1);
+                if (status != status_t::success_k) thread_failures.add(1);
                 return;
             }
             if (!spin_until([&]() noexcept { return entered.load(std::memory_order_acquire); })) {
-                thread_failures.fetch_add(1);
+                thread_failures.add(1);
                 released.store(true, std::memory_order_release); // The gate opens even on failure.
                 return;
             }
             if (index.size() != 0 || succeeded(index.key_of(0).status) || index.contains(keys[0]))
-                thread_failures.fetch_add(1);
+                thread_failures.add(1);
             released.store(true, std::memory_order_release);
         });
-        failures += expect_eq(thread_failures.load(), 0u);
+        failures += expect_eq(thread_failures_count, 0u);
         failures += expect_eq(index.size(), 2u);
         failures += expect(index.contains(keys[1]));
         failures += expect_eq(index.degree_of(1).value, 1u); // Linked to the first row before either published.
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 

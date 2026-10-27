@@ -18,20 +18,19 @@
 #include <cmath>   // `std::sqrt` - attention's default logit scale
 #include <cstring> // `std::memcpy`, `std::memmove` - landing rows and device names
 
-#include <atomic>             // `std::atomic` - serializing the progress ticks
-#include <bit>                // `std::bit_cast` - the softmax carry crossing the ABI
-#include <condition_variable> // `std::condition_variable` - waiting out deferred calls other threads run
-#include <initializer_list>   // `std::initializer_list` - the inputs a call checks against its arena
-#include <mutex>              // `std::lock_guard` over the ticks' lock and the deferred tables
-#include <memory>             // `std::unique_ptr` - the executor's topology
-#include <new>                // `std::nothrow`
-#include <span>               // `std::span` - key batches crossing the ABI
-#include <string_view>        // `std::string_view` - checkpoint paths
-#include <type_traits>        // `std::is_same_v` - the placements' host allocator
-#include <utility>            // `std::exchange` - nulling each donor slot an absorb consumes
-#include <variant>            // `std::variant`, `std::visit`
+#include <bit>              // `std::bit_cast` - the softmax carry crossing the ABI
+#include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
+#include <mutex>            // `std::lock_guard` over the ticks' lock and the deferred tables
+#include <memory>           // `std::unique_ptr` - the executor's topology
+#include <new>              // `std::nothrow`
+#include <span>             // `std::span` - key batches crossing the ABI
+#include <string_view>      // `std::string_view` - checkpoint paths
+#include <type_traits>      // `std::is_same_v` - the placements' host allocator
+#include <utility>          // `std::exchange` - nulling each donor slot an absorb consumes
+#include <variant>          // `std::variant`, `std::visit`
 
 #include <forkunion.h>            // `fu_topology_new` - the executor factories' discovery
+#include <forkunion/atomics.hpp>  // `fu::standard_atomic_ref` - the cursors' busy bits
 #include <forkunion/types.hpp>    // `fu::spin_mutex` - the ticks' lock
 #include <numkong/capabilities.h> // `nk_cpu_capabilities_enabled`, `nk_cpu_configure_thread`
 #include <numkong/cast.h>         // `nk_cast_best` - converting foreign scalar rows at the boundary
@@ -193,9 +192,9 @@ static constexpr bool cpu_home_compiled(cpu_class_t cpu_class) noexcept {
 }
 
 /** The RAM or NVMe variant of @p dtype on the newest rung of @p ladder the machine admits and
- *  @p pinned holds, the serial floor last: a RAM rung needs the class's ForkUnion features too, an
- *  NVMe one its kits alone, as a storage walk carries no waiter or atomic reference. A rung whose
- *  table holds no variant of the dtype picks nothing its parent does not, so the walk goes on. */
+ *  @p pinned holds, the serial floor last: a rung needs the class's NumKong and ForkUnion features.
+ *  A rung whose table holds no variant of the dtype picks nothing its parent does not, so the walk
+ *  goes on. */
 template <dense_home_t home_, cpu_class_t... classes_>
 static dense_verbs<home_> const* pick_cpu_variant(cpu_ladder<classes_...>, nk_dtype_t dtype, usearch_cpu_class_t pinned,
                                                   nk_capability_t available) noexcept {
@@ -203,11 +202,9 @@ static dense_verbs<home_> const* pick_cpu_variant(cpu_ladder<classes_...>, nk_dt
     auto rung = [&]<cpu_class_t class_>() noexcept {
         if constexpr (cpu_home_compiled<home_>(class_)) {
             if (picked) return;
-            if constexpr (class_ != cpu_class_t::serial_k) {
-                if (!cpu_pin_takes(pinned, class_) || !numkong_admits(available, class_)) return;
-                if constexpr (home_ == dense_home_t::ram_k)
-                    if (!forkunion_admits<class_>()) return;
-            }
+            if constexpr (class_ != cpu_class_t::serial_k)
+                if (!cpu_pin_takes(pinned, class_) || !numkong_admits(available, class_) || !forkunion_admits<class_>())
+                    return;
             picked = dense_class_tables<home_, class_>::find(dtype);
         }
     };
@@ -479,7 +476,7 @@ static bool maxsim_queries(punned_dense_index<home_> punned, usearch_dense_maxsi
     if (!executor) return false;
     dense_walk_config_t walk {};
     walk.expansion_factor = static_cast<u32_t>(arguments.expansion_factor);
-    walk.traversal = static_cast<traversal_t>(arguments.traversal);
+    walk.traversal = arguments.traversal == usearch_traversal_scan_k ? traversal_t::scan_k : traversal_t::walk_k;
 
     // The runs' headers and the tape sit in the call's arena, which no engine rewinds.
     thread_allocator_t const staging {arena.memory};
@@ -545,7 +542,7 @@ struct usearch_dense_cursor_handle_t {
     usearch_dense_index_handle_t const* opened_on = nullptr;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    std::atomic_flag busy;
+    u32_t busy = 0;
 
     usearch_dense_cursor_handle_t(dense_home_tables_t picked, usearch_dense_index_handle_t const* index) noexcept
         : tables(picked), opened_on(index) {}
@@ -963,7 +960,8 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
             punned, arguments->executor, count, arguments->queries, 1, landing, arguments->expansion_factor,
             arguments->progress, arguments->stats, outcome,
             [&](auto rows, auto& executor, dense_walk_config_t walk, auto keys, auto distances, auto counts) noexcept {
-                walk.traversal = static_cast<traversal_t>(arguments->traversal);
+                walk.traversal = arguments->traversal == usearch_traversal_scan_k ? traversal_t::scan_k
+                                                                                  : traversal_t::walk_k;
                 if (!keyed.predicate.callback)
                     return punned.verbs.search(punned.index, rows, executor, walk, keys, distances, counts);
                 // An expensive one stays the C struct, from which each call builds its own family.
@@ -1092,8 +1090,8 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                       host_device_k, {}, outcome);
     if (!arena) return;
-    std::atomic_flag& busy = arguments->cursor->busy;
-    if (busy.test_and_set(std::memory_order_acquire))
+    fu::standard_atomic_ref<u32_t> const busy {arguments->cursor->busy};
+    if (busy.fetch_test_and_set_bit(0, std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull is still running on the cursor"),
                void();
     // A handle never changes its variant, so it is still the one the cursor opened on.
@@ -1117,7 +1115,7 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
         }
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
-    busy.clear(std::memory_order_release);
+    busy.clear_bits(1, std::memory_order_release);
 }
 
 USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor) {
@@ -1268,7 +1266,7 @@ USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_
                 delete std::exchange(refinement->donors[position], nullptr);
         // Running totals, so a cancelled or failed call still says how far the pass got.
         us::dense::refine_result_t const refined = punned.verbs.refinement_running(refinement->refining);
-        if (arguments->visited) *arguments->visited = refined.visited_nodes;
+        if (arguments->visited) *arguments->visited = refined.reselected_nodes;
         if (arguments->changed) *arguments->changed = refined.changed_nodes;
         accumulate_stats(arguments->stats, refined);
         if (failed(ran)) return propagate_error(ran, outcome), void();
@@ -1647,11 +1645,11 @@ USEARCH_EXPORT void usearch_dense_metadata_read_buffer(usearch_dense_metadata_re
 
 USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t* outcome) {
     finish_calls_using(outcome);
-    std::atomic_ref<usearch_status_t> status {outcome->status};
-    usearch_status_t seen = status.load(std::memory_order_acquire);
-    for (; seen == usearch_status_deferred_k; seen = status.load(std::memory_order_acquire))
-        status.wait(usearch_status_deferred_k, std::memory_order_acquire);
-    return seen;
+    return host_outcome_verbs().wait(outcome);
+}
+
+USEARCH_EXPORT usearch_status_t usearch_outcome_status(usearch_outcome_t* outcome) {
+    return host_outcome_verbs().load(outcome);
 }
 
 USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {

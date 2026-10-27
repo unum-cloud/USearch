@@ -1056,9 +1056,12 @@ struct vram_amd_indexes {
     }
 
     /**
-     *  @brief Measures how much of every shard a search can reach, shard by shard on its own
-     *      device: reachable nodes summed, depth the deepest shard's. Read-only, and bracketed by
-     *      the epoch as every reader is.
+     *  @brief Measures how much of every shard a search can reach, every shard's batch of sweeps
+     *      queued on its own device before any waits: reachable nodes summed, depth the deepest
+     *      shard's.
+     *
+     *  Read-only, and bracketed by the epoch as every reader is.
+     *
      *  @param[inout] executor The streams and their scratch, one per shard.
      */
     expected<health_result_t> health(executor_t& executor) noexcept {
@@ -1076,10 +1079,34 @@ struct vram_amd_indexes {
                 failed(ready))
                 return {{}, ready};
 
-            health_result_t result;
+            using health_plan_t = typename index_t::health_plan_t;
+            growing_buffer<health_plan_t, forkunion_allocator_t> plans {shards_.allocator()};
+            if (failed(plans.reserve_exactly(traversals.size()))) return {{}, status_t::bad_alloc_k};
             for (std::size_t shard = 0; shard != traversals.size(); ++shard) {
                 if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return {{}, entered};
-                auto const [shard_health, status] = shards_[shard].index->health(traversals[shard]);
+                auto [plan, status] = shards_[shard].index->plan_health(traversals[shard]);
+                if (failed(status)) return {{}, status};
+                plans.push_back_reserved(std::move(plan));
+            }
+            // Every shard's batch queues before any waits, so the devices sweep at once.
+            bool running = true;
+            while (running) {
+                running = false;
+                for (std::size_t shard = 0; shard != plans.size(); ++shard) {
+                    if (!plans[shard].running()) continue;
+                    if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return {{}, entered};
+                    if (status_t const queued = plans[shard].queue(traversals[shard]); failed(queued))
+                        return {{}, queued};
+                }
+                for (std::size_t shard = 0; shard != plans.size(); ++shard) {
+                    if (status_t const landed = plans[shard].wait(traversals[shard]); failed(landed))
+                        return {{}, landed};
+                    running |= plans[shard].running();
+                }
+            }
+            health_result_t result;
+            for (health_plan_t const& plan : plans) {
+                auto const [shard_health, status] = plan.finish();
                 if (failed(status)) return {{}, status};
                 result += shard_health;
             }

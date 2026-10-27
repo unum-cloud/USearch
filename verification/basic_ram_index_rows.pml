@@ -1,14 +1,16 @@
 /**
- *  @brief The basic index's rows under their mutex, behind the gate's shared and unique sides.
+ *  @brief The basic index's rows under their lock word, behind the gate's shared and unique sides.
  *
- *  One neighbor row from `include/usearch/basic/ram_index.hpp` under its `basic::mutex`, edited by
- *  the manual `link` and `unlink` and by an insert's `back_link_` behind the shared side of
- *  `basic::shared_mutex`, copied by the traversal's `copy_row_`, the cursor's `seek` and `degree_of`
- *  under the row mutex alone, and read plain by `health` and `plan_save` on the unique side. The
- *  gate inlines are the header's lines: the acquire add and the release fence of `lock_shared`, the
- *  release subtract of `unlock_shared`, the acquire compare-exchange from a free word of
- *  `try_lock`, and the release clear of `unlock`. The row mutex is the header's
- *  test-and-test-and-set: a peek at the flag, the acquire exchange, the release store.
+ *  One neighbor row from `include/usearch/basic/ram_index.hpp` under its node's `state` word,
+ *  edited by the manual `link` and `unlink` and by an insert's `back_link_` behind the shared side
+ *  of `basic::shared_mutex`, copied by the traversal's `copy_row_`, the cursor's `seek` and
+ *  `degree_of` under the row lock alone, and read plain by `health` and `plan_save` on the unique
+ *  side. The gate inlines are the header's lines: the acquire add and the release fence of
+ *  `lock_shared`, the release subtract of `unlock_shared`, the acquire compare-exchange from a free
+ *  word of `try_lock`, and the release clear of `unlock`. The row lock is the header's `held_k` bit
+ *  beside `wired_k` in that word: a relaxed peek, the acquire `fetch_test_and_set_bit`, a
+ *  `fetch_or` claiming the row when the value it replaced lacked the bit, and the release
+ *  `clear_bits`.
  *  `basic_ram_index_steps.pml` covers the load path.
  *
  *  Row 0 holds two edges at most, the model's bound rather than `link`'s, which grows a row past
@@ -17,14 +19,14 @@
  *  the last slot into its place. The inserter stores node 1's key and back-links before its batch's
  *  turn: an append when the row has room, else the re-selection that clears the row and writes it
  *  anew; then it moves the watermark to 2 with a release. A reader acquires the watermark, reads
- *  `key_of` for node 1 when it is published, copies the row under its mutex, and follows every
+ *  `key_of` for node 1 when it is published, copies the row under its lock, and follows every
  *  copied edge below its snapshot to that node's key. A unique taker reads the row plain. The
  *  idempotence re-checks of `link` and `back_link_`, and the re-selection's off-lock scoring with
  *  its relock and revalidation, are `basic_ram_index_back_link.pml`'s: no ordering claim rests on
  *  them.
  *
  *  Invariants:
- *  - a copied row holds no unwritten slot, under the row mutex or the unique side;
+ *  - a copied row holds no unwritten slot, under the row lock or the unique side;
  *  - a reader that acquired the watermark reads the published key, for `key_of` and for every edge
  *    it follows; under `sc` the ghost adds that the record was published before the reader's
  *    snapshot, which is why the traversal skips IDs at or above it.
@@ -32,11 +34,11 @@
  *  @verify pass sc,rc11
  *  @verify fail rc11 watermark_order=order_relaxed: the watermark's release carries the newcomer's
  *      key; without it, `key_of` below the watermark reads no key
- *  @verify fail rc11 row_lock_order=order_relaxed: the row lock's exchange acquires the previous
+ *  @verify fail rc11 row_lock_order=order_relaxed: the row lock's `fetch_or` acquires the previous
  *      holder's edit; without it, a copy taken under the lock holds the new size beside an
  *      unwritten slot
- *  @verify fail rc11 row_unlock_order=order_relaxed: the row unlock releases the edit to the next
- *      holder; without it, the next holder copies the same torn row
+ *  @verify fail rc11 row_unlock_order=order_relaxed: the row unlock's `clear_bits` releases the
+ *      edit to the next holder; without it, the next holder copies the same torn row
  *  @verify fail rc11 unlock_shared_order=order_relaxed: `unlock_shared`'s release carries the
  *      shared side's edits through the gate; without it, the unique side reads the row torn
  *  @verify fail sc watermark_filter=false: the frontier is a protocol claim, not an ordering one:
@@ -53,7 +55,7 @@
 
 // The words, by the index member each stands for; only the newcomer's key is ever read.
 #define shared_mutex 0
-#define row_flag 1
+#define row_state 1
 #define row_size 2
 #define row_slot(position) (3 + (position))
 #define last_visible_id 5
@@ -65,6 +67,11 @@
 #define id_of(slot) ((slot) - 1)
 #define keyed(id) (10 + (id))
 #define row_capacity 2
+
+// The row's state word: the wiring bit, set before any of these threads runs, and the lock bit.
+#define wired 1
+#define held 2
+#define held_of(word) ((word) & held)
 
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
 #ifndef watermark_order
@@ -83,7 +90,7 @@
 #define watermark_filter true
 #endif
 
-bool editing;            // a mutator holds the row mutex
+bool editing;            // a mutator holds the row lock
 bool published;          // the inserter moved the watermark past node 1
 bool snapshot_published; // it had, when the reader took its snapshot
 
@@ -102,15 +109,21 @@ inline lock_shared(t, observed) {
 }
 inline unlock_shared(t, observed) { read_modify_write(t, shared_mutex, unlock_shared_order, observed, observed - 1) }
 
-// the row mutex: the peek, then the claiming exchange, one step so the exchange never reads the
-// flag back set; the caller declares `displaced`, since a local here costs a step
+// the row lock: a relaxed peek that waits out a holder, then the claiming `fetch_or`, which may
+// still lose to a claim landing after the peek; the caller declares `displaced`, since a local here
+// costs a step
 inline lock_row(t) {
-    atomic {
-        newest_value(row_flag) == hole;
-        read_modify_write(t, row_flag, row_lock_order, displaced, 1)
-    }
+    do
+    :: load(t, row_state, order_relaxed, displaced);
+        if
+        :: held_of(displaced) -> (!held_of(newest_value(row_state)))
+        :: else ->
+            read_modify_write(t, row_state, row_lock_order, displaced, displaced | held);
+            if :: !held_of(displaced) -> break :: else fi
+        fi
+    od
 }
-inline unlock_row(t) { store(t, row_flag, row_unlock_order, hole) }
+inline unlock_row(t) { read_modify_write(t, row_state, row_unlock_order, displaced, displaced & ~held) }
 
 // the row as one holder sees it: the size, then the slots below it
 inline copy_row(t, size, first, second) {
@@ -200,7 +213,7 @@ proctype inserter(byte t) {
     unlock_shared(t, observed)
 }
 
-// copy_row_, the cursor's seek and degree_of: one watermark snapshot, then the row under its mutex
+// copy_row_, the cursor's seek and degree_of: one watermark snapshot, then the row under its lock
 proctype reader(byte t) {
     int watermark, seen, size, first, second, displaced;
     atomic {
@@ -240,6 +253,7 @@ proctype unique_taker(byte t) {
 // the words that do not start at zero take their value as the initial write, before any thread runs
 init {
     atomic {
+        seed(row_state, wired);
         seed(row_size, 1);
         seed(row_slot(0), linked(0));
         seed(last_visible_id, id_of(linked(1)));

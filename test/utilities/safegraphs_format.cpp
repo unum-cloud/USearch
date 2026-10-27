@@ -96,7 +96,7 @@ struct embedding_codec_t {
 /** The embeddings over @p key_type_ keys and @p node_id_type_ node IDs. */
 template <typename key_type_, typename node_id_type_>
 struct embeddings_fixture {
-    using index_t = ram_index<embedding_t, key_type_, node_id_type_, f32_t, dummy_waiter_t, standard_atomic_ref,
+    using index_t = ram_index<embedding_t, key_type_, node_id_type_, f32_t, dummy_waiter_t, fu::standard_atomic_ref,
                               counting_allocator_t>;
 
     static constexpr char const* metric_k = "angular";
@@ -143,7 +143,7 @@ static_assert(interchange_value_codec<embedding_codec_t>);
 
 /** A UUID-keyed RAM index over the embeddings, the target every narrower key column widens into. */
 using widened_index_t =
-    ram_index<embedding_t, uuid_t, u32_t, f32_t, dummy_waiter_t, standard_atomic_ref, counting_allocator_t>;
+    ram_index<embedding_t, uuid_t, u32_t, f32_t, dummy_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
 
 /** A UUID-keyed view of the embeddings on storage. */
 using widened_view_t = us::basic::nvme_indexes<embedding_codec_t, uuid_t, u32_t, f32_t, blocking_files_engine<>>;
@@ -266,7 +266,7 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
     }
     fu_topology_delete(topology);
     std::remove(path);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** A monolith of 64-bit node IDs reaches no reader of 32-bit ones: the UUID-keyed RAM load and the
@@ -316,7 +316,7 @@ static std::size_t expect_wide_nodes_refused(u64_t seed) {
     }
     fu_topology_delete(topology);
     std::remove(path);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value

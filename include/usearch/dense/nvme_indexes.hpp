@@ -21,7 +21,6 @@
 #include <cstring> // `std::memcmp`, `std::memset`
 
 #include <array>       // `std::array`
-#include <atomic>      // `std::atomic_ref`
 #include <bit>         // `std::popcount`, `std::countr_zero`
 #include <chrono>      // `std::chrono::steady_clock`, for a scan's latencies
 #include <limits>      // `std::numeric_limits`
@@ -31,6 +30,8 @@
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::is_same_v`, `std::remove_reference_t`
+
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/blocking_files.hpp"    // `seekable_file_t`, `file_span_t`
@@ -55,14 +56,16 @@ struct nvme_indexes_cursor;
  *  growth is a new part from a RAM or VRAM save, opened by a fresh @ref view. The metric is the
  *  one the parts' headers name, so one instantiation views parts of any kernel its kits finalize.
  */
-template <                                                     //
-    typename key_type_ = uuid_t,                               //
-    typename quads_kit_type_ = bf16_serial_quads_kit_t,        //
-    typename tiles_kit_type_ = no_tiles_kit_t,                 //
-    typename elementwise_kit_type_ = serial_elementwise_kit_t, //
-    typename rmscast_kit_type_ = no_rmscast_kit_t,             //
-    typename visits_kit_type_ = serial_visits_hash_set_kit_t,  //
-    typename engine_type_ = default_io_engine_t                //
+template <                                                                    //
+    typename key_type_ = uuid_t,                                              //
+    typename quads_kit_type_ = bf16_serial_quads_kit_t,                       //
+    typename tiles_kit_type_ = no_tiles_kit_t,                                //
+    typename elementwise_kit_type_ = serial_elementwise_kit_t,                //
+    typename rmscast_kit_type_ = no_rmscast_kit_t,                            //
+    typename visits_kit_type_ = serial_visits_hash_set_kit_t,                 //
+    typename engine_type_ = default_io_engine_t,                              //
+    template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
+    typename wait_type_ = fu::standard_yield_t                                //
     >
 struct nvme_indexes {
     friend struct nvme_indexes_cursor<nvme_indexes>;
@@ -76,7 +79,12 @@ struct nvme_indexes {
     using key_t = key_type_;
 
     /** The one-part index, whose walks every verb drives over all parts at once. */
-    using index_t = nvme_index<quads_kit_type_, visits_kit_type_, engine_type_>;
+    using index_t = nvme_index<quads_kit_type_, visits_kit_type_, engine_type_, atomic_ref_template_, wait_type_>;
+
+    /** The CPU class's reference over the words one call's threads share, and its waiter. */
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
+    using wait_t = wait_type_;
 
     /** The threads, their engines and their scratch every verb runs on; it names no view, so one
      *  executor serves every view reaching the same devices. */
@@ -512,7 +520,7 @@ struct nvme_indexes {
         auto [call, call_status] = begin_scans_(executor, 1);
         if (failed(call_status)) return call_status;
         return scan_keys_(keys, executor, [&](std::size_t, std::size_t position, nvme_locator<u32_t>) noexcept {
-            std::atomic_ref<std::size_t>(entries[position]).fetch_add(1, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(entries[position]).add(1, std::memory_order_relaxed);
         });
     }
 
@@ -1081,12 +1089,11 @@ struct nvme_indexes {
             std::size_t issuing = depth, next_read = 0;
             nvme_reads_t reads;
             while (true) {
-                while (succeeded(local) &&
-                       succeeded(std::atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) {
+                while (succeeded(local) && succeeded(atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) {
                     if (issuing == depth) {
                         if (!free_count) break;
                         if (task == unclaimed_k)
-                            task = min_of(std::atomic_ref<std::size_t>(cursor).fetch_add(1, std::memory_order_relaxed),
+                            task = min_of(atomic_ref<std::size_t>(cursor).fetch_add(1, std::memory_order_relaxed),
                                           tasks_count),
                             progress = 0;
                         if (task == tasks_count) break;
@@ -1148,12 +1155,12 @@ struct nvme_indexes {
                         free_slots[free_count++] = static_cast<u32_t>(landed);
                     }
             }
-            std::atomic_ref<std::size_t>(issued.count).fetch_add(reads.count, std::memory_order_relaxed);
-            std::atomic_ref<std::size_t>(issued.bytes).fetch_add(reads.bytes, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(issued.count).add(reads.count, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(issued.bytes).add(reads.bytes, std::memory_order_relaxed);
             if (succeeded(local)) return;
             status_t unset = status_t::success_k;
-            std::atomic_ref<status_t>(failure).compare_exchange_strong(unset, local, std::memory_order_relaxed,
-                                                                       std::memory_order_relaxed);
+            atomic_ref<status_t>(failure).compare_exchange_strong(unset, local, std::memory_order_relaxed,
+                                                                  std::memory_order_relaxed);
         };
         if (status_t const fanned = executor.for_threads(scan_thread); failed(fanned)) return {issued, fanned};
         return {issued, failure};
@@ -1666,9 +1673,9 @@ struct nvme_indexes {
         status_t listing = status_t::success_k;
         status_t const scanned = scan_keys_(
             nominations, executor, [&](std::size_t thread, std::size_t position, nvme_locator<u32_t> locator) noexcept {
-                std::atomic_ref<std::size_t>(row_starts[position]).fetch_add(1, std::memory_order_relaxed);
+                atomic_ref<std::size_t>(row_starts[position]).add(1, std::memory_order_relaxed);
                 if (failed(matches[thread].push_back({locator, position})))
-                    std::atomic_ref<status_t>(listing).store(status_t::bad_alloc_k, std::memory_order_relaxed);
+                    atomic_ref<status_t>(listing).store(status_t::bad_alloc_k, std::memory_order_relaxed);
             });
         if (failed(scanned)) return {result, scanned};
         if (failed(listing)) return {result, listing};
@@ -1730,7 +1737,7 @@ struct nvme_indexes {
                                                          to_writable_span(ranked).subspan(thread * capacity, capacity),
                                                          thread, query, land);
                 failed(landed))
-                std::atomic_ref<status_t>(landing).store(landed, std::memory_order_relaxed);
+                atomic_ref<status_t>(landing).store(landed, std::memory_order_relaxed);
         });
         return {result, failed(ranking) ? ranking : landing};
     }
@@ -1843,13 +1850,13 @@ struct nvme_indexes {
                 if (position == admitted) continue;
                 vector_view_t const values {reinterpret_cast<scalar_t const*>(landed[1] + row * part.value_row_bytes),
                                             part.dimensions};
-                fold_quads<quads_kit_t>(
-                    values, index_t::norms_(kernel_, values), query_rows, query_norms,
-                    to_span(maxima.row(position).as_vector()), [](dot_result_t& maximum, dot_result_t dot) noexcept {
-                        std::atomic_ref<dot_result_t> const shared {maximum};
-                        dot_result_t seen = shared.load(std::memory_order_relaxed);
-                        while (seen < dot && !shared.compare_exchange_weak(seen, dot, std::memory_order_relaxed)) {}
-                    });
+                fold_quads<quads_kit_t>(values, index_t::norms_(kernel_, values), query_rows, query_norms,
+                                        to_span(maxima.row(position).as_vector()),
+                                        [](dot_result_t& maximum, dot_result_t dot) noexcept {
+                                            atomic_ref<dot_result_t> const shared {maximum};
+                                            if (shared.load(std::memory_order_relaxed) < dot)
+                                                shared.max(dot, std::memory_order_relaxed);
+                                        });
             }
         };
         auto const [run_reads, fold_status] = scan_reads_<2>(executor, runs_count_(0, rows_count, runs_column),
@@ -1872,7 +1879,7 @@ struct nvme_indexes {
                         to_span(candidates).first(admitted), maxima(nk::all, nk::range(first, first + rows), nk::slice),
                         to_writable_span(ranked).subspan(thread * capacity, capacity), thread, query, land);
                     failed(landed))
-                    std::atomic_ref<status_t>(landing).store(landed, std::memory_order_relaxed);
+                    atomic_ref<status_t>(landing).store(landed, std::memory_order_relaxed);
             });
         return {result, failed(ranking) ? ranking : landing};
     }
@@ -1933,7 +1940,7 @@ struct nvme_indexes {
         // Within a level only `next` changes, through relaxed atomics, as threads expand their rows
         // and reach others.
         auto later = [&](std::size_t word) noexcept {
-            return std::atomic_ref<u64_t>(next[word]).load(std::memory_order_relaxed);
+            return atomic_ref<u64_t>(next[word]).load(std::memory_order_relaxed);
         };
         auto first_in_level = [&](std::size_t from, std::size_t bound) noexcept {
             while (from < bound) {
@@ -1967,13 +1974,13 @@ struct nvme_indexes {
                 std::size_t const node = first + row;
                 u64_t const lane = u64_t {1} << (node % 64);
                 if (!(current[node / 64] & ~later(node / 64) & lane)) continue;
-                std::atomic_ref<u64_t>(next[node / 64]).fetch_or(lane, std::memory_order_relaxed);
+                atomic_ref<u64_t>(next[node / 64]).set_bits(lane, std::memory_order_relaxed);
                 auto const* const neighbors = reinterpret_cast<node_id_t const*>(bytes + row * row_bytes);
                 for (std::size_t slot = 0; slot != part.connectivity; ++slot) {
                     node_id_t const neighbor = neighbors[slot];
                     u64_t const reached = u64_t {1} << (neighbor % 64);
                     if (neighbor >= nodes || (current[neighbor / 64] | later(neighbor / 64)) & reached) continue;
-                    std::atomic_ref<u64_t>(next[neighbor / 64]).fetch_or(reached, std::memory_order_relaxed);
+                    atomic_ref<u64_t>(next[neighbor / 64]).set_bits(reached, std::memory_order_relaxed);
                 }
             }
         };

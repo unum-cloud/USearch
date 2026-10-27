@@ -64,7 +64,7 @@ struct positions_handmade_t {
 
 struct positions_fixture_t {
     using index_t =
-        geospatial::ram_index<us::utilities::uuid_t, flaky_waiter_t, standard_atomic_ref, counting_allocator_t>;
+        geospatial::ram_index<us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
     using value_t = typename index_t::value_t;
     using allocator_t = typename index_t::allocator_t;
 
@@ -255,7 +255,7 @@ static std::size_t check_positions_selector(u64_t seed) {
             failures += expect(winners_count <= selector.connectivity);
         }
     }
-    failures += expect_eq(ledger.live_bytes.load(), std::ptrdiff_t {0});
+    failures += expect_eq(ledger.live_bytes, std::ptrdiff_t {0});
     return failures;
 }
 
@@ -314,7 +314,7 @@ static std::size_t check_positions_long_links(u64_t seed) {
                               status_t::success_k);
         failures += expect_eq(index.degree_of(assigned_ids[0]).value, 0u);
     }
-    failures += expect_eq(ledger.live_bytes.load(), std::ptrdiff_t {0});
+    failures += expect_eq(ledger.live_bytes, std::ptrdiff_t {0});
     return failures;
 }
 
@@ -362,7 +362,7 @@ static std::size_t check_positions_radius(u64_t seed) {
             }
         }
     }
-    failures += expect_eq(ledger.live_bytes.load(), std::ptrdiff_t {0});
+    failures += expect_eq(ledger.live_bytes, std::ptrdiff_t {0});
     return failures;
 }
 

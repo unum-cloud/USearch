@@ -64,14 +64,14 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
         failures += expect_eq(index.size(), dense_growth_nodes_k);
         auto const [refined, refined_status] = index.refine({0, static_cast<node_id_t>(index.size())}, context);
         failures += expect(refined_status == status_t::success_k && refined.changed_nodes > 0 &&
-                           refined.changed_nodes <= refined.visited_nodes);
+                           refined.changed_nodes <= refined.reselected_nodes);
         // A dot graph's hubs can stall the heal short of every row.
         if constexpr (kernel_ != nk_kernel_dot_k) {
             failures += expect_eq(refined.health.reachable_nodes, dense_growth_nodes_k);
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
         }
     }
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** Builds and refines the growth set at an expansion past the widest register candidates of 32
@@ -105,7 +105,7 @@ std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_
         if constexpr (kernel_ != nk_kernel_dot_k)
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
     }
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    return failures + expect_eq(ledger.live_bytes, 0);
 }
 
 /** A vendor this build leaves out composes nothing. */

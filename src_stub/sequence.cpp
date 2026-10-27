@@ -902,14 +902,14 @@ void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
     usearch_sequence_index_handle_t& index = *arguments->index;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
-    if (reject_if(cursor.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
-                  "Another pull is still running on the cursor", outcome))
+    if (reject_if(fu::standard_atomic_ref<u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
+                  usearch_status_contended_k, "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
     sequence_search_scratch_t scratch;
     auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
     pull_walk(*arguments, cursor, score, *arena, outcome);
-    cursor.pulling.clear(std::memory_order_release);
+    fu::standard_atomic_ref<u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
 }
 
 void usearch_sequence_cursor_free(usearch_sequence_cursor_t handle) {

@@ -12,13 +12,12 @@
  *  executor's next drain or blocking call, or the free of a handle it uses runs it on that caller's
  *  thread. Only the RAM constructors succeed.
  */
-#include <algorithm>          // `std::find`, `std::find_if`, `std::any_of`, `std::count_if`
-#include <condition_variable> // `std::condition_variable`
-#include <iterator>           // `std::next`
-#include <list>               // `std::list`
-#include <mutex>              // `std::mutex`, `std::lock_guard`, `std::unique_lock`
-#include <variant>            // `std::visit`
-#include <vector>             // `std::vector`
+#include <algorithm> // `std::find`, `std::find_if`, `std::any_of`, `std::count_if`
+#include <iterator>  // `std::next`
+#include <list>      // `std::list`
+#include <mutex>     // `std::mutex`, `std::lock_guard`, `std::unique_lock`
+#include <variant>   // `std::visit`
+#include <vector>    // `std::vector`
 
 #include "usearch/types.h"
 
@@ -38,8 +37,8 @@ namespace stub {
 struct calls_t {
     std::mutex guard;
 
-    /** Signalled whenever a running call becomes final. */
-    std::condition_variable finished;
+    /** Counted up whenever a running call becomes final, under @c guard; waiters read it bare. */
+    u32_t finished = 0;
 
     /** Deferred calls no drain has started yet. */
     std::list<call_t> held;
@@ -68,7 +67,7 @@ static void run_listed(std::list<call_t>::iterator call) {
     std::visit([&](auto& arguments) { call->verb(&arguments); }, call->arguments);
     std::lock_guard<std::mutex> lock(calls.guard);
     calls.running.erase(call);
-    calls.finished.notify_all();
+    fu::standard_atomic_ref<u32_t>(calls.finished).add(1, std::memory_order_release);
 }
 
 void run_blocking(call_t call) {
@@ -109,7 +108,14 @@ void wait_for_calls_using(void const* handle) {
             drain(executor);
             lock.lock();
         }
-        else if (std::any_of(calls.running.begin(), calls.running.end(), uses_handle)) calls.finished.wait(lock);
+        else if (std::any_of(calls.running.begin(), calls.running.end(), uses_handle)) {
+            u32_t const seen = calls.finished;
+            lock.unlock();
+            fu::standard_atomic_ref<u32_t const> const finished {calls.finished};
+            while (finished.load(std::memory_order_acquire) == seen)
+                fu::standard_yield_t {}(&calls.finished, seen, 0u, fu::wait_capped_t {});
+            lock.lock();
+        }
         else return;
     }
 }
@@ -135,16 +141,16 @@ char const* usearch_capabilities_available(void) { return "serial"; }
 usearch_status_t usearch_outcome_wait(usearch_outcome_t* outcome) {
     if (!outcome) return usearch_status_invalid_argument_k;
     wait_for_calls_using(outcome);
-    std::atomic_ref status(outcome->status);
+    fu::standard_atomic_ref<usearch_status_t const> const status {outcome->status};
     usearch_status_t current = status.load(std::memory_order_acquire);
     for (; current == usearch_status_deferred_k; current = status.load(std::memory_order_acquire))
-        status.wait(usearch_status_deferred_k, std::memory_order_acquire);
+        fu::standard_yield_t {}(&outcome->status, current, 0u, fu::wait_capped_t {});
     return current;
 }
 
 usearch_status_t usearch_outcome_status(usearch_outcome_t* outcome) {
     if (!outcome) return usearch_status_invalid_argument_k;
-    return std::atomic_ref(outcome->status).load(std::memory_order_acquire);
+    return fu::standard_atomic_ref<usearch_status_t const>(outcome->status).load(std::memory_order_acquire);
 }
 
 void usearch_arena_init(usearch_arena_init_t* arguments) {
@@ -287,9 +293,11 @@ char const* usearch_residency_name(usearch_residency_t residency) {
 }
 
 usearch_residency_t usearch_residency_from_name(usearch_bytes_view_t name) {
-    if (named(name, "vram")) return usearch_residency_vram_k;
-    if (named(name, "nvme")) return usearch_residency_nvme_k;
-    return usearch_residency_ram_k;
+    for (int code = usearch_residency_ram_k; code <= usearch_residency_nvme_k; ++code) {
+        usearch_residency_t const residency = static_cast<usearch_residency_t>(code);
+        if (named(name, usearch_residency_name(residency))) return residency;
+    }
+    return usearch_residency_unknown_k;
 }
 
 char const* usearch_traversal_name(usearch_traversal_t traversal) {
@@ -301,7 +309,8 @@ char const* usearch_traversal_name(usearch_traversal_t traversal) {
 }
 
 usearch_traversal_t usearch_traversal_from_name(usearch_bytes_view_t name) {
-    return named(name, "scan") ? usearch_traversal_scan_k : usearch_traversal_walk_k;
+    if (named(name, "walk")) return usearch_traversal_walk_k;
+    return named(name, "scan") ? usearch_traversal_scan_k : usearch_traversal_unknown_k;
 }
 
 char const* usearch_mood_name(usearch_mood_t mood) {
@@ -313,7 +322,8 @@ char const* usearch_mood_name(usearch_mood_t mood) {
 }
 
 usearch_mood_t usearch_mood_from_name(usearch_bytes_view_t name) {
-    return named(name, "spinning") ? usearch_mood_spinning_k : usearch_mood_parked_k;
+    if (named(name, "parked")) return usearch_mood_parked_k;
+    return named(name, "spinning") ? usearch_mood_spinning_k : usearch_mood_unknown_k;
 }
 
 char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class) {

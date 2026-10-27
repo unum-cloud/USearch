@@ -153,16 +153,25 @@ static std::size_t matched_count(std::span<sz_size_t const> found, std::vector<s
     return min_of(matched, wanted);
 }
 
+/** What a GPU collection's recall is held to: a RAM index built at the same breadth, or nothing
+ *  beyond the exact distances, where diversity pruning on the host would take minutes. */
+enum class recall_reference_t {
+    ram_index_k,
+    exact_distances_k,
+};
+
 /**
  *  @brief One collection of @p count strings of about @p length bytes, held out @p queries_count
  *      queries, built on the GPU with @p node_id_type_ IDs and in RAM alike.
  *
- *  Every match the GPU reports must carry the pair's exact distance, ascending, and the GPU's
- *  recall at ten must reach the RAM index's at the same breadth, give or take a twentieth.
+ *  Every match the GPU reports must carry the pair's exact distance, ascending, and under
+ *  @p reference the GPU's recall at ten must reach the RAM index's at the same breadth, give or
+ *  take a twentieth.
  */
 template <usearch_sequence_metric_t metric_, typename node_id_type_ = u32_t>
 static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& executor, std::size_t count,
-                                                  std::size_t length, std::size_t queries_count) {
+                                                  std::size_t length, std::size_t queries_count,
+                                                  recall_reference_t reference = recall_reference_t::ram_index_k) {
     using ram_index_t = ram_index<us::utilities::uuid_t, u32_t>;
     using vram_index_t = vram_nvidia_index<metric_, node_id_type_, sz_cap_cuda_k, sequence_nvidia_fatbin<metric_>>;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3, origin_k = 3;
@@ -185,30 +194,33 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
         serial_metric.drain(exact[query], us::basic::unbounded_radius<sz_size_t>());
     }
 
-    // The RAM index over the same rows, at the same breadth.
-    ram_index_t ram_index;
-    auto metric = make_sequence_metric<metric_, sz_cap_any_k>(expansion_k * connectivity_32_k, failures);
-    ram_index_t::traversal_context_t ram_context {seed};
-    failures += expect(bool(ram_index.reserve(count)));
-    for (std::size_t row = 0; row != count; ++row) {
-        ram_index_t::value_t value;
-        [[maybe_unused]] sz::status_t const assigned = value.assign(strings[row]);
-        us::utilities::uuid_t const key = uuid_of(row);
-        failures += expect_eq(ram_index
-                                  .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
-                                          us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
-                                  .status,
-                              status_t::success_k);
-    }
+    // The RAM index over the same rows, at the same breadth, which an exact-distance reference
+    // leaves unbuilt and its recall at zero.
     std::size_t ram_matched = 0;
-    for (std::size_t query = 0; query != queries_count; ++query) {
-        failures += expect_eq(
-            ram_index.search(std::string_view {strings[count + query]}, metric, ram_context, {expansion_k}).status,
-            status_t::success_k);
-        std::vector<sz_size_t> found;
-        for (std::size_t rank = 0; rank != min_of(wanted_k, ram_context.results.size()); ++rank)
-            found.push_back(ram_context.results[rank].distance);
-        ram_matched += matched_count(found, exact[query], wanted_k);
+    if (reference == recall_reference_t::ram_index_k) {
+        ram_index_t ram_index;
+        auto metric = make_sequence_metric<metric_, sz_cap_any_k>(expansion_k * connectivity_32_k, failures);
+        ram_index_t::traversal_context_t ram_context {seed};
+        failures += expect(bool(ram_index.reserve(count)));
+        for (std::size_t row = 0; row != count; ++row) {
+            ram_index_t::value_t value;
+            [[maybe_unused]] sz::status_t const assigned = value.assign(strings[row]);
+            us::utilities::uuid_t const key = uuid_of(row);
+            failures += expect_eq(ram_index
+                                      .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
+                                              us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
+                                      .status,
+                                  status_t::success_k);
+        }
+        for (std::size_t query = 0; query != queries_count; ++query) {
+            failures += expect_eq(
+                ram_index.search(std::string_view {strings[count + query]}, metric, ram_context, {expansion_k}).status,
+                status_t::success_k);
+            std::vector<sz_size_t> found;
+            for (std::size_t rank = 0; rank != min_of(wanted_k, ram_context.results.size()); ++rank)
+                found.push_back(ram_context.results[rank].distance);
+            ram_matched += matched_count(found, exact[query], wanted_k);
+        }
     }
 
     // The GPU index, in three batches, each over a context carved from the executor's run.
@@ -379,33 +391,42 @@ static std::size_t check_sequence_vram_plural(u64_t seed, cuda_executor_t& execu
 std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& device) {
     if (device.vendor != gpu_vendor_t::nvidia_k) return 0;
     std::size_t failures = 0;
-    if (!settings.filter.selects("sequence_vram")) return failures;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
     auto [executor, spawn_status] = cuda_executor_t::spawn(std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println(stderr, "- CUDA: device #{} opens no stream", ordinal), 1;
+    auto const run = [&](char const* name, auto&& check) {
+        if (settings.filter.selects(name)) failures += report(name, check());
+    };
     constexpr usearch_sequence_metric_t bytes_k = usearch_sequence_metric_levenshtein_bytes_k;
     constexpr usearch_sequence_metric_t runes_k = usearch_sequence_metric_levenshtein_utf8_k;
     constexpr usearch_sequence_metric_t overlap_k = usearch_sequence_metric_overlap_k;
-    failures += report("sequence_vram 100 nt", check_sequence_vram_collection<bytes_k>(
-                                                   stream_key(settings.seed, "short"), executor, 2048, 100, 128));
-    failures += report("sequence_vram 200 nt", check_sequence_vram_collection<bytes_k>(
-                                                   stream_key(settings.seed, "long"), executor, 512, 200, 64));
-    failures += report("sequence_vram 1100 nt", check_sequence_vram_collection<bytes_k>(
-                                                    stream_key(settings.seed, "block"), executor, 256, 1100, 32));
-    failures += report("sequence_vram 200 runes", check_sequence_vram_collection<runes_k>(
-                                                      stream_key(settings.seed, "runes"), executor, 512, 200, 64));
-    failures += report(
-        "sequence_vram 200 nt overlap",
-        check_sequence_vram_collection<overlap_k>(stream_key(settings.seed, "overlap"), executor, 512, 200, 64));
     constexpr usearch_sequence_metric_t aligned_k = usearch_sequence_metric_needleman_wunsch_k;
-    failures += report(
-        "sequence_vram 200 nt needleman-wunsch",
-        check_sequence_vram_collection<aligned_k>(stream_key(settings.seed, "aligned"), executor, 512, 200, 64));
-    failures += report("sequence_vram 1100 nt needleman-wunsch",
-                       check_sequence_vram_collection<aligned_k>(stream_key(settings.seed, "aligned_stripes"), executor,
-                                                                 256, 1100, 32));
-    failures += report("sequence_vram plural",
-                       check_sequence_vram_plural(stream_key(settings.seed, "plural"), executor));
+    run("sequence_vram 100 nt", [&] {
+        return check_sequence_vram_collection<bytes_k>(stream_key(settings.seed, "short"), executor, 2048, 100, 128);
+    });
+    run("sequence_vram 200 nt", [&] {
+        return check_sequence_vram_collection<bytes_k>(stream_key(settings.seed, "long"), executor, 512, 200, 64);
+    });
+    run("sequence_vram 1100 nt", [&] {
+        return check_sequence_vram_collection<bytes_k>(stream_key(settings.seed, "block"), executor, 256, 1100, 32);
+    });
+    run("sequence_vram 200 runes", [&] {
+        return check_sequence_vram_collection<runes_k>(stream_key(settings.seed, "runes"), executor, 512, 200, 64);
+    });
+    run("sequence_vram 200 nt overlap", [&] {
+        return check_sequence_vram_collection<overlap_k>(stream_key(settings.seed, "overlap"), executor, 512, 200, 64);
+    });
+    run("sequence_vram 200 nt needleman-wunsch", [&] {
+        return check_sequence_vram_collection<aligned_k>(stream_key(settings.seed, "aligned"), executor, 512, 200, 64);
+    });
+    // Strided alignments past one tile only need to match the exact costs; a host index over them
+    // would spend its minutes on diversity pruning.
+    run("sequence_vram 1100 nt needleman-wunsch", [&] {
+        return check_sequence_vram_collection<aligned_k>(stream_key(settings.seed, "aligned_stripes"), executor, 256,
+                                                         1100, 8, recall_reference_t::exact_distances_k);
+    });
+    run("sequence_vram plural",
+        [&] { return check_sequence_vram_plural(stream_key(settings.seed, "plural"), executor); });
     return failures;
 }
 

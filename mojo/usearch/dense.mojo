@@ -44,10 +44,12 @@ from usearch.types import (
     BytesView,
     Call,
     Completion,
+    CpuClass,
     Deferred,
     Distance,
     Error,
     Executor,
+    GpuClass,
     Key,
     KeyBytes,
     KeysTapeViewArguments,
@@ -279,8 +281,12 @@ struct DenseIndexDescription(Copyable, Movable):
     """Entries hosted without growing again."""
     var memory_usage: c_size_t
     """Bytes the handle holds; traversal scratch is the executor's."""
-    var capabilities: String
-    """Codename of the kernels the index dispatched to on this machine."""
+    var cpu_class: CpuClass
+    """The CPU class dispatch picked on this machine; `UNKNOWN` for a device index."""
+    var gpu_class: GpuClass
+    """The GPU class dispatch picked on the index's devices; `UNKNOWN` for a host index."""
+    var shards_count: c_size_t
+    """Live shards."""
 
 
 @fieldwise_init
@@ -291,7 +297,9 @@ struct DenseIndexDescriptionOutputs(Defaultable, ImplicitlyCopyable):
     var size: c_size_t
     var capacity: c_size_t
     var memory_usage: c_size_t
-    var capabilities: Address
+    var cpu_class: CpuClass
+    var gpu_class: GpuClass
+    var shards_count: c_size_t
 
     def __init__(out self):
         """Zeroes every field, so an unwritten slot reads as an empty index."""
@@ -299,7 +307,9 @@ struct DenseIndexDescriptionOutputs(Defaultable, ImplicitlyCopyable):
         self.size = c_size_t(0)
         self.capacity = c_size_t(0)
         self.memory_usage = c_size_t(0)
-        self.capabilities = NULL_ADDRESS
+        self.cpu_class = CpuClass.UNKNOWN
+        self.gpu_class = GpuClass.UNKNOWN
+        self.shards_count = c_size_t(0)
 
 
 @fieldwise_init
@@ -1311,7 +1321,13 @@ struct _DenseDescribeCall(Call):
 
     def conclude(deinit self, outputs: DenseIndexDescriptionOutputs, generation: Int) -> DenseIndexDescription:
         return DenseIndexDescription(
-            outputs.metadata, outputs.size, outputs.capacity, outputs.memory_usage, text_at(outputs.capabilities)
+            outputs.metadata,
+            outputs.size,
+            outputs.capacity,
+            outputs.memory_usage,
+            outputs.cpu_class,
+            outputs.gpu_class,
+            outputs.shards_count,
         )
 
 

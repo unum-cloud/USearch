@@ -129,8 +129,8 @@ struct bioinformatics_handmade_t {
 
 template <typename wait_type_ = fu::standard_yield_t>
 struct bioinformatics_fixture {
-    using index_t =
-        ram_index<dna_t, us::utilities::uuid_t, u64_t, u64_t, wait_type_, standard_atomic_ref, counting_allocator_t>;
+    using index_t = ram_index<dna_t, us::utilities::uuid_t, u64_t, u64_t, wait_type_, fu::standard_atomic_ref,
+                              counting_allocator_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));

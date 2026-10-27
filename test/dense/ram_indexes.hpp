@@ -109,18 +109,20 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
             failures += expect(succeeded(
                 donor.insert(keys_of(part * (round + 1)), rows_of(part * (round + 1)), drivers[1].executor).status));
         }
-        std::atomic<bool> absorbing {false}, absorbed {false};
+        bool absorbing = false, absorbed = false;
         status_t absorb_status = status_t::success_k;
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
-                absorbing.store(true, std::memory_order_release);
+                fu::standard_atomic_ref<bool>(absorbing).store(true, std::memory_order_release);
                 do absorb_status = recipient.absorb(donor, drivers[1].executor).status;
                 while (absorb_status == status_t::contended_k);
-                absorbed.store(true, std::memory_order_release);
+                fu::standard_atomic_ref<bool>(absorbed).store(true, std::memory_order_release);
             }
             else if (thread == 1) {
-                while (!absorbing.load(std::memory_order_acquire)) std::this_thread::yield();
-                for (std::size_t row = 0; !absorbed.load(std::memory_order_acquire); row = (row + 1) % part) {
+                while (!fu::standard_atomic_ref<bool>(absorbing).load(std::memory_order_acquire))
+                    std::this_thread::yield();
+                for (std::size_t row = 0; !fu::standard_atomic_ref<bool>(absorbed).load(std::memory_order_acquire);
+                     row = (row + 1) % part) {
                     status_t const status =
                         recipient.insert(next_key, vectors.view().row(row).as_vector(), rows_driver.handle()).status;
                     if (status == status_t::success_k) {
@@ -361,24 +363,25 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
     compact_config_t halves;
     halves.shard_capacity = rows / 2;
     expected<compact_result_t> compacted {};
-    std::atomic<bool> compacting {true};
+    bool compacting = true;
     std::size_t miscounted = 0;
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(2))) return failures + expect(false);
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread == 0) {
             compacted = compact(std::span<indexes_type_* const> {in_place}, indexes, executor, halves);
-            compacting.store(false, std::memory_order_release);
+            fu::standard_atomic_ref<bool>(compacting).store(false, std::memory_order_release);
         }
         else if (thread == 1)
-            for (std::size_t row = 0; compacting.load(std::memory_order_acquire); row = (row + 1) % rows)
+            for (std::size_t row = 0; fu::standard_atomic_ref<bool>(compacting).load(std::memory_order_acquire);
+                 row = (row + 1) % rows)
                 miscounted += indexes.count(keys[row]) != 1;
     });
     failures += expect_eq(miscounted, 0u);
     auto const [packed, packed_status] = compacted;
     failures += expect_eq(packed_status, status_t::success_k);
     failures += expect(packed.source_shards == 4 && packed.target_shards == 2 && packed.moved_rows == rows / 2);
-    failures += expect(packed.graph.visited_nodes >= rows / 2);
+    failures += expect(packed.graph.reselected_nodes >= rows / 2);
     failures += expect_eq(indexes.shards_count(), 4u);
     failures += expect_eq(filled_shards(indexes), 2u);
     failures += dense_indexes_expect_restored(indexes, vectors, keys, dimensions, executor, seed);
@@ -431,37 +434,39 @@ static std::size_t test_ram_indexes_clear_race(u64_t seed) {
 
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(searchers_k + 1))) return failures + expect(false);
-    std::atomic<std::size_t> foreign {0}, refused {0};
+    std::size_t foreign_count = 0, refused_count = 0;
+    fu::standard_atomic_ref<std::size_t> const foreign {foreign_count}, refused {refused_count};
     for (std::size_t round = 0; round != rounds_k; ++round) {
         failures += expect(
             succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), drivers[0].executor).status));
-        std::atomic<bool> cleared {false};
+        bool cleared = false;
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 while (indexes.clear() == status_t::contended_k) std::this_thread::yield();
-                cleared.store(true, std::memory_order_release);
+                fu::standard_atomic_ref<bool>(cleared).store(true, std::memory_order_release);
                 return;
             }
             dense_indexes_row_driver<indexes_type_> walker {indexes, drivers[0]};
-            if (failed(walker.status)) return foreign.fetch_add(1), void();
+            if (failed(walker.status)) return foreign.add(1);
             std::array<key_t, 8> found_keys {};
             std::array<distance_t, 8> found_distances {};
-            for (std::size_t row = thread; !cleared.load(std::memory_order_acquire); row = (row + searchers_k) % rows) {
+            for (std::size_t row = thread; !fu::standard_atomic_ref<bool>(cleared).load(std::memory_order_acquire);
+                 row = (row + searchers_k) % rows) {
                 auto const [result, status] = indexes.search(vectors.view().row(row).as_vector(), walker.handle(), {},
                                                              std::span<key_t> {found_keys},
                                                              std::span {found_distances});
-                if (status == status_t::contended_k) refused.fetch_add(1);
-                else if (failed(status)) foreign.fetch_add(1);
+                if (status == status_t::contended_k) refused.add(1);
+                else if (failed(status)) foreign.add(1);
                 else
                     for (std::size_t found = 0; found != result.count; ++found)
-                        foreign.fetch_add(dense_key_number(found_keys[found]) < 1 ||
-                                          dense_key_number(found_keys[found]) > rows);
+                        foreign.add(dense_key_number(found_keys[found]) < 1 ||
+                                    dense_key_number(found_keys[found]) > rows);
             }
         });
         failures += expect_eq(indexes.size(), 0u);
         failures += expect_eq(indexes.count(keys[0]), 0u);
     }
-    failures += expect_eq(foreign.load(), 0u);
+    failures += expect_eq(foreign_count, 0u);
 
     // Claims a plan holds refuse every close, so neither a clear nor an absorb frees them.
     failures += expect(

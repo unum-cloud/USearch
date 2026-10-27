@@ -18,6 +18,10 @@
  *      negative counter; without the wait, one reserver's release lifts the counter back to zero
  *      while the other still grows, its next subtract crosses zero again, and two threads are
  *      inside `create_next_chunk`, whose `chunks_count_` and directory writes are plain
+ *  @verify fail sc release_floor=0: `release_capacity`'s floor is the count it adds, so the sum
+ *      stays at least the count only where the counter read non-negative; a floor of zero admits a
+ *      counter as low as minus the count, lifting a grower's deficit back across zero, and a
+ *      second reserver is elected into `create_next_chunk`
  *  @verify fail rc11 take_order=order_acquire: the grower's take on `last_allocated_id_` releases
  *      the new chunks; acquiring only, a reserver that fit on the counter before the growth, but
  *      whose rows the take pushed into the new chunk, has no edge to the directory and reads it

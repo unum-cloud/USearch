@@ -580,8 +580,8 @@ typedef struct usearch_geospatial_refine_t {
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
  *  @c expansion_factor belongs here rather than in @c usearch_geospatial_insert. A refined entry
- *  keeps its cone winners and the longest of its other candidates, and the long links an insertion
- *  drew past them give way to that pick.
+ *  keeps its cone winners and the longest of its other candidates, then has its long links drawn
+ *  again by the insertion's rule, so a refine never leaves an entry without them.
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting an entry's
  *  neighbors is idempotent and claims no identity, so a stopped pass leaves the graph correct and

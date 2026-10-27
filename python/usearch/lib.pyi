@@ -72,8 +72,8 @@ class Status(IntEnum):
 class Mood(IntEnum):
     """What an executor's idle workers do, valued as `usearch_mood_t`: sleep, or stay hot."""
 
-    PARKED = 0
-    SPINNING = 1
+    PARKED = 1
+    SPINNING = 2
 
 class Scalar(IntEnum):
     """A stored or exchanged scalar type, valued as `usearch_scalar_t`, widest dynamic range first."""
@@ -96,15 +96,15 @@ class Scalar(IntEnum):
 class Residency(IntEnum):
     """Where a handle's payload lives, valued as `usearch_residency_t`."""
 
-    RAM = 0
-    VRAM = 1
-    NVME = 2
+    RAM = 1
+    VRAM = 2
+    NVME = 3
 
 class Traversal(IntEnum):
     """How a search reaches the rows it scores, valued as `usearch_traversal_t`."""
 
-    WALK = 0
-    SCAN = 1
+    WALK = 1
+    SCAN = 2
 
 class CPUClass(IntEnum):
     """The CPU families dispatch picks from, valued as `usearch_cpu_class_t`; a placement may pin one."""

@@ -56,20 +56,21 @@ inline bool monotone_offsets(usearch_tape_view_t tape, std::size_t count) noexce
     return true;
 }
 
-/** Keeps the first failure any thread reports into @p first. */
-inline void keep_first_failure(status_t& first, status_t status) noexcept {
+/** Keeps the first failure any thread reports into @p first, through the CPU class's reference. */
+template <template <typename> class atomic_ref_template_>
+void keep_first_failure(status_t& first, status_t status) noexcept {
     if (succeeded(status)) return;
     status_t unset = status_t::success_k;
-    standard_atomic_ref<status_t>(first).compare_exchange_strong(unset, status, std::memory_order_relaxed,
-                                                                 std::memory_order_relaxed);
+    atomic_ref_template_<status_t>(first).compare_exchange_strong(unset, status, std::memory_order_relaxed,
+                                                                  std::memory_order_relaxed);
 }
 
-/** Raises @p word to @p value, if it is larger, from any thread; a relaxed peek first, so a word
- *  already that large is never written. */
-template <typename word_type_>
+/** Raises @p word to @p value, if it is larger, from any thread, through the CPU class's reference;
+ *  a relaxed peek first, so a word already that large is never written. */
+template <template <typename> class atomic_ref_template_, typename word_type_>
 void raise_to(word_type_& word, std::type_identity_t<word_type_> value) noexcept {
-    fu::standard_atomic_ref<word_type_> const raised {word};
-    if (raised.load(std::memory_order_relaxed) < value) raised.fetch_max(value, std::memory_order_relaxed);
+    atomic_ref_template_<word_type_> const raised {word};
+    if (raised.load(std::memory_order_relaxed) < value) raised.max(value, std::memory_order_relaxed);
 }
 
 /** The decimal spelling of @p value in @p text, which a checkpoint's metadata records. */

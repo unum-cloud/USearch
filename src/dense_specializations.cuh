@@ -57,12 +57,14 @@ using ram_indexes =
                        waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type,
                        typename cache_hints_for_cpu_class<cpu_class_>::type>;
 
-/** One NVMe variant: scoring compiles per CPU class, while the metric comes from the parts' headers
- *  and the transport is the executor's runtime choice. */
+/** One NVMe variant: scoring and the words its threads share compile per CPU class, while the
+ *  metric comes from the parts' headers and the transport is the executor's runtime choice. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 using nvme_indexes =
     dense::nvme_indexes<us::utilities::uuid_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
-                        elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>>;
+                        elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>,
+                        default_io_engine_t, atomic_ref_for_cpu_class<cpu_class_>::template type,
+                        waiter_of<cpu_class_>>;
 
 /** The start and end of every dtype's device code one GPU class unit embeds, in pairs in
  *  @c dense_dtypes_t order, as the table CMake writes for the class; each VRAM class unit
@@ -759,10 +761,11 @@ struct specialized_index {
  *  @brief Whether a class compiles its own variant of @p dtype_ in @p home_.
  *
  *  On RAM it does where its 4-way or tiles kit differs from the class it degrades to, or its
- *  ForkUnion mask does; on NVMe where its kit alone differs, as a storage walk carries no waiter or
- *  atomic reference; on a device always, since each class's unit alone carries kernels for its
- *  generation. The serial floor always compiles its variants, and a variant a class drops is its
- *  parent's, which the ladder reaches on the next rung.
+ *  ForkUnion mask does; on NVMe where its kit alone differs, as a storage walk shares a few
+ *  counters and never waits, so its parent's reference serves; on a device always, since each
+ *  class's unit alone carries kernels for its generation. The serial floor always compiles its
+ *  variants, and a variant a class drops is its parent's, which the ladder reaches on the next
+ *  rung.
  */
 template <dense_home_t home_, nk_dtype_t dtype_, auto class_>
 static consteval bool variant_advances() noexcept {

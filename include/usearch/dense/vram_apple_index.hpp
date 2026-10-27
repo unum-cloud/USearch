@@ -29,7 +29,8 @@
 #include <span>         // `std::span`
 #include <utility>      // `std::exchange`
 
-#include <forkunion/types.hpp> // `fu::standard_yield_t` - the watermark's turn
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the published words
+#include <forkunion/types.hpp>   // `fu::standard_yield_t` - the watermark's turn
 
 #include <numkong/capabilities.h> // `nk_kernel_kind_t`
 #include <numkong/tensor.hpp>     // `nk::matrix_span`, `nk::range`
@@ -242,12 +243,12 @@ struct vram_apple_index {
 
     /** Rows visible to searches. */
     std::size_t size() const noexcept {
-        return standard_atomic_ref<std::size_t const>(last_visible_id_).load(std::memory_order_acquire);
+        return fu::standard_atomic_ref<std::size_t const>(last_visible_id_).load(std::memory_order_acquire);
     }
 
     /** The first failure that left claimed rows unpublished, kept for the index's lifetime. */
     status_t status() const noexcept {
-        return standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
+        return fu::standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
     }
 
     /** Rows the storage holds without growing. */
@@ -667,7 +668,7 @@ struct vram_apple_index {
         bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
 
         /** Nodes re-selected so far. */
-        std::size_t visited() const noexcept { return tally_.visited_nodes; }
+        std::size_t visited() const noexcept { return tally_.reselected_nodes; }
 
         /** The pass, complete once @ref advance answered false, otherwise @c cancelled_k; a failure
          *  a phase kept answers instead. */
@@ -858,14 +859,14 @@ struct vram_apple_index {
             node_id_t* const landed = reinterpret_cast<node_id_t*>(neighbors_rows.data());
             for (std::size_t slot = 0; slot != rows.size() * connectivity; ++slot)
                 landed[slot] = source[slot] < visible ? source[slot] : node_id_unknown_k;
-            standard_atomic_ref<std::size_t> {covered}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const nodes = static_cast<std::size_t>(visible);
-            if (standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != nodes)
+            if (fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != nodes)
                 return status_t::config_mismatch_k;
             index_ = nullptr;
             return status_t::success_k;
@@ -978,14 +979,14 @@ struct vram_apple_index {
             if (index_->stores_norms() && !norms_rows.empty()) {
                 std::memcpy(index_->norms_column_.host + range.first * sizeof(norms_t), norms_rows.data(),
                             norms_rows.size());
-                standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
+                fu::standard_atomic_ref<std::size_t> {covered_norms}.add(range.size(), std::memory_order_acq_rel);
             }
             std::span<node_id_t> const landed {index_->neighbor_rows_() + range.first * connectivity,
                                                range.size() * connectivity};
             std::memcpy(landed.data(), neighbors_rows.data(), neighbors_rows.size());
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
-            standard_atomic_ref<std::size_t> {covered}.fetch_add(range.size(), std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1009,13 +1010,13 @@ struct vram_apple_index {
             if (index_->stores_norms()) {
                 std::memcpy(index_->norms_column_.host + into * sizeof(norms_t),
                             source.norms_column_.host + from * sizeof(norms_t), count * sizeof(norms_t));
-                standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(count, std::memory_order_acq_rel);
+                fu::standard_atomic_ref<std::size_t> {covered_norms}.add(count, std::memory_order_acq_rel);
             }
             std::span<node_id_t> const landed {index_->neighbor_rows_() + into * connectivity, count * connectivity};
             std::memcpy(landed.data(), source.neighbor_rows_() + from * connectivity, landed.size_bytes());
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
-            standard_atomic_ref<std::size_t> {covered}.fetch_add(count, std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.add(count, std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1023,11 +1024,11 @@ struct vram_apple_index {
          *  appended rows. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
-            if (standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
+            if (fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
             if (rows) {
                 if (index_->stores_norms() &&
-                    standard_atomic_ref<std::size_t> {covered_norms}.load(std::memory_order_acquire) != rows)
+                    fu::standard_atomic_ref<std::size_t> {covered_norms}.load(std::memory_order_acquire) != rows)
                     if (status_t const derived = index_->derive_norms_(base, rows); failed(derived))
                         return index_->fail_(derived);
                 u32_t* const words = metal_words(index_->counters_);
@@ -1819,15 +1820,23 @@ struct vram_apple_index {
             std::size_t const node = node_ids.empty() ? nodes.first + offset : node_ids[offset];
             u32_t* const row = live + node * connectivity;
             u32_t const* const picked = shadow + node * connectivity;
-            if (std::memcmp(row, picked, connectivity * sizeof(u32_t)) == 0) continue;
+            // Changed means the set gained a member the row lacked;
+            // a reordering or a loss alone never counts.
+            bool gained = false;
+            for (std::size_t slot = 0; slot != connectivity && !gained; ++slot) {
+                bool lacked = picked[slot] != node_id_unknown_k && picked[slot] != node;
+                for (std::size_t old_slot = 0; lacked && old_slot != connectivity; ++old_slot)
+                    lacked = row[old_slot] != picked[slot];
+                gained = lacked;
+            }
             std::memcpy(row, picked, connectivity * sizeof(u32_t));
-            ++result.changed_nodes;
+            result.changed_nodes += gained;
         }
         u32_t const* const counters = metal_words(counters_);
-        result.visited_nodes = walk_count;
-        result.visited_members = metal_tally(counters, metal_hops_k);
-        result.computed_distances = metal_tally(counters, metal_scored_k);
-        result.restarts = metal_tally(counters, metal_restarts_k);
+        result.reselected_nodes = walk_count;
+        result.telemetry.visited_members = metal_tally(counters, metal_hops_k);
+        result.telemetry.computed_distances = metal_tally(counters, metal_scored_k);
+        result.telemetry.restarts = metal_tally(counters, metal_restarts_k);
         return result;
     }
 
@@ -1940,8 +1949,8 @@ struct vram_apple_index {
     /** Keeps @p failure as the status unless one is kept already. */
     status_t fail_(status_t failure) noexcept {
         status_t expected = status_t::success_k;
-        standard_atomic_ref<status_t>(status_).compare_exchange_strong(expected, failure, std::memory_order_acq_rel,
-                                                                       std::memory_order_acquire);
+        fu::standard_atomic_ref<status_t>(status_).compare_exchange_strong(expected, failure, std::memory_order_acq_rel,
+                                                                           std::memory_order_acquire);
         return failure;
     }
 
@@ -1976,8 +1985,8 @@ struct vram_apple_index {
         std::unique_lock storage {storage_};
         if (std::size_t const rows = size())
             std::memset(neighbors_matrix_.host, 0xFF, rows * connectivity() * sizeof(u32_t));
-        standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
-        standard_atomic_ref<status_t>(status_).store(status_t::success_k, std::memory_order_release);
+        fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
+        fu::standard_atomic_ref<status_t>(status_).store(status_t::success_k, std::memory_order_release);
     }
 
     /** Row zero of the neighbors matrix, as the IDs its rows hold. */
@@ -1990,7 +1999,7 @@ struct vram_apple_index {
             if (status_t const kept = status(); failed(kept)) return kept;
             fu::standard_yield_t {}(&last_visible_id_, watermark, 0u, fu::wait_capped_t {});
         }
-        standard_atomic_ref<std::size_t>(last_visible_id_).store(first + rows, std::memory_order_release);
+        fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(first + rows, std::memory_order_release);
         return status_t::success_k;
     }
 

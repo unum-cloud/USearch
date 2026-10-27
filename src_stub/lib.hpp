@@ -29,7 +29,6 @@
 
 #include <algorithm>        // `std::copy`, `std::sort`, `std::stable_sort`, `std::min`
 #include <array>            // `std::array`
-#include <atomic>           // `std::atomic`, `std::atomic_ref`
 #include <bit>              // `std::bit_cast`
 #include <functional>       // `std::function`
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
@@ -46,6 +45,9 @@
 #include <variant>          // `std::variant`
 #include <vector>           // `std::vector`
 
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the serial class's reference over every shared word
+#include <forkunion/types.hpp>   // `fu::standard_yield_t` - the serial class's waiter
+
 #include "usearch/usearch.h" // every argument structure a call copies
 
 #include "usearch/utilities/blocking_files.hpp" // `seekable_file_t`, `mapped_file_t` - the checkpoints' handles
@@ -59,8 +61,9 @@ struct usearch_arena_handle_t {
     us::utilities::growing_arena<> memory {us::utilities::global_allocator};
 
     /** The outcome of the call holding the arena, from its claim or deferred submission until just
-     *  before its final status; null while free. Atomic, since a held call finishes on any thread. */
-    std::atomic<usearch_outcome_t const*> holder {nullptr};
+     *  before its final status; null while free. Touched through @c fu::standard_atomic_ref, since
+     *  a held call finishes on any thread. */
+    usearch_outcome_t const* holder = nullptr;
 };
 
 namespace unum {
@@ -100,17 +103,17 @@ inline bytes_view_t as_readable_bytes(usearch_bytes_view_t bytes) {
 
 /** Marks @p outcome deferred - every verb's first act, so a waiter never reads a stale status. */
 inline void propagate_deferred(usearch_outcome_t* outcome) {
-    if (outcome) std::atomic_ref(outcome->status).store(usearch_status_deferred_k, std::memory_order_relaxed);
+    if (outcome)
+        fu::standard_atomic_ref<usearch_status_t>(outcome->status)
+            .store(usearch_status_deferred_k, std::memory_order_relaxed);
 }
 
-/** The one final write to @p outcome: the message, then the status with release ordering, waking
- *  every waiter. The message is null exactly on success. */
+/** The one final write to @p outcome: the message, then the status with release ordering, which
+ *  waiters watch by address, so nothing notifies. The message is null exactly on success. */
 inline void propagate_error(usearch_status_t status, usearch_outcome_t* outcome, char const* message) {
     if (!outcome) return;
     outcome->message = status == usearch_status_success_k ? nullptr : message;
-    std::atomic_ref final_status(outcome->status);
-    final_status.store(status, std::memory_order_release);
-    final_status.notify_all();
+    fu::standard_atomic_ref<usearch_status_t>(outcome->status).store(status, std::memory_order_release);
 }
 
 /**
@@ -134,7 +137,9 @@ class deferred_outcome_t {
     ~deferred_outcome_t() noexcept {
         // Only the holder lets go, so a call refused as contended leaves the other call's hold alone.
         usearch_outcome_t const* holder = published_;
-        if (arena_) arena_->holder.compare_exchange_strong(holder, nullptr, std::memory_order_release);
+        if (arena_)
+            fu::standard_atomic_ref<usearch_outcome_t const*>(arena_->holder)
+                .compare_exchange_strong(holder, nullptr, std::memory_order_release, std::memory_order_relaxed);
         propagate_error(recorded_.status, published_, recorded_.message);
     }
     deferred_outcome_t(deferred_outcome_t const&) = delete;
@@ -152,9 +157,11 @@ inline bool reject_if(bool wrong, usearch_status_t status, char const* message, 
     return true;
 }
 
-/** Refuses a traversal other than a walk or a scan; this stand-in answers both exactly. */
+/** Refuses a traversal other than a walk, a scan, or nothing, which derives the walk; this stand-in
+ *  answers both exactly. */
 inline bool reject_traversal(usearch_traversal_t traversal, usearch_outcome_t* outcome) {
-    return reject_if(traversal != usearch_traversal_walk_k && traversal != usearch_traversal_scan_k,
+    return reject_if(traversal != usearch_traversal_unknown_k && traversal != usearch_traversal_walk_k &&
+                         traversal != usearch_traversal_scan_k,
                      usearch_status_unknown_kind_k, "Unknown traversal", outcome);
 }
 
@@ -309,7 +316,9 @@ std::vector<void const*> handles_used_by(arguments_ const& arguments) {
 inline bool hold_arena(usearch_arena_t arena, usearch_outcome_t const* call) {
     if (!arena) return true;
     usearch_outcome_t const* holder = nullptr;
-    return arena->holder.compare_exchange_strong(holder, call, std::memory_order_acquire) || holder == call;
+    return fu::standard_atomic_ref<usearch_outcome_t const*>(arena->holder)
+               .compare_exchange_strong(holder, call, std::memory_order_acquire, std::memory_order_acquire) ||
+           holder == call;
 }
 
 /** Every verb's first act. A call without an executor answers false and runs the verb's body in
@@ -333,7 +342,8 @@ bool through_executor(arguments_* arguments) {
     // A refused submission never runs, so nothing else would let go of the arena it took.
     usearch_outcome_t const* holder = arguments->outcome;
     if (!submit_deferred(std::move(call), arguments->outcome) && arena)
-        arena->holder.compare_exchange_strong(holder, nullptr, std::memory_order_release);
+        fu::standard_atomic_ref<usearch_outcome_t const*>(arena->holder)
+            .compare_exchange_strong(holder, nullptr, std::memory_order_release, std::memory_order_relaxed);
     return true;
 }
 
@@ -1017,8 +1027,8 @@ struct graph_cursor {
     /** Each row's links, kept once a pull or an expansion computed them. */
     std::unordered_map<std::size_t, std::vector<std::size_t>> links;
 
-    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    std::atomic_flag pulling;
+    /** Bit zero is set while a pull runs, so an overlapping pull is refused instead of racing. */
+    u32_t pulling = 0;
 };
 
 /** Opens @p cursor on @p index: a scan without @p starts, else a walk beginning with the start

@@ -86,8 +86,7 @@ constexpr u32_t cuda_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept
 template <nk_capability_t capability_, nk_dtype_t dtype_>
 constexpr u32_t cuda_resident_blocks(vram_dense_kernel_t kernel, u32_t slots) noexcept {
     switch (kernel) {
-    // Percolations and folds re-select as the refine does, on its budget and its arena.
-    case vram_dense_kernel_t::percolate_k:
+    // Folds re-select as the refine does, on its budget and its arena.
     case vram_dense_kernel_t::fold_k:
     case vram_dense_kernel_t::merge_back_links_k: return slots <= 8 ? 3 : 2;
     case vram_dense_kernel_t::search_indexer_k:
@@ -140,11 +139,6 @@ inline constexpr cuda_rung<vram_kernel_t> cuda_rungs[] = {
 /** Every instantiation of @c cuda_dense_kernel one dtype exports bar the attends, which the device
  *  pass instantiates and the host looks up as it loads the fatbin. */
 inline constexpr cuda_rung<vram_dense_kernel_t> cuda_dense_rungs[] = {
-    {vram_dense_kernel_t::percolate_k, 0},
-    {vram_dense_kernel_t::percolate_k, 2},
-    {vram_dense_kernel_t::percolate_k, 4},
-    {vram_dense_kernel_t::percolate_k, 8},
-    {vram_dense_kernel_t::percolate_k, 16},
     {vram_dense_kernel_t::search_indexer_k, 0},
     {vram_dense_kernel_t::search_indexer_k, 2},
     {vram_dense_kernel_t::search_indexer_k, 4},
@@ -183,7 +177,6 @@ constexpr bool cuda_gathers_rows(vram_kernel_t kernel) noexcept {
 
 constexpr bool cuda_gathers_rows(vram_dense_kernel_t kernel) noexcept {
     switch (kernel) {
-    case vram_dense_kernel_t::percolate_k:
     case vram_dense_kernel_t::search_indexer_k:
     case vram_dense_kernel_t::multiply_k:
     case vram_dense_kernel_t::attend_k: return true;
@@ -638,25 +631,20 @@ struct vram_nvidia_kernels {
         u32_t parts = 0;
         u32_t round = 0;
 
-        /** The loaded kernel the rows run through, a walk or a percolation, and its blocks resident
-         *  per multiprocessor; a percolation also takes its fresh slots and its two counters. */
+        /** The loaded walk the rows run through, and its blocks resident per multiprocessor. */
         cuda_function_handle_t function {};
         u32_t resident_blocks = 0;
-        u32_t* fresh_slots = nullptr;
-        u32_t* percolated = nullptr;
-        u32_t* gained = nullptr;
     };
 
     /** Queues one pass of the three-pass refinement engine behind @c refine_plan_t into its carved
-     *  @p scratch through @p kernel, a walk or a percolation: the pass covers @p nodes, or under a
-     *  device-resident @p node_ids the listed IDs with @p nodes spanning the array's offsets, each
-     *  node first walking across the neighboring group in round @p round when @p parts parts are
-     *  given; the merge folds the re-selected rows' forward picks and the rows chained onto every
-     *  picked row into the live rows, and leaves every other row as it was. Nothing waits: the
-     *  landing queued after it checks its claims. */
-    template <typename kernel_enum_type_>
+     *  @p scratch through @p kernel: the pass covers @p nodes, or under a device-resident
+     *  @p node_ids the listed IDs with @p nodes spanning the array's offsets, each node first
+     *  walking across the neighboring group in round @p round when @p parts parts are given; the
+     *  merge folds the re-selected rows' forward picks and the rows chained onto every picked row
+     *  into the live rows, and leaves every other row as it was. Nothing waits: the landing queued
+     *  after it checks its claims. */
     status_t refine_pass_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
-                          refine_config_t config, kernel_enum_type_ kernel, iota_view<node_id_t> nodes,
+                          refine_config_t config, vram_kernel_t kernel, iota_view<node_id_t> nodes,
                           std::span<u32_t const> node_ids, u32_t parts = 0, u32_t round = 0) noexcept {
         if (status_t const kept = core.status(); failed(kept)) return kept;
         std::size_t const nodes_count = core.size();
@@ -664,8 +652,8 @@ struct vram_nvidia_kernels {
         cuda_stream_handle_t const stream = context.stream();
         vram_refine_passes_t const passes = core.refine_passes_(context);
         if (!passes.link_heads) return status_t::bad_alloc_k;
-        // Chains start empty and no row walked yet; a percolation's counters follow the claims.
-        if (cuda_fill_async(scratch.claims, 0, 4 * sizeof(u32_t), stream) != cuda_success_k ||
+        // Chains start empty and no row walked yet.
+        if (cuda_fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != cuda_success_k ||
             cuda_fill_async(passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) != cuda_success_k ||
             cuda_fill_async(passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
@@ -705,10 +693,6 @@ struct vram_nvidia_kernels {
         launch.round = round;
         launch.function = kernel_function_(kernel, candidate_slots);
         launch.resident_blocks = resident_blocks_(kernel, candidate_slots);
-        // A range pass marks the slots its merge fills for the next round; a heal marks none.
-        if (node_ids.empty())
-            launch.fresh_slots = passes.fresh_slots, launch.percolated = scratch.percolated,
-            launch.gained = scratch.gained;
         if (status_t const launched = launch_refine_(core, launch, context); failed(launched)) return launched;
 
         // Fold every walked row's forward picks and every chain of walkers into the live rows; a
@@ -953,8 +937,7 @@ struct vram_nvidia_kernels {
         return status_t::success_k;
     }
 
-    /** Walks or percolates the rows of @p launch, landing their re-selected neighbors in its shadow
-     *  matrix. */
+    /** Walks the rows of @p launch, landing their re-selected neighbors in its shadow matrix. */
     status_t launch_refine_(core_t& core, refine_launch_t const& launch, traversal_context_t& context) noexcept {
         vram_arguments_t arguments {};
         u32_t const selection_rows = core.walk_selection_rows_(launch.expansion, launch.candidate_slots);
@@ -977,10 +960,7 @@ struct vram_nvidia_kernels {
                             launch.round,
                             launch.link_heads,
                             launch.link_next,
-                            launch.walked,
-                            launch.fresh_slots,
-                            launch.percolated,
-                            nullptr};
+                            launch.walked};
         return launch_(launch.function, core.device_.multiprocessor_count * launch.resident_blocks,
                        vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments,
                        rows_map_(core));
@@ -1016,10 +996,7 @@ struct vram_nvidia_kernels {
             0,
             launch.link_heads,
             launch.link_next,
-            launch.walked,
-            launch.fresh_slots,
-            nullptr,
-            launch.gained};
+            launch.walked};
         return launch_(
             kernel_function_(vram_dense_kernel_t::merge_back_links_k, 0),
             core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.candidate_slots),
@@ -1303,6 +1280,7 @@ struct vram_nvidia_index {
     using refine_result_t = typename core_t::refine_result_t;
     using health_result_t = typename core_t::health_result_t;
     using refine_plan_t = typename core_t::refine_plan_t;
+    using health_plan_t = typename core_t::health_plan_t;
     using save_plan_t = typename core_t::save_plan_t;
     using load_plan_t = typename core_t::load_plan_t;
 
@@ -1438,6 +1416,7 @@ struct vram_nvidia_index {
         return core_.plan_split(receivers, context, config, seed);
     }
 
+    expected<health_plan_t> plan_health(traversal_context_t& context) noexcept { return core_.plan_health(context); }
     expected<health_result_t> health(traversal_context_t& context) noexcept { return core_.health(context); }
 
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,

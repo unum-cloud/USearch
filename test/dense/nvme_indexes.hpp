@@ -23,7 +23,6 @@
 
 #include <algorithm>    // `std::is_sorted`, `std::nth_element`
 #include <array>        // `std::array`
-#include <atomic>       // `std::atomic`, for the failing engines' countdown
 #include <bit>          // `std::bit_cast`, for `uuid_t` keys from numbers
 #include <filesystem>   // `std::filesystem::temp_directory_path`, the directory parts land in
 #include <memory>       // `std::unique_ptr`, for the rewrites' checkpoints
@@ -511,7 +510,7 @@ struct nvme_composed_engine {
     using config_t = typename engine_type_::config_t;
 
     /** Submits left until one fails, across every engine of this type; zero never fails. */
-    inline static std::atomic<std::size_t> submits_to_failure {0};
+    inline static std::size_t submits_to_failure = 0;
 
     engine_type_ engine;
     std::size_t outstanding = 0;
@@ -531,8 +530,8 @@ struct nvme_composed_engine {
         return enqueued;
     }
     status_t submit(io_wait_t wait) noexcept {
-        std::size_t left = submits_to_failure.load(std::memory_order_relaxed);
-        while (left && !submits_to_failure.compare_exchange_weak(left, left - 1, std::memory_order_relaxed)) {}
+        std::size_t const left = fu::standard_atomic_ref<std::size_t>(submits_to_failure)
+                                     .fetch_sub_if_at_least(1, 0, std::memory_order_relaxed);
         if (left != 1) return engine.submit(wait);
         std::array<io_completion_t, 16> dropped;
         while (outstanding && succeeded(engine.submit(io_wait_t::blocking_k)))
@@ -901,11 +900,11 @@ std::size_t test_nvme_indexes_failed_submit(u64_t seed) {
     for (std::size_t const countdown : {1, 4}) {
         engine_t::submits_to_failure = countdown;
         failures += expect_eq(nvme.search(viewed, queries, driver.executor, 0).status, status_t::io_k);
-        failures += expect_eq(engine_t::submits_to_failure.load(), 0u);
+        failures += expect_eq(engine_t::submits_to_failure, 0u);
     }
     engine_t::submits_to_failure = 1;
     failures += expect_eq(viewed.count(probed, std::span {entries}, driver.executor), status_t::io_k);
-    failures += expect_eq(engine_t::submits_to_failure.load(), 0u);
+    failures += expect_eq(engine_t::submits_to_failure, 0u);
 
     // A lone query on a deep queue has several hops of its walks in flight by its second and third
     // submits.
@@ -915,7 +914,7 @@ std::size_t test_nvme_indexes_failed_submit(u64_t seed) {
     for (std::size_t const countdown : {2, 3}) {
         engine_t::submits_to_failure = countdown;
         failures += expect_eq(lone.search(viewed, reference.leading_rows(1), deep.executor, 0).status, status_t::io_k);
-        failures += expect_eq(engine_t::submits_to_failure.load(), 0u);
+        failures += expect_eq(engine_t::submits_to_failure, 0u);
     }
 
     nvme_rankings<nvme_t> const ram = reference.exhaustive_rankings(queries, wanted);
@@ -1358,7 +1357,7 @@ std::size_t test_nvme_rewrites_compact(u64_t seed) {
     fixture.failures += expect_eq(compacted.compaction.target_shards, 1u);
     fixture.failures += expect_eq(compacted.compaction.moved_rows, rewrite_rows_k / 2);
     fixture.failures += expect_eq(compacted.compaction.cut_edges, 0u);
-    fixture.failures += expect(compacted.compaction.graph.visited_nodes > 0);
+    fixture.failures += expect(compacted.compaction.graph.reselected_nodes > 0);
     fixture.failures += expect(compacted.value_reads.count > 0 && compacted.written_bytes > 0);
     if (failed(status)) return fixture.failures;
 
@@ -1471,7 +1470,7 @@ std::size_t test_nvme_rewrites_compact_capacity(u64_t seed) {
     fixture.failures += expect_eq(cut.compaction.target_shards, 4u);
     fixture.failures += expect_eq(cut.compaction.moved_rows, 2 * part_rows);
     fixture.failures += expect(cut.compaction.cut_edges > 0);
-    fixture.failures += expect(cut.compaction.graph.visited_nodes >= rewrite_rows_k);
+    fixture.failures += expect(cut.compaction.graph.reselected_nodes >= rewrite_rows_k);
     if (failed(cut_status)) return fixture.failures;
     nvme_type_ viewed = fixture.view(quarters.manifest.data());
     fixture.failures += expect_eq(viewed.shards_count(), 4u);
@@ -1522,7 +1521,7 @@ std::size_t test_nvme_rewrites_refine(u64_t seed) {
     fixture.failures += expect_eq(status, status_t::success_k);
     target.parts = refined.compaction.target_shards;
     fixture.failures += expect_eq(refined.compaction.moved_rows, 0u);
-    fixture.failures += expect_eq(refined.compaction.graph.visited_nodes, rewrite_rows_k);
+    fixture.failures += expect_eq(refined.compaction.graph.reselected_nodes, rewrite_rows_k);
     fixture.failures += expect(refined.compaction.graph.changed_nodes > 0);
     fixture.failures += expect_eq(refined.compaction.graph.islands_reconnected, refined.compaction.graph.islands_found);
     if (failed(status)) return fixture.failures;
@@ -1594,7 +1593,7 @@ std::size_t test_nvme_rewrites_build(u64_t seed) {
     fixture.failures += expect_eq(built.compaction.target_shards, 1u);
     if (failed(finish_status)) return fixture.failures;
 
-    fixture.failures += expect(built.compaction.graph.visited_nodes >= rows_count);
+    fixture.failures += expect(built.compaction.graph.reselected_nodes >= rows_count);
     nvme_type_ viewed = fixture.view(target.manifest.data());
     fixture.expect_keys(viewed);
     fixture.expect_recall(

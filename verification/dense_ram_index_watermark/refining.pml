@@ -17,7 +17,7 @@
  *      `back_link_neighbors` holds it and settles a file holding a locked row
  *  @verify fail sc,rc11 save_locks_rows=false lock_recheck=true: a re-selection keeping the first
  *      neighbor unlocks with the slot-zero value its lock displaced; a save re-reading slot zero
- *      after its fence finds it unchanged and settles a copy whose tail holds one slot rewritten
+ *      after its copies finds it unchanged and settles a copy whose tail holds one slot rewritten
  *      and one not
  */
 #define thread_count 2

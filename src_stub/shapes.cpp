@@ -776,15 +776,15 @@ void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arguments) {
     if (arguments->links && reject_metric(index, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
-    if (reject_if(cursor.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
-                  "Another pull is still running on the cursor", outcome))
+    if (reject_if(fu::standard_atomic_ref<u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
+                  usearch_status_contended_k, "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
     auto const score = [&](shapes_payload_t const& first, shapes_payload_t const& second) {
         return distance(index, first, second);
     };
     pull_walk(*arguments, cursor, score, *arena, outcome);
-    cursor.pulling.clear(std::memory_order_release);
+    fu::standard_atomic_ref<u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
 }
 
 void usearch_shapes_cursor_free(usearch_shapes_cursor_t handle) {

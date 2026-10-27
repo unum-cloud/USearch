@@ -20,7 +20,6 @@
 #include <cstring> // `std::memcpy`, `std::memset` - a fresh chunk starts zeroed
 
 #include <array>       // `std::array` - batch-of-four overloads, the chunk directories, the arena's runs
-#include <atomic>      // `std::memory_order` - publishing a chunk to its readers
 #include <bit>         // `std::bit_width`, `std::bit_floor` - the closed-form chunk location
 #include <concepts>    // `std::same_as` - the buffer-allocator concept
 #include <span>        // `std::span` - the sorted-batch insert argument
@@ -997,9 +996,10 @@ struct chunk_schedule {
     /** Chunks in the doubling phase: the first chunk plus one per doubling. */
     inline static constexpr std::size_t doubling_chunks_k = slab_rows_log2_ - first_rows_log2_ + 1;
 
-    /** Rows the doubling phase covers: 2^(slab_rows_log2_ + 1) - 2^first_rows_log2_. */
-    inline static constexpr std::size_t doubling_rows_k = (std::size_t {1} << (slab_rows_log2_ + 1)) -
-                                                          (std::size_t {1} << first_rows_log2_);
+    /** Rows the doubling phase covers: 2^(slab_rows_log2_ + 1) - 2^first_rows_log2_, in 64 bits,
+     *  since a schedule may span more rows than a 32-bit @c std::size_t addresses. */
+    inline static constexpr u64_t doubling_rows_k = (u64_t {1} << (slab_rows_log2_ + 1)) -
+                                                    (u64_t {1} << first_rows_log2_);
 
     /** Where a row lives: its chunk, and its offset within that chunk. */
     struct location_t {
@@ -1011,24 +1011,28 @@ struct chunk_schedule {
     static constexpr location_t locate(std::size_t row) noexcept {
         if (row < doubling_rows_k) {
             // Biasing by the first chunk's size makes the leading bit of the row encode the chunk.
-            std::size_t const biased = row + (std::size_t {1} << first_rows_log2_);
+            u64_t const biased = row + (u64_t {1} << first_rows_log2_);
             return {static_cast<std::size_t>(std::bit_width(biased)) - 1 - first_rows_log2_,
-                    biased - std::bit_floor(biased)};
+                    static_cast<std::size_t>(biased - std::bit_floor(biased))};
         }
-        std::size_t const flat = row - doubling_rows_k;
-        return {doubling_chunks_k + (flat >> slab_rows_log2_), flat & ((std::size_t {1} << slab_rows_log2_) - 1)};
+        u64_t const flat = row - doubling_rows_k;
+        return {doubling_chunks_k + static_cast<std::size_t>(flat >> slab_rows_log2_),
+                static_cast<std::size_t>(flat & ((u64_t {1} << slab_rows_log2_) - 1))};
     }
 
     /** Rows across the first @p chunks chunks - the prefix sums @ref locate inverts. */
     static constexpr std::size_t rows_before(std::size_t chunks) noexcept {
         if (chunks <= doubling_chunks_k)
-            return (std::size_t {1} << (first_rows_log2_ + chunks)) - (std::size_t {1} << first_rows_log2_);
-        return doubling_rows_k + ((chunks - doubling_chunks_k) << slab_rows_log2_);
+            return static_cast<std::size_t>((u64_t {1} << (first_rows_log2_ + chunks)) -
+                                            (u64_t {1} << first_rows_log2_));
+        return static_cast<std::size_t>(doubling_rows_k + (u64_t {chunks - doubling_chunks_k} << slab_rows_log2_));
     }
 
-    /** Rows in chunk @p chunk. */
+    /** Rows in chunk @p chunk, capped at what @c std::size_t addresses,
+     *  which no allocation reaches. */
     static constexpr std::size_t rows_in(std::size_t chunk) noexcept {
-        return std::size_t {1} << (chunk < doubling_chunks_k ? first_rows_log2_ + chunk : slab_rows_log2_);
+        u64_t const rows = u64_t {1} << (chunk < doubling_chunks_k ? first_rows_log2_ + chunk : slab_rows_log2_);
+        return static_cast<std::size_t>(min_of<u64_t>(rows, std::numeric_limits<std::size_t>::max()));
     }
 
     /** Chunks that hold the first @p rows rows. */

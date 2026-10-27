@@ -180,12 +180,12 @@ usearch_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed)
 # CUDA fatbin or a HIP offload bundle, with @p target_'s includes and definitions; the bundle links into @p target_
 # page-aligned in a read-only section through an assembler stub, under `<name>_bundle_start` and `<name>_bundle_end`, so
 # it travels into archives too. With no codes the bundle is empty, and its devices refuse to load it. NVCC pairs with
-# `CMAKE_CUDA_HOST_COMPILER` when set, splits its optimizations across every CPU, and `CMAKE_CUDA_FLAGS` reach its pass.
-# The device pass compiles @p source_, or the `DEVICE` source when the unit keeps its kernels apart, as a dense unit
-# does per dtype and an AMD unit must: HIP-Clang refuses a kernel's address in device code, so a host function takes it,
-# which the host pass may never compile, or it would emit launch stubs and a fat-binary registration. A device pass of
-# one dtype takes NVCC's assemblers about 2 GB, so eight run at once, each spreading its own work across the CPUs. The
-# GPU helpers here serve the tests and benchmarks too, which bundle their own kernels through them.
+# `CMAKE_CUDA_HOST_COMPILER` when set, splits its optimizations across four threads, and `CMAKE_CUDA_FLAGS` reach its
+# pass. The device pass compiles @p source_, or the `DEVICE` source when the unit keeps its kernels apart, as a dense
+# unit does per dtype and an AMD unit must: HIP-Clang refuses a kernel's address in device code, so a host function
+# takes it, which the host pass may never compile, or it would emit launch stubs and a fat-binary registration. A device
+# pass split across every CPU grew one assembler past 10 GB, so each splits four ways and eight run at once. The GPU
+# helpers here serve the tests and benchmarks too, which bundle their own kernels through them.
 set_property(GLOBAL APPEND PROPERTY JOB_POOLS usearch_gpu_device_pass=8)
 function (usearch_gpu_bundle target_ vendor_ name_ source_)
     cmake_parse_arguments(PARSE_ARGV 4 arg "" "DEVICE" "")
@@ -204,7 +204,7 @@ function (usearch_gpu_bundle target_ vendor_ name_ source_)
         endif ()
         set(device_only_
             "${CUDAToolkit_NVCC_EXECUTABLE};-x;cu;--fatbin;-ccbin;${host_compiler_};--expt-relaxed-constexpr"
-            -split-compile=0
+            -split-compile=4
         )
         separate_arguments(device_flags_ UNIX_COMMAND "${CMAKE_CUDA_FLAGS}")
         set(optimization_ "$<$<CONFIG:Debug>:-O0$<SEMICOLON>-Xcicc$<SEMICOLON>-O0$<SEMICOLON>-Xptxas$<SEMICOLON>-O0>"

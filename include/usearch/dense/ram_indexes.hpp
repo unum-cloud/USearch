@@ -27,7 +27,8 @@
 #include <type_traits>  // `std::is_same_v`, `std::invoke_result_t`
 #include <utility>      // `std::move`, `std::swap`
 
-#include <forkunion.h> // `fu_memory_domain_id_t`
+#include <forkunion.h>           // `fu_memory_domain_id_t`
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer` - the plans' per-thread state
@@ -2797,7 +2798,7 @@ struct ram_indexes {
                 refusal = ran;
                 break;
             }
-            atomic_ref<std::size_t>(live_rows).fetch_sub(1, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(live_rows).sub(1, std::memory_order_relaxed);
             if (succeeded(refusal)) return;
             status_t expected_status = status_t::success_k;
             atomic_ref<status_t>(first_refusal)

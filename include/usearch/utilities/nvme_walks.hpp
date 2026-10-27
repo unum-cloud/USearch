@@ -31,7 +31,6 @@
 #include <cstring> // `std::memset`
 
 #include <array>       // `std::array`
-#include <atomic>      // `std::atomic_ref`
 #include <bit>         // `std::bit_cast`
 #include <chrono>      // `std::chrono::steady_clock`, for per-row latencies
 #include <concepts>    // `std::same_as`
@@ -386,6 +385,8 @@ class row_walker {
     using medium_t = typename tier_t::medium_t;
     using part_t = typename tier_t::part_t;
     using node_id_t = typename tier_t::node_id_t;
+    template <typename word_type_>
+    using atomic_ref = typename tier_t::template atomic_ref<word_type_>;
     using flight_t = nvme_flight<node_id_t>;
     using walk_t = typename tier_t::walk_t;
     using walk_shape_t = typename tier_t::walk_shape_t;
@@ -516,7 +517,7 @@ class row_walker {
     void fail(status_t failure) noexcept {
         if (succeeded(failure_)) failure_ = failure;
         status_t unset = status_t::success_k;
-        std::atomic_ref<status_t>(*shape_.failure)
+        atomic_ref<status_t>(*shape_.failure)
             .compare_exchange_strong(unset, failure, std::memory_order_relaxed, std::memory_order_relaxed);
     }
 
@@ -544,7 +545,7 @@ class row_walker {
         shape.latencies = latencies;
         status_t refusal = status_t::success_k;
         auto add = [](std::size_t& into, std::size_t value) noexcept {
-            std::atomic_ref<std::size_t>(into).fetch_add(value, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(into).add(value, std::memory_order_relaxed);
         };
         auto add_reads = [&](nvme_reads_t& into, nvme_reads_t const& reads) noexcept {
             add(into.count, reads.count), add(into.bytes, reads.bytes);
@@ -566,8 +567,8 @@ class row_walker {
             add(merged.round_trips, telemetry.round_trips);
             status_t unset = status_t::success_k;
             if (failed(refused))
-                std::atomic_ref<status_t>(refusal).compare_exchange_strong(unset, refused, std::memory_order_relaxed,
-                                                                           std::memory_order_relaxed);
+                atomic_ref<status_t>(refusal).compare_exchange_strong(unset, refused, std::memory_order_relaxed,
+                                                                      std::memory_order_relaxed);
         };
         if (status_t const fanned = executor.for_threads(walk_thread); failed(fanned)) return {merged, fanned};
         for (std::size_t const count : counts) merged.count += count;
@@ -582,11 +583,11 @@ class row_walker {
     }
 
     status_t shared_failure_() const noexcept {
-        return std::atomic_ref<status_t>(*shape_.failure).load(std::memory_order_relaxed);
+        return atomic_ref<status_t>(*shape_.failure).load(std::memory_order_relaxed);
     }
 
     bool exhausted_() const noexcept {
-        return std::atomic_ref<std::size_t>(*shape_.cursor).load(std::memory_order_relaxed) >= shape_.rows_count;
+        return atomic_ref<std::size_t>(*shape_.cursor).load(std::memory_order_relaxed) >= shape_.rows_count;
     }
 
     /** Hop slots a walk may hold now: its own share, and once the batch ran out, the shares of
@@ -684,8 +685,7 @@ class row_walker {
         for (u32_t slot_index = 0; slot_index != slots_.size(); ++slot_index) {
             nvme_row_slot_t& slot = slots_[slot_index];
             if (slot.stage != nvme_row_stage_t::idle_k) continue;
-            std::size_t const row =
-                std::atomic_ref<std::size_t>(*shape_.cursor).fetch_add(1, std::memory_order_relaxed);
+            std::size_t const row = atomic_ref<std::size_t>(*shape_.cursor).fetch_add(1, std::memory_order_relaxed);
             if (row >= shape_.rows_count) return;
             slot = nvme_row_slot_t {static_cast<u32_t>(parts), 0, 0, 0, nvme_row_stage_t::walking_k, row, {}};
             if (!shape_.latencies.empty()) slot.primed = std::chrono::steady_clock::now();

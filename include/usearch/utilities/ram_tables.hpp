@@ -17,7 +17,6 @@
 #include <cstring> // `std::memset` - the all-ones sentinel fill
 
 #include <array>       // `std::array` - batched membership inserts
-#include <atomic>      // `std::memory_order` - the slot states and the claimed seats
 #include <bit>         // `std::countr_zero` - the first matching lane of a group scan
 #include <functional>  // `std::hash`
 #include <limits>      // `std::numeric_limits` - the all-ones sentinel
@@ -470,8 +469,10 @@ class chunked_multimap {
         return atomic_ref<value_t const>(slot.value).load(std::memory_order_relaxed);
     }
 
-    /** Slots the columns hold - every chunk of the doubling phase, past any table a machine holds. */
-    inline static constexpr std::size_t max_slots_k = slots_schedule_t::doubling_rows_k;
+    /** Slots the columns hold - every chunk of the doubling phase, past any table a machine holds,
+     *  capped at what @c std::size_t addresses. */
+    inline static constexpr std::size_t max_slots_k = static_cast<std::size_t>(
+        min_of<u64_t>(slots_schedule_t::doubling_rows_k, std::numeric_limits<std::size_t>::max()));
     inline static constexpr std::size_t max_chunks_k = slots_schedule_t::chunks_for(max_slots_k);
 
     status_t cover_(std::size_t seats) noexcept {

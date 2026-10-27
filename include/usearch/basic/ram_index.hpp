@@ -17,7 +17,6 @@
 #include <cstdint> // `std::uint64_t`
 
 #include <array>        // `std::array` - a filtered walk's quads
-#include <atomic>       // `std::memory_order`
 #include <bit>          // `std::popcount`, `std::bit_width` - an audit's reached count, a refine's rounds
 #include <concepts>     // `std::same_as` - the plural takes 32-bit shards
 #include <limits>       // `std::numeric_limits` - the ID-space ceiling and the unbounded radius
@@ -212,88 +211,6 @@ concept value_codec = requires(codec_type_ const& codec, value_type_ const& immu
     { codec.load(input, mutable_value) } noexcept -> std::same_as<status_t>;
 };
 
-/** The per-walk counters every traversal accumulates; results report one call's share as the
- *  difference of two snapshots. */
-struct traversal_telemetry_t {
-
-    /** Metric invocations, batched rounds counted once per scored candidate: the walks' and the two
-     *  subsets below. */
-    std::size_t computed_distances = 0;
-
-    /** Frontier candidates whose neighbor lists were expanded. */
-    std::size_t visited_members = 0;
-
-    /** Re-seedings after the frontier drained prematurely - a connectivity signal. */
-    std::size_t restarts = 0;
-
-    /** Walks a scratch refusal ended early - ranked short, and on insertion wired thinner. */
-    std::size_t saturated_walks = 0;
-
-    /** Subset of @c computed_distances ranking a full row and the newcomer against the row's owner
-     *  while back-linking. */
-    std::size_t computed_distances_in_rankings = 0;
-
-    /** Subset of @c computed_distances a selector spent pruning candidates to a row: an inserted
-     *  or refined node's own, and every full row a back-link re-selects. */
-    std::size_t computed_distances_in_selections = 0;
-
-    traversal_telemetry_t operator-(traversal_telemetry_t const& before) const noexcept {
-        return {computed_distances - before.computed_distances,
-                visited_members - before.visited_members,
-                restarts - before.restarts,
-                saturated_walks - before.saturated_walks,
-                computed_distances_in_rankings - before.computed_distances_in_rankings,
-                computed_distances_in_selections - before.computed_distances_in_selections};
-    }
-
-    /** Folds another walk's or thread's counters in, every one a spend that adds. */
-    traversal_telemetry_t& operator+=(traversal_telemetry_t const& other) noexcept {
-        computed_distances += other.computed_distances;
-        visited_members += other.visited_members;
-        restarts += other.restarts;
-        saturated_walks += other.saturated_walks;
-        computed_distances_in_rankings += other.computed_distances_in_rankings;
-        computed_distances_in_selections += other.computed_distances_in_selections;
-        return *this;
-    }
-};
-
-/** Outcome of one refinement or heal pass, counted as the dense tier counts it, with the walks'
- *  spend as every basic verb reports it. */
-struct [[nodiscard]] refine_result_t {
-
-    /** Nodes re-selected: the planned range, then the islands of every round. */
-    std::size_t visited_nodes = 0;
-
-    /** Of those, the nodes whose neighbors differ as a set from before - never more than
-     *  @c visited_nodes. */
-    std::size_t changed_nodes = 0;
-
-    /** Nodes the first audit left unreached, counted once. */
-    std::size_t islands_found = 0;
-
-    /** Links actually written between an island and a node the audit proved both ways. */
-    std::size_t islands_reconnected = 0;
-
-    /** The audit closing the heal, as a fresh @c plan_health sweep right after would take it. */
-    health_result_t health;
-
-    /** The re-selection walks' and back-links' spend. */
-    traversal_telemetry_t telemetry;
-
-    /** Folds another pass or shard in: every count is a population or a spend and adds, and the
-     *  audits fold as @c health_result_t does. */
-    refine_result_t& operator+=(refine_result_t const& other) noexcept {
-        visited_nodes += other.visited_nodes;
-        changed_nodes += other.changed_nodes;
-        islands_found += other.islands_found;
-        islands_reconnected += other.islands_reconnected;
-        health += other.health;
-        telemetry += other.telemetry;
-        return *this;
-    }
-};
-
 /** One round's scoring epilogue: sizes the distances to the staging fill, drains
  *  the metric within @p radius, and counts the round into the telemetry. */
 template <typename metric_type_, typename context_type_, typename distance_type_>
@@ -445,7 +362,7 @@ struct keep_diverse_t {
                 // Candidates ascend, so the last one staged is the farthest from the node.
                 metric.drain(round.first(staged_count), context.results[farthest].distance);
                 context.telemetry.computed_distances += staged_count;
-                context.telemetry.computed_distances_in_selections += staged_count;
+                context.telemetry.computed_distances_in_refines += staged_count;
                 for (std::size_t later = first, slot = 0; later != round_end; ++later)
                     if (!(nearest_kept[later] < context.results[later].distance))
                         nearest_kept[later] = min_of(nearest_kept[later], round[slot++]);
@@ -622,8 +539,8 @@ struct ram_cursor;
  *  @tparam distance_type_ the metrics' result element.
  *  @tparam wait_type_ the monitored-wait engaged on contended words.
  *  @tparam atomic_ref_template_ the atomic reference owning the plain synchronization words;
- *      @c standard_atomic_ref by default, ForkUnion's ISA-specific references plug in; either binds a const word
- *      for the const readers' loads.
+ *      @c standard_atomic_ref by default, the CPU class's reference as @c src/ picks it; either
+ *      binds a const word for the const readers' loads.
  *  @tparam allocator_type_ places the node records, neighbor buffers & key multimap, and builds
  *      every stored value through uses-allocator construction.
  *  @tparam cache_hints_type_ the line hints streaming the record a walk expands next toward the
@@ -695,8 +612,9 @@ struct ram_index {
          *  the watermark alone, and only @c clear, which recycles the IDs, resets it. */
         inline static constexpr u32_t wired_k = 1;
 
-        /** Held by whoever edits @c neighbors once the row is reachable. */
-        inline static constexpr u32_t held_k = 2;
+        /** Held by whoever edits @c neighbors once the row is reachable: one bit, claimed alone. */
+        inline static constexpr unsigned held_bit_k = 1;
+        inline static constexpr u32_t held_k = u32_t {1} << held_bit_k;
 
         /** The row's wiring and its lock in one word, through @c atomic_ref_template_. */
         u32_t state {0};
@@ -720,16 +638,14 @@ struct ram_index {
                 u32_t observed = word.load(std::memory_order_relaxed);
                 for (; observed & held_k; observed = word.load(std::memory_order_relaxed))
                     wait_t {}(&state, observed, 0u);
-                if (word.compare_exchange_weak(observed, observed | held_k, std::memory_order_acquire,
-                                               std::memory_order_relaxed))
-                    break;
+                if (!word.fetch_test_and_set_bit(held_bit_k, std::memory_order_acquire)) break;
             }
             annotate_lock_acquired(&state);
         }
 
         void unlock() noexcept {
             annotate_unlock_started(&state);
-            atomic_clear_bits(atomic_ref<u32_t>(state), held_k, std::memory_order_release);
+            atomic_ref<u32_t>(state).clear_bits(held_k, std::memory_order_release);
             annotate_unlock_finished(&state);
         }
 
@@ -978,7 +894,7 @@ struct ram_index {
                                                          values[position], keys[position], metric, context, selector,
                                                          walk);
             // Releases this step's rows to the acquire in `finish`, whose turn carries them on.
-            atomic_add(atomic_ref<std::size_t>(landed), count, std::memory_order_release);
+            atomic_ref<std::size_t>(landed).add(count, std::memory_order_release);
         }
 
         /** Publishes every position at once: @c config_mismatch_k while any has yet to land,
@@ -1337,8 +1253,8 @@ struct ram_index {
                 }
                 node.unlock();
             }
-            atomic_add(atomic_ref<std::size_t>(expanded_in_level_), expanded_count, std::memory_order_relaxed);
-            atomic_add(atomic_ref<std::size_t>(reached_back_in_level_), reached_back_count, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(expanded_in_level_).add(expanded_count, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(reached_back_in_level_).add(reached_back_count, std::memory_order_relaxed);
             return expanded_count + reached_back_count;
         }
 
@@ -1646,7 +1562,7 @@ struct ram_index {
         };
 
         static void add_(std::size_t& into, std::size_t value) noexcept {
-            atomic_add(atomic_ref<std::size_t>(into), value, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(into).add(value, std::memory_order_relaxed);
         }
 
         /** Reopens the claims of the refined index and of every receiver closed, and drops every
@@ -1887,7 +1803,7 @@ struct ram_index {
         void reselect_(step_t const& step, metric_type_& metric, context_type_& context,
                        selector_type_ const& selector) noexcept {
             traversal_telemetry_t const before = context.telemetry;
-            std::size_t visited = 0, changed = 0;
+            std::size_t reselected = 0, changed = 0;
             // Only the planned rounds walk across; the heal rounds re-select as a plain pass does.
             bool const across = phase_ == phase_t::reselect_k && part_bases_.size() > 1;
             for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
@@ -1897,17 +1813,17 @@ struct ram_index {
                                                                         audit.visible, node_id)
                                                           : iota_view<node_id_t> {};
                 changed += index_->refine_one_(node_id, audit.visible, other, walk_, metric, context, selector);
-                ++visited;
+                ++reselected;
             }
             traversal_telemetry_t const spent = context.telemetry - before;
-            add_(tally_.visited_nodes, visited);
+            add_(tally_.reselected_nodes, reselected);
             add_(tally_.changed_nodes, changed);
             add_(tally_.telemetry.computed_distances, spent.computed_distances);
             add_(tally_.telemetry.visited_members, spent.visited_members);
             add_(tally_.telemetry.restarts, spent.restarts);
             add_(tally_.telemetry.saturated_walks, spent.saturated_walks);
-            add_(tally_.telemetry.computed_distances_in_rankings, spent.computed_distances_in_rankings);
-            add_(tally_.telemetry.computed_distances_in_selections, spent.computed_distances_in_selections);
+            add_(tally_.telemetry.computed_distances_in_refines, spent.computed_distances_in_refines);
+            add_(tally_.telemetry.computed_distances_in_reverse_refines, spent.computed_distances_in_reverse_refines);
         }
 
         /** Reconnects every island in @p step, a node the audit left unreached or not reaching
@@ -2603,7 +2519,7 @@ struct ram_index {
                                                     columns.values.subspan(first, bound - first));
                 if (failed(encoded)) return encoded;
             }
-            atomic_add(atomic_ref<std::size_t>(covered), node_range.size(), std::memory_order_release);
+            atomic_ref<std::size_t>(covered).add(node_range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -2779,7 +2695,7 @@ struct ram_index {
                 index_->key_map_.insert(seats, record.key, node);
             }
             index_->widen_(widest_row);
-            atomic_add(atomic_ref<std::size_t>(covered), node_range.size(), std::memory_order_release);
+            atomic_ref<std::size_t>(covered).add(node_range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -2882,7 +2798,7 @@ struct ram_index {
      *  graph at its budget never writes the shared line. */
     void widen_(std::size_t row) noexcept {
         atomic_ref<std::size_t> const widest {widest_row_};
-        if (widest.load(std::memory_order_relaxed) < row) atomic_fetch_max(widest, row, std::memory_order_relaxed);
+        if (widest.load(std::memory_order_relaxed) < row) widest.max(row, std::memory_order_relaxed);
     }
 
     /** Forgets every record below @p visible, every key and every counter: what @c clear does under
@@ -2950,8 +2866,7 @@ struct ram_index {
         capacity_claim_t(capacity_claim_t const&) = delete;
         capacity_claim_t& operator=(capacity_claim_t const&) = delete;
         ~capacity_claim_t() noexcept {
-            if (index_ && rows_)
-                atomic_sub(atomic_ref<std::size_t>(index_->claimed_count_), rows_, std::memory_order_release);
+            if (index_ && rows_) atomic_ref<std::size_t>(index_->claimed_count_).sub(rows_, std::memory_order_release);
         }
 
       private:
@@ -2989,13 +2904,13 @@ struct ram_index {
         // of the batches dispensed up to this one, the last to claim covered past this range, and
         // the dispenser's acquire-release carries its cover along.
         std::size_t const ceiling = atomic_ref<std::size_t>(ceiling_rows_).load(std::memory_order_relaxed);
-        std::size_t const claimed = atomic_fetch_add_if_at_most(atomic_ref<std::size_t>(claimed_count_), count, ceiling,
-                                                                std::memory_order_acq_rel);
+        std::size_t const claimed =
+            atomic_ref<std::size_t>(claimed_count_).fetch_add_if_at_most(count, ceiling, std::memory_order_acq_rel);
         if (claimed == closed_claims_k) return {{}, status_t::contended_k};
         // A ceiling lowered under the claims refuses every batch rather than wrapping.
         if (claimed > ceiling || ceiling - claimed < count) return {{}, status_t::overflow_k};
         if (status_t const covered = nodes_.cover(claimed + count); failed(covered)) {
-            atomic_sub(atomic_ref<std::size_t>(claimed_count_), count, std::memory_order_release);
+            atomic_ref<std::size_t>(claimed_count_).sub(count, std::memory_order_release);
             return {{}, covered};
         }
         return {capacity_claim_t {this, count, seats, std::move(hold)}, status_t::success_k};
@@ -3209,13 +3124,13 @@ struct ram_index {
         add_row_candidates_(node_id, value, metric, every, context);
         selector(*this, metric, context);
 
-        // Neighbors are distinct, so equal sizes and every pick present mean the same set.
+        // The set gained a member only when a pick was absent before; a shrink alone gains none.
         node_t& node = nodes_[node_id];
         context.reverse_ids.clear();
         node.lock();
         std::size_t const kept_count = min_of(min_of(context.selected_neighbors.size(), selector.connectivity),
                                               node.neighbors.capacity());
-        bool changed = kept_count != node.neighbors.size();
+        bool changed = false;
         for (std::size_t kept = 0; kept != kept_count && !changed; ++kept) {
             bool present = false;
             for (node_id_t const neighbor : node.neighbors)
@@ -3797,7 +3712,7 @@ struct ram_index {
             metric.drain({context.staged_distances.data() + scored_count, staged_count},
                          unbounded_radius<distance_t>());
             context.telemetry.computed_distances += staged_count;
-            context.telemetry.computed_distances_in_rankings += staged_count;
+            context.telemetry.computed_distances_in_reverse_refines += staged_count;
             scored_count += staged_count;
         }
         if (scored_count != degree + 1) {
@@ -3810,7 +3725,12 @@ struct ram_index {
             context.results.insert(scored_node_t {context.staged_ids[position], context.staged_distances[position]},
                                    degree + 1);
         context.results.insert(scored_node_t {new_node_id, context.staged_distances[degree]}, degree + 1);
+        std::size_t const refines_before = context.telemetry.computed_distances_in_refines;
         selector(*this, metric, context);
+        // The selector counts a refine; re-selecting a back-linked row is a reverse refine.
+        std::size_t const reselecting = context.telemetry.computed_distances_in_refines - refines_before;
+        context.telemetry.computed_distances_in_refines = refines_before;
+        context.telemetry.computed_distances_in_reverse_refines += reselecting;
 
         // Relock & revalidate: apply the re-selection only onto the exact row it was computed
         // from; a raced row goes round again.

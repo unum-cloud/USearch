@@ -20,6 +20,8 @@
 #include <type_traits> // `std::is_same_v` - the bit kits' metrics
 #include <utility>     // `std::index_sequence` - every rung of one dtype
 
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the rows map's state
+
 #include <numkong/types.h>       // `NUMKONG_ARCH_CUDA_`, which the two below test before including it
 #include <numkong/cast/simt.cuh> // `nk_cast_unit_simt_` - the import and export casts' device body
 #include <numkong/each/cuda.cuh> // `nk_each_rmscast_e4m3_cuda_vectors_` & kin - the unit-RMS import's device bodies
@@ -103,7 +105,7 @@ vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_all
     constexpr u32_t window_bytes = cuda_gather_window_bytes<schedule_t, capability_k, vector_dtype_>();
     if constexpr (window_bytes == 0) return {};
     else {
-        standard_atomic_ref<u32_t> state {rows_map_state_};
+        fu::standard_atomic_ref<u32_t> state {rows_map_state_};
         if (state.load(std::memory_order_acquire) == 2) return rows_map_kept_;
         // The signed tensor coordinates reach 2^31 - 1 rows at most.
         std::size_t const ceiling_rows = core.vectors_matrix_.reserved_bytes() / core.row_bytes() - 1;
@@ -137,8 +139,6 @@ bool vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vector
     // Every resident block of a builder takes its own scratch, so the most any builder keeps
     // resident must fit on one multiprocessor, or the launch keeps fewer blocks resident than its
     // grid and arena were sized for.
-    static_assert(resident_blocks_(vram_dense_kernel_t::percolate_k, 0) == resident_blocks_(vram_kernel_t::refine_k, 0),
-                  "A percolation carves its slices from the arena its plan sized for the refine's grid");
     std::size_t const resident_blocks = max_of(resident_blocks_(vram_kernel_t::insert_k, 0),
                                                resident_blocks_(vram_kernel_t::refine_k, 0));
     return block_bytes <= core.device_.shared_memory_per_block_bytes &&
@@ -578,9 +578,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     vram_arguments_t const& arguments = launch.records;
     vram_graph_t const& graph = arguments.graph;
     cuda_kernel_prologue<vram_dense_kernel_t, kernel_, capability_, resident_blocks>(launch);
-    if constexpr (kernel_ == vram_dense_kernel_t::percolate_k)
-        vram_percolate<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.refine));
-    else if constexpr (kernel_ == vram_dense_kernel_t::search_indexer_k) {
+    if constexpr (kernel_ == vram_dense_kernel_t::search_indexer_k) {
         // Only the floating dtypes take indexer heads; others export a plain walk never launched.
         if constexpr (floating_scalar<typename kit_t::scalar_t>)
             vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.search),

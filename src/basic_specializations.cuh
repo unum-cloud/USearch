@@ -235,8 +235,8 @@ expected<traversal_telemetry_t> insert_entries(indexes_type_& index, usearch_key
     status_t built = status_t::success_k;
     drain_in_order<indexes_type_::template atomic_ref>(
         executor, count, [&](std::size_t row, std::size_t thread) noexcept {
-            if (succeeded(standard_atomic_ref<status_t>(built).load(std::memory_order_relaxed)))
-                keep_first_failure(built, build(row, values[row], thread));
+            if (succeeded(typename indexes_type_::template atomic_ref<status_t>(built).load(std::memory_order_relaxed)))
+                keep_first_failure<indexes_type_::template atomic_ref>(built, build(row, values[row], thread));
         });
     if (failed(built)) return {{}, built};
 
@@ -281,6 +281,8 @@ template <typename plan_type_, typename shard_type_, typename metric_type_, type
 status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_type_>& scratch,
                           selector_type_ const& selector, progress_ticks_t& ticks,
                           forkunion_executor_t& executor) noexcept {
+    using count_ref_t = typename shard_type_::template atomic_ref<std::size_t>;
+    using flag_ref_t = typename shard_type_::template atomic_ref<bool>;
     std::size_t const population = plan.audit().visible;
     // Every step bumps them, so they take their own lines, away from the locals every thread reads.
     alignas(default_alignment_k) std::size_t ticked = plan.ticked;
@@ -290,8 +292,8 @@ status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_t
         bool const reselecting = plan.reselecting();
         auto const steps = plan.steps();
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
-            standard_atomic_ref<std::size_t> const next {taken};
-            while (!standard_atomic_ref<bool>(cancelled).load(std::memory_order_relaxed)) {
+            count_ref_t const next {taken};
+            while (!flag_ref_t(cancelled).load(std::memory_order_relaxed)) {
                 std::size_t const position = next.fetch_add(1, std::memory_order_relaxed);
                 if (position >= steps.size()) break;
                 auto const step = steps[position];
@@ -299,10 +301,9 @@ status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_t
                                                                scratch.traversals[thread], selector);
                 if (!reselecting) continue;
                 std::size_t const nodes = plan.nodes_in(step);
-                std::size_t const done =
-                    standard_atomic_ref<std::size_t>(ticked).fetch_add(nodes, std::memory_order_relaxed) + nodes;
+                std::size_t const done = count_ref_t(ticked).fetch_add(nodes, std::memory_order_relaxed) + nodes;
                 if (ticks(done, population) == continuation_t::cancel_k)
-                    standard_atomic_ref<bool>(cancelled).store(true, std::memory_order_relaxed);
+                    flag_ref_t(cancelled).store(true, std::memory_order_relaxed);
             }
         };
         if (failed(executor.for_threads(drain))) drain(0, 0);
@@ -402,7 +403,9 @@ expected<traversal_telemetry_t> search_entries(indexes_type_& indexes, std::size
             using admits_t = std::invoke_result_t<admits_of_type_&, std::size_t>;
             drain_in_order<indexes_type_::template atomic_ref>(
                 executor, count, [&](std::size_t row, std::size_t thread) noexcept {
-                    if (failed(standard_atomic_ref<status_t>(searched).load(std::memory_order_relaxed))) return;
+                    if (failed(typename indexes_type_::template atomic_ref<status_t>(searched).load(
+                            std::memory_order_relaxed)))
+                        return;
                     traversal_context_t& context = scratch.traversals[thread];
                     metric_t& metric = scratch.metrics[thread];
                     admits_t admits = admits_of(thread);
@@ -421,8 +424,9 @@ expected<traversal_telemetry_t> search_entries(indexes_type_& indexes, std::size
                         landing.counts[row] = found;
                         return status;
                     });
-                    keep_first_failure(searched, answered);
-                    if (ticks(row) == continuation_t::cancel_k) keep_first_failure(searched, status_t::cancelled_k);
+                    keep_first_failure<indexes_type_::template atomic_ref>(searched, answered);
+                    if (ticks(row) == continuation_t::cancel_k)
+                        keep_first_failure<indexes_type_::template atomic_ref>(searched, status_t::cancelled_k);
                 });
         });
     if (failed(asked)) return {{}, asked};
@@ -688,7 +692,8 @@ void get_entries(variant_type_& variant, arguments_type_ const& arguments, growi
     };
     status_t keeping = status_t::success_k;
     auto keep = [&](std::size_t, std::size_t rank, std::size_t thread, auto const& value) noexcept {
-        keep_first_failure(keeping, variant_bodies<traits_type_>::keep(*executor, thread, value, kept[rank]));
+        keep_first_failure<variant_type_::index_t::template atomic_ref>(
+            keeping, variant_bodies<traits_type_>::keep(*executor, thread, value, kept[rank]));
     };
     if (status_t const read = values_under(variant.index, arguments.key, *executor, carve_entries, keep); failed(read))
         return propagate_error(read, outcome), void();
@@ -904,7 +909,7 @@ static expected<usearch_traversal_stats_t> walked_stats(expected<traversal_telem
 static basic_refined_t refined_report(basic::refine_result_t const& refined) noexcept {
     basic_refined_t report;
     accumulate_stats(&report.stats, refined.telemetry);
-    report.visited = refined.visited_nodes;
+    report.visited = refined.reselected_nodes;
     report.changed = refined.changed_nodes;
     report.reachability = {refined.health.audited_nodes, refined.health.reachable_nodes, refined.health.sweeps,
                            refined.health.back_sweeps};

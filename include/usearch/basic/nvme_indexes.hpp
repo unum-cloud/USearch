@@ -16,11 +16,12 @@
 #include <cstring> // `std::memcmp`
 
 #include <array>       // `std::array` - the monolith magic a view sniffs
-#include <atomic>      // `std::atomic_ref` - the next part and the first failure across threads
 #include <concepts>    // `std::same_as`
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 #include <utility>     // `std::forward`, `std::move`
+
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/blocking_files.hpp"    // `seekable_file_t` - the magic a view sniffs
@@ -44,14 +45,18 @@ namespace unum::usearch::basic {
  */
 template <typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t,
           typename distance_type_ = f64_t, typename engine_type_ = default_io_engine_t,
-          typename row_kit_type_ = st::serial_row_kit_t>
+          typename row_kit_type_ = st::serial_row_kit_t,
+          template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
+          typename wait_type_ = fu::standard_yield_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
 class nvme_indexes {
   public:
 
     /** The walks every call runs over every part. */
-    using catalog_t =
-        nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, engine_type_, row_kit_type_>;
+    using catalog_t = nvme_parts_catalog<codec_type_, key_type_, node_id_type_, distance_type_, engine_type_,
+                                         row_kit_type_, atomic_ref_template_, wait_type_>;
+    template <typename word_type_>
+    using atomic_ref = typename catalog_t::template atomic_ref<word_type_>;
 
     using codec_t = typename catalog_t::codec_t;
     using key_t = typename catalog_t::key_t;
@@ -275,8 +280,8 @@ class nvme_indexes {
         auto open_parts = [&](std::size_t thread, std::size_t) noexcept {
             growing_buffer<u64_t, scratch_allocator_t> chunk {scratch_allocator_t {executor.arena(thread)}};
             status_t opened = chunk.resize_uninitialized(catalog_t::scan_chunk_bytes_k / sizeof(u64_t));
-            while (succeeded(opened) && succeeded(std::atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) {
-                std::size_t const part = std::atomic_ref<std::size_t>(cursor).fetch_add(1, std::memory_order_relaxed);
+            while (succeeded(opened) && succeeded(atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) {
+                std::size_t const part = atomic_ref<std::size_t>(cursor).fetch_add(1, std::memory_order_relaxed);
                 if (part >= parts_.size()) return;
                 std::string_view const path {resolved_paths.data() + resolved_entries[part].first,
                                              resolved_entries[part].size()};
@@ -284,8 +289,8 @@ class nvme_indexes {
             }
             status_t unset = status_t::success_k;
             if (failed(opened))
-                std::atomic_ref<status_t>(failure).compare_exchange_strong(unset, opened, std::memory_order_relaxed,
-                                                                           std::memory_order_relaxed);
+                atomic_ref<status_t>(failure).compare_exchange_strong(unset, opened, std::memory_order_relaxed,
+                                                                      std::memory_order_relaxed);
         };
         if (status_t const fanned = executor.for_threads(open_parts); failed(fanned)) return fanned;
         return failure;

@@ -35,6 +35,15 @@ extern fn usearch_mood_name(mood: Mood) [*:0]const u8;
 extern fn usearch_mood_from_name(name: BytesView) Mood;
 
 extern fn usearch_version_name() [*:0]const u8;
+pub extern fn usearch_cpu_class_name(cpu_class: usearch_cpu_class_t) [*:0]const u8;
+pub extern fn usearch_gpu_class_name(gpu_class: usearch_gpu_class_t) [*:0]const u8;
+
+/// Mirrors `usearch_cpu_class_t`, whose zero derives the CPU's own class.
+pub const usearch_cpu_class_t = c_int;
+/// Mirrors `usearch_gpu_class_t`, whose zero derives the devices' own class.
+pub const usearch_gpu_class_t = c_int;
+/// Mirrors `usearch_nvme_class_t`, whose zero derives the devices' own class.
+pub const usearch_nvme_class_t = c_int;
 extern fn usearch_capabilities_compiled() [*:0]const u8;
 extern fn usearch_capabilities_available() [*:0]const u8;
 
@@ -347,11 +356,11 @@ pub const Scalar = enum(c_int) {
 /// verbs spell in their names, as `DenseIndex.initVram` does. Kept for its name table.
 pub const Residency = enum(c_int) {
     /// Volatile-memory index traversed by CPU threads.
-    ram = 0,
+    ram = 1,
     /// Accelerator-memory index traversed by GPU warps.
-    vram = 1,
+    vram = 2,
     /// Persisted index traversed through pluggable I/O engines.
-    nvme = 2,
+    nvme = 3,
 
     /// The canonical spelling, as `.ram` spells "ram". Calls `usearch_residency_name`.
     pub fn name(self: Residency) [:0]const u8 {
@@ -367,9 +376,9 @@ pub const Residency = enum(c_int) {
 /// How a search reaches the indexed rows it scores. Mirrors `usearch_traversal_t`.
 pub const Traversal = enum(c_int) {
     /// Walk the graph, scoring the rows the expansion reaches - approximate, the default.
-    walk = 0,
+    walk = 1,
     /// Score every row published when the query's scan starts - exact, on RAM and NVMe handles.
-    scan = 1,
+    scan = 2,
 
     /// The canonical spelling, as `.scan` spells "scan". Calls `usearch_traversal_name`.
     pub fn name(self: Traversal) [:0]const u8 {
@@ -548,6 +557,10 @@ pub const usearch_ram_options_t = extern struct {
     memory_domains: ?[*]const i32 = null,
     /// Entries in `memory_domains`; zero derives.
     memory_domains_count: usize = 0,
+    /// Entries one shard holds before the index opens another shard generation; zero derives.
+    shard_capacity: usize = 0,
+    /// The class to dispatch as; zero derives the CPU's own.
+    cpu_class: usearch_cpu_class_t = 0,
 
     pub fn of(memory_domains: []const i32) usearch_ram_options_t {
         return .{ .memory_domains = memory_domains.ptr, .memory_domains_count = memory_domains.len };
@@ -560,6 +573,10 @@ pub const usearch_vram_options_t = extern struct {
     devices: ?[*]const i32 = null,
     /// Entries in `devices`; zero derives.
     devices_count: usize = 0,
+    /// Entries one shard holds before the index opens another shard generation; zero derives.
+    shard_capacity: usize = 0,
+    /// The class to dispatch as; zero derives the devices' own.
+    gpu_class: usearch_gpu_class_t = 0,
 
     pub fn of(devices: []const i32) usearch_vram_options_t {
         return .{ .devices = devices.ptr, .devices_count = devices.len };
@@ -572,6 +589,8 @@ pub const usearch_nvme_options_t = extern struct {
     paths: ?[*]const BytesView = null,
     /// Entries in `paths`; zero derives.
     paths_count: usize = 0,
+    /// The class to dispatch as; zero derives the CPU's own.
+    cpu_class: usearch_cpu_class_t = 0,
 
     pub fn of(paths: []const BytesView) usearch_nvme_options_t {
         return .{ .paths = paths.ptr, .paths_count = paths.len };
@@ -706,9 +725,9 @@ pub const Completion = enum(c_int) {
 /// What an executor does with its threads or streams once it goes idle. Mirrors `usearch_mood_t`.
 pub const Mood = enum(c_int) {
     /// Park them; the next call pays a wake-up.
-    parked = 0,
+    parked = 1,
     /// Keep them spinning, trading power for the next call's latency.
-    spinning = 1,
+    spinning = 2,
 
     /// The canonical spelling, as `.parked` spells "parked". Calls `usearch_mood_name`.
     pub fn name(self: Mood) [:0]const u8 {
@@ -752,6 +771,7 @@ const usearch_executor_for_nvme_t = extern struct {
     nvme: usearch_nvme_options_t,
     threads: usize,
     deferred_limit: usize,
+    nvme_class: usearch_nvme_class_t = 0,
 };
 
 const usearch_arena_init_t = extern struct {

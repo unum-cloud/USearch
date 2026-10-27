@@ -23,13 +23,16 @@ if (POLICY CMP0077)
 endif ()
 
 # Each GPU vendor is probed only to default its `USEARCH_BUILD_<VENDOR>` switch, only while the caller leaves it unset,
-# and only under Clang, which compiles every GPU build's host code. NVIDIA needs NVCC, though `check_language` caches
-# the host compiler it paired with, which would then outrank a caller's own `CMAKE_CUDA_HOST_COMPILER`. AMD needs ROCm's
-# own Clang as the C++ compiler, as the `rocm_*` presets name it. Apple needs only an Apple silicon target, since Metal
-# ships with macOS and its kernels compile at first use.
+# and only under Clang targeting a native host, since the WebAssembly compilers are Clang too and carry no GPU code.
+# NVIDIA needs NVCC, though `check_language` caches the host compiler it paired with, which would then outrank a
+# caller's own `CMAKE_CUDA_HOST_COMPILER`. AMD needs ROCm's own Clang as the C++ compiler, as the `rocm_*` presets name
+# it. Apple needs only an Apple silicon target, since Metal ships with macOS and its kernels compile at first use.
 include(CheckLanguage)
 set(usearch_can_build_cuda_ OFF)
-if (NOT DEFINED USEARCH_BUILD_CUDA AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if (NOT DEFINED USEARCH_BUILD_CUDA
+    AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
+    AND NOT CMAKE_SYSTEM_NAME MATCHES "Emscripten|WASI"
+)
     check_language(CUDA)
     if (CMAKE_CUDA_COMPILER)
         set(usearch_can_build_cuda_ ON)

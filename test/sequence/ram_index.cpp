@@ -18,7 +18,6 @@
 
 #include <algorithm>   // `std::min`, `std::max`, `std::find` - a found key among the batch's
 #include <array>       // `std::array` - the window widths, the handmade triples, a round's distances
-#include <atomic>      // `std::atomic` - the searchers racing a clear
 #include <limits>      // `std::numeric_limits` - the oracle's open best
 #include <memory>      // `std::unique_ptr`
 #include <new>         // `std::nothrow`
@@ -58,7 +57,7 @@ constexpr std::string_view overlap_alphabet_k = "ACGT";
 constexpr std::size_t overlap_symbols_k = 12;
 
 using sequence_index_t =
-    sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, standard_atomic_ref, counting_allocator_t>;
+    sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
 using sequence_value_t = sequence_index_t::value_t;
 
 /** The symbols of @p text as views of their bytes: every byte under @c sz_levenshtein_bytes_k, and
@@ -382,7 +381,7 @@ std::size_t check_levenshtein_kit(u64_t seed) {
             }
         }
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 
@@ -433,7 +432,7 @@ std::size_t check_overlap_kit(u64_t seed) {
             }
         }
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 
@@ -544,8 +543,8 @@ std::size_t check_sequence_nvme(u64_t seed) {
 
 /** The byte Levenshtein fixture over 64-bit node IDs, which a saved neighbors column records. */
 struct levenshtein_wide_fixture_t : levenshtein_bytes_fixture_t {
-    using index_t =
-        sequence::ram_index<us::utilities::uuid_t, u64_t, flaky_waiter_t, standard_atomic_ref, counting_allocator_t>;
+    using index_t = sequence::ram_index<us::utilities::uuid_t, u64_t, flaky_waiter_t, fu::standard_atomic_ref,
+                                        counting_allocator_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
@@ -769,38 +768,40 @@ std::size_t check_sequence_plural_clear_race(u64_t seed) {
 
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(searchers_k + 1))) return failures + expect(false);
-    std::atomic<std::size_t> foreign {0};
+    std::size_t foreign_count = 0;
+    fu::standard_atomic_ref<std::size_t> const foreign {foreign_count};
     for (std::size_t round = 0; round != rounds_k; ++round) {
         insert_batch();
         failures += expect_eq(indexes.size(), rows_k);
         indexes_t::cursor_t cursor {indexes};
-        std::atomic<bool> cleared {false};
-        std::atomic<std::size_t> searched {0};
+        bool cleared = false;
+        std::size_t searched = 0;
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 // Every searcher walks the rows once first, so the clear lands under live walks.
-                while (searched.load(std::memory_order_acquire) < searchers_k) std::this_thread::yield();
+                while (fu::standard_atomic_ref<std::size_t>(searched).load(std::memory_order_acquire) < searchers_k)
+                    std::this_thread::yield();
                 while (indexes.clear() == status_t::contended_k) std::this_thread::yield();
-                cleared.store(true, std::memory_order_release);
+                fu::standard_atomic_ref<bool>(cleared).store(true, std::memory_order_release);
                 return;
             }
             std::vector<u32_t> watermarks;
             std::array<us::utilities::uuid_t, wanted_k> found_keys;
             std::array<distance_t, wanted_k> found_distances;
             dummy_predicate_t unfiltered;
-            for (std::size_t row = thread; !cleared.load(std::memory_order_acquire);
+            for (std::size_t row = thread; !fu::standard_atomic_ref<bool>(cleared).load(std::memory_order_acquire);
                  row = (row + searchers_k) % rows_k) {
                 watermarks.resize(indexes.shards_count());
                 if (indexes.snapshot(watermarks).status == status_t::shape_mismatch_k) continue;
                 auto const [found, status] = indexes.search_if(std::string_view {texts[row]}, metrics[thread],
                                                                unfiltered, contexts[thread], {}, watermarks, found_keys,
                                                                found_distances);
-                if (row == thread) searched.fetch_add(1, std::memory_order_release);
+                if (row == thread) fu::standard_atomic_ref<std::size_t>(searched).add(1, std::memory_order_release);
                 if (status == status_t::contended_k) continue;
-                if (failed(status)) foreign.fetch_add(1);
+                if (failed(status)) foreign.add(1);
                 else
                     for (std::size_t match = 0; match != found; ++match)
-                        foreign.fetch_add(std::find(keys.begin(), keys.end(), found_keys[match]) == keys.end());
+                        foreign.add(std::find(keys.begin(), keys.end(), found_keys[match]) == keys.end());
             }
         });
         failures += expect_eq(indexes.size(), std::size_t {0});
@@ -811,7 +812,7 @@ std::size_t check_sequence_plural_clear_race(u64_t seed) {
         std::array<us::utilities::uuid_t, 4> read_keys;
         failures += expect_eq(cursor.read(indexes, read_keys).status, status_t::contended_k);
     }
-    failures += expect_eq(foreign.load(), std::size_t {0});
+    failures += expect_eq(foreign_count, std::size_t {0});
 
     // The fresh shard takes a batch whole, and a clear of an empty index retires nothing.
     insert_batch();

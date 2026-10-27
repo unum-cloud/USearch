@@ -36,7 +36,6 @@
 #include <cstring> // `std::memcpy`, `std::memset`
 
 #include <array>       // `std::array`
-#include <atomic>      // `std::atomic_ref`
 #include <memory>      // `std::unique_ptr`, `std::destroy_at` - the RAM index a block builds in
 #include <new>         // placement `new`
 #include <span>        // `std::span`
@@ -275,6 +274,9 @@ struct [[nodiscard]] nvme_compact_plan {
                                                                save_config_t const&) noexcept;
 
     using node_id_t = dense::node_id_t;
+    template <typename word_type_>
+    using atomic_ref = typename indexes_t::template atomic_ref<word_type_>;
+    using wait_t = typename indexes_t::wait_t;
     using scalar_t = typename indexes_t::scalar_t;
     using dot_result_t = typename indexes_t::dot_result_t;
     using vector_view_t = typename indexes_t::vector_view_t;
@@ -297,7 +299,7 @@ struct [[nodiscard]] nvme_compact_plan {
     using ram_index_t =
         ram_index<typename indexes_t::quads_kit_t, typename indexes_t::tiles_kit_t,
                   typename indexes_t::elementwise_kit_t, typename indexes_t::rmscast_kit_t,
-                  typename indexes_t::visits_kit_t, fu::standard_yield_t, fu::standard_atomic_ref, dummy_cache_hints_t,
+                  typename indexes_t::visits_kit_t, wait_t, indexes_t::template atomic_ref, dummy_cache_hints_t,
                   workspace_allocator_t, workspace_allocator_t, arena_allocator<byte_t, forkunion_allocator_t>>;
     using traversal_context_t = typename ram_index_t::traversal_context_t;
     using traversals_t = growing_buffer<traversal_context_t, scratch_allocator_t>;
@@ -1201,10 +1203,10 @@ struct [[nodiscard]] nvme_compact_plan {
 
     /** Folds the telemetry of one batch of walks into the result. */
     void absorb_walks_(typename indexes_t::search_result_t const& walked) noexcept {
-        result_.compaction.graph.visited_members += walked.visited_members;
-        result_.compaction.graph.computed_distances += walked.computed_distances;
-        result_.compaction.graph.restarts += walked.restarts;
-        result_.compaction.graph.saturated_walks += walked.saturated_walks;
+        result_.compaction.graph.telemetry.visited_members += walked.visited_members;
+        result_.compaction.graph.telemetry.computed_distances += walked.computed_distances;
+        result_.compaction.graph.telemetry.restarts += walked.restarts;
+        result_.compaction.graph.telemetry.saturated_walks += walked.saturated_walks;
         result_.neighbor_reads += walked.neighbor_reads;
         result_.value_reads += walked.value_reads;
     }
@@ -1263,7 +1265,7 @@ struct [[nodiscard]] nvme_compact_plan {
             }
             node_id_t* const row_neighbors = neighbors + row * connectivity_();
             std::size_t const row_cut = source.kept.empty() ? 0 : rewire_(source, first + row, row_neighbors);
-            if (row_cut) std::atomic_ref<std::size_t>(cut).fetch_add(row_cut, std::memory_order_relaxed);
+            if (row_cut) atomic_ref<std::size_t>(cut).add(row_cut, std::memory_order_relaxed);
         });
         if (failed(prepared)) return prepared;
         result_.compaction.cut_edges += cut;
@@ -1302,15 +1304,8 @@ struct [[nodiscard]] nvme_compact_plan {
 
     /** Folds the telemetry a RAM index's traversals ran up into the result. */
     void absorb_traversals_(traversals_t const& traversals) noexcept {
-        for (traversal_context_t const& traversal : traversals) {
-            result_.compaction.graph.visited_members += traversal.visited_members;
-            result_.compaction.graph.computed_distances += traversal.computed_distances;
-            result_.compaction.graph.computed_distances_in_refines += traversal.computed_distances_in_refines;
-            result_.compaction.graph.computed_distances_in_reverse_refines +=
-                traversal.computed_distances_in_reverse_refines;
-            result_.compaction.graph.restarts += traversal.restarts;
-            result_.compaction.graph.saturated_walks += traversal.saturated_walks;
-        }
+        for (traversal_context_t const& traversal : traversals)
+            result_.compaction.graph.telemetry += traversal.telemetry();
     }
 
     /** Writes the neighbors of RAM rows [0, rows) of @p index as target rows from @p first on,
@@ -1372,7 +1367,7 @@ struct [[nodiscard]] nvme_compact_plan {
         auto refuse = [&](status_t status) noexcept {
             status_t unset = status_t::success_k;
             if (failed(status))
-                std::atomic_ref<status_t>(refusal).compare_exchange_strong(unset, status, std::memory_order_relaxed);
+                atomic_ref<status_t>(refusal).compare_exchange_strong(unset, status, std::memory_order_relaxed);
         };
         // One row per task, as a RAM group inserts, so the threads interleave from the first row.
         auto insert = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
@@ -1401,7 +1396,7 @@ struct [[nodiscard]] nvme_compact_plan {
         if (failed(healed_status)) return healed_status;
         // The heal walked the same traversals, so their counters already hold its telemetry.
         absorb_traversals_(traversals);
-        result_.compaction.graph.visited_nodes += count + healed.visited_nodes;
+        result_.compaction.graph.reselected_nodes += count + healed.reselected_nodes;
         result_.compaction.graph.changed_nodes += healed.changed_nodes;
         result_.compaction.graph.islands_found += healed.islands_found;
         result_.compaction.graph.islands_reconnected += healed.islands_reconnected;
@@ -1451,7 +1446,7 @@ struct [[nodiscard]] nvme_compact_plan {
         auto refuse = [&](status_t status) noexcept {
             status_t unset = status_t::success_k;
             if (failed(status))
-                std::atomic_ref<status_t>(refusal).compare_exchange_strong(unset, status, std::memory_order_relaxed);
+                atomic_ref<status_t>(refusal).compare_exchange_strong(unset, status, std::memory_order_relaxed);
         };
         {
             auto [load, load_status] = index.plan_load(nodes);
@@ -1484,16 +1479,11 @@ struct [[nodiscard]] nvme_compact_plan {
         } while (refining.advance());
         auto const [refined, finish_status] = refining.finish();
         if (failed(finish_status)) return finish_status;
-        result_.compaction.graph.visited_nodes += refined.visited_nodes;
+        result_.compaction.graph.reselected_nodes += refined.reselected_nodes;
         result_.compaction.graph.changed_nodes += refined.changed_nodes;
         result_.compaction.graph.islands_found += refined.islands_found;
         result_.compaction.graph.islands_reconnected += refined.islands_reconnected;
-        result_.compaction.graph.computed_distances += refined.computed_distances;
-        result_.compaction.graph.computed_distances_in_refines += refined.computed_distances_in_refines;
-        result_.compaction.graph.computed_distances_in_reverse_refines += refined.computed_distances_in_reverse_refines;
-        result_.compaction.graph.visited_members += refined.visited_members;
-        result_.compaction.graph.restarts += refined.restarts;
-        result_.compaction.graph.saturated_walks += refined.saturated_walks;
+        result_.compaction.graph.telemetry += refined.telemetry;
         return write_ram_rows_(
             index, target, 0, nodes, slices.staging, staged, executor,
             [](std::size_t row) noexcept { return static_cast<node_id_t>(row); },
@@ -1585,11 +1575,9 @@ struct [[nodiscard]] nvme_compact_plan {
             std::memcpy(before.data(), out.data(), connectivity * sizeof(node_id_t));
             std::size_t const picks = select_diverse_(
                 candidates, row, selection_of_(orders, kept_slots, kept_norms, row, slots), out, local_computed);
-            std::size_t matched = 0, previous = 0;
-            for (std::size_t slot = 0; slot != connectivity; ++slot) {
-                previous += before[slot] < nodes && before[slot] != first + row;
+            std::size_t matched = 0;
+            for (std::size_t slot = 0; slot != connectivity; ++slot)
                 matched += out[slot] != sentinel_k && holds_(before, out[slot]);
-            }
             proposal_t* const spilled = proposals + row * connectivity;
             for (std::size_t pick = 0; pick != connectivity; ++pick) {
                 spilled[pick] = proposal_t {};
@@ -1599,14 +1587,15 @@ struct [[nodiscard]] nvme_compact_plan {
                 while (row_entries[slot].node_id != out[pick]) ++slot;
                 spilled[pick] = proposal_t {out[pick], static_cast<node_id_t>(first + row), row_entries[slot].distance};
             }
-            std::atomic_ref<std::size_t>(computed).fetch_add(local_computed, std::memory_order_relaxed);
-            std::atomic_ref<std::size_t>(changed).fetch_add(matched != picks || previous != picks,
-                                                            std::memory_order_relaxed);
+            atomic_ref<std::size_t>(computed).add(local_computed, std::memory_order_relaxed);
+            // A set gains a member only through a pick it lacked;
+            // dropping one alone changes nothing.
+            atomic_ref<std::size_t>(changed).add(matched != picks, std::memory_order_relaxed);
         });
         if (failed(selected)) return selected;
-        result_.compaction.graph.computed_distances += computed;
-        result_.compaction.graph.computed_distances_in_refines += computed;
-        result_.compaction.graph.visited_nodes += count;
+        result_.compaction.graph.telemetry.computed_distances += computed;
+        result_.compaction.graph.telemetry.computed_distances_in_refines += computed;
+        result_.compaction.graph.reselected_nodes += count;
         result_.compaction.graph.changed_nodes += changed;
         if (status_t const wrote = write_rows_(target, part.neighbors_begin, neighbors_row_bytes_(), first, count,
                                                reinterpret_cast<byte_t const*>(neighbors));
@@ -1719,11 +1708,11 @@ struct [[nodiscard]] nvme_compact_plan {
                     std::span<node_id_t> const out {neighbors + row * connectivity, connectivity};
                     select_diverse_(candidates, row, selection_of_(orders, kept_slots, kept_norms, row, slots), out,
                                     local_computed);
-                    std::atomic_ref<std::size_t>(computed).fetch_add(local_computed, std::memory_order_relaxed);
+                    atomic_ref<std::size_t>(computed).add(local_computed, std::memory_order_relaxed);
                 });
             if (failed(selected)) return selected;
-            result_.compaction.graph.computed_distances += computed;
-            result_.compaction.graph.computed_distances_in_reverse_refines += computed;
+            result_.compaction.graph.telemetry.computed_distances += computed;
+            result_.compaction.graph.telemetry.computed_distances_in_reverse_refines += computed;
             if (status_t const wrote = write_rows_(target, part.neighbors_begin, neighbors_row_bytes_(), first, count,
                                                    reinterpret_cast<byte_t const*>(neighbors));
                 failed(wrote))
@@ -1774,10 +1763,10 @@ struct [[nodiscard]] nvme_compact_plan {
             for (std::size_t slot = 0; slot != extents[0].bytes / sizeof(node_id_t); ++slot) {
                 std::size_t const neighbor = neighbors[slot];
                 if (neighbor >= nodes || neighbor == task * run_rows + slot / connectivity) continue;
-                std::atomic_ref<u64_t> const word {in_links[neighbor / 32]};
+                atomic_ref<u64_t> const word {in_links[neighbor / 32]};
                 u64_t const once = u64_t {1} << (neighbor % 32 * 2);
                 if (word.fetch_or(once, std::memory_order_relaxed) & once)
-                    word.fetch_or(once << 1, std::memory_order_relaxed);
+                    word.set_bits(once << 1, std::memory_order_relaxed);
             }
         };
         auto const [scanned, scan_status] = target.view.scan_reads_(executor, divide_round_up(nodes, run_rows),
@@ -1810,7 +1799,7 @@ struct [[nodiscard]] nvme_compact_plan {
                         break;
                     }
                 if (linked == island) return;
-                landings[std::atomic_ref<std::size_t>(taken).fetch_add(1, std::memory_order_relaxed)] =
+                landings[atomic_ref<std::size_t>(taken).fetch_add(1, std::memory_order_relaxed)] =
                     static_cast<u64_t>(linked) << 32 | island;
             };
             auto const [read, pick_status] = target.view.scan_reads_(executor, divide_round_up(bound - from, run_rows),

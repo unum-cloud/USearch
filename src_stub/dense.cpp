@@ -118,8 +118,8 @@ struct dense_search_stream_t {
     /** The next match to hand out. */
     std::size_t position;
 
-    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    std::atomic_flag pulling;
+    /** Bit zero is set while a pull runs, so an overlapping pull is refused instead of racing. */
+    u32_t pulling = 0;
 };
 
 /** Rejects a kind naming no scalar, and @c i32, which only geospatial points take. */
@@ -866,15 +866,15 @@ void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     usearch_dense_index_handle_t& index = *arguments->index;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
-    if (reject_if(cursor.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
-                  "Another pull is still running on the cursor", outcome))
+    if (reject_if(fu::standard_atomic_ref<u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
+                  usearch_status_contended_k, "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
     auto const score = [&](dense_payload_t const& first, dense_payload_t const& second) {
         return distance(index.options.metric, first, second);
     };
     pull_walk(*arguments, cursor, score, *arena, outcome);
-    cursor.pulling.clear(std::memory_order_release);
+    fu::standard_atomic_ref<u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
 }
 
 void usearch_dense_cursor_free(usearch_dense_cursor_t handle) {
@@ -958,14 +958,14 @@ void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* argume
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     ranked_landing_t landing {};
     if (!arena || !carve_ranked(*arena, 1, arguments->wanted, landing, outcome)) return;
-    if (reject_if(stream.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
-                  "Another pull is still running on the stream", outcome))
+    if (reject_if(fu::standard_atomic_ref<u32_t>(stream.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
+                  usearch_status_contended_k, "Another pull is still running on the stream", outcome))
         return;
     std::span<match_t const> const remaining = std::span<match_t const>(stream.ranked).subspan(stream.position);
     landing.write(0, remaining);
     stream.position += landing.counts[0];
     *arguments->matches = landing.view();
-    stream.pulling.clear(std::memory_order_release);
+    fu::standard_atomic_ref<u32_t>(stream.pulling).clear_bits(1, std::memory_order_release);
 }
 
 void usearch_dense_search_stream_free(usearch_dense_search_stream_t handle) {

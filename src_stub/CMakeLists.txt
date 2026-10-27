@@ -1,9 +1,9 @@
 # The brute-force stand-in for the C interface: a separate library defining the same symbols a different way, so any
 # consumer - a binding suite, a downstream SDK, a bisect - runs in seconds against the ABI instead of waiting on a build
-# of the engine. It needs the headers and nothing else - no submodules, no instantiation grid, no engine sources - so it
-# skips `usearch_setup_target` deliberately and sets by hand the few properties consumers depend on. The one runtime it
-# does resolve is the platform's threads, since the stand-ins keep the headers' concurrency promises with a
-# `std::shared_mutex` rather than a comment.
+# of the engine. It needs the headers and ForkUnion's header-only core, whose atomic references the shared utilities
+# reach - no instantiation grid, no engine sources - so it skips `usearch_setup_target` deliberately and sets by hand
+# the few properties consumers depend on. The one runtime it does resolve is the platform's threads, since the stand-ins
+# keep the headers' concurrency promises with a `std::shared_mutex` rather than a comment.
 #
 # The file names match what `c/` produces - `libusearch_shared` and `libusearch_static` - and land in a directory of
 # their own, so a suite chooses an implementation with one `-L` and the two libraries can never shadow one another.
@@ -20,7 +20,7 @@ foreach (target_ usearch_shared_stub usearch_static_stub)
     target_include_directories(
         ${target_} PRIVATE ${PROJECT_SOURCE_DIR}/c ${PROJECT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}
     )
-    target_link_libraries(${target_} PRIVATE Threads::Threads)
+    target_link_libraries(${target_} PRIVATE Threads::Threads forkunion::header)
     set_target_properties(
         ${target_}
         PROPERTIES PREFIX "lib"

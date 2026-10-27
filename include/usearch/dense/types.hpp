@@ -48,9 +48,6 @@ enum class vram_dense_kernel_t : u32_t {
     /** Folds each walked node's forward picks and the walkers chained onto it into its row. */
     merge_back_links_k,
 
-    /** Re-selects each row with a fresh slot within two hops from those two hops of the graph. */
-    percolate_k,
-
     /** Re-selects each row of a fold bin's shard from its members and its cross results, or merges
      *  the picks other shards of the bin made of it into its row. */
     fold_k,
@@ -156,62 +153,6 @@ struct further_scored_node_t {
         return first.distance > second.distance;
     }
 };
-
-/** Outcome of one refinement or heal pass: every count means the same on every dense layer and residency. */
-struct [[nodiscard]] refine_result_t {
-
-    /** Nodes re-selected: the planned range, then the rows each further round a caller asked for
-     *  found fresh, then the islands of every heal round. */
-    std::size_t visited_nodes = 0;
-
-    /** Of those, the nodes whose neighbors gained a member they lacked - never more than
-     *  @c visited_nodes. */
-    std::size_t changed_nodes = 0;
-
-    /** Nodes the first audit left unreached, counted once. */
-    std::size_t islands_found = 0;
-
-    /** Links actually written from a reached node to an island. */
-    std::size_t islands_reconnected = 0;
-
-    /** The audit closing the heal, as a @c health call right after would take it. */
-    health_result_t health;
-
-    /** Frontier candidates expanded across all re-selection walks. */
-    std::size_t visited_members = 0;
-
-    /** Total distance computations, with padding lanes of 4-way kernels excluded. */
-    std::size_t computed_distances = 0;
-
-    /** Subset of @c computed_distances spent in the forward diversity selection. */
-    std::size_t computed_distances_in_refines = 0;
-
-    /** Subset of @c computed_distances spent re-selecting a full neighbor set while back-linking. */
-    std::size_t computed_distances_in_reverse_refines = 0;
-
-    /** Starvation restarts across the walks - a graph-connectivity health signal. */
-    std::size_t restarts = 0;
-
-    /** Walks a scratch refusal ended early; their rows re-selected from fewer candidates. */
-    std::size_t saturated_walks = 0;
-};
-
-/** Folds another pass or shard in: every count is a population or a spend and adds, and the audits
- *  fold as @c health_result_t does. */
-inline refine_result_t& operator+=(refine_result_t& into, refine_result_t const& other) noexcept {
-    into.visited_nodes += other.visited_nodes;
-    into.changed_nodes += other.changed_nodes;
-    into.islands_found += other.islands_found;
-    into.islands_reconnected += other.islands_reconnected;
-    into.health += other.health;
-    into.visited_members += other.visited_members;
-    into.computed_distances += other.computed_distances;
-    into.computed_distances_in_refines += other.computed_distances_in_refines;
-    into.computed_distances_in_reverse_refines += other.computed_distances_in_reverse_refines;
-    into.restarts += other.restarts;
-    into.saturated_walks += other.saturated_walks;
-    return into;
-}
 
 /** What a compaction targets: the most rows any target shard may hold, and the breadth of every
  *  re-selection walk. */

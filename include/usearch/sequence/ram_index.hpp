@@ -35,6 +35,8 @@
 #include <span>        // `std::span`, `std::as_bytes`
 #include <string_view> // `std::string_view` - a row's borrowed string
 
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
+
 #include <stringzilla/stringzilla.hpp> // `sz::string`, `sz::status_t` - the stored values
 
 #include "usearch/utilities/types.hpp"
@@ -88,7 +90,7 @@ struct codec_t {
 /** Similarity Search over byte sequences: owned strings, integer distances, and a metric chosen per
  *  call - so a graph built under one kernel is queried under another without rebuilding. */
 template <typename key_type_ = uuid_t, typename node_id_type_ = u32_t, typename wait_type_ = dummy_waiter_t,
-          template <typename> class atomic_ref_template_ = standard_atomic_ref,
+          template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = dummy_cache_hints_t>
 using ram_index =
     basic::ram_index<sz::string<typename std::allocator_traits<allocator_type_>::template rebind_alloc<char>>,

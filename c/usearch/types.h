@@ -613,25 +613,31 @@ typedef struct usearch_gpu_device_t {
  */
 typedef enum usearch_residency_t {
 
+    /** No residency named, which is what @c usearch_residency_from_name reads unknown text as. */
+    usearch_residency_unknown_k = 0,
+
     /** Volatile-memory index traversed by CPU threads - the concurrent baseline. */
-    usearch_residency_ram_k = 0,
+    usearch_residency_ram_k = 1,
 
     /** Accelerator-memory index traversed by GPU warps on a chosen device. */
-    usearch_residency_vram_k = 1,
+    usearch_residency_vram_k = 2,
 
     /** Persisted index traversed through pluggable I/O engines, sized past RAM. */
-    usearch_residency_nvme_k = 2,
+    usearch_residency_nvme_k = 3,
 } usearch_residency_t;
 
 /** How a search reaches the indexed rows it scores. */
 typedef enum usearch_traversal_t {
 
+    /** No traversal named, which derives the walk. */
+    usearch_traversal_unknown_k = 0,
+
     /** Walk the graph, scoring the rows the expansion reaches - approximate, the default. */
-    usearch_traversal_walk_k = 0,
+    usearch_traversal_walk_k = 1,
 
     /** Score every row published when the query's scan starts - exact, the ground truth a walk
      *  approximates. */
-    usearch_traversal_scan_k = 1,
+    usearch_traversal_scan_k = 2,
 } usearch_traversal_t;
 
 /** Traversal telemetry, shared by every verb that walks a graph in every modality - a pure output,
@@ -1113,11 +1119,14 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
 /** What an executor does with its threads or streams once it goes idle. */
 typedef enum usearch_mood_t {
 
+    /** No mood named, which derives parked. */
+    usearch_mood_unknown_k = 0,
+
     /** Idle threads sleep; the next call pays a wake-up. */
-    usearch_mood_parked_k = 0,
+    usearch_mood_parked_k = 1,
 
     /** Idle threads stay hot, trading power for the next call's latency. */
-    usearch_mood_spinning_k = 1,
+    usearch_mood_spinning_k = 2,
 } usearch_mood_t;
 
 /** The arguments of @c usearch_executor_drain. */

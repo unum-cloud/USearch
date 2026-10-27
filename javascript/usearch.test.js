@@ -932,9 +932,7 @@ test("Every enumerator crosses the C name tables", async (t) => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 8 });
     index.reserve(1);
     index.insert(1n, new Float32Array(8).fill(1));
-    for (const scalar of Object.values(Scalar).filter((scalar) => scalar !== Scalar.I32))
-      assert.equal(index.get(1n, new Arena(), { scalar }).scalar, scalar);
-    assert.throws(() => index.get(1n, new Arena(), { scalar: Scalar.I32 }), { code: Status.UnknownKind });
+    for (const scalar of Object.values(Scalar)) assert.equal(index.get(1n, new Arena(), { scalar }).scalar, scalar);
   });
 
   await t.test("moods", () => {
@@ -1093,10 +1091,10 @@ test("Arenas hold every output whose length scales with the call", async (t) => 
 
   await t.test("the exported kind decides the element type and the byte count", () => {
     assert(index.get(1n, new Arena(), { scalar: Scalar.F64 }).data instanceof Float64Array);
-    assert.deepEqual(
-      index.get(1n, new Arena(), { scalar: Scalar.U1x8 }).data,
-      new Uint8Array([0x80]),
-      "four bits pack into one byte, the first dimension in the most significant bit",
+    assert.throws(
+      () => index.get(1n, new Arena(), { scalar: Scalar.U1x8 }),
+      { code: Status.ShapeMismatch, message: "Sub-byte rows come in whole bytes" },
+      "four dimensions fill half a byte, which a packed export refuses",
     );
     const arena = new Arena();
     const absent = index.get(3n, arena);

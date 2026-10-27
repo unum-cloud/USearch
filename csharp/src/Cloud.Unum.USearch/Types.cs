@@ -866,21 +866,21 @@ internal enum PredicateCost : int
 public enum Residency : int
 {
     /// <summary>Host memory, traversed by CPU threads.</summary>
-    Ram = 0,
+    Ram = 1,
     /// <summary>Accelerator memory, traversed by GPU warps on a chosen device.</summary>
-    Vram = 1,
+    Vram = 2,
     /// <summary>Persisted storage, traversed through pluggable I/O engines and sized past RAM.</summary>
-    Nvme = 2,
+    Nvme = 3,
 }
 
 /// <summary>How a search reaches the indexed rows it scores. Mirrors <c>usearch_traversal_t</c>.</summary>
 public enum Traversal : int
 {
     /// <summary>Walk the graph, scoring the rows the expansion reaches - approximate, the default.</summary>
-    Walk = 0,
+    Walk = 1,
     /// <summary>Score every row published when the query's scan starts - exact, on RAM and NVMe
     /// handles.</summary>
-    Scan = 1,
+    Scan = 2,
 }
 
 /// <summary>What an executor does with its threads or streams once it goes idle. Mirrors
@@ -888,9 +888,9 @@ public enum Traversal : int
 public enum Mood : int
 {
     /// <summary>Idle threads sleep; the next call pays a wake-up.</summary>
-    Parked = 0,
+    Parked = 1,
     /// <summary>Idle threads stay hot, trading power for the next call's latency.</summary>
-    Spinning = 1,
+    Spinning = 2,
 }
 
 /// <summary>

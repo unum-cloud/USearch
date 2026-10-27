@@ -11,7 +11,7 @@
 #include <cstring> // `std::memmove`, `std::memcmp`, `std::memcpy`
 
 #include <array>       // `std::array` - a quad's keys and admissions
-#include <atomic>      // `std::atomic`
+#include <atomic>      // `std::atomic_ref` - under `standard_atomic_ref`
 #include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words, `std::bit_width` - the bijection's span
 #include <concepts>    // `std::convertible_to` - the string-view conversion's constraint
 #include <functional>  // `std::hash` - specialized for `uuid_t` below, `std::less`
@@ -908,6 +908,90 @@ inline health_result_t& operator+=(health_result_t& into, health_result_t const&
     return into;
 }
 
+/** The per-walk counters every traversal accumulates; results report one call's share as the
+ *  difference of two snapshots. */
+struct traversal_telemetry_t {
+
+    /** Metric invocations, batched rounds counted once per scored candidate: the walks' and the two
+     *  subsets below. */
+    std::size_t computed_distances = 0;
+
+    /** Frontier candidates whose neighbor lists were expanded. */
+    std::size_t visited_members = 0;
+
+    /** Re-seedings after the frontier drained prematurely - a connectivity signal. */
+    std::size_t restarts = 0;
+
+    /** Walks a scratch refusal ended early - ranked short, and on insertion wired thinner. */
+    std::size_t saturated_walks = 0;
+
+    /** Subset of @c computed_distances a selector spent pruning an inserted or re-selected node's
+     *  own candidates. */
+    std::size_t computed_distances_in_refines = 0;
+
+    /** Subset of @c computed_distances spent back-linking: ranking a full neighbor list and the
+     *  newcomer against the list's owner, then re-selecting it. */
+    std::size_t computed_distances_in_reverse_refines = 0;
+
+    traversal_telemetry_t operator-(traversal_telemetry_t const& before) const noexcept {
+        return {computed_distances - before.computed_distances,
+                visited_members - before.visited_members,
+                restarts - before.restarts,
+                saturated_walks - before.saturated_walks,
+                computed_distances_in_refines - before.computed_distances_in_refines,
+                computed_distances_in_reverse_refines - before.computed_distances_in_reverse_refines};
+    }
+
+    /** Folds another walk's or thread's counters in, every one a spend that adds. */
+    traversal_telemetry_t& operator+=(traversal_telemetry_t const& other) noexcept {
+        computed_distances += other.computed_distances;
+        visited_members += other.visited_members;
+        restarts += other.restarts;
+        saturated_walks += other.saturated_walks;
+        computed_distances_in_refines += other.computed_distances_in_refines;
+        computed_distances_in_reverse_refines += other.computed_distances_in_reverse_refines;
+        return *this;
+    }
+};
+
+/** Outcome of one refinement or heal pass: every count means the same in every family, layer and
+ *  residency. */
+struct [[nodiscard]] refine_result_t {
+
+    /** Nodes re-selected: the planned nodes, then the fresh nodes of every later round, then the
+     *  islands of every heal round. */
+    std::size_t reselected_nodes = 0;
+
+    /** Of those, the nodes whose neighbor set gained a member it lacked; order never counts, nor
+     *  does a back-link's re-selection of a node the pass did not re-select. */
+    std::size_t changed_nodes = 0;
+
+    /** Nodes the first audit did not reach both ways, counted once. */
+    std::size_t islands_found = 0;
+
+    /** Links written between an island and a node the audit reached both ways, summed across
+     *  audits. */
+    std::size_t islands_reconnected = 0;
+
+    /** The audit closing the heal, as a fresh health audit right after would take it. */
+    health_result_t health;
+
+    /** The re-selection walks' and back-links' spend. */
+    traversal_telemetry_t telemetry;
+
+    /** Folds another pass or shard in: every count is a population or a spend and adds, and the
+     *  audits fold as @c health_result_t does. */
+    refine_result_t& operator+=(refine_result_t const& other) noexcept {
+        reselected_nodes += other.reselected_nodes;
+        changed_nodes += other.changed_nodes;
+        islands_found += other.islands_found;
+        islands_reconnected += other.islands_reconnected;
+        health += other.health;
+        telemetry += other.telemetry;
+        return *this;
+    }
+};
+
 /** The tail slots of a full row a heal may give up to islands, which spread over them by ID so
  *  islands sharing a row land apart: the farther half, keeping the nearer half that carries search
  *  and slot 0, and nothing in a single-neighbor row. */
@@ -1095,21 +1179,12 @@ struct wait_capped_t {};
  *      monitors, like @c fu::x86_tpause_t, @c fu::arm64_wfet_t, and @c fu::risc5_wrs_t.
  *
  *  Ignores the watched word and returns at once, so the loop re-checks it - correctness never
- *  depends on the waiter, only latency and power do. The first overload watches a @c std::atomic
- *  object; the second watches an in-place word owned through @c std::atomic_ref, like the slot-0
- *  locks living inside neighbor rows. The waiting bound (capped or uncapped) arrives as an
- *  arbitrary tag type, so this header stays independent of ForkUnion.
- *
- *  The pointer overload exists because of pre-C++26 STL limitations: @c std::atomic_ref cannot
- *  bind const-qualified objects until P3323, @c std::atomic::wait offers no timed variant, and
- *  neither API exposes the address-armed hardware waits - @c UMWAIT, @c WFET, @c WRS - that
- *  ForkUnion reaches directly, so the raw address plus the observed bit pattern is the portable
- *  currency.
+ *  depends on the waiter, only latency and power do. It watches an in-place word, like the row
+ *  locks living inside node records, by its address and the bit pattern last observed: the
+ *  currency the address-armed hardware waits - @c UMWAIT, @c WFET, @c WRS - take. The waiting
+ *  bound (capped or uncapped) arrives as an arbitrary tag type.
  */
 struct dummy_waiter_t {
-    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
-    void operator()(std::atomic<value_type_> const&, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
-    }
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
     void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {}
 };
@@ -1166,28 +1241,30 @@ struct object_prefetcher {
 };
 
 /**
- *  @brief The standard's @c std::atomic_ref, extended to bind a const word for loads - the one
- *      place a const reader of a plain synchronization word casts its constness away, so no owner
- *      has to declare that word @c mutable.
+ *  @brief The standard's @c std::atomic_ref with the verbs the core calls past it, spelled as
+ *      ForkUnion's references spell them, so either binds the same @c atomic_ref_template_.
  *
- *  The standard binds const words only from C++26 on, per P3323; ForkUnion's references already
- *  do, and this is the analog for code that must build on the standard library alone. A const word
- *  only ever loads. The reference is held as a member, with every named verb forwarded.
+ *  The core builds on the standard library alone, so this is its default; @c src/ swaps in the
+ *  instruction-set references. The extremal and bounded verbs are read-first compare-exchange
+ *  loops: a word that already refuses returns without writing, so losers never take the line.
+ *  The no-return verbs discard the result, which the compiler lowers to the store-only
+ *  instruction where the target has one.
  */
 template <typename value_type_>
 struct standard_atomic_ref {
     explicit standard_atomic_ref(value_type_& word) noexcept : word_(word) {}
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept { return word_.load(order); }
-    void store(value_type_ value, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        word_.store(value, order);
+    void store(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        word_.store(desired, order);
     }
-    value_type_ exchange(value_type_ value, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        return word_.exchange(value, order);
+    value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.exchange(desired, order);
     }
-    bool compare_exchange_weak(value_type_& expected, value_type_ desired,
-                               std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        return word_.compare_exchange_weak(expected, desired, order);
+
+    bool compare_exchange_strong(value_type_& expected, value_type_ desired, std::memory_order success,
+                                 std::memory_order failure) const noexcept {
+        return word_.compare_exchange_strong(expected, desired, success, failure);
     }
     bool compare_exchange_weak(value_type_& expected, value_type_ desired, std::memory_order success,
                                std::memory_order failure) const noexcept {
@@ -1197,33 +1274,84 @@ struct standard_atomic_ref {
                                  std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return word_.compare_exchange_strong(expected, desired, order);
     }
-    bool compare_exchange_strong(value_type_& expected, value_type_ desired, std::memory_order success,
-                                 std::memory_order failure) const noexcept {
-        return word_.compare_exchange_strong(expected, desired, success, failure);
+    bool compare_exchange_weak(value_type_& expected, value_type_ desired,
+                               std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.compare_exchange_weak(expected, desired, order);
     }
+
     value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return word_.fetch_add(operand, order);
     }
     value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return word_.fetch_sub(operand, order);
     }
-    value_type_ fetch_and(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        return word_.fetch_and(operand, order);
+    value_type_ fetch_and(value_type_ mask, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.fetch_and(mask, order);
     }
-    value_type_ fetch_or(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        return word_.fetch_or(operand, order);
+    value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return word_.fetch_or(bits, order);
     }
-    value_type_ fetch_xor(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        return word_.fetch_xor(operand, order);
+
+    /** C++26's @c fetch_max: the value held before, whether or not the operand replaced it. */
+    value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        value_type_ observed = word_.load(std::memory_order_acquire);
+        while (observed < operand &&
+               !word_.compare_exchange_weak(observed, operand, acquiring_(order), std::memory_order_acquire)) {}
+        return observed;
+    }
+
+    /** Adds @p operand only if the sum stays at most @p limit, returning the value held before; the
+     *  caller learns the outcome from `observed + operand <= limit`. */
+    value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
+                                     std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        value_type_ observed = word_.load(std::memory_order_acquire);
+        while (observed <= limit && limit - observed >= operand &&
+               !word_.compare_exchange_weak(observed, static_cast<value_type_>(observed + operand), acquiring_(order),
+                                            std::memory_order_acquire)) {}
+        return observed;
+    }
+
+    void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        word_.fetch_add(operand, order);
+    }
+    void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        word_.fetch_sub(operand, order);
+    }
+    void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        word_.fetch_or(bits, order);
+    }
+    void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        word_.fetch_and(static_cast<value_type_>(~bits), order);
+    }
+
+    /** Sets or clears bit @p bit, below the word's width, returning whether it was set before: a
+     *  claim exactly one of several racing callers wins. */
+    bool fetch_test_and_set_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return (word_.fetch_or(static_cast<value_type_>(value_type_ {1} << bit), order) >> bit) & 1;
+    }
+    bool fetch_test_and_reset_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return (word_.fetch_and(static_cast<value_type_>(~(value_type_ {1} << bit)), order) >> bit) & 1;
+    }
+    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        fetch_max(operand, order);
     }
 
   private:
     std::atomic_ref<value_type_> word_;
+
+    // GCC refuses a relaxed success beside the acquiring failure the read-first loops take.
+    static constexpr std::memory_order acquiring_(std::memory_order order) noexcept {
+        return order == std::memory_order_relaxed || order == std::memory_order_consume ? std::memory_order_acquire
+                                                                                        : order;
+    }
 };
 
+/** Loads a word down a const path: @c std::atomic_ref binds no const word before C++26's P3323,
+ *  so this one reference casts the constness away and only ever loads. */
 template <typename value_type_>
 struct standard_atomic_ref<value_type_ const> {
     explicit standard_atomic_ref(value_type_ const& word) noexcept : word_(const_cast<value_type_&>(word)) {}
+
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept { return word_.load(order); }
 
   private:
@@ -1822,7 +1950,7 @@ struct vram_telemetry_block_t {
      *  tail still could not fit, and visited-set claims out of probes, which re-scored. */
     u64_t tail_compactions, tail_dropped, visited_saturations;
 
-    /** Nodes whose neighbors a refinement merge landed in a different sequence than they held. */
+    /** Re-selected nodes whose neighbor set gained a member it lacked; order never counts. */
     u64_t changed_nodes;
 };
 
@@ -1892,69 +2020,9 @@ struct claim_word_t {
 
 #pragma region Gates
 
-/** A reference spelling the verbs the index posts past the standard's - the no-return add,
- *  subtract and bit clear, and the bounded add - as ForkUnion's do. For the standard's own
- *  reference, which does not, the functions below spell them; ForkUnion's references carry the
- *  same names as free functions in their namespace, reached through argument lookup, so a site
- *  reads the same whichever reference the index was given. */
-template <typename reference_type_, typename value_type_>
-concept extended_atomic_ref = requires(reference_type_ reference, value_type_ value) {
-    reference.add(value, std::memory_order_relaxed);
-    reference.sub(value, std::memory_order_relaxed);
-    reference.clear_bits(value, std::memory_order_relaxed);
-    reference.fetch_add_if_at_most(value, value, std::memory_order_relaxed);
-};
-
-/** A reference spelling only the standard's verbs, such as @c std::atomic_ref, for which the
- *  functions below spell the rest. */
-template <typename reference_type_, typename value_type_>
-concept plain_atomic_ref = !extended_atomic_ref<reference_type_, value_type_>;
-
-template <typename reference_type_, typename value_type_>
-    requires plain_atomic_ref<reference_type_, value_type_>
-void atomic_add(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    reference.fetch_add(operand, order);
-}
-template <typename reference_type_, typename value_type_>
-    requires plain_atomic_ref<reference_type_, value_type_>
-void atomic_sub(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    reference.fetch_sub(operand, order);
-}
-template <typename reference_type_, typename value_type_>
-    requires plain_atomic_ref<reference_type_, value_type_>
-void atomic_clear_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
-    reference.fetch_and(static_cast<value_type_>(~bits), order);
-}
-
-/** Adds @p operand only if the sum stays at most @p limit; returns the value held before. */
-template <typename reference_type_, typename value_type_>
-    requires plain_atomic_ref<reference_type_, value_type_>
-value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ operand, value_type_ limit,
-                                        std::memory_order order) noexcept {
-    value_type_ observed = reference.load(std::memory_order_relaxed);
-    while (observed <= limit && limit - observed >= operand &&
-           !reference.compare_exchange_weak(observed, observed + operand, order, std::memory_order_relaxed)) {}
-    return observed;
-}
-
-/** Raises the word to @p operand if it is larger; returns the value held before. */
-template <typename reference_type_, typename value_type_>
-    requires plain_atomic_ref<reference_type_, value_type_>
-value_type_ atomic_fetch_max(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    value_type_ observed = reference.load(std::memory_order_relaxed);
-    while (observed < operand &&
-           !reference.compare_exchange_weak(observed, operand, order, std::memory_order_relaxed)) {}
-    return observed;
-}
-template <typename reference_type_, typename value_type_>
-    requires extended_atomic_ref<reference_type_, value_type_>
-value_type_ atomic_fetch_max(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    return reference.fetch_max(operand, order);
-}
-
 /**
  *  @brief Shared among mutators, try-unique for stop-the-world, wait-free to probe - one
- *      @c std::atomic word, so every reading is a consistent joint snapshot.
+ *      plain 64-bit word, so every reading is a consistent joint snapshot.
  *
  *  The word packs forty-one generation bits on top, a dedicated unique bit, and twenty-two
  *  holder bits - the OS pid ceiling bounds simultaneous holders well below that. The
@@ -2014,7 +2082,7 @@ struct shared_mutex {
         // atomics, and the certified probes' acquire would otherwise pair with nothing.
         annotate_release(&word);
         annotate_unlock_shared_started(&word);
-        atomic_sub(atomic_ref<u64_t>(word), u64_t {1}, std::memory_order_release);
+        atomic_ref<u64_t>(word).sub(u64_t {1}, std::memory_order_release);
         annotate_unlock_shared_finished(&word);
     }
 
@@ -2036,7 +2104,7 @@ struct shared_mutex {
     void unlock() noexcept {
         annotate_release(&word);
         annotate_unlock_started(&word);
-        atomic_clear_bits(atomic_ref<u64_t>(word), unique_bit_k, std::memory_order_release);
+        atomic_ref<u64_t>(word).clear_bits(unique_bit_k, std::memory_order_release);
         annotate_unlock_finished(&word);
     }
 

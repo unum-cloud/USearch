@@ -49,6 +49,8 @@ from usearch.dense import (
 from usearch.types import (
     Address,
     ArenaInit,
+    CpuClass,
+    GpuClass,
     BytesView,
     Error,
     ExecutorDrain,
@@ -149,6 +151,10 @@ struct Symbols:
     """`usearch_mood_name`."""
     var mood_from_name: FromName
     """`usearch_mood_from_name`."""
+    var cpu_class_name: NameOf
+    """`usearch_cpu_class_name`."""
+    var gpu_class_name: NameOf
+    """`usearch_gpu_class_name`."""
     var dense_metric_name: NameOf
     """`usearch_dense_metric_name`."""
     var dense_metric_from_name: FromName
@@ -265,6 +271,8 @@ struct Symbols:
         self.traversal_from_name = _resolve[FromName](handle, "usearch_traversal_from_name")
         self.mood_name = _resolve[NameOf](handle, "usearch_mood_name")
         self.mood_from_name = _resolve[FromName](handle, "usearch_mood_from_name")
+        self.cpu_class_name = _resolve[NameOf](handle, "usearch_cpu_class_name")
+        self.gpu_class_name = _resolve[NameOf](handle, "usearch_gpu_class_name")
         self.dense_metric_name = _resolve[NameOf](handle, "usearch_dense_metric_name")
         self.dense_metric_from_name = _resolve[FromName](handle, "usearch_dense_metric_from_name")
 
@@ -427,6 +435,14 @@ struct Library(ImplicitlyCopyable):
     def traversal_from_name(self, name: StringSlice) -> Traversal:
         """Reads a spelling back; `WALK` when unrecognized. Calls `usearch_traversal_from_name`."""
         return Traversal(self.symbols().traversal_from_name(BytesView.of(name).untracked()))
+
+    def cpu_class_name(self, cpu_class: CpuClass) -> String:
+        """The engine's spelling of a CPU class, as dispatch reports it. Calls `usearch_cpu_class_name`."""
+        return text_at(self.symbols().cpu_class_name(cpu_class.code))
+
+    def gpu_class_name(self, gpu_class: GpuClass) -> String:
+        """The engine's spelling of a GPU class, as dispatch reports it. Calls `usearch_gpu_class_name`."""
+        return text_at(self.symbols().gpu_class_name(gpu_class.code))
 
     def mood_name(self, mood: Mood) -> String:
         """The engine's spelling of a mood, as `PARKED` spells "parked". Calls `usearch_mood_name`."""

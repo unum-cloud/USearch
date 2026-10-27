@@ -3629,11 +3629,11 @@ void test_names(void) {
                  status_name_of, status_from_name);
     expect_names("scalar", scalars, sizeof(scalars) / row_bytes, usearch_scalar_unknown_k, "unknown", scalar_name_of,
                  scalar_from_name);
-    expect_names("residency", residencies, sizeof(residencies) / row_bytes, usearch_residency_ram_k, "unknown",
+    expect_names("residency", residencies, sizeof(residencies) / row_bytes, usearch_residency_unknown_k, "unknown",
                  residency_name_of, residency_from_name);
-    expect_names("traversal", traversals, sizeof(traversals) / row_bytes, usearch_traversal_walk_k, "unknown",
+    expect_names("traversal", traversals, sizeof(traversals) / row_bytes, usearch_traversal_unknown_k, "unknown",
                  traversal_name_of, traversal_from_name);
-    expect_names("mood", moods, sizeof(moods) / row_bytes, usearch_mood_parked_k, "unknown", mood_name_of,
+    expect_names("mood", moods, sizeof(moods) / row_bytes, usearch_mood_unknown_k, "unknown", mood_name_of,
                  mood_from_name);
     expect_names("CPU class", cpu_classes, sizeof(cpu_classes) / row_bytes, usearch_cpu_class_unknown_k, "unknown",
                  cpu_class_name_of, cpu_class_from_name);

@@ -435,9 +435,9 @@ public final class Types {
     public enum Mood {
 
         /** Idle threads sleep; the next call pays a wake-up. */
-        PARKED(0),
+        PARKED(1),
         /** Idle threads stay hot, trading power for the next call's latency. */
-        SPINNING(1);
+        SPINNING(2);
 
         private final int code;
 
@@ -464,11 +464,11 @@ public final class Types {
     public enum Residency {
 
         /** Host memory, walked by host threads. */
-        RAM(0),
+        RAM(1),
         /** Device memory, walked by device streams. */
-        VRAM(1),
+        VRAM(2),
         /** NVMe drives, read through host submission rings into host memory. */
-        NVME(2);
+        NVME(3);
 
         private final int code;
 
@@ -492,9 +492,9 @@ public final class Types {
     public enum Traversal {
 
         /** Walks the graph, scoring the rows the expansion reaches - approximate, the default. */
-        WALK(0),
+        WALK(1),
         /** Scores every row published when the query's scan starts - exact, on RAM and NVMe handles. */
-        SCAN(1);
+        SCAN(2);
 
         private final int code;
 

@@ -17,6 +17,12 @@
 
 namespace unum::usearch::utilities {
 
+// Checked where only CUDA builds compile, since 32-bit hosts such as wasm32 never load the driver.
+static_assert(sizeof(cuda_allocation_properties_t) == 32 && sizeof(cuda_access_descriptor_t) == 12 &&
+                  sizeof(cuda_copy_2d_t) == 128 && sizeof(cuda_launch_config_t) == 56 &&
+                  sizeof(cuda_launch_attribute_t) == 72 && sizeof(cuda_tensor_map_t) == 128,
+              "The driver's 64-bit layouts");
+
 /** The device-scope atomic reference the NVIDIA kernels reach a shared word through, so each
  *  access names its memory order - relaxed wherever the launch boundary is what publishes the
  *  result. */

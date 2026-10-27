@@ -348,7 +348,8 @@ struct vram_sorted_candidates {
             bool holds = false;
 #pragma unroll
             for (u32_t slot = 0; slot < slots_; ++slot)
-                holds |= !(entries_[slot] == scored_node_t::sentinel()) && entries_[slot].id() == probe_id;
+                // An empty slot's all-ones ID matches only a sentinel probe, itself a sentinel.
+                holds |= entries_[slot].id() == probe_id;
             if (warp_t::any(holds) && lane == probe) resident = true;
         }
         return resident ? scored_node_t::sentinel() : staged;

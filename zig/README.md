@@ -442,7 +442,7 @@ const first_head = try attended.row(f32, 0);
 ```zig
 const description = try index.describe();
 std.debug.print("{d} entries in {d} bytes\n", .{ description.size, description.memory_usage });
-std.debug.print("dispatched to {s}\n", .{description.capabilities});
+std.debug.print("dispatched to {s} across {d} shards\n", .{ description.cpu_class, description.shards_count });
 std.debug.print("compiled for {s}\n", .{usearch.capabilitiesCompiled()});
 std.debug.print("available here {s}\n", .{usearch.capabilitiesAvailable()});
 

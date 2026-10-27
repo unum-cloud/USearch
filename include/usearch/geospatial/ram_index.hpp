@@ -36,6 +36,8 @@
 #include <numbers> // `std::numbers::pi`
 #include <span>    // `std::span`
 
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
+
 #include <numkong/geospatial.h> // `NUMKONG_EARTH_ELLIPSOID_EQUATORIAL_RADIUS` and kin
 
 #include "usearch/utilities/types.hpp"
@@ -642,7 +644,7 @@ static_assert(basic::value_codec<earth_observation_codec_t, earth_observation_t>
 /** Similarity Search over observations: 32-byte values, squared chords in square centimetres as
  *  distances, and 32-bit node IDs. */
 template <typename key_type_ = uuid_t, typename wait_type_ = dummy_waiter_t,
-          template <typename> class atomic_ref_template_ = standard_atomic_ref,
+          template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = dummy_cache_hints_t>
 using ram_index = basic::ram_index<earth_observation_t, key_type_, u32_t, nk_u64_t, wait_type_, atomic_ref_template_,
                                    allocator_type_, cache_hints_type_>;

@@ -22,7 +22,8 @@
 #include <type_traits> // `std::is_same_v`
 #include <utility>     // `std::exchange` - a moved-from plan forgets its index
 
-#include <forkunion/types.hpp> // `fu::standard_yield_t` - the watermark's turn
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the published words
+#include <forkunion/types.hpp>   // `fu::standard_yield_t` - the watermark's turn
 
 #include <numkong/cast/serial.h> // `nk_cast_plan_serial_` - the device casts' plans
 #include <numkong/each/serial.h> // `nk_each_rmsnorm_arguments_t` - the unit-RMS import's record
@@ -123,9 +124,6 @@ struct vram_refine_t {
     u32_t* link_heads = nullptr;
     u32_t* link_next = nullptr;
     vram_bitset_t walked;
-    u32_t* fresh_slots = nullptr;
-    u32_t* percolated = nullptr;
-    u32_t* gained = nullptr;
 };
 
 /** One shard of a fold bin as the bin's storage reads it on every device of the bin: its vectors
@@ -362,16 +360,13 @@ struct vram_attend_heads_t {
 
 /** The counters an audit lands in page-locked memory, in the order of the device's: the levels that
  *  expanded, the last sweep's count, which only a sweep short of convergence leaves nonzero, then
- *  the unreached, reconnected and claim counters, and a percolation round's percolated and changed
- *  rows. */
+ *  the unreached, reconnected and claim counters. */
 struct vram_audit_landing_t {
     u32_t levels;
     u32_t last_expanded;
     u32_t unreached;
     u32_t reconnected;
     u32_t claims[2];
-    u32_t percolated;
-    u32_t gained;
 };
 
 /** Device scratch one refine plan carves once from a @p traversal_context_type_ and its phases
@@ -396,10 +391,6 @@ struct vram_refine_scratch {
     /** The walk's and the merge's claim counters, the last pass's completion oracle. */
     u32_t* claims = nullptr;
 
-    /** The rows the last percolation round re-selected, and the rows its merge changed. */
-    u32_t* percolated = nullptr;
-    u32_t* gained = nullptr;
-
     /** The rows the last audit left unreached, which the heal walks. */
     u32_t* island_ids = nullptr;
 
@@ -410,15 +401,13 @@ struct vram_refine_scratch {
 
 /** The buffers one refinement pass uses up, carved from its context's staging when it queues: the
  *  heads of the walkers' chains, then the bitset of rows the pass walked, the shadow neighbors the
- *  walks land and the chains' links beside them, @b [rows,connectivity] each, then one bit per
- *  neighbor slot, the slots a percolation round's merge filled, which the plan's next round reads.
- *  A reconnection counts its in-links over the chain heads, since it queues after its pass. */
+ *  walks land and the chains' links beside them, @b [rows,connectivity] each. A reconnection counts
+ *  its in-links over the chain heads, since it queues after its pass. */
 struct vram_refine_passes_t {
     u32_t* link_heads = nullptr;
     vram_bitset_t walked;
     u32_t* shadow_neighbors = nullptr;
     u32_t* link_next = nullptr;
-    u32_t* fresh_slots = nullptr;
 };
 
 #pragma endregion Shard Types
@@ -543,13 +532,13 @@ struct vram_shard_core {
     /** Rows visible to searches: the watermark every walk samples below and filters neighbors
      *  by. */
     std::size_t size() const noexcept {
-        return standard_atomic_ref<std::size_t const>(last_visible_id_).load(std::memory_order_acquire);
+        return fu::standard_atomic_ref<std::size_t const>(last_visible_id_).load(std::memory_order_acquire);
     }
 
     /** The first failure that left claimed rows unpublished, kept for the index's lifetime; it
      *  refuses every later mutation while searches keep running. */
     status_t status() const noexcept {
-        return standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
+        return fu::standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
     }
 
     /** Rows mapped across the flat storage, the smallest of their counts, since slabs are a fixed
@@ -569,11 +558,11 @@ struct vram_shard_core {
     }
     std::size_t connectivity() const noexcept {
         return geometry_connectivity(
-            standard_atomic_ref<packed_geometry_id_t const>(geometry_).load(std::memory_order_acquire));
+            fu::standard_atomic_ref<packed_geometry_id_t const>(geometry_).load(std::memory_order_acquire));
     }
     std::size_t dimensions() const noexcept {
         return geometry_dimensions(
-            standard_atomic_ref<packed_geometry_id_t const>(geometry_).load(std::memory_order_acquire));
+            fu::standard_atomic_ref<packed_geometry_id_t const>(geometry_).load(std::memory_order_acquire));
     }
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
@@ -739,7 +728,7 @@ struct vram_shard_core {
         packed_geometry_id_t const requested = pack_geometry(config.dimensions,
                                                              static_cast<std::size_t>(config.connectivity));
         packed_geometry_id_t observed = 0;
-        if (!standard_atomic_ref<packed_geometry_id_t>(geometry_).compare_exchange_strong(
+        if (!fu::standard_atomic_ref<packed_geometry_id_t>(geometry_).compare_exchange_strong(
                 observed, requested, std::memory_order_acq_rel, std::memory_order_acquire) &&
             observed != requested)
             return {capacity(), status_t::config_mismatch_k};
@@ -1118,9 +1107,7 @@ struct vram_shard_core {
      *  a reached pick or the landmark covering it. A re-selection lands shadow neighbors and chains
      *  itself onto every pick, as an insertion does, and the merge folds each re-selected row's
      *  forward picks, then every row chained onto it, into its live row, re-judging whatever
-     *  overflows it. The walk runs once, as the CPU's refine does per call; each round @ref
-     *  percolate asks for after it percolates every row with a slot within two hops the last merge
-     *  filled.
+     *  overflows it. The walk runs once, as the CPU's refine does per call.
      *
      *  A phase queues its launches and the landing of its counters behind the context's event and
      *  never waits; @ref plan_refine made every allocation, so no phase allocates, and only a
@@ -1152,14 +1139,6 @@ struct vram_shard_core {
                 if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), 0, stream);
                 break;
             }
-            case phase_t::percolate_k:
-                // Every row is claimed, and only those with a slot within two hops the last merge
-                // filled percolate.
-                status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config,
-                                                        vram_dense_kernel_t::percolate_k,
-                                                        {0, static_cast<node_id_t>(index_->size())}, {});
-                if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), 0, stream);
-                break;
             case phase_t::audit_k: status_ = queue_sweeps_(context); break;
             case phase_t::heal_k:
                 // The island IDs replace the range: offsets below their count index them. Only
@@ -1197,11 +1176,9 @@ struct vram_shard_core {
                 status_ = status_t::device_error_k;
                 return false;
             }
-            // A percolation round claims every row of its range but re-selects only the fresh ones.
-            tally_.visited_nodes += phase_ == phase_t::percolate_k ? landed.percolated : walked;
+            tally_.reselected_nodes += walked;
             if (phase_ == phase_t::reselect_k && ++round_ < rounds_) return true;
-            if (phase_ == phase_t::reselect_k || phase_ == phase_t::percolate_k) {
-                gained_before_ = std::exchange(gained_, landed.gained);
+            if (phase_ == phase_t::reselect_k) {
                 phase_ = phase_t::audit_k;
                 return true;
             }
@@ -1209,6 +1186,8 @@ struct vram_shard_core {
             if (landed.last_expanded) return true;
             next_sweep_ = 0;
             tally_.health = audited_(landed, rows);
+            // The device counter is zeroed once per plan and every heal adds to it,
+            // so it lands summed.
             tally_.islands_reconnected = landed.reconnected;
             u32_t const left = landed.unreached;
             if (phase_ == phase_t::audit_k) tally_.islands_found = left;
@@ -1223,25 +1202,14 @@ struct vram_shard_core {
         /** Stops the re-selection after the round that landed last, so the next phase audits and
          *  heals; a no-op in any other phase. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k || phase_ == phase_t::percolate_k) rounds_ = 0, phase_ = phase_t::audit_k;
-        }
-
-        /** Follows the round that landed last, the walk or a percolation, with a percolation round
-         *  before its audit queues: answers whether one follows, which needs that round to have
-         *  changed fewer rows than the one before it. The percolation re-selects only the rows with
-         *  a slot within two hops that the last round's merge filled. */
-        bool percolate() noexcept {
-            bool const shrank = gained_ && (!gained_before_ || gained_ < gained_before_);
-            if (!index_ || failed(status_) || phase_ != phase_t::audit_k || next_sweep_ || !shrank) return false;
-            phase_ = phase_t::percolate_k;
-            return true;
+            if (phase_ == phase_t::reselect_k) rounds_ = 0, phase_ = phase_t::audit_k;
         }
 
         /** Whether the current phase re-selects - the phase a caller's progress counts. */
-        bool reselecting() const noexcept { return phase_ == phase_t::reselect_k || phase_ == phase_t::percolate_k; }
+        bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
 
         /** Nodes re-selected so far. */
-        std::size_t visited() const noexcept { return tally_.visited_nodes; }
+        std::size_t visited() const noexcept { return tally_.reselected_nodes; }
 
         /** The pass: its telemetry read from @p context 's last landing, complete once @ref advance
          *  answered false, otherwise @c cancelled_k; a failure a phase kept answers instead. */
@@ -1250,16 +1218,17 @@ struct vram_shard_core {
             refine_result_t result = tally_;
             vram_telemetry_block_t const spent = context.spent();
             result.changed_nodes = spent.changed_nodes;
-            result.visited_members = spent.hops;
-            result.computed_distances = spent.scored;
-            result.restarts = spent.restarts;
+            result.telemetry.visited_members = spent.hops;
+            result.telemetry.computed_distances = spent.scored;
+            result.telemetry.restarts = spent.restarts;
+            result.telemetry.saturated_walks = spent.visited_saturations;
             if (failed(status_)) return {result, status_};
             return {result, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
         }
 
       private:
         friend struct vram_shard_core;
-        enum class phase_t : u8_t { reselect_k, percolate_k, audit_k, heal_k, done_k };
+        enum class phase_t : u8_t { reselect_k, audit_k, heal_k, done_k };
 
         /** Queues the audit's next batch of sweeps on @p context, its seeds first when it
          *  starts. */
@@ -1282,7 +1251,6 @@ struct vram_shard_core {
          *  when a heal round's queue began a fresh audit, which leaves the next sweep at two. */
         std::size_t walked_() const noexcept {
             if (phase_ == phase_t::reselect_k) return round_nodes_().size();
-            if (phase_ == phase_t::percolate_k) return index_->size();
             return phase_ == phase_t::heal_k && next_sweep_ == 2 ? islands_ : 0;
         }
 
@@ -1301,11 +1269,6 @@ struct vram_shard_core {
 
         /** The islands the last audit left. */
         u32_t islands_ = 0;
-
-        /** The rows the last percolation round's merge changed and the round before's, zero before
-         *  them. */
-        u32_t gained_ = 0;
-        u32_t gained_before_ = 0;
 
         /** The audit sweep the next batch queues from, zero before an audit starts. */
         u32_t next_sweep_ = 0;
@@ -1402,28 +1365,93 @@ struct vram_shard_core {
                 status_t::unsupported_k};
     }
 
+    /** One reachability audit in flight on this index's device, in the shape one host thread drives
+     *  over many devices at once: @ref queue a batch of sweeps, @ref wait for it, and @ref finish
+     *  once no batch follows, so every shard's batch is queued before any waits. */
+    struct health_plan_t {
+
+        /** An unbound plan over @p scratch - what an empty index or a refused plan answers with. */
+        explicit health_plan_t(refine_scratch_t&& scratch) noexcept : scratch_(std::move(scratch)) {}
+        health_plan_t(health_plan_t&&) noexcept = default;
+        health_plan_t& operator=(health_plan_t&&) noexcept = default;
+
+        /** Whether another batch of sweeps follows, the last one still expanding. */
+        bool running() const noexcept { return phase_ == phase_t::sweeping_k; }
+
+        /** Queues the next batch of sweeps on @p context, the landmarks first, doubling the batch
+         *  each time; a no-op unless @ref running. */
+        status_t queue(traversal_context_t& context) noexcept {
+            if (phase_ != phase_t::sweeping_k) return status_;
+            status_ = next_sweep_
+                          ? index_->kernels_.queue_sweeps_(*index_, context, scratch_, landing_.get(), next_sweep_)
+                          : index_->kernels_.queue_audit_(*index_, context, scratch_, landing_.get());
+            next_sweep_ = next_sweep_ ? 2 * next_sweep_ : 2;
+            phase_ = succeeded(status_) ? phase_t::landing_k : phase_t::done_k;
+            return status_;
+        }
+
+        /** Sleeps until the queued batch landed on @p context 's event, then reads whether it still
+         *  expanded; a no-op unless a batch was queued. */
+        status_t wait(traversal_context_t& context) noexcept {
+            if (phase_ != phase_t::landing_k) return status_;
+            status_ = context.wait();
+            phase_ = succeeded(status_) && landing_->last_expanded ? phase_t::sweeping_k : phase_t::done_k;
+            return status_;
+        }
+
+        /** The audit over the rows published when it was planned; a failure a batch kept answers
+         *  instead. */
+        expected<health_result_t> finish() const noexcept {
+            if (failed(status_)) return {{}, status_};
+            return {index_ ? audited_(*landing_, rows_) : health_result_t {}, status_t::success_k};
+        }
+
+      private:
+        friend struct vram_shard_core;
+        enum class phase_t : u8_t { sweeping_k, landing_k, done_k };
+
+        refine_scratch_t scratch_;
+        vram_shard_core* index_ = nullptr;
+        audit_landing_ptr_t landing_ {nullptr, landing_return_t {}};
+        std::size_t rows_ = 0;
+
+        /** The sweep the next batch queues from, zero before the landmarks. */
+        u32_t next_sweep_ = 0;
+        phase_t phase_ = phase_t::done_k;
+        status_t status_ = status_t::success_k;
+    };
+
+    /** Opens a reachability audit of the rows published now on @p context 's stream: carves the
+     *  audit share of the scratch and takes a page-locked landing; queues nothing. */
+    expected<health_plan_t> plan_health(traversal_context_t& context) noexcept {
+        using bytes_ptr_t = typename traversal_context_t::bytes_ptr_t;
+        std::size_t const rows = size();
+        if (!rows)
+            return {health_plan_t {refine_scratch_t {
+                        bytes_ptr_t {nullptr, typename bytes_ptr_t::deleter_type {context.allocator_, 0}}}},
+                    status_t::success_k};
+        auto [scratch, carve_status] = carve_scratch_(context, scratch_use_t::audit_k);
+        health_plan_t plan {std::move(scratch)};
+        if (failed(carve_status)) return {std::move(plan), carve_status};
+        plan.landing_ = take_landing_(context);
+        if (!plan.landing_) return {std::move(plan), status_t::bad_alloc_k};
+        plan.index_ = this;
+        plan.rows_ = rows;
+        plan.phase_ = health_plan_t::phase_t::sweeping_k;
+        return {std::move(plan), status_t::success_k};
+    }
+
     /** Measures forward reachability from as many stride-spread landmarks as one search draws -
      *  the connectivity; any shortfall against @c size() is the population no search can
      *  discover. Read-only on the graph, so concurrent insertions may leave fresh nodes
-     *  uncounted. Waits on the context's event once per batch of sweeps, the batches doubling
-     *  until one expands nothing. */
+     *  uncounted. One @ref health_plan_t driven on the calling thread, waiting once per batch of
+     *  sweeps, the batches doubling until one expands nothing. */
     expected<health_result_t> health(traversal_context_t& context) noexcept {
-        std::size_t const rows = size();
-        if (!rows) return {{}, status_t::success_k};
-        auto [scratch, carve_status] = carve_scratch_(context, scratch_use_t::audit_k);
-        if (failed(carve_status)) return {{}, carve_status};
-        audit_landing_ptr_t const landing = take_landing_(context);
-        if (!landing) return {{}, status_t::bad_alloc_k};
-        if (status_t const queued = kernels_.queue_audit_(*this, context, scratch, landing.get()); failed(queued))
-            return {{}, queued};
-        for (u32_t first_sweep = 2;; first_sweep *= 2) {
-            if (status_t const drained = context.wait(); failed(drained)) return {{}, drained};
-            if (!landing->last_expanded) break;
-            if (status_t const queued = kernels_.queue_sweeps_(*this, context, scratch, landing.get(), first_sweep);
-                failed(queued))
-                return {{}, queued};
-        }
-        return {audited_(*landing, rows), status_t::success_k};
+        auto [plan, status] = plan_health(context);
+        if (failed(status)) return {{}, status};
+        while (plan.running())
+            if (failed(plan.queue(context)) || failed(plan.wait(context))) break;
+        return plan.finish();
     }
 
     /** The bytes an executor's run must hold before a context carved over it can refine the rows
@@ -1609,7 +1637,7 @@ struct vram_shard_core {
             if (failed(vendor_t::select(index_->device_specs().ordinal))) return status_t::device_error_k;
             if (status_t const landed = land_pending_(); failed(landed)) return landed;
             std::size_t const nodes = static_cast<std::size_t>(visible);
-            if (standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != nodes)
+            if (fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != nodes)
                 return status_t::config_mismatch_k;
             index_ = nullptr;
             return status_t::success_k;
@@ -1645,7 +1673,7 @@ struct vram_shard_core {
                                                rows.size() * connectivity};
             for (node_id_t& neighbor : landed) neighbor = neighbor < visible ? neighbor : node_id_unknown_k;
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(neighbors_rows, std::as_bytes(landed));
-            standard_atomic_ref<std::size_t> {covered}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1893,8 +1921,8 @@ struct vram_shard_core {
                     return index_->fail_(status_t::device_error_k);
             }
             if (normed)
-                standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
-            standard_atomic_ref<std::size_t> {covered}.fetch_add(range.size(), std::memory_order_acq_rel);
+                fu::standard_atomic_ref<std::size_t> {covered_norms}.add(range.size(), std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1945,8 +1973,8 @@ struct vram_shard_core {
                 return index_->fail_(status_t::device_error_k);
             if (failed(index_->launch_rebase_links_(range, source_range, shift, stream)))
                 return index_->fail_(status_t::device_error_k);
-            if (normed) standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(count, std::memory_order_acq_rel);
-            standard_atomic_ref<std::size_t> {covered}.fetch_add(count, std::memory_order_acq_rel);
+            if (normed) fu::standard_atomic_ref<std::size_t> {covered_norms}.add(count, std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.add(count, std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1959,13 +1987,13 @@ struct vram_shard_core {
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (failed(vendor_t::select(index_->device_specs().ordinal))) return status_t::device_error_k;
-            if (standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
+            if (fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
             if (rows) {
                 // One launch derives every row, so a load mixing carried and missing norms
                 // re-derives the carried.
                 if (index_->stores_norms() &&
-                    standard_atomic_ref<std::size_t> {covered_norms}.load(std::memory_order_acquire) != rows &&
+                    fu::standard_atomic_ref<std::size_t> {covered_norms}.load(std::memory_order_acquire) != rows &&
                     failed(index_->launch_derive_norms_(base, rows, stream)))
                     return index_->fail_(status_t::device_error_k);
                 // A fill carries the count by value, so no host word must outlive a copy; the one
@@ -2327,17 +2355,14 @@ struct vram_shard_core {
     std::size_t scratch_bytes_(scratch_use_t use, std::size_t parts = 0) const noexcept {
         std::size_t const rows = size(), words = divide_round_up<std::size_t>(rows, 32);
         std::size_t const refine_words = use == scratch_use_t::refine_k ? rows + parts : 0;
-        return (words * 3 + 9 + refine_words) * sizeof(u32_t);
+        return (words * 3 + 7 + refine_words) * sizeof(u32_t);
     }
 
     /** Bytes of the staging one refinement pass carves over the rows published now. */
     std::size_t refine_staging_bytes_() const noexcept {
         std::size_t const rows = size(), words = divide_round_up<std::size_t>(rows, 32);
-        return (rows + words + 2 * rows * connectivity() + rows * fresh_words_()) * sizeof(u32_t);
+        return (rows + words + 2 * rows * connectivity()) * sizeof(u32_t);
     }
-
-    /** Words of one row's fresh slots, a bit per neighbor slot. */
-    std::size_t fresh_words_() const noexcept { return divide_round_up<std::size_t>(connectivity(), 32); }
 
     /** The buffers one refinement pass uses up, from @p context 's staging, which @ref plan_refine
      *  grew for them; all null when it could not. */
@@ -2350,7 +2375,6 @@ struct vram_shard_core {
         passes.walked.words = passes.link_heads + rows;
         passes.shadow_neighbors = passes.walked.words + words;
         passes.link_next = passes.shadow_neighbors + rows * connectivity();
-        passes.fresh_slots = passes.link_next + rows * connectivity();
         return passes;
     }
 
@@ -2376,10 +2400,8 @@ struct vram_shard_core {
         scratch.unreached = scratch.expanded + 2;
         scratch.reconnected = scratch.unreached + 1;
         scratch.claims = scratch.reconnected + 1;
-        scratch.percolated = scratch.claims + 2;
-        scratch.gained = scratch.percolated + 1;
         if (use == scratch_use_t::refine_k) {
-            scratch.island_ids = scratch.gained + 1;
+            scratch.island_ids = scratch.claims + 2;
             scratch.part_bases = scratch.island_ids + rows;
         }
         if (failed(vendor_t::fill(scratch.reconnected, 0, sizeof(u32_t), context.stream())))
@@ -2423,8 +2445,8 @@ struct vram_shard_core {
      *  report. */
     status_t fail_(status_t failure) noexcept {
         status_t expected = status_t::success_k;
-        standard_atomic_ref<status_t>(status_).compare_exchange_strong(expected, failure, std::memory_order_acq_rel,
-                                                                       std::memory_order_acquire);
+        fu::standard_atomic_ref<status_t>(status_).compare_exchange_strong(expected, failure, std::memory_order_acq_rel,
+                                                                           std::memory_order_acquire);
         return failure;
     }
 
@@ -2456,8 +2478,8 @@ struct vram_shard_core {
      *  count, so IDs restart from zero on the storage already mapped, which nothing frees. A walk
      *  still reaching the index reads that retained storage, and its caller's epoch discards it. */
     void forget_() noexcept {
-        standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
-        standard_atomic_ref<status_t>(status_).store(status_t::success_k, std::memory_order_release);
+        fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
+        fu::standard_atomic_ref<status_t>(status_).store(status_t::success_k, std::memory_order_release);
         filled_rows_ = 0;
     }
 
@@ -2471,7 +2493,7 @@ struct vram_shard_core {
             if (status_t const kept = status(); failed(kept)) return kept;
             fu::standard_yield_t {}(&last_visible_id_, watermark, 0u, fu::wait_capped_t {});
         }
-        standard_atomic_ref<std::size_t>(last_visible_id_).store(first + rows, std::memory_order_release);
+        fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(first + rows, std::memory_order_release);
         return status_t::success_k;
     }
 
@@ -2550,9 +2572,8 @@ struct vram_shard_core {
      *  cannot fit it. */
     gpu_arena_shape_t build_arena_shape_(u32_t expansion, u32_t candidate_slots, u32_t walks) const noexcept {
         u32_t const scratch_bytes = builder_scratch_bytes_per_warp_(expansion, candidate_slots);
-        // A percolation claims two hops, a row of rows, however few ranks it keeps.
         gpu_arena_shape_t shape = arena_shape_for(
-            max_of(walk_selection_rows_(expansion, candidate_slots), static_cast<u32_t>(connectivity())),
+            walk_selection_rows_(expansion, candidate_slots),
             candidate_slots ? frontier_kind_t::register_ladder_k : frontier_kind_t::wide_arena_k, walks);
         if (!kernels_.build_scratch_fits(*this, scratch_bytes)) shape.scratch_bytes = scratch_bytes;
         return shape;

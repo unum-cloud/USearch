@@ -181,7 +181,7 @@ struct shapes_fixture {
     using kit_t = kit_type_;
     using scalar_t = typename kit_t::scalar_t;
     using index_t =
-        shapes::ram_index<kit_t, us::utilities::uuid_t, flaky_waiter_t, standard_atomic_ref, counting_allocator_t>;
+        shapes::ram_index<kit_t, us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
     using value_t = typename index_t::value_t;
     using allocator_t = typename index_t::allocator_t;
     using distance_t = typename index_t::distance_t;
@@ -304,7 +304,7 @@ std::size_t check_shapes_kernels(u64_t seed) {
             }
         }
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 
@@ -348,7 +348,7 @@ std::size_t check_shapes_codec(u64_t seed) {
             failures += expect(std::fabs(f64_t(after) - f64_t(before)) <= storage_precision<scalar_t>(extent));
         }
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 
@@ -392,7 +392,7 @@ std::size_t check_shapes_packing(u64_t seed) {
             }
         }
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 

@@ -52,22 +52,23 @@ chunked_column<key_type_, schedule_type_, max_rows_, allocator_type_, atomic_ref
 }
 
 /** Where one source shard's entries land: shard @c from of the sources' concatenated shard lists,
- *  into shard @c into of the target. Sixteen bytes. */
+ *  into shard @c into of the target.
+ *  Two words: sixteen bytes, or eight where addresses are 32-bit. */
 struct landing_t {
     std::size_t from = 0;
     std::size_t into = 0;
 };
 
-static_assert(sizeof(landing_t) == 16);
+static_assert(sizeof(landing_t) == 2 * sizeof(std::size_t));
 
 /** Where one entry of a split batch lands: the shard, counted from the open shard generation's
- *  first, and its offset among the entries that shard takes. Sixteen bytes. */
+ *  first, and its offset among the entries that shard takes. Two words, as @ref landing_t. */
 struct entry_in_shard_t {
     std::size_t shard = 0;
     std::size_t offset = 0;
 };
 
-static_assert(sizeof(entry_in_shard_t) == 16);
+static_assert(sizeof(entry_in_shard_t) == 2 * sizeof(std::size_t));
 
 /** Whether a target shard shares the source shard's placement, which every rank prefers. */
 enum class placement_match_t : bool { other_k, same_k };
@@ -417,7 +418,7 @@ struct shard_set {
             }
         }
         // The unique side orders the seal for every later claimer, which takes the shared side.
-        atomic_ref<std::size_t>(shards_count_).fetch_or(sealed_k, std::memory_order_relaxed);
+        atomic_ref<std::size_t>(shards_count_).set_bits(sealed_k, std::memory_order_relaxed);
         return status_t::success_k;
     }
 
@@ -426,7 +427,7 @@ struct shard_set {
      *  lifts the seal. Idle shards past the count and retired ones before it stay closed. */
     void reopen() noexcept {
         for (std::size_t shard = size(), live = retired_shards(); shard != live;) at_(--shard).index->reopen_();
-        atomic_ref<std::size_t>(shards_count_).fetch_and(~sealed_k, std::memory_order_release);
+        atomic_ref<std::size_t>(shards_count_).clear_bits(sealed_k, std::memory_order_release);
     }
 
 #pragma endregion Shards
@@ -694,17 +695,13 @@ struct shard_set {
 
 #pragma region Commits and Snapshots
 
-    /** Opens a commit spanning several shards: its watermarks may now move one shard at a time. The
-     *  no-return adds go through @c atomic_add, so the standard reference serves as well as
-     *  ForkUnion's. */
-    void begin_commit() noexcept {
-        atomic_add(atomic_ref<u64_t>(commit_sequence_), u64_t {1}, std::memory_order_release);
-    }
+    /** Opens a commit spanning several shards: its watermarks may now move one shard at a time. */
+    void begin_commit() noexcept { atomic_ref<u64_t>(commit_sequence_).add(u64_t {1}, std::memory_order_release); }
 
     /** Closes the commit @ref begin_commit opened; closing carries into the high half, so a reader
      *  sees the word move even when two commits overlap. */
     void end_commit() noexcept {
-        atomic_add(atomic_ref<u64_t>(commit_sequence_), (u64_t {1} << 32) - 1, std::memory_order_release);
+        atomic_ref<u64_t>(commit_sequence_).add((u64_t {1} << 32) - 1, std::memory_order_release);
     }
 
     /** Takes every shard's watermark into @p watermarks, unless it is empty, at one instant no
@@ -759,12 +756,12 @@ struct shard_set {
     /** Opens a destructive window under the tower's unique side: the epoch turns odd before any
      *  store of the window, which the fence keeps after it. */
     void begin_window() noexcept {
-        atomic_ref<u64_t>(epoch_).fetch_add(1, std::memory_order_relaxed);
+        atomic_ref<u64_t>(epoch_).add(1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
     }
 
     /** Closes the window @ref begin_window opened, releasing its stores to the next reader. */
-    void end_window() noexcept { atomic_ref<u64_t>(epoch_).fetch_add(1, std::memory_order_release); }
+    void end_window() noexcept { atomic_ref<u64_t>(epoch_).add(1, std::memory_order_release); }
 
     /** Runs the reader @p read under the epoch, again once if a destructive window overlapped it,
      *  and answers @c contended_k if one overlapped that too, so whatever it returns was read whole

@@ -20,6 +20,8 @@
 #include <string_view> // `std::string_view` - tokens and paths
 #include <variant>     // `std::monostate` - nothing a freeze reads past the geometry
 
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the scan totals
+
 #include "usearch/shapes/ram_index.hpp"
 #if USEARCH_ARCH_CUDA_
 #include "usearch/shapes/vram_nvidia_index.hpp"
@@ -56,6 +58,8 @@ auto shapes_metric_factory(usearch_shapes_metric_t metric) noexcept {
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 struct shapes_ram_variant {
     using executor_t = forkunion_executor_t;
+    template <typename word_type_>
+    using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
     using scalar_t = scalar_type_;
     using kit_t = typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_class_)>::kit_t;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
@@ -87,7 +91,7 @@ struct shapes_ram_variant {
     /** Empties the index and its point count. */
     status_t clear() noexcept {
         status_t const cleared = index.clear();
-        if (succeeded(cleared)) standard_atomic_ref<std::size_t>(total_points).store(0, std::memory_order_relaxed);
+        if (succeeded(cleared)) atomic_ref<std::size_t>(total_points).store(0, std::memory_order_relaxed);
         return cleared;
     }
 
@@ -112,7 +116,7 @@ struct shapes_ram_variant {
 
     /** Adds the points of a landed @p donor, whose rows this index now holds. */
     void absorbed(shapes_ram_variant const& donor) noexcept {
-        standard_atomic_ref<std::size_t>(total_points).fetch_add(donor.total_points, std::memory_order_relaxed);
+        atomic_ref<std::size_t>(total_points).add(donor.total_points, std::memory_order_relaxed);
     }
 
     /** The points of one stored value. */
@@ -176,8 +180,7 @@ expected<traversal_telemetry_t> shapes_ram_variant<scalar_type_, cpu_class_>::in
         index, arguments.keys, count, connectivity, expansion, shapes_metric_factory<metric_t>(geometry.metric), build,
         ticks, executor);
     if (inserted)
-        standard_atomic_ref<std::size_t>(total_points)
-            .fetch_add(shapes.offsets[count] - shapes.offsets[0], std::memory_order_relaxed);
+        atomic_ref<std::size_t>(total_points).add(shapes.offsets[count] - shapes.offsets[0], std::memory_order_relaxed);
     return inserted;
 }
 
@@ -267,12 +270,15 @@ status_t shapes_ram_variant<scalar_type_, cpu_class_>::load(std::string_view pat
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 struct shapes_nvme_variant {
     using executor_t = nvme_executor_t;
+    template <typename word_type_>
+    using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
     using scalar_t = scalar_type_;
     using kit_t = typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_class_)>::kit_t;
     using codec_t = us::shapes::codec<kit_t>;
     using metric_t = us::shapes::shapes_metric<kit_t, thread_allocator_t>;
     using index_t = basic::nvme_indexes<codec_t, us::utilities::uuid_t, u32_t, typename kit_t::distance_t,
-                                        default_io_engine_t, row_kit_of<cpu_class_>>;
+                                        default_io_engine_t, row_kit_of<cpu_class_>,
+                                        atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
 
@@ -432,7 +438,7 @@ struct shapes_vram_nvidia_variant {
      *  on the same devices. */
     status_t clear() noexcept {
         status_t const cleared = index.clear();
-        if (succeeded(cleared)) standard_atomic_ref<std::size_t>(total_points).store(0, std::memory_order_relaxed);
+        if (succeeded(cleared)) fu::standard_atomic_ref<std::size_t>(total_points).store(0, std::memory_order_relaxed);
         return cleared;
     }
 
@@ -508,8 +514,8 @@ expected<traversal_telemetry_t> shapes_vram_nvidia_variant<scalar_type_, gpu_cla
     expected<traversal_telemetry_t> const landed = vram_nvidia_insert(
         index, arguments.keys, packs, geometry.connectivity, arguments.expansion_factor, ticks, executor);
     if (failed(landed.status)) return landed;
-    standard_atomic_ref<std::size_t>(total_points)
-        .fetch_add(shapes.offsets[count] - shapes.offsets[0], std::memory_order_relaxed);
+    fu::standard_atomic_ref<std::size_t>(total_points)
+        .add(shapes.offsets[count] - shapes.offsets[0], std::memory_order_relaxed);
     return landed;
 }
 
@@ -601,7 +607,7 @@ struct variant_bodies<shapes_traits_t> {
     static void describe(variant_type_ const& variant, usearch_shapes_index_description_t& description) noexcept {
         description.metadata = shapes_traits_t::metadata_of(variant.geometry);
         description.total_points =
-            standard_atomic_ref<std::size_t const>(variant.total_points).load(std::memory_order_relaxed);
+            fu::standard_atomic_ref<std::size_t const>(variant.total_points).load(std::memory_order_relaxed);
     }
 
     template <typename variant_type_>
@@ -651,8 +657,8 @@ struct variant_bodies<shapes_traits_t> {
         std::size_t points = 0;
         if constexpr (requires { cloud.max_points(); }) points = cloud.max_points();
         else points = cloud.extent(0);
-        standard_atomic_ref<std::size_t>(stats.total_points).fetch_add(points, std::memory_order_relaxed);
-        raise_to(stats.largest_points, points);
+        fu::standard_atomic_ref<std::size_t>(stats.total_points).add(points, std::memory_order_relaxed);
+        raise_to<fu::standard_atomic_ref>(stats.largest_points, points);
     }
 };
 

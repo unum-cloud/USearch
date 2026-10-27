@@ -23,7 +23,6 @@
 
 #include <algorithm>   // `std::sort`, `std::unique` - the dispensed-ID density check
 #include <array>       // `std::array` - one latent point of the sign sketches
-#include <atomic>      // `std::atomic`
 #include <chrono>      // `std::chrono::microseconds` - the flaky waiter's oversleep
 #include <limits>      // `std::numeric_limits` - the unbounded allocation budget
 #include <span>        // `std::span` - the dispensed-ID density check
@@ -256,14 +255,14 @@ inline std::size_t scored_failures(scored_type_ const* results, std::size_t resu
 struct allocation_ledger_t {
 
     /** Bytes allocated minus bytes freed; must balance to zero at scope exit. */
-    std::atomic<std::ptrdiff_t> live_bytes {0};
+    std::ptrdiff_t live_bytes = 0;
 
     /** Lifetime number of @c allocate calls, for coarse allocation-pressure checks. */
-    std::atomic<std::size_t> total_allocations {0};
+    std::size_t total_allocations = 0;
 
     /** Allocation ceiling in live bytes; scenarios lower it to drive the all-or-
      *  nothing refusal paths, so a request past it is refused, never counted. */
-    std::atomic<std::ptrdiff_t> byte_budget {std::numeric_limits<std::ptrdiff_t>::max()};
+    std::ptrdiff_t byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
 };
 
 /**
@@ -293,13 +292,17 @@ struct counting_allocator {
     value_type_* allocate(std::size_t count) noexcept {
         if (!ledger_) std::abort(); // A default-constructed instance must never allocate.
         std::ptrdiff_t const wanted = static_cast<std::ptrdiff_t>(count * sizeof(value_type_));
-        if (ledger_->live_bytes.load() + wanted > ledger_->byte_budget.load()) return nullptr;
-        ledger_->live_bytes.fetch_add(wanted);
-        ledger_->total_allocations.fetch_add(1);
+        fu::standard_atomic_ref<std::ptrdiff_t> const live_bytes {ledger_->live_bytes};
+        if (live_bytes.load() + wanted > fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->byte_budget).load())
+            return nullptr;
+        live_bytes.add(wanted);
+        fu::standard_atomic_ref<std::size_t>(ledger_->total_allocations).add(1);
         return static_cast<value_type_*>(std::malloc(count * sizeof(value_type_)));
     }
     void deallocate(value_type_* pointer, std::size_t count) noexcept {
-        if (ledger_) ledger_->live_bytes.fetch_sub(static_cast<std::ptrdiff_t>(count * sizeof(value_type_)));
+        if (ledger_)
+            fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes)
+                .sub(static_cast<std::ptrdiff_t>(count * sizeof(value_type_)));
         // Scribbled first, so a read after free sees garbage in every build rather than stale bytes.
         if (pointer) std::memset(static_cast<void*>(pointer), 0xA5, count * sizeof(value_type_));
         std::free(pointer);
@@ -335,10 +338,6 @@ auto make_scalar(unsigned value) noexcept {
  *  hundreds of microseconds, stretching the lock & watermark contention windows far beyond
  *  anything hardware timing produces - a poor man's schedule fuzzer. */
 struct flaky_waiter_t {
-    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
-    void operator()(std::atomic<value_type_> const&, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
-        misbehave_();
-    }
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
     void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
         misbehave_();

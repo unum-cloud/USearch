@@ -250,32 +250,32 @@ std::size_t check_hash_set_arena_growth() noexcept {
         using set_t = growing_hash_set<u32_t, std::hash<u32_t>, arena_allocator<std::byte, upstream_t>>;
         arena_t arena {upstream_t(ledger)};
         failures += expect(succeeded(arena.reserve_exactly(1024)));
-        std::ptrdiff_t const seed_bytes = ledger.live_bytes.load();
+        std::ptrdiff_t const seed_bytes = ledger.live_bytes;
 
         set_t set {arena_allocator<std::byte, upstream_t>(arena)};
         failures += expect(succeeded(set.reserve(16)));
-        failures += expect_eq(ledger.live_bytes.load(), seed_bytes); // The seed chunk served it.
+        failures += expect_eq(ledger.live_bytes, seed_bytes); // The seed chunk served it.
         for (u32_t value = 0; value != 16; ++value) failures += expect(set.insert(value) == membership_t::absent_k);
 
         failures += expect(succeeded(set.reserve(4'096)));
-        failures += expect(ledger.live_bytes.load() > seed_bytes); // A wider chunk opened beside the seed.
+        failures += expect(ledger.live_bytes > seed_bytes); // A wider chunk opened beside the seed.
         failures += expect(arena.capacity() > 1024u);
         for (u32_t value = 0; value != 16; ++value) failures += expect(set.contains(value));
         for (u32_t value = 16; value != 4'096; ++value) failures += expect(set.insert(value) == membership_t::absent_k);
 
-        ledger.byte_budget.store(ledger.live_bytes.load());
+        ledger.byte_budget = ledger.live_bytes;
         failures += expect_eq(set.reserve(1u << 20), status_t::bad_alloc_k);
         failures += expect_eq(set.size(), 4'096u);
         failures += expect(set.contains(4'095));
 
-        std::ptrdiff_t const grown_bytes = ledger.live_bytes.load();
+        std::ptrdiff_t const grown_bytes = ledger.live_bytes;
         set.reset();
         arena.clear();
         // The rewind drops the seed and keeps the widest chunk, so the next reservation lands in it.
-        failures += expect(ledger.live_bytes.load() < grown_bytes && ledger.live_bytes.load() > seed_bytes);
+        failures += expect(ledger.live_bytes < grown_bytes && ledger.live_bytes > seed_bytes);
         failures += expect(arena.capacity() > 1024u);
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 
@@ -493,7 +493,7 @@ std::size_t check_chunked_column() noexcept {
         failures += expect(runs > 1);
         failures += expect_eq(column.cover(2048), status_t::overflow_k);
     }
-    failures += expect_eq(ledger.live_bytes.load(), 0);
+    failures += expect_eq(ledger.live_bytes, 0);
 
     allocation_ledger_t built_ledger;
     {
@@ -501,13 +501,13 @@ std::size_t check_chunked_column() noexcept {
             counting_allocator_t {built_ledger}};
         failures += expect(succeeded(column.cover(20)));
         // Two chunks, then one word per row: every row was built, and from the column's allocator.
-        failures += expect_eq(built_ledger.total_allocations.load(), 2 + column.capacity());
+        failures += expect_eq(built_ledger.total_allocations, 2 + column.capacity());
         failures += expect(column[19].allocator.ledger_ == &built_ledger);
         column.reset();
-        failures += expect_eq(built_ledger.live_bytes.load(), 0);
+        failures += expect_eq(built_ledger.live_bytes, 0);
         failures += expect(succeeded(column.cover(20))); // The column's destructor destroys these.
     }
-    failures += expect_eq(built_ledger.live_bytes.load(), 0);
+    failures += expect_eq(built_ledger.live_bytes, 0);
     return failures;
 }
 

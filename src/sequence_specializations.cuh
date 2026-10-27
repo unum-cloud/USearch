@@ -21,6 +21,8 @@
 #include <type_traits> // `std::type_identity`
 #include <variant>     // `std::monostate` - no radius walk
 
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the scan totals
+
 #include "usearch/sequence/ram_index.hpp"
 #if USEARCH_ARCH_CUDA_
 #include "usearch/sequence/vram_nvidia_index.hpp"
@@ -249,7 +251,8 @@ template <cpu_class_t cpu_class_>
 struct sequence_nvme_variant {
     using executor_t = nvme_executor_t;
     using index_t = basic::nvme_indexes<us::sequence::codec_t, us::utilities::uuid_t, u32_t, sz_size_t,
-                                        default_io_engine_t, row_kit_of<cpu_class_>>;
+                                        default_io_engine_t, row_kit_of<cpu_class_>,
+                                        atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr sz_capability_t capability_k = stringzilla_capabilities_of(cpu_class_);
@@ -545,8 +548,8 @@ struct variant_bodies<sequence_traits_t> {
     /** Adds one entry's bytes to a key's statistics, from any thread. */
     template <typename value_type_>
     static void tally(usearch_sequence_key_stats_t& stats, value_type_ const& value) noexcept {
-        standard_atomic_ref<std::size_t>(stats.total_bytes).fetch_add(value.size(), std::memory_order_relaxed);
-        raise_to(stats.largest_bytes, value.size());
+        fu::standard_atomic_ref<std::size_t>(stats.total_bytes).add(value.size(), std::memory_order_relaxed);
+        raise_to<fu::standard_atomic_ref>(stats.largest_bytes, value.size());
     }
 };
 

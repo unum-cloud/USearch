@@ -8,8 +8,9 @@
  *  its rows from `last_allocated_id_` with an `acq_rel`, and only then releases the fresh rows; a
  *  thread that stayed non-negative takes its rows at once; a thread that found a deficit releases
  *  its subtract and waits for the counter to move. `release_capacity` returns rows no ID was
- *  dispensed against: a release no-return subtract on `last_allocated_id_`, then a release
- *  compare-exchange that adds to `remaining_capacity_` only once it reads non-negative. Every
+ *  dispensed against: a release no-return subtract on `last_allocated_id_`, a wait while
+ *  `remaining_capacity_` reads negative, then a release `fetch_add_if_at_least(count, count)`, which
+ *  adds only where the sum stays at least the count, so only onto a non-negative counter. Every
  *  scenario beside this file checks the election, one thread growing at a time, and existence,
  *  the rows a claim returns lying inside the chunks the claimer can see.
  */
@@ -40,6 +41,9 @@
 #ifndef same_geometry
 #define same_geometry false
 #endif
+#ifndef release_floor
+#define release_floor count
+#endif
 
 byte growing; // threads inside `create_next_chunk`
 
@@ -47,16 +51,18 @@ byte growing; // threads inside `create_next_chunk`
 // `seen_chunks`, `added` and `unclaimed`, since a local an inline declares costs a step every time
 // the inline runs.
 
-// `release_capacity`: the deflation, then an add that lands only on a whole counter; the guard
-// stands in for the header's acquire loads before the wait
+// `release_capacity`: the deflation, then `fetch_add_if_at_least(count, release_floor)`, which adds
+// only where `whole + count >= release_floor`; the guard stands in for the header's acquire loads
+// and its wait while the counter reads negative
 inline release_capacity(t, count) {
     add_no_return(t, last_allocated_id, deflation_order, 0 - count);
     if
     :: waits_for_whole ->
         do
         :: (newest_value(remaining_capacity) >= 0);
-            read_modify_write_if(t, remaining_capacity, order_release, whole >= 0, whole, whole + count);
-            if :: whole >= 0 -> break :: else fi
+            read_modify_write_if(t, remaining_capacity, order_release, whole + count >= release_floor,
+                                 whole, whole + count);
+            if :: whole + count >= release_floor -> break :: else fi
         od
     :: else -> add_no_return(t, remaining_capacity, order_release, count)
     fi

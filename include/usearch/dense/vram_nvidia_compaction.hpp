@@ -553,15 +553,15 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 if (phase_ == phase_t::cross_k || bin.count == 1) continue;
                 for (std::size_t place = 0; place != bin.count; ++place) {
                     vram_telemetry_block_t const spent = walks_[bin.state + place].spent();
-                    folded_.computed_distances += spent.scored;
+                    folded_.telemetry.computed_distances += spent.scored;
                     folded_.changed_nodes += spent.changed_nodes;
                     if (phase_ == phase_t::reselect_k)
-                        folded_.visited_nodes += shard_at_(members_[bin.first + place]).index->size();
+                        folded_.reselected_nodes += shard_at_(members_[bin.first + place]).index->size();
                 }
             }
             phase_ = static_cast<phase_t>(static_cast<u8_t>(phase_) + 1);
             if (phase_ != phase_t::reselect_k &&
-                on_visited(folded_.visited_nodes, moved_rows_) == continuation_t::cancel_k)
+                on_visited(folded_.reselected_nodes, moved_rows_) == continuation_t::cancel_k)
                 return status_t::cancelled_k;
         }
         return status_t::success_k;

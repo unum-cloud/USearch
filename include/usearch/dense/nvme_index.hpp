@@ -48,6 +48,8 @@
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::is_same_v`
 
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref`
+#include <forkunion/types.hpp>   // `fu::standard_yield_t`
 #include <numkong/tensor.hpp>
 
 #include "usearch/utilities/types.hpp"
@@ -114,15 +116,17 @@ struct nvme_part_t {
  *  several hops in flight, expanding the next closest frontier nodes inside its candidates' radius
  *  before earlier hops land, so a full batch walks hop by hop and a lone query takes the queue.
  */
-template <                                                    //
-    typename quads_kit_type_ = bf16_serial_quads_kit_t,       //
-    typename visits_kit_type_ = serial_visits_hash_set_kit_t, //
-    typename engine_type_ = default_io_engine_t               //
+template <                                                                    //
+    typename quads_kit_type_ = bf16_serial_quads_kit_t,                       //
+    typename visits_kit_type_ = serial_visits_hash_set_kit_t,                 //
+    typename engine_type_ = default_io_engine_t,                              //
+    template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
+    typename wait_type_ = fu::standard_yield_t                                //
     >
 struct nvme_index {
 
     // The sharded index walks every part of a row on one thread, through the walk machinery below.
-    template <typename, typename, typename, typename, typename, typename, typename>
+    template <typename, typename, typename, typename, typename, typename, typename, template <typename> class, typename>
     friend struct nvme_indexes;
     template <typename, typename, typename>
     friend class utilities::row_walker;
@@ -136,6 +140,12 @@ struct nvme_index {
     using executor_t = nvme_executor<engine_t>;
     using medium_t = typename engine_t::medium_t;
     using arena_t = typename executor_t::arena_t;
+
+    /** The CPU class's reference over the words one call's threads share, and its waiter, as
+     *  @c src/ picked them. */
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
+    using wait_t = wait_type_;
 
     using dot_result_t = typename scalar_t::dot_result_t;
     using distance_t = f32_t;

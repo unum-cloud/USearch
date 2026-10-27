@@ -1241,16 +1241,16 @@ pub(crate) fn lower_predicate(predicate: &Option<&Predicate>, callbacks: &Callba
 pub enum Mood {
     /// Idle threads sleep; the next call pays a wake-up.
     #[default]
-    Parked = 0,
+    Parked = 1,
     /// Idle threads stay hot, trading power for the next call's latency.
-    Spinning = 1,
+    Spinning = 2,
 }
 
 impl Mood {
     fn from_raw(value: usearch_mood_t) -> Option<Self> {
         match value {
-            0 => Some(Mood::Parked),
-            1 => Some(Mood::Spinning),
+            1 => Some(Mood::Parked),
+            2 => Some(Mood::Spinning),
             _ => None,
         }
     }
@@ -1280,19 +1280,19 @@ impl FromStr for Mood {
 #[non_exhaustive]
 pub enum Residency {
     /// Volatile memory, traversed by CPU threads.
-    Ram = 0,
+    Ram = 1,
     /// Accelerator memory, traversed by GPU warps on a chosen device.
-    Vram = 1,
+    Vram = 2,
     /// Persisted storage, traversed through pluggable I/O engines.
-    Nvme = 2,
+    Nvme = 3,
 }
 
 impl Residency {
     fn from_raw(value: usearch_residency_t) -> Option<Self> {
         match value {
-            0 => Some(Residency::Ram),
-            1 => Some(Residency::Vram),
-            2 => Some(Residency::Nvme),
+            1 => Some(Residency::Ram),
+            2 => Some(Residency::Vram),
+            3 => Some(Residency::Nvme),
             _ => None,
         }
     }
@@ -1328,16 +1328,16 @@ impl FromStr for Residency {
 pub enum Traversal {
     /// Walks the graph, scoring the rows the expansion reaches - approximate.
     #[default]
-    Walk = 0,
+    Walk = 1,
     /// Scores every row published when the query's scan starts - exact, on RAM and NVMe handles.
-    Scan = 1,
+    Scan = 2,
 }
 
 impl Traversal {
     fn from_raw(value: usearch_traversal_t) -> Option<Self> {
         match value {
-            0 => Some(Traversal::Walk),
-            1 => Some(Traversal::Scan),
+            1 => Some(Traversal::Walk),
+            2 => Some(Traversal::Scan),
             _ => None,
         }
     }
