@@ -207,6 +207,11 @@ void test_add_vector(size_t const collection_size, size_t const dimensions) {
  *  and adds vectors. It then performs a search query for each added vector to ensure that the vectors are correctly
  *  found in the index, validating the count of found vectors.
  */
+static int filter_even(usearch_key_t key, void* state) {
+    (void)state;
+    return (key % 2 == 0) ? 1 : 0;
+}
+
 void test_find_vector(size_t const collection_size, size_t const dimensions) {
     printf("Test: Find Vector... %zu vectors, %zu dimensions \n", collection_size, dimensions);
 
@@ -253,6 +258,18 @@ void test_find_vector(size_t const collection_size, size_t const dimensions) {
 
     free(threaded_keys);
     free(threaded_distances);
+    // Exact filtered search: find only even keys
+    for (size_t i = 0; i < collection_size; i++) {
+        size_t exact_count = usearch_exact_filtered_search(
+            index, data + i * dimensions, usearch_scalar_f32_k, collection_size,
+            filter_even, NULL, keys, distances, &error);
+        expect(!error, error);
+        expect(exact_count > 0, "Exact filtered search returned no results");
+        for (size_t j = 0; j < exact_count; j++) {
+            expect(keys[j] % 2 == 0, "Exact filtered search returned an odd key");
+        }
+    }
+
     free(data);
     free(keys);
     free(distances);
