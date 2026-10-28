@@ -402,11 +402,13 @@ jobs:
 
   build_wheels_linux:
     name: Build Python Wheels (Linux)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     needs: [test_ubuntu_gcc, test_ubuntu_clang]
     strategy:
       matrix:
         python-version: ["311", "312", "313", "314", "314t", "315", "315t"]
+        # aarch64 wheels build natively instead of under QEMU (free Arm runners for public repos)
+        arch: ["x86_64", "aarch64"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -414,8 +416,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
       - name: Install cibuildwheel
         uses: nick-fields/retry@v4
         with:
@@ -433,6 +433,7 @@ jobs:
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
           CIBW_PLATFORM: linux
+          CIBW_ARCHS: ${{ matrix.arch }}
 
   build_wheels_macos:
     name: Build Python Wheels (macOS)
