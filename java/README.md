@@ -72,7 +72,7 @@ import cloud.unum.usearch.Types.Scalar;
 public class Main {
     public static void main(String[] arguments) {
         DenseOptions options = new DenseOptions().dimensions(3).metric(DenseMetric.ANGULAR).quantization(Scalar.BF16);
-        try (Executor pool = Executor.forRam(new int[0], 0, 0);
+        try (Executor pool = Executor.forRam(new int[0], null, 0, 0);
                 Arena arena = new Arena(pool);
                 DenseIndex index = DenseIndex.initRam(options, new int[0])) {
 
@@ -125,10 +125,11 @@ The index itself runs a call on the calling thread instead: single-threaded on R
 There is one factory per C constructor, and each takes every argument its C twin takes, the last of them the `deferredLimit` sizing its table of deferred calls, where zero takes the default.
 
 ```java
-Executor.forRam(new int[] {0, 1}, 16, 0);                        // two NUMA nodes, sixteen workers
-Executor.onPool(forkUnionPool, new int[0], 0);                   // a thread pool the caller already runs
-Executor.forVram(new int[] {0, 1, 2, 3}, new MemorySegment[0], 0, 0); // four devices, own streams
-Executor.forNvme(new String[] {"/mnt/a", "/mnt/b"}, 8, 0);       // two drives, eight submission rings
+Executor.forRam(new int[] {0, 1}, null, 16, 0);                        // two NUMA nodes, sixteen workers
+Executor.forRam(new int[0], CPUClass.INTEL_HASWELL, 0, 0);             // waiters and atomics of one class
+Executor.onPool(forkUnionPool, new int[0], null, 0);                   // a thread pool the caller already runs
+Executor.forVram(new int[] {0, 1, 2, 3}, null, new MemorySegment[0], 0, 0); // four devices, own streams
+Executor.forNvme(new String[] {"/mnt/a", "/mnt/b"}, null, 8, 0);       // two drives, eight submission rings
 ```
 
 `forVram` takes no thread count: one host thread keeps every device fed, so the width of that pool is the device list itself.
@@ -136,7 +137,7 @@ It borrows one CUDA stream per device when given them, and caps scratch bytes pe
 Naming no hardware derives it: an empty domain list spreads over every memory domain the process may allocate on, an empty device list opens one free device, and an empty path list leaves every shard where its manifest already points.
 
 ```java
-try (Executor pool = Executor.forRam(new int[0], 16, 0)) {
+try (Executor pool = Executor.forRam(new int[0], null, 16, 0)) {
     DenseIndex.On receiver = index.on(pool);
     receiver.insert(keys, vectors);
     Matches matches = receiver.search(queries, 10, arena);
@@ -243,10 +244,10 @@ Each takes only the placement its own hardware has, one shard per memory domain,
 ```java
 DenseIndex inRam = DenseIndex.initRam(options, new int[] {0, 1});             // one graph per socket
 DenseIndex inVram = DenseIndex.initVram(options, new int[] {0, 1, 2, 3});     // sharded, never replicated
-DenseIndex copied = DenseIndex.loadRam("index.safegraphs", pool, new int[0], 0);
+DenseIndex copied = DenseIndex.loadRam("index.safegraphs", pool, new int[0], null, 0);
 DenseIndex uploaded = DenseIndex.loadVram("index.safegraphs", gpu, new int[] {0}, 0);
 DenseIndex mapped = DenseIndex.viewRam("index.safegraphs");
-DenseIndex served = DenseIndex.viewNvme("index.safegraphs.json", disks, new String[] {"/mnt/nvme0"});
+DenseIndex served = DenseIndex.viewNvme("index.safegraphs.json", disks, new String[] {"/mnt/nvme0"}, null);
 ```
 
 `initRam` and `initVram` create an empty, mutable index, and the `load` family copies a checkpoint in, each taking the executor its read fans out over, or `null` for the calling thread.

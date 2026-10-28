@@ -159,6 +159,12 @@ struct registered_suite_t {
     std::size_t (*check)(settings_t const& settings, gpu_device_t const& device) = nullptr;
 };
 
+/** Every vendor's driver table, shared with the tools' read-backs. */
+using us::tools::gpu_drivers;
+
+/** Every device the C interface numbers, in its order, which @c USEARCH_DEVICES indexes. */
+std::span<gpu_device_t const> gpu_devices() noexcept;
+
 /** Registers @p added when it names a check, and answers every suite registered so far. */
 inline std::span<registered_suite_t const> registered_suites(registered_suite_t added = {}) noexcept {
     static registered_suite_t suites[16];

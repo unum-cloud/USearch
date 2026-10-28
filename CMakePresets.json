@@ -9,12 +9,15 @@
     {
       "name": "base",
       "hidden": true,
-      "description": "Ninja, a build tree named after the preset, and a compilation database for the language server. No compiler is pinned here: the developer presets inherit `clang`, and CI rows override with -D CMAKE_CXX_COMPILER. Export CMAKE_CXX_COMPILER_LAUNCHER=ccache and CMAKE_CUDA_COMPILER_LAUNCHER=ccache to cache objects, the `.cu` units included.",
+      "description": "Ninja, a build tree named after the preset, and a compilation database for the language server. No compiler is pinned here: the developer presets inherit `clang`, and CI rows override with -D CMAKE_CXX_COMPILER. Export CMAKE_C_COMPILER_LAUNCHER, CMAKE_CXX_COMPILER_LAUNCHER and CMAKE_CUDA_COMPILER_LAUNCHER, like `ccache`, to cache objects.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build_${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_OPTIMIZE_DEPENDENCIES": "ON"
+        "CMAKE_OPTIMIZE_DEPENDENCIES": "ON",
+        "CMAKE_C_COMPILER_LAUNCHER": "$env{CMAKE_C_COMPILER_LAUNCHER}",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "$env{CMAKE_CXX_COMPILER_LAUNCHER}",
+        "CMAKE_CUDA_COMPILER_LAUNCHER": "$env{CMAKE_CUDA_COMPILER_LAUNCHER}"
       }
     },
     {
@@ -34,6 +37,24 @@
       "cacheVariables": {
         "CMAKE_C_COMPILER": "gcc",
         "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "linux",
+      "hidden": true,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "darwin",
+      "hidden": true,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
       }
     },
     {
@@ -97,6 +118,7 @@
       "displayName": "CUDA Check - fastest compile cycle with the `.cu` units",
       "description": "Same as `check`, plus the `.cu` units, with `ptxas` at `-O0` too, since optimizing each class unit's kernels is what dominates their build.",
       "cacheVariables": {
+        "CMAKE_CUDA_HOST_COMPILER": "clang++",
         "USEARCH_BUILD_CUDA": "ON",
         "USEARCH_CUDA_ARCHITECTURES": "native"
       }
@@ -165,7 +187,7 @@
       }
     },
     {
-      "name": "cuda_relwithdebinfo",
+      "name": "cuda",
       "inherits": [
         "base",
         "clang"
@@ -177,6 +199,7 @@
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
         "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O2 -lineinfo -DNDEBUG",
+        "CMAKE_CUDA_HOST_COMPILER": "clang++",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "ON",
         "USEARCH_BUILD_SHARED": "ON",
@@ -186,7 +209,7 @@
     },
     {
       "name": "cuda_trace",
-      "inherits": "cuda_relwithdebinfo",
+      "inherits": "cuda",
       "displayName": "CUDA Trace - where the build time goes",
       "description": "Emits a .json next to every object; open them in a flame-graph viewer or aggregate with ClangBuildAnalyzer to see which instantiations dominate.",
       "cacheVariables": {
@@ -195,49 +218,100 @@
     },
     {
       "name": "cuda_release",
-      "inherits": "cuda_relwithdebinfo",
+      "inherits": "cuda",
       "displayName": "CUDA Release - every architecture, Ampere through Blackwell",
-      "description": "Same targets as `cuda_relwithdebinfo`, at Release and emitting every architecture rather than the host GPU - what shipping artifacts and cross-machine runs need.",
+      "description": "Same targets as `cuda`, at Release and emitting every architecture rather than the host GPU - what shipping artifacts and cross-machine runs need.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "USEARCH_CUDA_ARCHITECTURES": "80;89;90a;100f;120f"
+        "USEARCH_CUDA_ARCHITECTURES": "80-real;89-real;90a-real;100f-real;120f-real;80-virtual"
       }
     },
     {
-      "name": "dgx_blackwell",
-      "inherits": "cuda_release",
-      "displayName": "DGX Blackwell - Xeon 6 with B200 or B300",
-      "description": "Built anywhere for a Granite Rapids host and Blackwell GPUs; its tests and benchmarks run on that machine.",
+      "name": "machine",
+      "hidden": true,
+      "inherits": [
+        "base",
+        "linux",
+        "clang"
+      ],
+      "description": "The C library for one machine: its CPU floor, only the CPU classes it runs, and its one GPU code. Compile only.",
       "cacheVariables": {
-        "CMAKE_SYSTEM_NAME": "Linux",
-        "CMAKE_SYSTEM_PROCESSOR": "x86_64",
-        "CMAKE_C_FLAGS": "-march=graniterapids",
-        "CMAKE_CXX_FLAGS": "-march=graniterapids",
-        "USEARCH_CUDA_ARCHITECTURES": "100f-real"
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_HOST_COMPILER": "clang++",
+        "USEARCH_BUILD_TEST": "OFF",
+        "USEARCH_BUILD_BENCH": "OFF",
+        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_CUDA": "ON",
+        "NUMKONG_PROFILE_CAPABILITIES": "ON",
+        "STRINGZILLA_PROFILE_CAPABILITIES": "ON"
       }
     },
     {
-      "name": "dgx_hopper",
-      "inherits": "cuda_release",
-      "displayName": "DGX Hopper - Xeon 4 with H100 or H200",
-      "description": "Built anywhere for a Sapphire Rapids host and Hopper GPUs; its tests and benchmarks run on that machine.",
+      "name": "xeon4_hopper",
+      "inherits": "machine",
+      "displayName": "Xeon 4 with Hopper - compile only",
       "cacheVariables": {
-        "CMAKE_SYSTEM_NAME": "Linux",
-        "CMAKE_SYSTEM_PROCESSOR": "x86_64",
-        "CMAKE_C_FLAGS": "-march=sapphirerapids",
-        "CMAKE_CXX_FLAGS": "-march=sapphirerapids",
-        "USEARCH_CUDA_ARCHITECTURES": "90a-real"
+        "USEARCH_TARGET_ARCH": "sapphirerapids",
+        "USEARCH_TARGET_CLASSES": "intel_sapphire",
+        "USEARCH_CUDA_ARCHITECTURES": "90a-real",
+        "NUMKONG_TARGET_SIERRA": "0",
+        "NUMKONG_TARGET_TURIN": "0",
+        "NUMKONG_TARGET_DIAMOND": "0",
+        "NUMKONG_TARGET_GRANITEAMX": "0",
+        "NUMKONG_TARGET_DIAMONDAMX": "0"
       }
     },
     {
-      "name": "rocm_relwithdebinfo",
+      "name": "xeon6_blackwell",
+      "inherits": "machine",
+      "displayName": "Xeon 6 with Blackwell - compile only",
+      "cacheVariables": {
+        "USEARCH_TARGET_ARCH": "graniterapids",
+        "USEARCH_TARGET_CLASSES": "intel_granite",
+        "USEARCH_CUDA_ARCHITECTURES": "100f-real",
+        "NUMKONG_TARGET_SIERRA": "0",
+        "NUMKONG_TARGET_TURIN": "0",
+        "NUMKONG_TARGET_DIAMOND": "0",
+        "NUMKONG_TARGET_DIAMONDAMX": "0"
+      }
+    },
+    {
+      "name": "grace_hopper",
+      "inherits": "machine",
+      "displayName": "Grace with Hopper - compile only",
+      "description": "Neoverse V2 runs `apple_m2` in full, while `aws_g5` needs WFET.",
+      "cacheVariables": {
+        "USEARCH_TARGET_ARCH": "neoverse-v2",
+        "USEARCH_TARGET_CLASSES": "apple_m2",
+        "USEARCH_CUDA_ARCHITECTURES": "90a-real",
+        "NUMKONG_TARGET_NEONFP8": "0",
+        "NUMKONG_TARGET_SME": "0",
+        "NUMKONG_TARGET_SMEF64": "0",
+        "NUMKONG_TARGET_SMEBI32": "0"
+      }
+    },
+    {
+      "name": "vera_rubin",
+      "inherits": "machine",
+      "displayName": "Vera with Rubin - compile only",
+      "description": "Olympus cores need Clang 22 or GCC 15, and CUDA 13.4 names no Rubin code, so it compiles 100f.",
+      "cacheVariables": {
+        "USEARCH_TARGET_ARCH": "olympus",
+        "USEARCH_TARGET_CLASSES": "nvidia_vera",
+        "USEARCH_CUDA_ARCHITECTURES": "100f-real",
+        "NUMKONG_TARGET_SME": "0",
+        "NUMKONG_TARGET_SMEF64": "0",
+        "NUMKONG_TARGET_SMEBI32": "0"
+      }
+    },
+    {
+      "name": "rocm",
       "inherits": "base",
       "displayName": "ROCm RelWithDebInfo - everything, the AMD arms included",
       "description": "ROCm's Clang compiles every unit, the AMD ones device-only into embedded code objects and host-only around them, so the library still loads without `libamdhip64`. Narrowed to MI300's gfx942.",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "/opt/rocm/llvm/bin/clang",
         "CMAKE_CXX_COMPILER": "/opt/rocm/llvm/bin/clang++",
-        "CMAKE_CXX_SCAN_FOR_MODULES": "OFF",
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
@@ -250,12 +324,45 @@
     },
     {
       "name": "rocm_release",
-      "inherits": "rocm_relwithdebinfo",
+      "inherits": "rocm",
       "displayName": "ROCm Release - every AMD class, CDNA3 through CDNA5",
-      "description": "Same targets as `rocm_relwithdebinfo`, at Release and embedding code objects for every AMD class - what shipping artifacts need.",
+      "description": "Same targets as `rocm`, at Release and embedding code objects for every AMD class - what shipping artifacts need.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "USEARCH_ROCM_ARCHITECTURES": "gfx942;gfx950;gfx1250"
+        "USEARCH_ROCM_ARCHITECTURES": "gfx942;gfx950;gfx1250;gfx1251"
+      }
+    },
+    {
+      "name": "linux_cuda_rocm",
+      "inherits": [
+        "library",
+        "linux"
+      ],
+      "displayName": "Linux CUDA and ROCm - the C library with both GPU vendors",
+      "description": "ROCm's Clang compiles every host unit and the AMD code objects, and NVCC hosts on it for the NVIDIA bundles, into one library that links neither vendor's runtime. One code per vendor, compile only.",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "/opt/rocm/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/rocm/llvm/bin/clang++",
+        "USEARCH_BUILD_CUDA": "ON",
+        "USEARCH_BUILD_ROCM": "ON",
+        "USEARCH_CUDA_ARCHITECTURES": "80-real",
+        "USEARCH_ROCM_ARCHITECTURES": "gfx942"
+      }
+    },
+    {
+      "name": "metal",
+      "inherits": [
+        "base",
+        "clang",
+        "darwin"
+      ],
+      "displayName": "Metal RelWithDebInfo - everything, the Apple arms included",
+      "description": "The Apple classes, whose kernels compile from embedded source at first use, beside the CPU suites.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_BUILD_METAL": "ON"
       }
     },
     {
@@ -320,6 +427,7 @@
       ],
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-emscripten.cmake",
       "cacheVariables": {
+        "USEARCH_TARGET_ARCH": "v128",
         "CMAKE_CROSSCOMPILING_EMULATOR": "node"
       }
     },
@@ -331,6 +439,7 @@
       ],
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm64-emscripten.cmake",
       "cacheVariables": {
+        "USEARCH_TARGET_ARCH": "v128relaxed",
         "CMAKE_CROSSCOMPILING_EMULATOR": "node"
       }
     },
@@ -340,15 +449,18 @@
         "base",
         "wasm"
       ],
-      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi.cmake"
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi.cmake",
+      "cacheVariables": {
+        "USEARCH_TARGET_ARCH": "v128"
+      }
     },
     {
-      "name": "windows_x64",
+      "name": "msvc2026_x64",
       "inherits": [
         "base",
         "windows"
       ],
-      "generator": "Visual Studio 17 2022",
+      "generator": "Visual Studio 18 2026",
       "architecture": "x64",
       "cacheVariables": {
         "USEARCH_BUILD_TEST": "ON",
@@ -357,7 +469,7 @@
       }
     },
     {
-      "name": "windows_arm64",
+      "name": "msvc2022_arm64",
       "inherits": [
         "windows",
         "library"
@@ -403,8 +515,8 @@
       "jobs": 0
     },
     {
-      "name": "cuda_relwithdebinfo",
-      "configurePreset": "cuda_relwithdebinfo",
+      "name": "cuda",
+      "configurePreset": "cuda",
       "jobs": 0
     },
     {
@@ -418,23 +530,55 @@
       "jobs": 0
     },
     {
-      "name": "dgx_blackwell",
-      "configurePreset": "dgx_blackwell",
-      "jobs": 0
+      "name": "xeon4_hopper",
+      "configurePreset": "xeon4_hopper",
+      "jobs": 0,
+      "targets": [
+        "usearch_shared"
+      ]
     },
     {
-      "name": "dgx_hopper",
-      "configurePreset": "dgx_hopper",
-      "jobs": 0
+      "name": "xeon6_blackwell",
+      "configurePreset": "xeon6_blackwell",
+      "jobs": 0,
+      "targets": [
+        "usearch_shared"
+      ]
     },
     {
-      "name": "rocm_relwithdebinfo",
-      "configurePreset": "rocm_relwithdebinfo",
+      "name": "grace_hopper",
+      "configurePreset": "grace_hopper",
+      "jobs": 0,
+      "targets": [
+        "usearch_shared"
+      ]
+    },
+    {
+      "name": "vera_rubin",
+      "configurePreset": "vera_rubin",
+      "jobs": 0,
+      "targets": [
+        "usearch_shared"
+      ]
+    },
+    {
+      "name": "rocm",
+      "configurePreset": "rocm",
       "jobs": 0
     },
     {
       "name": "rocm_release",
       "configurePreset": "rocm_release",
+      "jobs": 0
+    },
+    {
+      "name": "linux_cuda_rocm",
+      "configurePreset": "linux_cuda_rocm",
+      "jobs": 0
+    },
+    {
+      "name": "metal",
+      "configurePreset": "metal",
       "jobs": 0
     },
     {
@@ -490,14 +634,14 @@
       ]
     },
     {
-      "name": "windows_x64",
-      "configurePreset": "windows_x64",
+      "name": "msvc2026_x64",
+      "configurePreset": "msvc2026_x64",
       "jobs": 0,
       "configuration": "Release"
     },
     {
-      "name": "windows_arm64",
-      "configurePreset": "windows_arm64",
+      "name": "msvc2022_arm64",
+      "configurePreset": "msvc2022_arm64",
       "jobs": 0,
       "configuration": "Release"
     }
@@ -537,9 +681,9 @@
       }
     },
     {
-      "name": "cuda_relwithdebinfo",
+      "name": "cuda",
       "inherits": "base",
-      "configurePreset": "cuda_relwithdebinfo"
+      "configurePreset": "cuda"
     },
     {
       "name": "wasm32_emscripten",
@@ -572,9 +716,9 @@
       }
     },
     {
-      "name": "windows_x64",
+      "name": "msvc2026_x64",
       "inherits": "base",
-      "configurePreset": "windows_x64",
+      "configurePreset": "msvc2026_x64",
       "configuration": "Release"
     }
   ],
@@ -631,19 +775,19 @@
       ]
     },
     {
-      "name": "cuda_relwithdebinfo",
+      "name": "cuda",
       "steps": [
         {
           "type": "configure",
-          "name": "cuda_relwithdebinfo"
+          "name": "cuda"
         },
         {
           "type": "build",
-          "name": "cuda_relwithdebinfo"
+          "name": "cuda"
         },
         {
           "type": "test",
-          "name": "cuda_relwithdebinfo"
+          "name": "cuda"
         }
       ]
     },

@@ -38,20 +38,6 @@ inline constexpr usearch_distance_t
     distance_unit<us::sequence::overlap_metric<kit_type_, allocator_type_, cache_hints_type_>> =
         1.0 / us::sequence::overlap_resolution_k;
 
-/** Lowers one CPU class onto StringZilla's capability bits, which name backends rather than
- *  accumulate, so each class spells every backend its kits may pick, and a class adding none
- *  spells its parent's. */
-constexpr sz_capability_t stringzilla_capabilities_of(cpu_class_t cpu_class) noexcept {
-    switch (cpu_class) {
-    case cpu_class_t::serial_k: return sz_cap_serial_k;
-    case cpu_class_t::intel_haswell_k: return static_cast<sz_capability_t>(sz_cap_serial_k | sz_cap_haswell_k);
-    case cpu_class_t::intel_skylake_k:
-        return static_cast<sz_capability_t>(sz_cap_serial_k | sz_cap_haswell_k | sz_cap_skylake_k);
-    case cpu_class_t::aws_g2_k: return static_cast<sz_capability_t>(sz_cap_serial_k | sz_cap_neon_k);
-    default: return stringzilla_capabilities_of(parent_class_of(cpu_class));
-    }
-}
-
 /** Calls @p callback with a factory of the metric @p geometry names over a thread's arena, sized
  *  for a round of candidates, scoring with the kits @p capability_ picks, the alignment kind with
  *  the folded @p costs, and prefetching through @p cache_hints_type_. */
@@ -341,7 +327,8 @@ struct sequence_vram_nvidia_build {
     us::sequence::needleman_wunsch_costs_t const* costs = nullptr;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        std::unique_ptr<face_t> face {new (std::nothrow) face_t(cuda_virtual_memory_allocator<byte_t> {device})};
+        std::unique_ptr<face_t> face {new (std::nothrow)
+                                          face_t(cuda_virtual_memory_allocator<byte_t> {gpu_drivers().cuda, device})};
         if (face && (failed(face->window_widths(to_span(geometry->window_widths))) || failed(face->costs(*costs))))
             face.reset();
         return face;

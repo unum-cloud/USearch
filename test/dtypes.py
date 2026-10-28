@@ -7,8 +7,6 @@ Run:
     python -m pytest test/dtypes.py -v
 """
 
-from __future__ import annotations
-
 import copy
 import ctypes
 import pickle

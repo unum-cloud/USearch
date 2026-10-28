@@ -81,7 +81,7 @@ struct vram_shard_fanout {
 
     /** Makes shard @p shard 's device current, since a launch fails on a stream of any other. */
     static status_t enter(shards_t const& shards, std::size_t shard) noexcept {
-        return vendor_t::select(shards[shard].index->device_specs().ordinal);
+        return vendor_t::select(shards[shard].index->api(), shards[shard].index->device_specs().ordinal);
     }
 
     /**

@@ -427,6 +427,10 @@ typedef struct usearch_geospatial_view_ram_t {
 
     /** The @b optional terrain lines of sight are tested over, which no checkpoint carries. */
     usearch_geospatial_terrain_t terrain;
+
+    /** The class to dispatch as; a view reads its shards from the checkpoint, so only
+     *  @c usearch_ram_options_t::cpu_class is read. */
+    usearch_ram_options_t ram;
 } usearch_geospatial_view_ram_t;
 
 /**

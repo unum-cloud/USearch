@@ -29,10 +29,20 @@ set_target_properties(
     PROPERTIES OUTPUT_NAME "lib"
                C_STANDARD 11
                C_STANDARD_REQUIRED ON
+               C_VISIBILITY_PRESET hidden
+               CXX_VISIBILITY_PRESET hidden
+               VISIBILITY_INLINES_HIDDEN ON
 )
 
 target_include_directories(usearch_python PRIVATE ${PROJECT_SOURCE_DIR}/c ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_python PRIVATE ${usearch_python_library_})
+
+# The module's one export is its init function; the archive's entry points and siblings stay inside it.
+if (APPLE)
+    target_link_options(usearch_python PRIVATE "LINKER:-exported_symbol,_PyInit_lib")
+elseif (NOT MSVC)
+    target_link_options(usearch_python PRIVATE "LINKER:--exclude-libs,ALL")
+endif ()
 
 # CPython's own symbols come from the interpreter, so they are absent at link time and the linker must not insist.
 if (APPLE)

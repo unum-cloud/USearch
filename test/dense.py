@@ -7,8 +7,6 @@ Run:
     python -m pytest test/dense.py -v
 """
 
-from __future__ import annotations
-
 import asyncio
 import gc
 import os

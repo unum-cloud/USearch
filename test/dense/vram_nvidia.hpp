@@ -33,6 +33,19 @@ inline constexpr gpu_class_t dense_nvidia_class_k = NUMKONG_TARGET_HOPPER       
                                                     : NUMKONG_TARGET_ADA          ? gpu_class_t::nvidia_ada_k
                                                                                   : gpu_class_t::nvidia_ampere_k;
 
+/** Whether a device of compute capability @p major. @p minor runs the cells of
+ *  @ref dense_nvidia_class_k, as the driver reports it: the same family, and Ada from 8.9 on. */
+constexpr bool dense_nvidia_runs(u32_t major, u32_t minor) noexcept {
+    cuda_arch_t const arch = static_cast<cuda_arch_t>(major * 100 + minor * 10);
+    switch (dense_nvidia_class_k) {
+    case gpu_class_t::nvidia_ada_k: return major == 8 && arch >= cuda_arch_ada_k;
+    case gpu_class_t::nvidia_hopper_k: return major == 9;
+    case gpu_class_t::nvidia_blackwell_k: return major == 10;
+    case gpu_class_t::nvidia_blackwellrtx_k: return major == 12;
+    default: return major == 8 && arch < cuda_arch_ada_k;
+    }
+}
+
 /** The library's fatbin of @p dtype_ 's kernels for @ref dense_nvidia_class_k, under the ceiling
  *  the library compiles that class with. */
 template <nk_dtype_t dtype_>
@@ -71,7 +84,7 @@ struct vram_cell<gpu_vendor_t::nvidia_k, dtype_, kernel_> {
 
     /** Builds the cell's index over @p ledger, on the stream's device. */
     std::unique_ptr<index_t> operator()(allocation_ledger_t& ledger) const noexcept {
-        counting_cuda_allocator_t const allocator {ledger, stream.device};
+        counting_cuda_allocator_t const allocator {ledger, *stream.api, stream.device};
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, allocator, allocator));
     }
 

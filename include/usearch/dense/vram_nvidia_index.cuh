@@ -112,9 +112,9 @@ vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_all
         std::size_t const ceiling_rows = core.vectors_matrix_.reserved_bytes() / core.row_bytes() - 1;
         u32_t const rows = static_cast<u32_t>(min_of<std::size_t>(ceiling_rows, 0x7FFFFFFFu));
         u32_t const vector_row_bytes = static_cast<u32_t>(core.row_bytes());
-        cuda_rows_map_t const map = cuda_set_device(core.device_.ordinal) == cuda_success_k
-                                        ? cuda_encode_rows_map(core.storage().vectors, vector_row_bytes, rows,
-                                                               min_of(vector_row_bytes, window_bytes))
+        cuda_rows_map_t const map = cuda_set_device(core.api(), core.device_.ordinal) == cuda_success_k
+                                        ? cuda_encode_rows_map(core.api(), core.storage().vectors, vector_row_bytes,
+                                                               rows, min_of(vector_row_bytes, window_bytes))
                                         : cuda_rows_map_t {};
         u32_t idle = 0;
         if (state.compare_exchange_strong(idle, 1, std::memory_order_acquire)) {

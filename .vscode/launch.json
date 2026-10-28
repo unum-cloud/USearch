@@ -72,7 +72,7 @@
       "name": "Unit Test CUDA",
       "type": "cuda-gdb",
       "request": "launch",
-      "program": "${workspaceFolder}/build_cuda_relwithdebinfo/test/usearch_test_vram",
+      "program": "${workspaceFolder}/build_cuda/test/usearch_test_vram",
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
       "breakOnLaunch": false,
@@ -124,7 +124,7 @@
       "name": "Benchmark CUDA on Deep 10M",
       "type": "cuda-gdb",
       "request": "launch",
-      "program": "${workspaceFolder}/build_cuda_relwithdebinfo/bench/usearch_bench_dense_vram_index_search",
+      "program": "${workspaceFolder}/build_cuda/bench/usearch_bench_dense_vram_index_search",
       "cwd": "${workspaceFolder}",
       "args": [
         "--base-vectors",

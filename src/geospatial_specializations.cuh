@@ -1083,7 +1083,8 @@ struct geospatial_vram_nvidia_build_t {
         us::geospatial::vram_nvidia_index<u32_t, geospatial_nvidia_capabilities_k, geospatial_nvidia_fatbin_t>;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        return std::unique_ptr<face_t> {new (std::nothrow) face_t(cuda_virtual_memory_allocator<byte_t> {device})};
+        return std::unique_ptr<face_t> {new (std::nothrow)
+                                            face_t(cuda_virtual_memory_allocator<byte_t> {gpu_drivers().cuda, device})};
     }
 };
 
@@ -1130,7 +1131,7 @@ struct geospatial_vram_nvidia_variant {
 
     /** Loads the judging kernel onto the index's device. */
     status_t load_admit() noexcept {
-        auto [module, status] = cuda_module_t::load(device, geospatial_nvidia_fatbin_t::bytes());
+        auto [module, status] = cuda_module_t::load(gpu_drivers().cuda, device, geospatial_nvidia_fatbin_t::bytes());
         if (failed(status)) return status;
         admit_module = std::move(module);
         vram_kernel_symbol_t symbol;
@@ -1155,13 +1156,14 @@ struct geospatial_vram_nvidia_variant {
         std::size_t const heights_bytes = (borrowed.rows - 1) * borrowed.heights_stride +
                                           borrowed.columns * sizeof(f32_t);
         std::size_t const pack_bytes = host_terrain.terrain_pack.size();
-        if (cuda_set_device(device) != cuda_success_k) return status_t::device_error_k;
-        device_heights = cuda_make_unique(cuda_device_allocator<f32_t> {},
+        cuda_api_t const& api = gpu_drivers().cuda;
+        if (cuda_set_device(api, device) != cuda_success_k) return status_t::device_error_k;
+        device_heights = cuda_make_unique(cuda_device_allocator<f32_t> {api},
                                           divide_round_up(heights_bytes, sizeof(f32_t)));
-        device_terrain_pack = cuda_make_unique(cuda_device_allocator_t {}, pack_bytes);
+        device_terrain_pack = cuda_make_unique(cuda_device_allocator_t {api}, pack_bytes);
         if (!device_heights || !device_terrain_pack) return status_t::bad_alloc_k;
-        if (cuda_copy(device_heights.get(), borrowed.heights, heights_bytes) != cuda_success_k ||
-            cuda_copy(device_terrain_pack.get(), host_terrain.terrain_pack.data(), pack_bytes) != cuda_success_k)
+        if (cuda_copy(api, device_heights.get(), borrowed.heights, heights_bytes) != cuda_success_k ||
+            cuda_copy(api, device_terrain_pack.get(), host_terrain.terrain_pack.data(), pack_bytes) != cuda_success_k)
             return status_t::device_error_k;
         return status_t::success_k;
     }
@@ -1320,7 +1322,8 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
             admitting.column_step_degrees = borrowed.column_step_degrees;
             admitting.drop_scale = (1.0 - us::geospatial::terrain_refraction_k) / (2.0 * NUMKONG_EARTH_MEAN_RADIUS);
         }
-        if (cuda_copy_async(device_queries, queries.elements, count * sizeof(value_t), context.stream()) !=
+        cuda_api_t const& api = admit_module.api();
+        if (cuda_copy_async(api, device_queries, queries.elements, count * sizeof(value_t), context.stream()) !=
             cuda_success_k)
             return status_t::device_error_k;
         if (status_t const searched = face.search(queries, {candidate_ids, {count, candidates_count}},
@@ -1331,13 +1334,13 @@ inline expected<traversal_telemetry_t> geospatial_vram_nvidia_variant::search(
         u32_t const blocks = static_cast<u32_t>(
             min_of<std::size_t>(divide_round_up<std::size_t>(count, vram_warps_per_block_k),
                                 std::size_t {face.device_specs().multiprocessor_count} * 8));
-        if (failed(cuda_launch(admit, blocks, vram_warps_per_block_k * 32, 0, context.stream(),
+        if (failed(cuda_launch(api, admit, blocks, vram_warps_per_block_k * 32, 0, context.stream(),
                                cuda_overlap_t::serialized_k, admitting)) ||
-            cuda_copy_async(landed_ids.data(), matched_ids, judged * sizeof(node_id_t), context.stream()) !=
+            cuda_copy_async(api, landed_ids.data(), matched_ids, judged * sizeof(node_id_t), context.stream()) !=
                 cuda_success_k ||
-            cuda_copy_async(landed_metres.data(), matched_metres, judged * sizeof(f64_t), context.stream()) !=
+            cuda_copy_async(api, landed_metres.data(), matched_metres, judged * sizeof(f64_t), context.stream()) !=
                 cuda_success_k ||
-            cuda_copy_async(landed_counts.data(), matched_counts, count * sizeof(u64_t), context.stream()) !=
+            cuda_copy_async(api, landed_counts.data(), matched_counts, count * sizeof(u64_t), context.stream()) !=
                 cuda_success_k)
             return status_t::device_error_k;
         return context.wait();

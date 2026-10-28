@@ -2938,7 +2938,7 @@ static PyObject* DenseIndex_view_ram(PyTypeObject* type, PyObject* path_object) 
 }
 
 static char const doc_DenseIndex_view_nvme[] =                                               //
-    "view_nvme(path, /, *, paths=None, executor=None) -> DenseIndex\n"                       //
+    "view_nvme(path, /, *, paths=None, executor=None, cpu_class=None) -> DenseIndex\n"       //
     "\n"                                                                                     //
     "Serves a checkpoint in place from NVMe drives as a read-only index. External-memory\n"  //
     "graphs are never modified in place, so bigger ones come from merging shards built in\n" //
@@ -2951,23 +2951,27 @@ static char const doc_DenseIndex_view_nvme[] =                                  
     "    serve the parts from; None serves each where its manifest points. A path may\n"     //
     "    name a kernel device, a transport identifier, or a FUSE mount.\n"                   //
     "  executor (Executor, optional): The NVMe executor whose rings read the headers;\n"     //
-    "    None reads them on the calling thread.";
+    "    None reads them on the calling thread.\n"                                           //
+    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
 
 static PyObject* DenseIndex_view_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                       PyObject* args_names_tuple) {
-    PyObject *path_object, *paths_object, *executor_object, *decoded = NULL;
+    PyObject *path_object, *paths_object, *executor_object, *cpu_class_object, *decoded = NULL;
     usearch_py_argument_t const arguments[] = {
         {"path", &path_object},
         {"paths", &paths_object},
         {"executor", &executor_object},
+        {"cpu_class", &cpu_class_object},
     };
     usearch_bytes_view_t path;
     usearch_py_paths_t paths = {0};
     usearch_executor_t executor = NULL;
+    int cpu_class = 0;
     PyObject* result = NULL;
     if (usearch_py_arguments_parse("view_nvme", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         executor_optional(executor_object, &executor) != 0 ||
+        pinned_parse(cpu_class_object, &usearch_py_cpu_class, &cpu_class) != 0 ||
         usearch_py_path_from_object(path_object, &path, &decoded) != 0 ||
         usearch_py_paths_from_object(paths_object, &paths) != 0)
         goto release;
@@ -2979,7 +2983,7 @@ static PyObject* DenseIndex_view_nvme(PyTypeObject* type, PyObject* const* args,
         .executor = executor,
         .outcome = &outcome,
         .path = path,
-        .nvme = {paths.views, paths.count},
+        .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class},
     };
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_view_nvme(&view_arguments);

@@ -116,6 +116,10 @@ type DenseOptions struct {
 	// keys. Above one is what late interaction needs, a document being one key holding its
 	// token rows.
 	ValuesPerKey uint
+	// CPUClass is the class a host index dispatches as; the zero value derives the CPU's own.
+	CPUClass CPUClass
+	// GPUClass is the class a device index dispatches as; the zero value derives the devices' own.
+	GPUClass GPUClass
 }
 
 // DefaultDenseOptions is an angular bf16 index, with every optional field derived.
@@ -262,6 +266,8 @@ type DenseLoadRamConfig struct {
 	// MemoryDomains are the NUMA node IDs to place the parts on, part p landing whole on shard p
 	// modulo their count; empty derives every node the process may use.
 	MemoryDomains []int32
+	// CPUClass is the class to dispatch as; the zero value derives the CPU's own.
+	CPUClass CPUClass
 	// ValuesPerKey bounds how many entries may share one key, which no checkpoint records; zero
 	// derives to one.
 	ValuesPerKey uint
@@ -281,6 +287,8 @@ type DenseLoadVramConfig struct {
 	// Devices are the CUDA ordinals to place the parts on, part p landing whole on device p modulo
 	// their count; empty derives one free device.
 	Devices []int32
+	// GPUClass is the class to dispatch as; the zero value derives the devices' own.
+	GPUClass GPUClass
 	// ValuesPerKey bounds how many entries may share one key; zero derives to one.
 	ValuesPerKey uint
 	// Progress reports the shards placed and stops wherever it says to.
@@ -298,6 +306,8 @@ type DenseLoadRamBufferConfig struct {
 	// MemoryDomains are the NUMA node IDs to place shards on, the monolith landing whole on the
 	// first; empty derives every node the process may use.
 	MemoryDomains []int32
+	// CPUClass is the class to dispatch as; the zero value derives the CPU's own.
+	CPUClass CPUClass
 	// ValuesPerKey bounds how many entries may share one key; zero derives to one.
 	ValuesPerKey uint
 	// Progress reports the bytes placed and stops wherever it says to.
@@ -315,6 +325,8 @@ type DenseLoadVramBufferConfig struct {
 	// Devices are the CUDA ordinals to place shards on, the monolith landing whole on the first;
 	// empty derives one free device.
 	Devices []int32
+	// GPUClass is the class to dispatch as; the zero value derives the devices' own.
+	GPUClass GPUClass
 	// ValuesPerKey bounds how many entries may share one key; zero derives to one.
 	ValuesPerKey uint
 	// Progress reports the bytes placed and stops wherever it says to.
@@ -333,6 +345,8 @@ type DenseViewNvmeConfig struct {
 	// Paths are the devices or directories to serve the parts from; empty serves each where its
 	// manifest points.
 	Paths []string
+	// CPUClass is the class to dispatch as; the zero value derives the CPU's own.
+	CPUClass CPUClass
 }
 
 // DenseMetadataReadConfig carries the optional settings of DenseMetadataRead.
@@ -700,7 +714,7 @@ func DenseInitRam(options DenseOptions, memoryDomains []int32) (*DenseIndex, err
 		dimensions:     C.size_t(options.Dimensions),
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		ram:            lent.ram(memoryDomains),
+		ram:            lent.ram(memoryDomains, options.CPUClass),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)
@@ -720,7 +734,7 @@ func DenseInitVram(options DenseOptions, devices []int32) (*DenseIndex, error) {
 		dimensions:     C.size_t(options.Dimensions),
 		connectivity:   C.size_t(options.Connectivity),
 		values_per_key: C.size_t(options.ValuesPerKey),
-		vram:           lent.vram(devices),
+		vram:           lent.vram(devices, options.GPUClass),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)
@@ -743,7 +757,7 @@ func DenseLoadRam(path string, config *DenseLoadRamConfig) (*DenseIndex, error) 
 		executor:       executor,
 		outcome:        lent.outcome,
 		path:           lent.text(path),
-		ram:            lent.ram(config.MemoryDomains),
+		ram:            lent.ram(config.MemoryDomains, config.CPUClass),
 		values_per_key: C.size_t(config.ValuesPerKey),
 		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
@@ -768,7 +782,7 @@ func DenseLoadVram(path string, config *DenseLoadVramConfig) (*DenseIndex, error
 		executor:       executor,
 		outcome:        lent.outcome,
 		path:           lent.text(path),
-		vram:           lent.vram(config.Devices),
+		vram:           lent.vram(config.Devices, config.GPUClass),
 		values_per_key: C.size_t(config.ValuesPerKey),
 		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
@@ -793,7 +807,7 @@ func DenseLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*Dense
 		executor:       executor,
 		outcome:        lent.outcome,
 		buffer:         lent.bytes(buffer),
-		ram:            lent.ram(config.MemoryDomains),
+		ram:            lent.ram(config.MemoryDomains, config.CPUClass),
 		values_per_key: C.size_t(config.ValuesPerKey),
 		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
@@ -818,7 +832,7 @@ func DenseLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*Den
 		executor:       executor,
 		outcome:        lent.outcome,
 		buffer:         lent.bytes(buffer),
-		vram:           lent.vram(config.Devices),
+		vram:           lent.vram(config.Devices, config.GPUClass),
 		values_per_key: C.size_t(config.ValuesPerKey),
 		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
@@ -859,7 +873,7 @@ func DenseViewNvme(path string, config *DenseViewNvmeConfig) (*DenseIndex, error
 		executor: executor,
 		outcome:  lent.outcome,
 		path:     lent.text(path),
-		nvme:     lent.nvme(config.Paths),
+		nvme:     lent.nvme(config.Paths, config.CPUClass),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)

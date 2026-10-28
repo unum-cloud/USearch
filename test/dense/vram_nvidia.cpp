@@ -30,15 +30,16 @@ namespace unum::usearch::test::dense {
 
 std::size_t check_vram_nvidia(settings_t const& settings, gpu_device_t const& device) {
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    if (cuda_set_device(ordinal) != cuda_success_k)
+    cuda_api_t const& api = test::gpu_drivers().cuda;
+    if (cuda_set_device(api, ordinal) != cuda_success_k)
         return fmt::println("- CUDA: device #{} does not answer", ordinal), 1;
-    fmt::println("- CUDA: {} {} #{}, {} SMs, {} MiB", device.name,
-                 usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)), ordinal,
-                 device.compute_units, device.memory_bytes >> 20);
-    auto [executor, spawn_status] = cuda_executor_t::spawn(std::span<int const> {&ordinal, 1});
+    fmt::println("- CUDA: {} sm_{}{} #{}, {} SMs, {} MiB", device.name, device.architecture_major,
+                 device.architecture_minor, ordinal, device.compute_units, device.memory_bytes >> 20);
+    auto [executor, spawn_status] = cuda_executor_t::spawn(api, std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println("- CUDA: device #{} opens no stream", ordinal), 1;
     std::size_t failures_count = 0;
-    if (device.gpu_class == dense_nvidia_class_k) failures_count += check_vram_indexes(settings, executor);
+    if (dense_nvidia_runs(device.architecture_major, device.architecture_minor))
+        failures_count += check_vram_indexes(settings, executor);
     else
         fmt::println("- CUDA: dense rung cells skipped, the build names {} for them",
                      usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(dense_nvidia_class_k)));

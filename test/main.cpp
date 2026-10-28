@@ -13,12 +13,36 @@
 
 #include <vector> // `std::vector` - the selected devices
 
-#include "usearch/utilities/vram_device.hpp" // `gpu_devices` - the listing `USEARCH_DEVICES` indexes
+#include "usearch/utilities/vram_device.hpp" // `gpu_drivers_t`, `list_gpu_devices` - the listing `USEARCH_DEVICES` indexes
 
 #include "harness.hpp"
 
 using namespace unum::usearch;
 using namespace unum::usearch::test;
+
+std::span<gpu_device_t const> test::gpu_devices() noexcept {
+    struct listing_t {
+        gpu_device_t devices[3 * gpu_devices_capacity_k];
+        std::size_t count = 0;
+    };
+    // The C interface numbers only the devices some class runs on, so the runner keeps the same.
+    static listing_t const listing = [] {
+        listing_t reported, numbered;
+        reported.count = list_gpu_devices(gpu_drivers(), reported.devices);
+        usearch_gpu_device_t devices[3 * gpu_devices_capacity_k];
+        std::size_t devices_count = 0;
+        usearch_outcome_t outcome {};
+        usearch_gpu_devices_t arguments {&outcome, devices, std::size(devices), &devices_count};
+        usearch_gpu_devices(&arguments);
+        for (std::size_t position = 0; position != devices_count; ++position)
+            for (std::size_t raw = 0; raw != reported.count; ++raw)
+                if (static_cast<usearch_gpu_vendor_t>(reported.devices[raw].vendor) == devices[position].vendor &&
+                    reported.devices[raw].vendor_ordinal == devices[position].vendor_ordinal)
+                    numbered.devices[numbered.count++] = reported.devices[raw];
+        return numbered;
+    }();
+    return {listing.devices, listing.count};
+}
 
 /** The positions in the listing @p settings names, or of the first listed device of every vendor
  *  when it names none. An ordinal past the listing exits with status 1 once the listing printed. */
@@ -44,8 +68,8 @@ static std::vector<std::size_t> selected_devices(settings_t const& settings) {
 static std::size_t check_devices(settings_t const& settings) {
     std::span<gpu_device_t const> const listed = gpu_devices();
     for (std::size_t position = 0; position != listed.size(); ++position)
-        fmt::println("- GPU {}: {}, {} #{}, {} compute units, {} MiB", position, listed[position].name,
-                     usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(listed[position].gpu_class)),
+        fmt::println("- GPU {}: {}, architecture {}.{} #{}, {} compute units, {} MiB", position, listed[position].name,
+                     listed[position].architecture_major, listed[position].architecture_minor,
                      listed[position].vendor_ordinal, listed[position].compute_units,
                      listed[position].memory_bytes >> 20);
     std::vector<std::size_t> const ordinals = selected_devices(settings);

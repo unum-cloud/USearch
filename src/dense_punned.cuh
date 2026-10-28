@@ -249,7 +249,8 @@ usearch_executor_t call_executor_for(punned_dense_index<home_> const& punned, us
         for (int const earlier : devices) opened |= earlier == device;
         if (!opened) devices.push_back_reserved(device);
     }
-    auto [built, status] = punned_dense_index<home_>::executor_t::spawn(devices);
+    using executor_t = typename punned_dense_index<home_>::executor_t;
+    auto [built, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}), devices);
     if (failed(status)) return propagate_error(status, outcome), nullptr;
     call_executor.executor = gpu_executor_t {std::move(built)};
     return &call_executor;

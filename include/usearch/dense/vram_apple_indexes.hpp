@@ -152,7 +152,7 @@ struct vram_apple_indexes {
      *    flight.
      */
     status_t emplace(typename executor_t::stream_t const& stream) noexcept {
-        std::unique_ptr<index_t> shard = build_(stream.handle.device);
+        std::unique_ptr<index_t> shard = build_(stream.handle);
         if (!shard) return status_t::bad_alloc_k;
         return emplace(std::move(shard));
     }
@@ -2116,9 +2116,9 @@ struct vram_apple_indexes {
         growing_buffer<scored_node_t, forkunion_allocator_t> frame_;
     };
 
-    /** One unreserved shard placed on @p device; null when the allocation fails. */
-    std::unique_ptr<index_t> build_(int device) const noexcept {
-        metal_shared_allocator_t const allocator {device};
+    /** One unreserved shard placed on the device of @p stream; null when the allocation fails. */
+    std::unique_ptr<index_t> build_(metal_stream_t const& stream) const noexcept {
+        metal_shared_allocator_t const allocator {stream};
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel(), allocator, allocator));
     }
 

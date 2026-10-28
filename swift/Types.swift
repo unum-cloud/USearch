@@ -773,6 +773,108 @@ extension Deferred {
     }
 }
 
+// MARK: - Classes
+
+/// A CPU family USearch ships tuned variants for, carrying the C enumerator; dispatch reports its pick
+/// in this vocabulary, and a RAM or NVMe placement or executor may pin one.
+public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: usearch_cpu_class_t
+
+    /// The portable floor, with no SIMD assumptions.
+    public static let serial = CPUClass(raw: usearch_cpu_class_serial_k)
+    /// Haswell-class x86: AVX2 and FMA.
+    public static let intelHaswell = CPUClass(raw: usearch_cpu_class_intel_haswell_k)
+    /// Sierra Forest-class x86: AVX-VNNI without AVX-512.
+    public static let intelSierra = CPUClass(raw: usearch_cpu_class_intel_sierra_k)
+    /// Skylake-class x86: the AVX-512 foundation.
+    public static let intelSkylake = CPUClass(raw: usearch_cpu_class_intel_skylake_k)
+    /// Icelake-class x86: AVX-512 VNNI and VPOPCNT.
+    public static let intelIcelake = CPUClass(raw: usearch_cpu_class_intel_icelake_k)
+    /// Genoa-class x86: native bf16 dot products over AVX-512.
+    public static let amdGenoa = CPUClass(raw: usearch_cpu_class_amd_genoa_k)
+    /// Sapphire Rapids-class x86: AVX-512 FP16 and the AMX tiles.
+    public static let intelSapphire = CPUClass(raw: usearch_cpu_class_intel_sapphire_k)
+    /// Granite Rapids-class x86: the AMX-FP16 tiles.
+    public static let intelGranite = CPUClass(raw: usearch_cpu_class_intel_granite_k)
+    /// Diamond Rapids-class x86: AVX10.2's FP8 conversions.
+    public static let intelDiamond = CPUClass(raw: usearch_cpu_class_intel_diamond_k)
+    /// Graviton2-class Arm: the bare NEON floor.
+    public static let awsG2 = CPUClass(raw: usearch_cpu_class_aws_g2_k)
+    /// Armv8.6 NEON with dot products and bf16.
+    public static let appleM2 = CPUClass(raw: usearch_cpu_class_apple_m2_k)
+    /// Apple M4-class Arm: the SME outer-product tiles.
+    public static let appleM4 = CPUClass(raw: usearch_cpu_class_apple_m4_k)
+    /// Graviton5-class Arm: Armv9.2.
+    public static let awsG5 = CPUClass(raw: usearch_cpu_class_aws_g5_k)
+    /// Vera-class Arm: FP8 dot products.
+    public static let nvidiaVera = CPUClass(raw: usearch_cpu_class_nvidia_vera_k)
+    /// Alibaba C930-class RISC-V: RVA23 vectors.
+    public static let alibabaC930 = CPUClass(raw: usearch_cpu_class_alibaba_c930_k)
+    /// WebAssembly with fixed-width simd128.
+    public static let wasm32V128 = CPUClass(raw: usearch_cpu_class_wasm32_v128_k)
+    /// WebAssembly with relaxed SIMD, threads and 64-bit addressing.
+    public static let wasm64Extended = CPUClass(raw: usearch_cpu_class_wasm64_extended_k)
+
+    /// The class as the library spells it. Calls `usearch_cpu_class_name`.
+    public var description: String { String(cString: usearch_cpu_class_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no class carries. Calls `usearch_cpu_class_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, usearch_cpu_class_from_name, usearch_cpu_class_name),
+            raw != usearch_cpu_class_unknown_k
+        else { return nil }
+        self.raw = raw
+    }
+
+    init(raw: usearch_cpu_class_t) { self.raw = raw }
+}
+
+/// A GPU family USearch ships tuned variants for, carrying the C enumerator; a VRAM placement or
+/// executor may pin one.
+public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: usearch_gpu_class_t
+
+    /// Ampere-class NVIDIA, and every NVIDIA GPU without a class of its own.
+    public static let nvidiaAmpere = GPUClass(raw: usearch_gpu_class_nvidia_ampere_k)
+    /// Ada-class NVIDIA: the fp8 conversions.
+    public static let nvidiaAda = GPUClass(raw: usearch_gpu_class_nvidia_ada_k)
+    /// Hopper-class NVIDIA.
+    public static let nvidiaHopper = GPUClass(raw: usearch_gpu_class_nvidia_hopper_k)
+    /// Blackwell-class NVIDIA.
+    public static let nvidiaBlackwell = GPUClass(raw: usearch_gpu_class_nvidia_blackwell_k)
+    /// Consumer Blackwell NVIDIA.
+    public static let nvidiaBlackwellRTX = GPUClass(raw: usearch_gpu_class_nvidia_blackwellrtx_k)
+    /// Rubin-class NVIDIA.
+    public static let nvidiaRubin = GPUClass(raw: usearch_gpu_class_nvidia_rubin_k)
+    /// CDNA3 AMD: gfx942.
+    public static let amdCDNA3 = GPUClass(raw: usearch_gpu_class_amd_cdna3_k)
+    /// CDNA4 AMD: gfx950.
+    public static let amdCDNA4 = GPUClass(raw: usearch_gpu_class_amd_cdna4_k)
+    /// CDNA5 AMD: gfx1250.
+    public static let amdCDNA5 = GPUClass(raw: usearch_gpu_class_amd_cdna5_k)
+    /// Apple7-family GPUs, and every Apple GPU without a class of its own.
+    public static let appleMetal7 = GPUClass(raw: usearch_gpu_class_apple_metal7_k)
+    /// Apple9-family GPUs.
+    public static let appleMetal9 = GPUClass(raw: usearch_gpu_class_apple_metal9_k)
+    /// Apple10-family GPUs.
+    public static let appleMetal10 = GPUClass(raw: usearch_gpu_class_apple_metal10_k)
+
+    /// The class as the library spells it. Calls `usearch_gpu_class_name`.
+    public var description: String { String(cString: usearch_gpu_class_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no class carries. Calls `usearch_gpu_class_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, usearch_gpu_class_from_name, usearch_gpu_class_name),
+            raw != usearch_gpu_class_unknown_k
+        else { return nil }
+        self.raw = raw
+    }
+
+    init(raw: usearch_gpu_class_t) { self.raw = raw }
+}
+
 // MARK: - Executors
 
 /// Where an executor computes, and with it where the arenas it makes keep their memory, carrying
@@ -875,9 +977,11 @@ public final class Executor: @unchecked Sendable {
     ///
     /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves the
     /// ordered publication path. Every factory's `deferredLimit` sizes the table of deferred calls
-    /// it tracks at once, and zero takes a default. Calls `usearch_executor_for_ram`.
+    /// it tracks at once, and zero takes a default. A `cpuClass` narrows the threads' waiters and
+    /// atomics to that class's; nil derives the CPU's own. Calls `usearch_executor_for_ram`.
     public static func forRam(
         memoryDomains: [Int32] = [],
+        cpuClass: CPUClass? = nil,
         threads: Int = 0,
         deferredLimit: Int = 0
     ) throws(USearchError) -> Executor {
@@ -887,7 +991,11 @@ public final class Executor: @unchecked Sendable {
             var arguments = usearch_executor_for_ram_t(
                 executor: executor,
                 outcome: landing.outcome,
-                ram: usearch_ram_options_t(memory_domains: domains, memory_domains_count: memoryDomains.count),
+                ram: usearch_ram_options_t(
+                    memory_domains: domains,
+                    memory_domains_count: memoryDomains.count,
+                    cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k
+                ),
                 threads: threads,
                 deferred_limit: deferredLimit
             )
@@ -901,6 +1009,7 @@ public final class Executor: @unchecked Sendable {
     /// the executor, and keeps its lender's mood. Calls `usearch_executor_on_pool`.
     public static func onPool(
         memoryDomains: [Int32] = [],
+        cpuClass: CPUClass? = nil,
         pool: UnsafeMutableRawPointer,
         deferredLimit: Int = 0
     ) throws(USearchError) -> Executor {
@@ -910,7 +1019,11 @@ public final class Executor: @unchecked Sendable {
             var arguments = usearch_executor_on_pool_t(
                 executor: executor,
                 outcome: landing.outcome,
-                ram: usearch_ram_options_t(memory_domains: domains, memory_domains_count: memoryDomains.count),
+                ram: usearch_ram_options_t(
+                    memory_domains: domains,
+                    memory_domains_count: memoryDomains.count,
+                    cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k
+                ),
                 pool: pool,
                 deferred_limit: deferredLimit
             )
@@ -926,12 +1039,13 @@ public final class Executor: @unchecked Sendable {
     /// `usearch_executor_for_nvme`.
     public static func forNvme(
         paths: [String] = [],
+        cpuClass: CPUClass? = nil,
         threads: Int = 0,
         deferredLimit: Int = 0
     ) throws(USearchError) -> Executor {
         let landing = Landing()
         let executor = landing.slots(usearch_executor_t?.none)
-        withPaths(paths) { nvme in
+        withPaths(paths, cpuClass) { nvme in
             var arguments = usearch_executor_for_nvme_t(
                 executor: executor,
                 outcome: landing.outcome,
@@ -949,9 +1063,11 @@ public final class Executor: @unchecked Sendable {
     ///
     /// `streams` borrows the caller's CUDA streams, one per device in `devices` order, and nil
     /// creates the executor's own. A zero `scratchLimit` lets per-device scratch grow as geometry
-    /// asks. Calls `usearch_executor_for_vram`.
+    /// asks. A `gpuClass` the devices do not run is refused with `unsupported`. Calls
+    /// `usearch_executor_for_vram`.
     public static func forVram(
         devices: [Int32] = [],
+        gpuClass: GPUClass? = nil,
         streams: [UnsafeMutableRawPointer?]? = nil,
         scratchLimit: Int = 0,
         deferredLimit: Int = 0
@@ -967,7 +1083,11 @@ public final class Executor: @unchecked Sendable {
                 var arguments = usearch_executor_for_vram_t(
                     executor: executor,
                     outcome: landing.outcome,
-                    vram: usearch_vram_options_t(devices: lentDevices, devices_count: devices.count),
+                    vram: usearch_vram_options_t(
+                        devices: lentDevices,
+                        devices_count: devices.count,
+                        gpu_class: gpuClass?.raw ?? usearch_gpu_class_unknown_k
+                    ),
                     streams: streams == nil ? nil : lentStreams,
                     scratch_limit: scratchLimit,
                     deferred_limit: deferredLimit
@@ -991,8 +1111,13 @@ public final class Executor: @unchecked Sendable {
     }
 }
 
-/// Lends NVMe paths as the byte views `usearch_nvme_options_t` points at, for one blocking call.
-func withPaths<Value>(_ paths: [String], _ body: (usearch_nvme_options_t) -> Value) -> Value {
+/// Lends NVMe paths as the byte views `usearch_nvme_options_t` points at, beside the class it
+/// dispatches as, for one blocking call.
+func withPaths<Value>(
+    _ paths: [String],
+    _ cpuClass: CPUClass?,
+    _ body: (usearch_nvme_options_t) -> Value
+) -> Value {
     let bytes = paths.flatMap(\.utf8)
     return bytes.withUnsafeBufferPointer { bytes in
         var offset = 0
@@ -1001,7 +1126,13 @@ func withPaths<Value>(_ paths: [String], _ body: (usearch_nvme_options_t) -> Val
             return usearch_bytes_view_t(data: bytes.baseAddress.map { $0 + offset }, length: path.utf8.count)
         }
         return views.withUnsafeBufferPointer { views in
-            body(usearch_nvme_options_t(paths: views.baseAddress, paths_count: views.count))
+            body(
+                usearch_nvme_options_t(
+                    paths: views.baseAddress,
+                    paths_count: views.count,
+                    cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k
+                )
+            )
         }
     }
 }

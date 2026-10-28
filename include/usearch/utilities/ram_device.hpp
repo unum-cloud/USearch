@@ -195,35 +195,37 @@ struct forkunion_executor_t {
      *  @par Statuses:
      *  - @c contended_k The fresh pool is running another dispatch.
      */
-    static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads) noexcept {
+    static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads,
+                                                fu_capabilities_t allowed = fu_capabilities_all_k) noexcept {
         auto const [count, status] = threads ? expected<std::size_t> {threads, status_t::success_k}
                                              : default_threads(topology);
         if (failed(status)) return {{}, status};
         bool const os_threads = fu_comptime_capabilities() & fu_capability_os_threads_k;
-        return spawn(topology, count, count != 1 && os_threads ? fu_caller_exclusive_k : fu_caller_inclusive_k);
+        return spawn(topology, count, count != 1 && os_threads ? fu_caller_exclusive_k : fu_caller_inclusive_k,
+                     allowed);
     }
 
     /**
      *  Spawns @p threads over @p topology with the caller inside the pool or outside it, as
-     *  @p exclusivity says; zero means @ref default_threads.
+     *  @p exclusivity says, using only the ForkUnion facilities @p allowed names; zero threads
+     *  means @ref default_threads.
      *
      *  @par Statuses:
      *  - @c contended_k The fresh pool is running another dispatch.
      */
     static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads,
-                                                fu_caller_exclusivity_t exclusivity) noexcept {
+                                                fu_caller_exclusivity_t exclusivity,
+                                                fu_capabilities_t allowed) noexcept {
         if (!threads) {
             auto const [count, status] = default_threads(topology);
             if (failed(status)) return {{}, status};
             threads = count;
         }
         // A flat pool, unlike a distributed one, never pins the caller's own thread.
-        fu_capabilities_t const capabilities =
-            exclusivity == fu_caller_inclusive_k
-                ? static_cast<fu_capabilities_t>(fu_capabilities_all_k & ~fu_capability_place_memory_on_domain_k)
-                : fu_capabilities_all_k;
+        if (exclusivity == fu_caller_inclusive_k)
+            allowed = static_cast<fu_capabilities_t>(allowed & ~fu_capability_place_memory_on_domain_k);
         fu_pool_t pool = nullptr;
-        if (fu_pool_new(pool_name_k, capabilities, &pool) != fu_success_k) return {{}, status_t::bad_alloc_k};
+        if (fu_pool_new(pool_name_k, allowed, &pool) != fu_success_k) return {{}, status_t::bad_alloc_k};
         if (fu_pool_spawn(topology, pool, threads, exclusivity) != fu_success_k)
             return fu_pool_delete(pool), expected<forkunion_executor_t> {{}, status_t::uninitialized_k};
         return acquire(topology, pool);

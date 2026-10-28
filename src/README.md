@@ -82,12 +82,12 @@ Each class unit compiles its variants with the class's own flags into a table of
 - `usearch_dense_nvme_variants` reuses those flags for the classes whose kits a storage walk tells apart, so `aws_g5`, `alibaba_c930` and the WebAssembly classes take none.
 - `usearch_dense_vram_variants_nvidia_<class>` embeds one NVIDIA class's fatbin per dtype, each compiled by NVCC device-only from `dense/vram_kernels_nvidia_<dtype>.cu` for the class's own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
   The class unit `dense/vram_variants_nvidia_<class>.cpp` holds the host variants, finding each dtype's fatbin in the table `dense_nvidia_<class>_bundles` CMake writes in `dense_dtypes_t` order, and the device units include `dense_kernels.cuh` rather than the specializations, whose CPU metrics would bring NumKong's own kernels into every pass.
-  Nothing links `libcuda` or the CUDA runtime: `cuda_api` opens the driver at first use through entry points it declares itself, and Clang's host-only pass builds the variants.
+  Nothing links `libcuda` or the CUDA runtime: `cuda_api_t::load` opens the driver through entry points it declares itself, once per process at the first VRAM call, and Clang's host-only pass builds the variants.
 - `usearch_dense_vram_variants_amd_<class>` embeds one AMD class's code object per dtype, compiled for its own processors, and the CDNA3 floor for CDNA4 too.
   Its kernels sit in `dense/vram_kernels_amd_<dtype>.hip`, compiled device-only once per class beside the class unit, which names none of them.
-  Nothing links `libamdhip64`: `hip_api` opens it at first use through entry points it declares itself, so host units need no ROCm headers.
+  Nothing links `libamdhip64`: `hip_api_t::load` opens it through entry points it declares itself, so host units need no ROCm headers.
 - `usearch_dense_vram_variants_apple` compiles the Apple variants as plain C++, one unit per Apple class, their kernels compiled from embedded source at first use.
-  Nothing links Metal, Foundation or `libobjc`: `metal_api` opens them at first use.
+  Nothing links Metal, Foundation or `libobjc`: `metal_api_t::load` opens them.
 - `usearch_sequence_cpu_variants`, `usearch_shapes_cpu_variants` and `usearch_geospatial_cpu_variants` collect each modality's class units, `<modality>/cpu_variants_<class>.cpp`, each instantiating its RAM and NVMe tables, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
 - `usearch_<modality>_vram_variants_nvidia` embeds a basic modality's NVIDIA fatbins, one per sequence metric or shapes dtype and one for geospatial, every kit compiled past the Ampere floor.
 - `usearch_punned` - `types.cpp` & the dispatch units, `dense_index.cpp`, `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp`.

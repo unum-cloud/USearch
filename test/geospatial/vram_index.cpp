@@ -25,7 +25,7 @@
 
 #include "usearch/geospatial_index.h"
 #include "usearch/geospatial/ram_metric.hpp" // `i32_serial_geospatial_kit_t` - the CPU's sight lines
-#include "usearch/utilities/vram_device.hpp" // `gpu_devices` - the listing the C interface indexes
+#include "usearch/utilities/vram_device.hpp" // `gpu_device_t` - the listing the C interface indexes
 
 #include "harness.hpp"
 
@@ -323,7 +323,7 @@ static std::size_t check_geospatial_vram_collection(u64_t seed, std::int32_t ord
 std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const& device) {
     if (device.vendor != gpu_vendor_t::nvidia_k || !settings.filter.selects("geospatial_vram")) return 0;
     // The C interface names devices by their place in the listing, which `device` belongs to.
-    std::int32_t const ordinal = static_cast<std::int32_t>(&device - gpu_devices().data());
+    std::int32_t const ordinal = static_cast<std::int32_t>(&device - test::gpu_devices().data());
     std::size_t failures = 0;
     failures += report(
         "geospatial_vram global",

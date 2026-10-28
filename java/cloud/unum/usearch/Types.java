@@ -463,6 +463,108 @@ public final class Types {
         }
     }
 
+    /** A CPU family USearch ships tuned variants for, which a RAM or NVMe placement or executor may pin. */
+    public enum CPUClass {
+
+        /** The portable floor, with no SIMD assumptions. */
+        SERIAL(1),
+        /** Haswell-class x86: AVX2 and FMA. */
+        INTEL_HASWELL(2),
+        /** Sierra Forest-class x86: AVX-VNNI without AVX-512. */
+        INTEL_SIERRA(3),
+        /** Skylake-class x86: the AVX-512 foundation. */
+        INTEL_SKYLAKE(4),
+        /** Icelake-class x86: AVX-512 VNNI and VPOPCNT. */
+        INTEL_ICELAKE(5),
+        /** Genoa-class x86: native bf16 dot products over AVX-512. */
+        AMD_GENOA(6),
+        /** Sapphire Rapids-class x86: AVX-512 FP16 and the AMX tiles. */
+        INTEL_SAPPHIRE(7),
+        /** Granite Rapids-class x86: the AMX-FP16 tiles. */
+        INTEL_GRANITE(8),
+        /** Diamond Rapids-class x86: AVX10.2's FP8 conversions. */
+        INTEL_DIAMOND(9),
+        /** Graviton2-class Arm: the bare NEON floor. */
+        AWS_G2(10),
+        /** Armv8.6 NEON with dot products and bf16. */
+        APPLE_M2(11),
+        /** Apple M4-class Arm: the SME outer-product tiles. */
+        APPLE_M4(12),
+        /** Graviton5-class Arm: Armv9.2. */
+        AWS_G5(13),
+        /** Vera-class Arm: FP8 dot products. */
+        NVIDIA_VERA(14),
+        /** Alibaba C930-class RISC-V: RVA23 vectors. */
+        ALIBABA_C930(15),
+        /** WebAssembly with fixed-width simd128. */
+        WASM32_V128(16),
+        /** WebAssembly with relaxed SIMD, threads and 64-bit addressing. */
+        WASM64_EXTENDED(17);
+
+        private final int code;
+
+        CPUClass(int code) {
+            this.code = code;
+        }
+
+        /** The C enumerator's numeric value. */
+        public int code() {
+            return code;
+        }
+
+        /** Renders the class as the library spells it. Calls {@code usearch_cpu_class_name}. */
+        @Override
+        public String toString() {
+            return Library.text(CPU_CLASS_NAME, code);
+        }
+    }
+
+    /** A GPU family USearch ships tuned variants for, which a VRAM placement or executor may pin. */
+    public enum GPUClass {
+
+        /** Ampere-class NVIDIA, and every NVIDIA GPU without a class of its own. */
+        NVIDIA_AMPERE(1),
+        /** Ada-class NVIDIA: the fp8 conversions. */
+        NVIDIA_ADA(2),
+        /** Hopper-class NVIDIA. */
+        NVIDIA_HOPPER(3),
+        /** Blackwell-class NVIDIA. */
+        NVIDIA_BLACKWELL(4),
+        /** Consumer Blackwell NVIDIA. */
+        NVIDIA_BLACKWELLRTX(5),
+        /** Rubin-class NVIDIA. */
+        NVIDIA_RUBIN(6),
+        /** CDNA3 AMD: gfx942. */
+        AMD_CDNA3(7),
+        /** CDNA4 AMD: gfx950. */
+        AMD_CDNA4(8),
+        /** CDNA5 AMD: gfx1250. */
+        AMD_CDNA5(9),
+        /** Apple7-family GPUs, and every Apple GPU without a class of its own. */
+        APPLE_METAL7(10),
+        /** Apple9-family GPUs. */
+        APPLE_METAL9(11),
+        /** Apple10-family GPUs. */
+        APPLE_METAL10(12);
+
+        private final int code;
+
+        GPUClass(int code) {
+            this.code = code;
+        }
+
+        /** The C enumerator's numeric value. */
+        public int code() {
+            return code;
+        }
+
+        /** Renders the class as the library spells it. Calls {@code usearch_gpu_class_name}. */
+        @Override
+        public String toString() {
+            return Library.text(GPU_CLASS_NAME, code);
+        }
+    }
+
     /**
      * Where an executor computes, and so where the arenas it makes keep their memory: host pages for
      * RAM and NVMe, device memory for VRAM.
@@ -536,7 +638,7 @@ public final class Types {
      * thread. Calls on one executor run in submission order; handles stay freely concurrent.
      *
      * <pre>{@code
-     * try (Executor pool = Executor.forRam(new int[] {0, 1}, 16, 0);
+     * try (Executor pool = Executor.forRam(new int[] {0, 1}, null, 16, 0);
      *         DenseIndex index = DenseIndex.initRam(new DenseOptions().dimensions(256), new int[0])) {
      *     index.on(pool).insert(keys, vectors);
      *     pool.drain(Mood.PARKED);
@@ -564,15 +666,19 @@ public final class Types {
          * Calls {@code usearch_executor_for_ram}.
          *
          * @param memoryDomains NUMA node ids to place shards on; an empty list derives every node.
+         * @param cpuClass the class whose waiters and atomics the workers use, or {@code null} for the
+         *     CPU's own.
          * @param threads Workers to spawn; zero takes 7/8 of the cores those domains carry, since full
          *     occupancy starves the ordered publication path.
          * @param deferredLimit Deferred calls tracked at once; zero takes a default.
          * @throws USearchException INVALID_ARGUMENT on a negative count, and OUT_OF_MEMORY when the
          *     scratch cannot be claimed.
          */
-        public static Executor forRam(int[] memoryDomains, long threads, long deferredLimit) {
+        public static Executor forRam(
+                int[] memoryDomains, @Nullable CPUClass cpuClass, long threads, long deferredLimit) {
             return spawn(FOR_RAM, Residency.RAM, call -> {
                 call.ordinals("ram", memoryDomains);
+                call.pinned("ram", cpuClass);
                 call.size("threads", unsigned(threads));
                 call.size("deferred_limit", unsigned(deferredLimit));
             });
@@ -588,11 +694,15 @@ public final class Types {
          *
          * @param pool The {@code fu_pool_t} to borrow, which must outlive the executor.
          * @param memoryDomains NUMA node ids of the indexes it will drive; an empty list derives them.
+         * @param cpuClass the class whose waiters and atomics the pool's threads use, or {@code null}
+         *     for the CPU's own.
          * @param deferredLimit Deferred calls tracked at once; zero takes a default.
          */
-        public static Executor onPool(MemorySegment pool, int[] memoryDomains, long deferredLimit) {
+        public static Executor onPool(
+                MemorySegment pool, int[] memoryDomains, @Nullable CPUClass cpuClass, long deferredLimit) {
             return spawn(ON_POOL, Residency.RAM, call -> {
                 call.ordinals("ram", memoryDomains);
+                call.pinned("ram", cpuClass);
                 call.pointer("pool", pool);
                 call.size("deferred_limit", unsigned(deferredLimit));
             });
@@ -607,6 +717,8 @@ public final class Types {
          * Calls {@code usearch_executor_for_vram}.
          *
          * @param devices CUDA device ordinals to place shards on; an empty list derives one free device.
+         * @param gpuClass a class the devices must run, refused with UNSUPPORTED otherwise, or
+         *     {@code null} for the devices' own.
          * @param streams No streams, or one borrowed CUDA stream per device in {@code devices} order,
          *     each outliving the executor.
          * @param scratchLimit The ceiling on scratch bytes per device; zero lets scratch grow.
@@ -615,13 +727,19 @@ public final class Types {
          *     device, DEVICE when a named device does not answer, and OUT_OF_MEMORY when the scratch
          *     cannot be claimed.
          */
-        public static Executor forVram(int[] devices, MemorySegment[] streams, long scratchLimit, long deferredLimit) {
+        public static Executor forVram(
+                int[] devices,
+                @Nullable GPUClass gpuClass,
+                MemorySegment[] streams,
+                long scratchLimit,
+                long deferredLimit) {
             // The C side reads one stream per device from any non-null pointer, so only this side sees a short list.
             if (streams.length != 0 && streams.length != devices.length) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "pass no streams or one per device");
             }
             return spawn(FOR_VRAM, Residency.VRAM, call -> {
                 call.ordinals("vram", devices);
+                call.pinned("vram", gpuClass);
                 if (streams.length != 0) {
                     MemorySegment borrowed = call.memory.allocate(Library.POINTER, streams.length);
                     for (int order = 0; order != streams.length; ++order) {
@@ -648,14 +766,18 @@ public final class Types {
          *
          * @param paths Devices or directories to place shards on; an empty list leaves every shard
          *     where its manifest points.
+         * @param cpuClass the class whose waiters and atomics the workers use, or {@code null} for the
+         *     CPU's own.
          * @param threads Workers to spawn; zero derives from those devices' queue capabilities.
          * @param deferredLimit Deferred calls tracked at once; zero takes a default.
          * @throws USearchException INVALID_ARGUMENT on a negative count, and OUT_OF_MEMORY when the
          *     scratch cannot be claimed.
          */
-        public static Executor forNvme(String[] paths, long threads, long deferredLimit) {
+        public static Executor forNvme(
+                String[] paths, @Nullable CPUClass cpuClass, long threads, long deferredLimit) {
             return spawn(FOR_NVME, Residency.NVME, call -> {
                 call.paths("nvme", paths);
+                call.pinned("nvme", cpuClass);
                 call.size("threads", unsigned(threads));
                 call.size("deferred_limit", unsigned(deferredLimit));
             });
@@ -1692,6 +1814,20 @@ public final class Types {
             }
         }
 
+        /** Pins the CPU class of the placement at {@code field}, leaving zero, which pins none, for {@code null}. */
+        void pinned(String field, @Nullable CPUClass cpuClass) {
+            if (cpuClass != null) {
+                enumeration(field + ".cpu_class", cpuClass.code());
+            }
+        }
+
+        /** Pins the GPU class of the placement at {@code field}, leaving zero, which pins none, for {@code null}. */
+        void pinned(String field, @Nullable GPUClass gpuClass) {
+            if (gpuClass != null) {
+                enumeration(field + ".gpu_class", gpuClass.code());
+            }
+        }
+
         /** Fills a {@code usearch_nvme_options_t} at {@code field}, leaving an empty run as the null C derives from. */
         void paths(String field, String[] paths) {
             if (paths.length == 0) {
@@ -1791,6 +1927,8 @@ public final class Types {
     private static final MethodHandle STATUS_NAME = Library.namer("usearch_status_name");
     private static final MethodHandle SCALAR_NAME = Library.namer("usearch_scalar_name");
     private static final MethodHandle MOOD_NAME = Library.namer("usearch_mood_name");
+    private static final MethodHandle CPU_CLASS_NAME = Library.namer("usearch_cpu_class_name");
+    private static final MethodHandle GPU_CLASS_NAME = Library.namer("usearch_gpu_class_name");
     private static final MethodHandle RESIDENCY_NAME = Library.namer("usearch_residency_name");
     private static final MethodHandle TRAVERSAL_NAME = Library.namer("usearch_traversal_name");
 

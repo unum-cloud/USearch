@@ -52,6 +52,22 @@ endif ()
 usearch_setup_target(usearch_shared)
 usearch_setup_target(usearch_static)
 
+# The objects compile with hidden visibility, so the shared flavor exports the `USEARCH_EXPORT` entry points alone, and
+# the static siblings it links, ForkUnion and yyjson, stay inside it too.
+set_target_properties(
+    usearch_shared
+    PROPERTIES C_VISIBILITY_PRESET hidden
+               CXX_VISIBILITY_PRESET hidden
+               VISIBILITY_INLINES_HIDDEN ON
+)
+if (APPLE)
+    target_link_options(usearch_shared PRIVATE "LINKER:-exported_symbol,_usearch_*")
+elseif (CMAKE_SYSTEM_NAME MATCHES "Emscripten|WASI")
+    # `wasm-ld` has no `--exclude-libs`.
+elseif (NOT MSVC)
+    target_link_options(usearch_shared PRIVATE "LINKER:--exclude-libs,ALL")
+endif ()
+
 # The shared flavor brings JeMalloc into the processes that load it, as `usearch_setup_target` does for executables; an
 # archive links nothing.
 if (USEARCH_WITH_JEMALLOC)

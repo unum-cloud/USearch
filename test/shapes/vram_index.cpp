@@ -184,7 +184,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     }
 
     int const device = executor.device(0);
-    vram_index_t vram_index {kernel, cuda_virtual_memory_allocator<byte_t> {device}};
+    vram_index_t vram_index {kernel, cuda_virtual_memory_allocator<byte_t> {executor.api(), device}};
     failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                           status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
@@ -275,13 +275,14 @@ static std::size_t check_shapes_vram_class(settings_t const& settings, cuda_exec
 std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& device) {
     if (device.vendor != gpu_vendor_t::nvidia_k || !settings.filter.selects("shapes_vram")) return 0;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto [executor, spawn_status] = cuda_executor_t::spawn(std::span<int const> {&ordinal, 1});
+    auto [executor, spawn_status] = cuda_executor_t::spawn(test::gpu_drivers().cuda,
+                                                           std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println(stderr, "- CUDA: device #{} opens no stream", ordinal), 1;
     constexpr nk_capability_t ampere_k = nk_cap_cuda_k | nk_cap_ampere_k;
     constexpr nk_capability_t blackwell_k = ampere_k | nk_cap_ada_k | nk_cap_blackwell_k;
     std::size_t failures = check_shapes_vram_class<gpu_class_t::nvidia_ampere_k, ampere_k>(settings, executor,
                                                                                            "ampere");
-    if (device.gpu_class == gpu_class_t::nvidia_blackwell_k)
+    if (device.architecture_major == static_cast<u32_t>(cuda_arch_blackwell_k / 100))
         failures += check_shapes_vram_class<gpu_class_t::nvidia_blackwell_k, blackwell_k>(settings, executor,
                                                                                           "blackwell");
     return failures;

@@ -6,8 +6,6 @@ Settings, matrices, oracle, and gates are plain values and functions, so they li
 and are imported by name.
 """
 
-from __future__ import annotations
-
 import platform
 import random
 from collections.abc import Callable, Iterator

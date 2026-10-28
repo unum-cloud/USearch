@@ -899,6 +899,74 @@ public enum Mood : int
     Spinning = 2,
 }
 
+/// <summary>A CPU family USearch ships tuned variants for, which a RAM or NVMe placement or executor may pin.</summary>
+public enum CPUClass : int
+{
+    /// <summary>The portable floor, with no SIMD assumptions.</summary>
+    Serial = 1,
+    /// <summary>Haswell-class x86: AVX2 and FMA.</summary>
+    IntelHaswell = 2,
+    /// <summary>Sierra Forest-class x86: AVX-VNNI without AVX-512.</summary>
+    IntelSierra = 3,
+    /// <summary>Skylake-class x86: the AVX-512 foundation.</summary>
+    IntelSkylake = 4,
+    /// <summary>Icelake-class x86: AVX-512 VNNI and VPOPCNT.</summary>
+    IntelIcelake = 5,
+    /// <summary>Genoa-class x86: native bf16 dot products over AVX-512.</summary>
+    AmdGenoa = 6,
+    /// <summary>Sapphire Rapids-class x86: AVX-512 FP16 and the AMX tiles.</summary>
+    IntelSapphire = 7,
+    /// <summary>Granite Rapids-class x86: the AMX-FP16 tiles.</summary>
+    IntelGranite = 8,
+    /// <summary>Diamond Rapids-class x86: AVX10.2's FP8 conversions.</summary>
+    IntelDiamond = 9,
+    /// <summary>Graviton2-class Arm: the bare NEON floor.</summary>
+    AwsG2 = 10,
+    /// <summary>Armv8.6 NEON with dot products and bf16.</summary>
+    AppleM2 = 11,
+    /// <summary>Apple M4-class Arm: the SME outer-product tiles.</summary>
+    AppleM4 = 12,
+    /// <summary>Graviton5-class Arm: Armv9.2.</summary>
+    AwsG5 = 13,
+    /// <summary>Vera-class Arm: FP8 dot products.</summary>
+    NvidiaVera = 14,
+    /// <summary>Alibaba C930-class RISC-V: RVA23 vectors.</summary>
+    AlibabaC930 = 15,
+    /// <summary>WebAssembly with fixed-width simd128.</summary>
+    Wasm32V128 = 16,
+    /// <summary>WebAssembly with relaxed SIMD, threads and 64-bit addressing.</summary>
+    Wasm64Extended = 17,
+}
+
+/// <summary>A GPU family USearch ships tuned variants for, which a VRAM placement or executor may pin.</summary>
+public enum GPUClass : int
+{
+    /// <summary>Ampere-class NVIDIA, and every NVIDIA GPU without a class of its own.</summary>
+    NvidiaAmpere = 1,
+    /// <summary>Ada-class NVIDIA: the fp8 conversions.</summary>
+    NvidiaAda = 2,
+    /// <summary>Hopper-class NVIDIA.</summary>
+    NvidiaHopper = 3,
+    /// <summary>Blackwell-class NVIDIA.</summary>
+    NvidiaBlackwell = 4,
+    /// <summary>Consumer Blackwell NVIDIA.</summary>
+    NvidiaBlackwellRTX = 5,
+    /// <summary>Rubin-class NVIDIA.</summary>
+    NvidiaRubin = 6,
+    /// <summary>CDNA3 AMD: gfx942.</summary>
+    AmdCDNA3 = 7,
+    /// <summary>CDNA4 AMD: gfx950.</summary>
+    AmdCDNA4 = 8,
+    /// <summary>CDNA5 AMD: gfx1250.</summary>
+    AmdCDNA5 = 9,
+    /// <summary>Apple7-family GPUs, and every Apple GPU without a class of its own.</summary>
+    AppleMetal7 = 10,
+    /// <summary>Apple9-family GPUs.</summary>
+    AppleMetal9 = 11,
+    /// <summary>Apple10-family GPUs.</summary>
+    AppleMetal10 = 12,
+}
+
 /// <summary>
 /// The workers every fanned-out verb runs on, shared across indexes.
 /// </summary>
@@ -955,9 +1023,12 @@ public sealed unsafe class Executor : IDisposable
     /// <param name="memoryDomains">NUMA node IDs to place shards on; empty derives every node the
     /// process may allocate on.</param>
     /// <param name="deferredLimit">The deferred calls tracked at once; zero takes a default.</param>
+    /// <param name="cpuClass">The class whose waiters and atomics the threads use; null derives the
+    /// CPU's own.</param>
     /// <returns>The spawned executor.</returns>
     public static Executor ForRam(
-        ulong threads = 0, ReadOnlySpan<int> memoryDomains = default, ulong deferredLimit = 0)
+        ulong threads = 0, ReadOnlySpan<int> memoryDomains = default, ulong deferredLimit = 0,
+        CPUClass? cpuClass = null)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -970,6 +1041,7 @@ public sealed unsafe class Executor : IDisposable
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
+                    CpuClass = (int)(cpuClass ?? 0),
                 },
                 Threads = (nuint)threads,
                 DeferredLimit = (nuint)deferredLimit,
@@ -988,8 +1060,11 @@ public sealed unsafe class Executor : IDisposable
     /// its lender's mood.</param>
     /// <param name="memoryDomains">NUMA node IDs of the indexes it will drive; empty derives.</param>
     /// <param name="deferredLimit">The deferred calls tracked at once; zero takes a default.</param>
+    /// <param name="cpuClass">The class whose waiters and atomics the threads use; null derives the
+    /// CPU's own.</param>
     /// <returns>The executor over that pool.</returns>
-    public static Executor OnPool(IntPtr pool, ReadOnlySpan<int> memoryDomains = default, ulong deferredLimit = 0)
+    public static Executor OnPool(
+        IntPtr pool, ReadOnlySpan<int> memoryDomains = default, ulong deferredLimit = 0, CPUClass? cpuClass = null)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1002,6 +1077,7 @@ public sealed unsafe class Executor : IDisposable
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
+                    CpuClass = (int)(cpuClass ?? 0),
                 },
                 Pool = pool,
                 DeferredLimit = (nuint)deferredLimit,
@@ -1021,8 +1097,11 @@ public sealed unsafe class Executor : IDisposable
     /// <param name="paths">Devices or directories to place shards on; empty leaves each shard where
     /// its manifest points.</param>
     /// <param name="deferredLimit">The deferred calls tracked at once; zero takes a default.</param>
+    /// <param name="cpuClass">The class whose waiters and atomics the threads use; null derives the
+    /// CPU's own.</param>
     /// <returns>The spawned executor.</returns>
-    public static Executor ForNvme(ulong threads = 0, ReadOnlySpan<string> paths = default, ulong deferredLimit = 0)
+    public static Executor ForNvme(
+        ulong threads = 0, ReadOnlySpan<string> paths = default, ulong deferredLimit = 0, CPUClass? cpuClass = null)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1033,7 +1112,10 @@ public sealed unsafe class Executor : IDisposable
             {
                 Executor = &spawned,
                 Outcome = &outcome,
-                Nvme = new NativeNvmeOptions { Paths = (IntPtr)views, PathsCount = (nuint)paths.Length },
+                Nvme = new NativeNvmeOptions
+                {
+                    Paths = (IntPtr)views, PathsCount = (nuint)paths.Length, CpuClass = (int)(cpuClass ?? 0),
+                },
                 Threads = (nuint)threads,
                 DeferredLimit = (nuint)deferredLimit,
             };
@@ -1059,12 +1141,15 @@ public sealed unsafe class Executor : IDisposable
     /// <param name="scratchLimit">The ceiling on scratch bytes per device; zero lets scratch grow as
     /// geometry asks.</param>
     /// <param name="deferredLimit">The deferred calls tracked at once; zero takes a default.</param>
+    /// <param name="gpuClass">A class the devices must run, refused with
+    /// <see cref="Status.Unsupported"/> otherwise; null takes the devices' own.</param>
     /// <returns>The opened executor.</returns>
     public static Executor ForVram(
         ReadOnlySpan<int> devices = default,
         ReadOnlySpan<IntPtr> streams = default,
         ulong scratchLimit = 0,
-        ulong deferredLimit = 0)
+        ulong deferredLimit = 0,
+        GPUClass? gpuClass = null)
     {
         // The library reads one stream per device from the pointer alone, so only this side sees a short list.
         if (!streams.IsEmpty && streams.Length != devices.Length)
@@ -1081,7 +1166,10 @@ public sealed unsafe class Executor : IDisposable
             {
                 Executor = &spawned,
                 Outcome = &outcome,
-                Vram = new NativeVramOptions { Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length },
+                Vram = new NativeVramOptions
+                {
+                    Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length, GpuClass = (int)(gpuClass ?? 0),
+                },
                 Streams = (IntPtr)borrowed,
                 ScratchLimit = (nuint)scratchLimit,
                 DeferredLimit = (nuint)deferredLimit,

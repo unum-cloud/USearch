@@ -171,6 +171,8 @@ export interface DenseLoadRamConfig {
   executor?: Executor;
   /** NUMA node IDs to place the parts on; absent spreads them over every node. */
   memoryDomains?: number[];
+  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  cpuClass?: string;
   /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
   valuesPerKey?: number;
 }
@@ -181,6 +183,8 @@ export interface DenseLoadVramConfig {
   executor?: Executor;
   /** CUDA ordinals to place the parts on; absent takes one free device. */
   devices?: number[];
+  /** The GPU class to dispatch as, as `usearch_gpu_class_name` spells it; absent dispatches as the devices. */
+  gpuClass?: string;
   /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
   valuesPerKey?: number;
 }
@@ -191,6 +195,8 @@ export interface DenseLoadRamBufferConfig {
   executor?: Executor;
   /** NUMA node IDs to place the shards on; the monolith lands whole on the first. */
   memoryDomains?: number[];
+  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  cpuClass?: string;
   /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
   valuesPerKey?: number;
 }
@@ -201,6 +207,8 @@ export interface DenseLoadVramBufferConfig {
   executor?: Executor;
   /** CUDA ordinals to place the shards on; the monolith lands whole on the first. */
   devices?: number[];
+  /** The GPU class to dispatch as, as `usearch_gpu_class_name` spells it; absent dispatches as the devices. */
+  gpuClass?: string;
   /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
   valuesPerKey?: number;
 }
@@ -211,6 +219,8 @@ export interface DenseViewNvmeConfig {
   executor?: Executor;
   /** Devices or directories to serve the parts from; absent leaves each where its manifest points. */
   paths?: string[];
+  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  cpuClass?: string;
 }
 
 /** The workers a checkpoint's metadata is read on. Mirrors `usearch_dense_metadata_read_t`. */
@@ -284,6 +294,10 @@ export interface DenseOptions {
   connectivity?: number;
   /** Entries one key may carry; absent derives to unique keys. */
   valuesPerKey?: number;
+  /** The CPU class a host index dispatches as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  cpuClass?: string;
+  /** The GPU class a device index dispatches as, as `usearch_gpu_class_name` spells it; absent dispatches as the devices. */
+  gpuClass?: string;
 }
 
 /**
@@ -1013,6 +1027,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
         options.connectivity,
         options.valuesPerKey,
         memoryDomains,
+        options.cpuClass,
       ),
     );
   }
@@ -1035,6 +1050,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
         options.connectivity,
         options.valuesPerKey,
         devices,
+        options.gpuClass,
       ),
     );
   }
@@ -1051,7 +1067,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   static loadRam(path: string, config: DenseLoadRamConfig = {}): DenseIndex {
     return new DenseIndex(
       indexSeal,
-      compiled.CompiledIndex.loadRam(path, config.executor, config.memoryDomains, config.valuesPerKey),
+      compiled.CompiledIndex.loadRam(path, config.executor, config.memoryDomains, config.valuesPerKey, config.cpuClass),
     );
   }
 
@@ -1066,7 +1082,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   static loadVram(path: string, config: DenseLoadVramConfig = {}): DenseIndex {
     return new DenseIndex(
       indexSeal,
-      compiled.CompiledIndex.loadVram(path, config.executor, config.devices, config.valuesPerKey),
+      compiled.CompiledIndex.loadVram(path, config.executor, config.devices, config.valuesPerKey, config.gpuClass),
     );
   }
 
@@ -1081,7 +1097,13 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
     const bytes = buffer instanceof Monolith ? buffer.bytes : buffer;
     return new DenseIndex(
       indexSeal,
-      compiled.CompiledIndex.loadRamBuffer(bytes, config.executor, config.memoryDomains, config.valuesPerKey),
+      compiled.CompiledIndex.loadRamBuffer(
+        bytes,
+        config.executor,
+        config.memoryDomains,
+        config.valuesPerKey,
+        config.cpuClass,
+      ),
     );
   }
 
@@ -1096,7 +1118,13 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
     const bytes = buffer instanceof Monolith ? buffer.bytes : buffer;
     return new DenseIndex(
       indexSeal,
-      compiled.CompiledIndex.loadVramBuffer(bytes, config.executor, config.devices, config.valuesPerKey),
+      compiled.CompiledIndex.loadVramBuffer(
+        bytes,
+        config.executor,
+        config.devices,
+        config.valuesPerKey,
+        config.gpuClass,
+      ),
     );
   }
 
@@ -1121,7 +1149,10 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
    *  @returns The read-only index.
    */
   static viewNvme(path: string, config: DenseViewNvmeConfig = {}): DenseIndex {
-    return new DenseIndex(indexSeal, compiled.CompiledIndex.viewNvme(path, config.executor, config.paths));
+    return new DenseIndex(
+      indexSeal,
+      compiled.CompiledIndex.viewNvme(path, config.executor, config.paths, config.cpuClass),
+    );
   }
 
   /**

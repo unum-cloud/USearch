@@ -285,7 +285,7 @@ static int check_scalar() noexcept {
 
 /** Binary inputs run dot/hamming/jaccard instead of dot/angular/euclidean. */
 template <>
-int check_scalar<nk::u1x8_t>() noexcept {
+[[maybe_unused]] int check_scalar<nk::u1x8_t>() noexcept {
     return check_kernel<nk_kernel_dot_k, nk::u1x8_t>() +     //
            check_kernel<nk_kernel_hamming_k, nk::u1x8_t>() + //
            check_kernel<nk_kernel_jaccard_k, nk::u1x8_t>();

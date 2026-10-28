@@ -9,8 +9,6 @@ Run:
     python -m pytest test/doctests.py -v
 """
 
-from __future__ import annotations
-
 import doctest
 from array import array
 

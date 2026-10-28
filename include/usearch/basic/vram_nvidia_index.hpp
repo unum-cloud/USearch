@@ -272,7 +272,8 @@ struct vram_ragged_graph {
     explicit vram_ragged_graph(nk_kernel_kind_t kernel,
                                cuda_virtual_memory_allocator<byte_t> const& allocator = {}) noexcept
         : device_ {allocator.device()}, kernel_ {kernel}, values_tape_(allocator), offsets_column_(allocator),
-          neighbors_matrix_(allocator), grown_((cuda_set_device(allocator.device()), cuda_event_t {})) {}
+          neighbors_matrix_(allocator),
+          grown_((cuda_set_device(allocator.api(), allocator.device()), cuda_event_t {allocator.api()})) {}
     vram_ragged_graph(vram_ragged_graph const&) = delete;
     vram_ragged_graph& operator=(vram_ragged_graph const&) = delete;
 
@@ -318,6 +319,9 @@ struct vram_ragged_graph {
 
     /** The pinned device's identity and limits, queried once at the first @c reserve. */
     cuda_device_specs_t const& device_specs() const noexcept { return device_; }
+
+    /** The driver table every call on this index goes through, the storage allocator's. */
+    cuda_api_t const& api() const noexcept { return neighbors_matrix_.api(); }
 
     /** The metric the kits score under where they cover several, unknown otherwise. */
     nk_kernel_kind_t kernel() const noexcept { return kernel_; }
@@ -371,11 +375,11 @@ struct vram_ragged_graph {
         std::size_t const frozen = connectivity();
         if (frozen && frozen != config.connectivity) return {capacity(), status_t::config_mismatch_k};
         if (!frozen) {
-            if (cuda_set_device(device_.ordinal) != cuda_success_k) return {0, status_t::device_error_k};
-            auto const [specs, status] = cuda_device_specs_t::query(device_.ordinal);
+            if (cuda_set_device(api(), device_.ordinal) != cuda_success_k) return {0, status_t::device_error_k};
+            auto const [specs, status] = cuda_device_specs_t::query(api(), device_.ordinal);
             if (failed(status)) return {0, status};
             device_ = specs;
-            if (status_t const loaded = kits_.load_kernels_(device_.ordinal); failed(loaded)) return {0, loaded};
+            if (status_t const loaded = kits_.load_kernels_(api(), device_.ordinal); failed(loaded)) return {0, loaded};
             if (status_t const loaded = load_graph_kernels_(); failed(loaded)) return {0, loaded};
             // No column maps more than the device's memory, whatever the first capacity.
             std::size_t const budget_bytes = device_.vram_bytes;
@@ -626,10 +630,12 @@ struct vram_ragged_graph {
         if (status_t const grown = grow_rows_(total_rows, stream); failed(grown)) return refuse(grown);
         if (status_t const mapped = values_tape_.commit(tape_bytes_ + batch_bytes + tape_margin_k); failed(mapped))
             return refuse(mapped);
-        if (cuda_copy_async(values_tape_.base() + tape_bytes_, tape.elements + tape.offsets[0], batch_bytes, stream) !=
+        if (cuda_copy_async(api(), values_tape_.base() + tape_bytes_, tape.elements + tape.offsets[0], batch_bytes,
+                            stream) != cuda_success_k ||
+            cuda_copy_async(api(), staging, tape.offsets.data(), (rows + 1) * sizeof(u64_t), stream) !=
                 cuda_success_k ||
-            cuda_copy_async(staging, tape.offsets.data(), (rows + 1) * sizeof(u64_t), stream) != cuda_success_k ||
-            cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != cuda_success_k)
+            cuda_fill_async(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) !=
+                cuda_success_k)
             return refuse(status_t::device_error_k);
         // Every row walks twice, to insert and to re-select, each walk under an epoch of its own.
         auto const [epoch_base, epochs_status] = context.take_epochs(2 * rows, arena_bytes_before);
@@ -651,7 +657,7 @@ struct vram_ragged_graph {
         build.link_next = build.link_heads + total_rows;
         build.touched_ids = build.link_next + rows * connectivity();
         build.touched_count = reinterpret_cast<u32_t*>(build.touched_ids + rows * connectivity());
-        if (cuda_fill_async(build.link_heads, 0xFF, total_rows * sizeof(node_id_t), stream) != cuda_success_k)
+        if (cuda_fill_async(api(), build.link_heads, 0xFF, total_rows * sizeof(node_id_t), stream) != cuda_success_k)
             return refuse(status_t::device_error_k);
         status_t const launched = launch_insert_(build, shape, tape.offsets, first_id, rung, stream);
         if (failed(launched)) return refuse(launched);
@@ -798,11 +804,13 @@ struct vram_ragged_graph {
         distance_t* const device_distances = reinterpret_cast<distance_t*>(device_ids + results_count);
         auto const [epoch_base, epochs_status] = context.take_epochs(queries_count, arena_bytes_before);
         if (failed(epochs_status)) return {{}, epochs_status};
-        if (cuda_copy_async(staging, queries.elements + queries.offsets[0], batch_bytes, stream) != cuda_success_k ||
-            cuda_copy_async(staged_offsets, queries.offsets.data(), (queries_count + 1) * sizeof(u64_t), stream) !=
+        if (cuda_copy_async(api(), staging, queries.elements + queries.offsets[0], batch_bytes, stream) !=
                 cuda_success_k ||
-            cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != cuda_success_k ||
-            cuda_fill_async(context.assigned_rows_.get(), 0, 2 * sizeof(u32_t), stream) != cuda_success_k)
+            cuda_copy_async(api(), staged_offsets, queries.offsets.data(), (queries_count + 1) * sizeof(u64_t),
+                            stream) != cuda_success_k ||
+            cuda_fill_async(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) !=
+                cuda_success_k ||
+            cuda_fill_async(api(), context.assigned_rows_.get(), 0, 2 * sizeof(u32_t), stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
 
         vram_arguments<node_id_t> arguments {};
@@ -826,16 +834,16 @@ struct vram_ragged_graph {
         search.result_ids = device_ids;
         search.result_distances = device_distances;
         search.count = config.count;
-        if (status_t const launched = cuda_launch(kits_.kernel_function_(rung, vram_kernel_t::search_k, slots), blocks,
-                                                  block_threads_k,
+        if (status_t const launched = cuda_launch(api(), kits_.kernel_function_(rung, vram_kernel_t::search_k, slots),
+                                                  blocks, block_threads_k,
                                                   walkers_per_block_(rung) * search.scratch_bytes_per_warp, stream,
                                                   cuda_overlap_t::serialized_k, arguments);
             failed(launched))
             return {{}, launched};
         std::size_t const row_bytes = config.count * sizeof(node_id_t);
-        if (cuda_copy_2d_async(result_ids.data(), result_ids.stride_bytes(0), device_ids, row_bytes, row_bytes,
+        if (cuda_copy_2d_async(api(), result_ids.data(), result_ids.stride_bytes(0), device_ids, row_bytes, row_bytes,
                                queries_count, stream) != cuda_success_k ||
-            cuda_copy_2d_async(result_distances.data(), result_distances.stride_bytes(0), device_distances,
+            cuda_copy_2d_async(api(), result_distances.data(), result_distances.stride_bytes(0), device_distances,
                                config.count * sizeof(distance_t), config.count * sizeof(distance_t), queries_count,
                                stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
@@ -939,7 +947,7 @@ struct vram_ragged_graph {
          *  into slots in place, the seams, the receivers' offsets columns back to back, the
          *  source's row starts, the bases and the roots planning uploads, and the last round's
          *  placed count. */
-        growing_buffer<byte_t, cuda_pinned_allocator_t> landing {cuda_pinned_allocator_t {}};
+        growing_buffer<byte_t, cuda_pinned_allocator_t> landing;
 
         /** The growth round the next batch queues from. */
         u32_t next_round = 0;
@@ -954,7 +962,8 @@ struct vram_ragged_graph {
         /** Rounds of re-selection each receiver runs, none once a stop cut the pass. */
         u32_t rounds = 1;
 
-        explicit split_t(typename traversal_context_t::bytes_ptr_t&& empty) noexcept : bytes(std::move(empty)) {}
+        explicit split_t(typename traversal_context_t::bytes_ptr_t&& empty) noexcept
+            : bytes(std::move(empty)), landing {cuda_pinned_allocator_t {bytes.get_deleter().allocator.api()}} {}
         split_t(split_t&& other) noexcept
             : source(std::exchange(other.source, nullptr)), receivers(std::move(other.receivers)),
               closed_receivers(std::exchange(other.closed_receivers, 0)), bound_receiver(other.bound_receiver),
@@ -1380,7 +1389,7 @@ struct vram_ragged_graph {
             vram_ragged_graph& source = donor->*graph;
             std::size_t const count = source.size();
             if (failed(landed) || !count) continue;
-            if (cuda_copy(shifted_offsets.data(), source.offsets_column_.base(), (count + 1) * sizeof(u64_t)) !=
+            if (cuda_copy(api(), shifted_offsets.data(), source.offsets_column_.base(), (count + 1) * sizeof(u64_t)) !=
                 cuda_success_k) {
                 landed = status_t::device_error_k;
                 continue;
@@ -1393,11 +1402,12 @@ struct vram_ragged_graph {
             graph.rows_count = static_cast<u32_t>(count);
             graph.source_bound = static_cast<node_id_t>(count);
             graph.shift = static_cast<node_id_t>(into);
-            if (cuda_copy(offsets_column_.base() + into * sizeof(u64_t), shifted_offsets.data(),
+            if (cuda_copy(api(), offsets_column_.base() + into * sizeof(u64_t), shifted_offsets.data(),
                           (count + 1) * sizeof(u64_t)) != cuda_success_k ||
-                (source.tape_bytes_ && cuda_copy_async(values_tape_.base() + tape_bytes, source.values_tape_.base(),
-                                                       source.tape_bytes_, stream) != cuda_success_k) ||
-                cuda_copy_async(neighbors_matrix_.base() + into * row_bytes, source.neighbors_matrix_.base(),
+                (source.tape_bytes_ &&
+                 cuda_copy_async(api(), values_tape_.base() + tape_bytes, source.values_tape_.base(),
+                                 source.tape_bytes_, stream) != cuda_success_k) ||
+                cuda_copy_async(api(), neighbors_matrix_.base() + into * row_bytes, source.neighbors_matrix_.base(),
                                 count * row_bytes, stream) != cuda_success_k)
                 landed = status_t::device_error_k;
             else
@@ -1599,6 +1609,10 @@ struct vram_ragged_graph {
         columns_extents_t extents {};
 
         save_plan_t() noexcept = default;
+
+        /** Pins its bounce through @p api and births its events on the current device. */
+        explicit save_plan_t(cuda_api_t const& api) noexcept
+            : bounce_ {cuda_pinned_allocator_t {api}}, crossed_ {cuda_event_t {api}, cuda_event_t {api}} {}
         save_plan_t(save_plan_t&& other) noexcept
             : extents(other.extents), neighbor_offsets_(other.neighbor_offsets_), neighbor_ids_(other.neighbor_ids_),
               value_offsets_(other.value_offsets_), values_(other.values_),
@@ -1672,10 +1686,10 @@ struct vram_ragged_graph {
             byte_t* const neighbors = bounce_.data() + half * (neighbors_bytes_ + half_bytes_);
             u64_t const first_byte = stored_offsets_[rows.first];
             u64_t const bytes = stored_offsets_[rows.bound] - first_byte;
-            if (cuda_copy_async(neighbors, index_->neighbors_matrix_.base() + rows.first * row_bytes,
+            if (cuda_copy_async(index_->api(), neighbors, index_->neighbors_matrix_.base() + rows.first * row_bytes,
                                 rows.size() * row_bytes, stream_) != cuda_success_k ||
-                (bytes && cuda_copy_async(neighbors + neighbors_bytes_, index_->values_tape_.base() + first_byte, bytes,
-                                          stream_) != cuda_success_k))
+                (bytes && cuda_copy_async(index_->api(), neighbors + neighbors_bytes_,
+                                          index_->values_tape_.base() + first_byte, bytes, stream_) != cuda_success_k))
                 return status_t::device_error_k;
             return crossed_[half].record(stream_);
         }
@@ -1875,6 +1889,10 @@ struct vram_ragged_graph {
         std::size_t rows = 0;
 
         load_plan_t() noexcept = default;
+
+        /** Pins its bounce through @p api and births its events on the current device. */
+        explicit load_plan_t(cuda_api_t const& api) noexcept
+            : bounce_ {cuda_pinned_allocator_t {api}}, crossed_ {cuda_event_t {api}, cuda_event_t {api}} {}
         load_plan_t(load_plan_t&& other) noexcept
             : base(other.base), rows(std::exchange(other.rows, 0)), neighbor_offsets_(other.neighbor_offsets_),
               neighbor_ids_(other.neighbor_ids_), value_offsets_(other.value_offsets_), values_(other.values_),
@@ -1944,11 +1962,12 @@ struct vram_ragged_graph {
                 offsets[bound - first] = tape_first_ + stored_offsets_[bound];
                 std::size_t const into = base + first;
                 u64_t const bytes = stored_offsets_[bound] - stored_offsets_[first];
-                if (cuda_copy_async(index_->neighbors_matrix_.base() + into * row_bytes, neighbors,
+                cuda_api_t const& api = index_->api();
+                if (cuda_copy_async(api, index_->neighbors_matrix_.base() + into * row_bytes, neighbors,
                                     (bound - first) * row_bytes, stream_) != cuda_success_k ||
-                    cuda_copy_async(index_->offsets_column_.base() + into * sizeof(u64_t), offsets,
+                    cuda_copy_async(api, index_->offsets_column_.base() + into * sizeof(u64_t), offsets,
                                     (bound - first + 1) * sizeof(u64_t), stream_) != cuda_success_k ||
-                    (bytes && cuda_copy_async(index_->values_tape_.base() + tape_first_ + stored_offsets_[first],
+                    (bytes && cuda_copy_async(api, index_->values_tape_.base() + tape_first_ + stored_offsets_[first],
                                               values, bytes, stream_) != cuda_success_k) ||
                     failed(crossed_[half].record(stream_)))
                     return status_t::device_error_k;
@@ -2042,8 +2061,8 @@ struct vram_ragged_graph {
     template <typename key_type_>
     expected<load_plan_t> plan_load(columns<key_type_ const, node_id_t const, byte_t const, u64_t const> columns,
                                     traversal_context_t& context) noexcept {
-        if (cuda_set_device(device_.ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
-        load_plan_t plan;
+        if (cuda_set_device(api(), device_.ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
+        load_plan_t plan {api()};
         std::size_t const connectivity = this->connectivity(), rows = columns.keys.size();
         if (!connectivity) return {std::move(plan), status_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {std::move(plan), status_t::config_mismatch_k};
@@ -2332,13 +2351,13 @@ struct vram_ragged_graph {
      *  claim. */
     status_t grow_rows_(std::size_t rows, cuda_stream_handle_t stream) noexcept {
         if (status_t const mapped = map_rows_(rows); failed(mapped)) return mapped;
-        cuda_api_t const& api = cuda_api();
-        if (api.stream_wait_event(stream, grown_, 0) != cuda_success_k) return status_t::device_error_k;
+        cuda_api_t const& driver = api();
+        if (driver.stream_wait_event(stream, grown_, 0) != cuda_success_k) return status_t::device_error_k;
         if (rows <= filled_rows_) return status_t::success_k;
         // The sentinel is all ones at any width, so 32-bit words fill IDs of either.
         std::size_t const mapped_rows = capacity(), row_words = connectivity() * sizeof(node_id_t) / sizeof(u32_t);
-        if (api.fill_words_async(cuda_address(neighbors_matrix_.base() + filled_rows_ * row_words * sizeof(u32_t)),
-                                 0xFFFFFFFFu, (mapped_rows - filled_rows_) * row_words, stream) != cuda_success_k ||
+        if (driver.fill_words_async(cuda_address(neighbors_matrix_.base() + filled_rows_ * row_words * sizeof(u32_t)),
+                                    0xFFFFFFFFu, (mapped_rows - filled_rows_) * row_words, stream) != cuda_success_k ||
             failed(grown_.record(stream)))
             return status_t::device_error_k;
         filled_rows_ = mapped_rows;
@@ -2376,15 +2395,17 @@ struct vram_ragged_graph {
             arguments.build.selection_rows = walks ? shape.walk_selection_rows : shape.reselection_rows;
             arguments.build.scratch_bytes_per_warp = walks ? shape.walk_scratch_bytes : shape.back_link_scratch_bytes;
             if (succeeded(launched))
-                launched = cuda_fill_async(build.assigned_rows, 0, sizeof(u32_t), stream) == cuda_success_k
-                               ? cuda_launch(kits_.kernel_function_(rung, kernel, slots), blocks, block_threads_k,
+                launched = cuda_fill_async(api(), build.assigned_rows, 0, sizeof(u32_t), stream) == cuda_success_k
+                               ? cuda_launch(api(), kits_.kernel_function_(rung, kernel, slots), blocks,
+                                             block_threads_k,
                                              walkers_per_block_(rung) * arguments.build.scratch_bytes_per_warp, stream,
                                              cuda_overlap_t::serialized_k, arguments)
                                : status_t::device_error_k;
             published = published || succeeded(launched);
         };
         auto const zero_touched = [&]() noexcept {
-            if (succeeded(launched) && cuda_fill_async(build.touched_count, 0, sizeof(u32_t), stream) != cuda_success_k)
+            if (succeeded(launched) &&
+                cuda_fill_async(api(), build.touched_count, 0, sizeof(u32_t), stream) != cuda_success_k)
                 launched = status_t::device_error_k;
         };
         for (node_id_t wave_first = first_id; wave_first != end_id;) {
@@ -2461,8 +2482,8 @@ struct vram_ragged_graph {
      *  selected first, where the plan's events are born: lands the device's row starts on the host
      *  and pins the bounce, sizing nothing yet. */
     expected<save_plan_t> open_save_(traversal_context_t& context) noexcept {
-        if (cuda_set_device(device_.ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
-        save_plan_t plan;
+        if (cuda_set_device(api(), device_.ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
+        save_plan_t plan {api()};
         if (context.device() != device_.ordinal || !context) return {std::move(plan), status_t::config_mismatch_k};
         if (status_t const closed = close_(); failed(closed)) return {std::move(plan), closed};
         plan.index_ = this;
@@ -2474,7 +2495,7 @@ struct vram_ragged_graph {
         plan.stored_offsets_[0] = 0;
         // Every batch drained before publishing, so the column holds every start under the
         // watermark.
-        if (rows && cuda_copy(plan.stored_offsets_.data(), offsets_column_.base(), (rows + 1) * sizeof(u64_t)) !=
+        if (rows && cuda_copy(api(), plan.stored_offsets_.data(), offsets_column_.base(), (rows + 1) * sizeof(u64_t)) !=
                         cuda_success_k)
             return {std::move(plan), status_t::device_error_k};
         plan.half_rows_ = min_of(rows, power_of_two<std::size_t>(crossing_rows_log2_k));
@@ -2489,7 +2510,7 @@ struct vram_ragged_graph {
      *  @ref cuda_graph_kernels over this node-ID type, leaving null the ones it lacks, whose verbs
      *  answer @c unsupported_k. */
     status_t load_graph_kernels_() noexcept {
-        auto [module, status] = cuda_module_t::load(device_.ordinal, cuda_graph_fatbin_t::bytes());
+        auto [module, status] = cuda_module_t::load(api(), device_.ordinal, cuda_graph_fatbin_t::bytes());
         if (failed(status)) return status;
         graph_module_ = std::move(module);
         vram_kernel_symbol_t symbol;
@@ -2518,7 +2539,7 @@ struct vram_ragged_graph {
     /** Launches the shared @p kernel over @p blocks blocks on @p stream. */
     status_t launch_graph_(vram_kernel_t kernel, u32_t blocks, vram_graph<node_id_t> const& graph,
                            cuda_stream_handle_t stream) noexcept {
-        return cuda_launch(graph_kernels_[static_cast<u32_t>(kernel)], blocks, block_threads_k, 0, stream,
+        return cuda_launch(api(), graph_kernels_[static_cast<u32_t>(kernel)], blocks, block_threads_k, 0, stream,
                            cuda_overlap_t::serialized_k, graph);
     }
 
@@ -2560,7 +2581,7 @@ struct vram_ragged_graph {
             scratch.island_ids = scratch.reconnected + 1;
             scratch.in_links = scratch.island_ids + rows;
         }
-        return cuda_fill_async(scratch.reconnected, 0, sizeof(u32_t), context.stream()) == cuda_success_k
+        return cuda_fill_async(context.api(), scratch.reconnected, 0, sizeof(u32_t), context.stream()) == cuda_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
@@ -2596,7 +2617,7 @@ struct vram_ragged_graph {
             !context.ensure_staging(build_staging_bytes_(nodes.size(), rows)))
             return status_t::bad_alloc_k;
         // Zeroed once, so every phase adds up, and landed with every phase.
-        if (cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) !=
+        if (cuda_fill_async(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) !=
             cuda_success_k)
             return status_t::device_error_k;
         plan.landing_ = take_landing_(context);
@@ -2641,8 +2662,8 @@ struct vram_ragged_graph {
         build.link_next = build.link_heads + rows;
         build.touched_ids = build.link_next + walked * connectivity();
         build.touched_count = reinterpret_cast<u32_t*>(build.touched_ids + walked * connectivity());
-        if (cuda_fill_async(build.link_heads, 0xFF, rows * sizeof(node_id_t), stream) != cuda_success_k ||
-            cuda_fill_async(build.touched_count, 0, sizeof(u32_t), stream) != cuda_success_k)
+        if (cuda_fill_async(api(), build.link_heads, 0xFF, rows * sizeof(node_id_t), stream) != cuda_success_k ||
+            cuda_fill_async(api(), build.touched_count, 0, sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
         u32_t const blocks = device_.multiprocessor_count *
                              cuda_resident_blocks(vram_kernel_t::refine_k, shape.candidate_slots);
@@ -2651,10 +2672,10 @@ struct vram_ragged_graph {
             bool const walks = launch.kernel == vram_kernel_t::refine_k;
             build.selection_rows = walks ? shape.walk_selection_rows : shape.reselection_rows;
             build.scratch_bytes_per_warp = walks ? shape.walk_scratch_bytes : shape.back_link_scratch_bytes;
-            if (cuda_fill_async(build.assigned_rows, 0, sizeof(u32_t), stream) != cuda_success_k)
+            if (cuda_fill_async(api(), build.assigned_rows, 0, sizeof(u32_t), stream) != cuda_success_k)
                 return status_t::device_error_k;
-            if (status_t const launched = cuda_launch(kits_.kernel_function_(rung, launch.kernel, launch.slots), blocks,
-                                                      block_threads_k,
+            if (status_t const launched = cuda_launch(api(), kits_.kernel_function_(rung, launch.kernel, launch.slots),
+                                                      blocks, block_threads_k,
                                                       walkers_per_block_(rung) * build.scratch_bytes_per_warp, stream,
                                                       cuda_overlap_t::serialized_k, arguments);
                 failed(launched))
@@ -2671,7 +2692,7 @@ struct vram_ragged_graph {
                           cuda_stream_handle_t stream) noexcept {
         // The bitsets, the levels, the sweeps' expanded counters and the unreached counter lie back
         // to back.
-        if (cuda_fill_async(scratch.reached.words, 0, (scratch.words * 3 + 4) * sizeof(u32_t), stream) !=
+        if (cuda_fill_async(api(), scratch.reached.words, 0, (scratch.words * 3 + 4) * sizeof(u32_t), stream) !=
             cuda_success_k)
             return status_t::device_error_k;
         vram_graph<node_id_t> graph {};
@@ -2709,9 +2730,9 @@ struct vram_ragged_graph {
             graph.next_frontier = odd ? scratch.next_frontier : scratch.frontier;
             graph.counter = scratch.expanded + odd;
             graph.previous_counter = sweep_number == 1 ? nullptr : scratch.expanded + !odd;
-            if (cuda_fill_async(graph.next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) !=
+            if (cuda_fill_async(api(), graph.next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) !=
                     cuda_success_k ||
-                cuda_fill_async(graph.counter, 0, sizeof(u32_t), stream) != cuda_success_k)
+                cuda_fill_async(api(), graph.counter, 0, sizeof(u32_t), stream) != cuda_success_k)
                 return status_t::device_error_k;
             if (status_t const launched = launch_graph_(vram_kernel_t::reachability_sweep_k,
                                                         graph_blocks_(vram_kernel_t::reachability_sweep_k), graph,
@@ -2721,7 +2742,7 @@ struct vram_ragged_graph {
         }
         graph.island_ids = scratch.island_ids;
         graph.counter = scratch.unreached;
-        if (cuda_fill_async(scratch.unreached, 0, sizeof(u32_t), stream) != cuda_success_k)
+        if (cuda_fill_async(api(), scratch.unreached, 0, sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
         if (status_t const launched = launch_graph_(vram_kernel_t::reachability_islands_k,
                                                     divide_round_up<u32_t>(graph.rows_count, block_threads_k), graph,
@@ -2729,10 +2750,10 @@ struct vram_ragged_graph {
             failed(launched))
             return launched;
         u32_t const* const last_expanded = scratch.expanded + ((2 * first_sweep - 1) & 1u);
-        return cuda_copy_async(&landing->levels, scratch.levels, sizeof(u32_t), stream) == cuda_success_k &&
-                       cuda_copy_async(&landing->last_expanded, last_expanded, sizeof(u32_t), stream) ==
+        return cuda_copy_async(api(), &landing->levels, scratch.levels, sizeof(u32_t), stream) == cuda_success_k &&
+                       cuda_copy_async(api(), &landing->last_expanded, last_expanded, sizeof(u32_t), stream) ==
                            cuda_success_k &&
-                       cuda_copy_async(&landing->unreached, scratch.unreached, 2 * sizeof(u32_t), stream) ==
+                       cuda_copy_async(api(), &landing->unreached, scratch.unreached, 2 * sizeof(u32_t), stream) ==
                            cuda_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
@@ -2743,7 +2764,7 @@ struct vram_ragged_graph {
      *  reached node is found through, then each island into a reached pick or its landmark. */
     status_t queue_reconnect_(audit_scratch_t const& scratch, u32_t islands, std::size_t rows,
                               cuda_stream_handle_t stream) noexcept {
-        if (cuda_fill_async(scratch.in_links, 0, rows * sizeof(u32_t), stream) != cuda_success_k)
+        if (cuda_fill_async(api(), scratch.in_links, 0, rows * sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
         vram_graph<node_id_t> graph {};
         graph.neighbors = reinterpret_cast<node_id_t*>(neighbors_matrix_.base());
@@ -2840,11 +2861,11 @@ struct vram_ragged_graph {
             roots[part] = static_cast<u32_t>(seeded_bijection(part, rows, seed));
         }
         cuda_stream_handle_t const stream = context.stream();
-        return cuda_copy_async(split.landing.data() + bytes.landed_starts, offsets_column_.base(),
+        return cuda_copy_async(api(), split.landing.data() + bytes.landed_starts, offsets_column_.base(),
                                (rows + 1) * sizeof(u64_t), stream) == cuda_success_k &&
-                       cuda_copy_async(carved.part_bases, bases, 3 * parts * sizeof(byte_t*), stream) ==
+                       cuda_copy_async(api(), carved.part_bases, bases, 3 * parts * sizeof(byte_t*), stream) ==
                            cuda_success_k &&
-                       cuda_copy_async(carved.roots, roots, parts * sizeof(u32_t), stream) == cuda_success_k
+                       cuda_copy_async(api(), carved.roots, roots, parts * sizeof(u32_t), stream) == cuda_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
@@ -2882,8 +2903,8 @@ struct vram_ragged_graph {
         std::size_t const words = divide_round_up<std::size_t>(rows, 32);
         split_scratch_t const carved = split_scratch_(split);
         // Each run lies back to back.
-        if (cuda_fill_async(carved.labels, 0xFF, 2 * rows * sizeof(u32_t), stream) != cuda_success_k ||
-            cuda_fill_async(carved.frontier.words, 0, (3 * words + 2 * parts + 2) * sizeof(u32_t), stream) !=
+        if (cuda_fill_async(api(), carved.labels, 0xFF, 2 * rows * sizeof(u32_t), stream) != cuda_success_k ||
+            cuda_fill_async(api(), carved.frontier.words, 0, (3 * words + 2 * parts + 2) * sizeof(u32_t), stream) !=
                 cuda_success_k)
             return status_t::device_error_k;
         vram_graph<node_id_t> graph = split_graph_(split);
@@ -2911,8 +2932,8 @@ struct vram_ragged_graph {
             graph.next_frontier = odd ? carved.next_frontier : carved.frontier;
             graph.counter = carved.placed + odd;
             graph.previous_counter = round == 1 ? nullptr : carved.placed + !odd;
-            if (cuda_fill_async(graph.next_frontier.words, 0, words * sizeof(u32_t), stream) != cuda_success_k ||
-                cuda_fill_async(graph.counter, 0, sizeof(u32_t), stream) != cuda_success_k)
+            if (cuda_fill_async(api(), graph.next_frontier.words, 0, words * sizeof(u32_t), stream) != cuda_success_k ||
+                cuda_fill_async(api(), graph.counter, 0, sizeof(u32_t), stream) != cuda_success_k)
                 return status_t::device_error_k;
             for (vram_kernel_t const pass : {vram_kernel_t::partition_propose_k, vram_kernel_t::partition_tally_k,
                                              vram_kernel_t::partition_accept_k})
@@ -2924,7 +2945,7 @@ struct vram_ragged_graph {
                 return launched;
         }
         split.next_round = 2 * first_round;
-        return cuda_copy_async(split.landing.data() + split_bytes_(split.rows, parts).landed_placed,
+        return cuda_copy_async(api(), split.landing.data() + split_bytes_(split.rows, parts).landed_placed,
                                carved.placed + ((2 * first_round - 1) & 1u), sizeof(u32_t), stream) == cuda_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
@@ -2950,8 +2971,8 @@ struct vram_ragged_graph {
             return launched;
         byte_t* const landing = split.landing.data();
         split_scratch_t const carved = split_scratch_(split);
-        return cuda_copy_async(landing, carved.labels, rows * sizeof(u32_t), stream) == cuda_success_k &&
-                       cuda_copy_async(landing + rows * sizeof(u32_t), carved.seams.words, words * sizeof(u32_t),
+        return cuda_copy_async(api(), landing, carved.labels, rows * sizeof(u32_t), stream) == cuda_success_k &&
+                       cuda_copy_async(api(), landing + rows * sizeof(u32_t), carved.seams.words, words * sizeof(u32_t),
                                        stream) == cuda_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
@@ -2963,13 +2984,13 @@ struct vram_ragged_graph {
         byte_t const* const landing = split.landing.data();
         u64_t const* const offsets = reinterpret_cast<u64_t const*>(
             landing + split_bytes_(split.rows, split.receivers.size()).landed_offsets);
-        if (cuda_copy_async(split_scratch_(split).labels, landing, split.rows * sizeof(u32_t), stream) !=
+        if (cuda_copy_async(api(), split_scratch_(split).labels, landing, split.rows * sizeof(u32_t), stream) !=
             cuda_success_k)
             return status_t::device_error_k;
         for (std::size_t index = 0; index != split.receivers.size(); ++index) {
             split_part_t const& part = split.parts[index];
             vram_ragged_graph const& receiver = *split.receivers[index];
-            if (part.rows && cuda_copy_async(receiver.offsets_column_.base(), offsets + part.offsets_first,
+            if (part.rows && cuda_copy_async(api(), receiver.offsets_column_.base(), offsets + part.offsets_first,
                                              (part.rows + 1) * sizeof(u64_t), stream) != cuda_success_k)
                 return status_t::device_error_k;
         }

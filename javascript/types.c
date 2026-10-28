@@ -62,6 +62,22 @@ static char const* usearch_js_traversal_spell(int traversal) {
     return usearch_traversal_name((usearch_traversal_t)traversal);
 }
 
+static int usearch_js_cpu_class_parse(char const* name) {
+    return (int)usearch_cpu_class_from_name(usearch_js_name_view(name));
+}
+
+static char const* usearch_js_cpu_class_spell(int cpu_class) {
+    return usearch_cpu_class_name((usearch_cpu_class_t)cpu_class);
+}
+
+static int usearch_js_gpu_class_parse(char const* name) {
+    return (int)usearch_gpu_class_from_name(usearch_js_name_view(name));
+}
+
+static char const* usearch_js_gpu_class_spell(int gpu_class) {
+    return usearch_gpu_class_name((usearch_gpu_class_t)gpu_class);
+}
+
 bool usearch_js_traversal_from_value(napi_env env, napi_value value, char const* field, usearch_traversal_t* result) {
     int traversal = usearch_traversal_walk_k;
     if (!usearch_js_value_absent(env, value) &&
@@ -69,6 +85,26 @@ bool usearch_js_traversal_from_value(napi_env env, napi_value value, char const*
                                     &traversal))
         return false;
     *result = (usearch_traversal_t)traversal;
+    return true;
+}
+
+bool usearch_js_cpu_class_from_value(napi_env env, napi_value value, usearch_cpu_class_t* result) {
+    int cpu_class = usearch_cpu_class_unknown_k;
+    if (!usearch_js_value_absent(env, value) &&
+        !usearch_js_name_from_value(env, value, "cpuClass", usearch_js_cpu_class_parse, usearch_js_cpu_class_spell,
+                                    &cpu_class))
+        return false;
+    *result = (usearch_cpu_class_t)cpu_class;
+    return true;
+}
+
+bool usearch_js_gpu_class_from_value(napi_env env, napi_value value, usearch_gpu_class_t* result) {
+    int gpu_class = usearch_gpu_class_unknown_k;
+    if (!usearch_js_value_absent(env, value) &&
+        !usearch_js_name_from_value(env, value, "gpuClass", usearch_js_gpu_class_parse, usearch_js_gpu_class_spell,
+                                    &gpu_class))
+        return false;
+    *result = (usearch_gpu_class_t)gpu_class;
     return true;
 }
 
@@ -612,7 +648,7 @@ static bool usearch_js_arguments(napi_env env, napi_callback_info info, size_t w
     return true;
 }
 
-/** @c forRam({memoryDomains, threads, deferredLimit}) → host workers over NUMA nodes. */
+/** @c forRam({memoryDomains, threads, deferredLimit, cpuClass}) → host workers over NUMA nodes. */
 static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -623,6 +659,7 @@ static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info i
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "threads"), "threads", &for_ram.threads) ||
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "deferredLimit"), "deferredLimit",
                                     &for_ram.deferred_limit) ||
+        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, config, "cpuClass"), &for_ram.ram.cpu_class) ||
         !usearch_js_ordinals_from_value(env, usearch_js_property(env, config, "memoryDomains"), "memoryDomains",
                                         &ordinals, &for_ram.ram.memory_domains_count))
         return NULL;
@@ -632,7 +669,8 @@ static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info i
     return usearch_js_executor_adopt(env, &outcome, handle, usearch_residency_ram_k);
 }
 
-/** @c onPool(pool, {memoryDomains, deferredLimit}) → an executor borrowing a ForkUnion pool. */
+/** @c onPool(pool, {memoryDomains, deferredLimit, cpuClass}) → an executor borrowing a ForkUnion
+ *  pool. */
 static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info info) {
     napi_value arguments[2] = {NULL, NULL};
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -643,6 +681,8 @@ static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info i
         !usearch_js_pointer_from_value(env, arguments[0], "pool", &on_pool.pool) ||
         !usearch_js_size_from_value(env, usearch_js_property(env, arguments[1], "deferredLimit"), "deferredLimit",
                                     &on_pool.deferred_limit) ||
+        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, arguments[1], "cpuClass"),
+                                         &on_pool.ram.cpu_class) ||
         !usearch_js_ordinals_from_value(env, usearch_js_property(env, arguments[1], "memoryDomains"), "memoryDomains",
                                         &ordinals, &on_pool.ram.memory_domains_count))
         return NULL;
@@ -652,7 +692,8 @@ static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info i
     return usearch_js_executor_adopt(env, &outcome, handle, usearch_residency_ram_k);
 }
 
-/** @c forVram({devices, streams, scratchLimit, deferredLimit}) → one stream per device. */
+/** @c forVram({devices, streams, scratchLimit, deferredLimit, gpuClass}) → one stream per
+ *  device. */
 static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -664,6 +705,7 @@ static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info 
                                     &for_vram.scratch_limit) ||
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "deferredLimit"), "deferredLimit",
                                     &for_vram.deferred_limit) ||
+        !usearch_js_gpu_class_from_value(env, usearch_js_property(env, config, "gpuClass"), &for_vram.vram.gpu_class) ||
         !usearch_js_ordinals_from_value(env, usearch_js_property(env, config, "devices"), "devices", &ordinals,
                                         &for_vram.vram.devices_count))
         return NULL;
@@ -709,7 +751,7 @@ static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info 
     return usearch_js_executor_adopt(env, &outcome, handle, usearch_residency_vram_k);
 }
 
-/** @c forNvme({paths, threads, deferredLimit}) → one submission ring per worker. */
+/** @c forNvme({paths, threads, deferredLimit, cpuClass}) → one submission ring per worker. */
 static napi_value usearch_js_executor_for_nvme(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -720,9 +762,10 @@ static napi_value usearch_js_executor_for_nvme(napi_env env, napi_callback_info 
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "threads"), "threads", &for_nvme.threads) ||
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "deferredLimit"), "deferredLimit",
                                     &for_nvme.deferred_limit) ||
+        !usearch_js_cpu_class_from_value(env, usearch_js_property(env, config, "cpuClass"), &for_nvme.nvme.cpu_class) ||
         !usearch_js_paths_from_value(env, usearch_js_property(env, config, "paths"), "paths", &paths))
         return NULL;
-    for_nvme.nvme = (usearch_nvme_options_t) {paths.views, paths.count};
+    for_nvme.nvme = (usearch_nvme_options_t) {paths.views, paths.count, for_nvme.nvme.cpu_class};
     usearch_executor_for_nvme(&for_nvme);
     usearch_js_paths_release(&paths);
     return usearch_js_executor_adopt(env, &outcome, handle, usearch_residency_nvme_k);

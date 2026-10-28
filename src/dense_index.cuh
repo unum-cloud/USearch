@@ -29,11 +29,10 @@
 #include <utility>          // `std::exchange` - nulling each donor slot an absorb consumes
 #include <variant>          // `std::variant`, `std::visit`
 
-#include <forkunion.h>            // `fu_topology_new` - the executor factories' discovery
-#include <forkunion/atomics.hpp>  // `fu::standard_atomic_ref` - the cursors' busy bits
-#include <forkunion/types.hpp>    // `fu::spin_mutex` - the ticks' lock
-#include <numkong/capabilities.h> // `nk_cpu_capabilities_enabled`, `nk_cpu_configure_thread`
-#include <numkong/cast.h>         // `nk_cast_best` - converting foreign scalar rows at the boundary
+#include <forkunion.h>           // `fu_topology_new` - the executor factories' discovery
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the cursors' busy bits
+#include <forkunion/types.hpp>   // `fu::spin_mutex` - the ticks' lock
+#include <numkong/cast.h>        // `nk_cast_best` - converting foreign scalar rows at the boundary
 
 #include "dense_punned.cuh"
 #include "usearch/utilities/nvme_walks.hpp"  // `nvme_read_metadata` - an NVMe view's own header read
@@ -192,22 +191,16 @@ static constexpr bool cpu_home_compiled(cpu_class_t cpu_class) noexcept {
     return home_ == dense_home_t::nvme_k ? nvme_class_compiled(cpu_class) : cpu_class_compiled(cpu_class);
 }
 
-/** The RAM or NVMe variant of @p dtype on the newest rung of @p ladder the machine admits and
- *  @p pinned holds, the serial floor last: a rung needs the class's NumKong and ForkUnion features.
- *  A rung whose table holds no variant of the dtype picks nothing its parent does not, so the walk
- *  goes on. */
+/** The RAM or NVMe variant of @p dtype on the newest rung of @p ladder that fits under @p ceiling,
+ *  the serial floor last. A rung whose table holds no variant of the dtype picks nothing its parent
+ *  does not, so the walk goes on. */
 template <dense_home_t home_, cpu_class_t... classes_>
-static dense_verbs<home_> const* pick_cpu_variant(cpu_ladder<classes_...>, nk_dtype_t dtype, usearch_cpu_class_t pinned,
-                                                  nk_capability_t available) noexcept {
+static dense_verbs<home_> const* pick_cpu_variant(cpu_ladder<classes_...>, nk_dtype_t dtype,
+                                                  cpu_ceiling_t ceiling) noexcept {
     dense_verbs<home_> const* picked = nullptr;
     auto rung = [&]<cpu_class_t class_>() noexcept {
-        if constexpr (cpu_home_compiled<home_>(class_)) {
-            if (picked) return;
-            if constexpr (class_ != cpu_class_t::serial_k)
-                if (!cpu_pin_takes(pinned, class_) || !numkong_admits(available, class_) || !forkunion_admits<class_>())
-                    return;
-            picked = dense_class_tables<home_, class_>::find(dtype);
-        }
+        if constexpr (cpu_home_compiled<home_>(class_))
+            if (!picked && cpu_rung_fits(class_, ceiling)) picked = dense_class_tables<home_, class_>::find(dtype);
     };
     (rung.template operator()<classes_>(), ...);
     return picked;
@@ -232,13 +225,12 @@ static dense_verbs<home_> const* pick_gpu_variant(gpu_ladder<classes_...>, nk_dt
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, usearch_ram_options_t const& ram,
                                         nk_dtype_t dtype, nk_kernel_kind_t kernel,
                                         usearch_outcome_t* outcome) noexcept {
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-    if (!cpu_pin_admitted(ram.cpu_class, available))
+    auto const [ceiling, pick_status] = pick_cpu_ceiling(ram.cpu_class);
+    if (failed(pick_status))
         return propagate_error(usearch_status_unsupported_k, outcome, "The CPU does not admit the pinned class"),
                nullptr;
-    dense_verbs<dense_home_t::ram_k> const* const verbs = pick_cpu_variant<dense_home_t::ram_k>(
-        cpu_ladder_t {}, dtype, ram.cpu_class, available);
+    dense_verbs<dense_home_t::ram_k> const* const verbs = pick_cpu_variant<dense_home_t::ram_k>(cpu_ladder_t {}, dtype,
+                                                                                                ceiling);
     return make_dense_handle(geometry, ram, *verbs, kernel, outcome);
 }
 
@@ -248,13 +240,12 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, nvme_placement_t const& nvme,
                                         nk_dtype_t dtype, nk_kernel_kind_t kernel,
                                         usearch_outcome_t* outcome) noexcept {
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-    if (!cpu_pin_admitted(nvme.cpu_class, available))
+    auto const [ceiling, pick_status] = pick_cpu_ceiling(nvme.cpu_class);
+    if (failed(pick_status))
         return propagate_error(usearch_status_unsupported_k, outcome, "The CPU does not admit the pinned class"),
                nullptr;
-    dense_verbs<dense_home_t::nvme_k> const* const verbs = pick_cpu_variant<dense_home_t::nvme_k>(
-        cpu_ladder_t {}, dtype, nvme.cpu_class, available);
+    dense_verbs<dense_home_t::nvme_k> const* const verbs = pick_cpu_variant<dense_home_t::nvme_k>(cpu_ladder_t {},
+                                                                                                  dtype, ceiling);
     return make_dense_handle(geometry, nvme, *verbs, kernel, outcome);
 }
 
@@ -269,11 +260,11 @@ static expected<gpu_class_t> shared_gpu_class(usearch_vram_options_t const& vram
         std::size_t const ordinal = named_ordinal(vram, position);
         if (ordinal >= devices.size()) return {gpu_class_t::unknown_k, status_t::device_error_k};
         gpu_device_t const device = devices[ordinal];
-        if (position && (device.vendor != shared.vendor || device.gpu_class != shared.gpu_class))
+        if (position && (device.vendor != shared.vendor || gpu_class_of(device) != gpu_class_of(shared)))
             return {gpu_class_t::unknown_k, status_t::config_mismatch_k};
         shared = device;
     }
-    return {shared.gpu_class, status_t::success_k};
+    return {gpu_class_of(shared), status_t::success_k};
 }
 
 /** The VRAM sibling of the RAM @ref make_index: the devices' vendor picks the ladder, and its
@@ -1678,10 +1669,13 @@ USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena) {
 USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
+    auto const [ceiling, pick_status] = pick_cpu_ceiling(arguments->ram.cpu_class);
+    if (failed(pick_status))
+        return propagate_error(pick_status, outcome, "The CPU does not admit the pinned class"), void();
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    if (!spawn_ram_executor(*executor, arguments->threads, outcome)) return delete executor, void();
+    if (!spawn_ram_executor(*executor, arguments->threads, ceiling, outcome)) return delete executor, void();
     hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
 }
 
@@ -1709,7 +1703,13 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
             return propagate_error(usearch_status_device_k, outcome, "A device ordinal is past the listing"), void();
         devices[shard] = listed[ordinal];
     }
-    auto [spawned, status] = spawn_gpu_executor(devices, arguments->scratch_limit);
+    auto const [gpu_class, shared_status] = shared_gpu_class(vram);
+    if (failed(shared_status) && shared_status != status_t::config_mismatch_k)
+        return propagate_error(shared_status, outcome), void();
+    if (vram.gpu_class != usearch_gpu_class_unknown_k && !gpu_pin_capabilities(gpu_class, vram.gpu_class))
+        return propagate_error(usearch_status_unsupported_k, outcome, "The devices do not run the pinned class"),
+               void();
+    auto [spawned, status] = spawn_gpu_executor(gpu_drivers(), devices, arguments->scratch_limit);
     if (status == status_t::config_mismatch_k)
         return propagate_error(status, outcome, "One executor drives one GPU vendor"), void();
     if (failed(status)) return propagate_error(status, outcome), void();
@@ -1729,7 +1729,7 @@ USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {
         usearch_gpu_device_t& landed = arguments->devices[position];
         landed = {static_cast<usearch_gpu_vendor_t>(device.vendor),
                   device.vendor_ordinal,
-                  static_cast<usearch_gpu_class_t>(device.gpu_class),
+                  static_cast<usearch_gpu_class_t>(gpu_class_of(device)),
                   device.compute_units,
                   device.memory_bytes,
                   {}};
@@ -1745,6 +1745,9 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
     *arguments->executor = nullptr;
     if (nvme.paths_count && !nvme.paths)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The paths must name storage"), void();
+    auto const [ceiling, pick_status] = pick_cpu_ceiling(nvme.cpu_class);
+    if (failed(pick_status))
+        return propagate_error(pick_status, outcome, "The CPU does not admit the pinned class"), void();
 
     // A transport identifier names a namespace the kernel no longer owns, which only a userspace
     // engine reaches, so one executor serves either kernel paths or transport identifiers, never
@@ -1797,7 +1800,7 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    if (!spawn_nvme_executor(*executor, arguments->threads, config, outcome)) return delete executor, void();
+    if (!spawn_nvme_executor(*executor, arguments->threads, config, ceiling, outcome)) return delete executor, void();
     hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
 }
 

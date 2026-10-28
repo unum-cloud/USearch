@@ -8,8 +8,6 @@ Author: Ash Vardanian
 Date: May 4, 2023
 """
 
-from __future__ import annotations
-
 import struct
 
 import numpy as np

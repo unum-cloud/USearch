@@ -284,8 +284,9 @@ struct counting_device_allocator {
     std::size_t tallied_bytes_ = 0;
 
     counting_device_allocator() noexcept = default;
-    counting_device_allocator(allocation_ledger_t& ledger, int device) noexcept
-        : virtual_memory_(device), ledger_(&ledger) {}
+    template <typename api_type_>
+    counting_device_allocator(allocation_ledger_t& ledger, api_type_ const& api, int device) noexcept
+        : virtual_memory_(api, device), ledger_(&ledger) {}
     counting_device_allocator(counting_device_allocator const& other) noexcept
         : virtual_memory_(other.virtual_memory_), ledger_(other.ledger_) {}
     template <typename other_>
@@ -308,6 +309,7 @@ struct counting_device_allocator {
     std::size_t reserved_bytes() const noexcept { return virtual_memory_.reserved_bytes(); }
     std::size_t committed_bytes() const noexcept { return virtual_memory_.committed_bytes(); }
     int device() const noexcept { return virtual_memory_.device(); }
+    auto const& api() const noexcept { return virtual_memory_.api(); }
     void share_with(std::bitset<gpu_devices_capacity_k> devices) noexcept { virtual_memory_.share_with(devices); }
     bool shared_with(int device) const noexcept { return virtual_memory_.shared_with(device); }
     status_t grant(std::bitset<gpu_devices_capacity_k> devices) noexcept { return virtual_memory_.grant(devices); }
@@ -3501,7 +3503,6 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
     using scalar_t = typename indexes_type_::index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
     using distance_t = typename indexes_type_::distance_t;
-    constexpr bool device_k = !ram_collection<indexes_type_>;
     using oracle_kit_t =
         typename quads_ladder<scalar_t, dense_oracle_capability<typename indexes_type_::index_t>()>::kit_t;
     constexpr std::size_t samples_k = 32, wanted_k = 10, noise_percent_k = 10;

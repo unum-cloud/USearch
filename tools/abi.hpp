@@ -902,14 +902,23 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t pi
     return session;
 }
 
+/** Every vendor's driver table and Apple's contexts, loaded once by the first harness step that
+ *  touches a device. */
+inline gpu_drivers_t& gpu_drivers() noexcept {
+    static gpu_drivers_t drivers;
+    return drivers;
+}
+
 /** Copies @p bytes of a call's output at @p source into @p destination: through the runtime of the
  *  vendor whose device memory holds it, else directly, as host memory, pinned or not, reads; false
  *  when the copy failed. */
 inline bool download(void* destination, void const* source, std::size_t bytes) noexcept {
     if (!bytes) return true;
-    if (cuda_device_of(source) >= 0) return cuda_copy(destination, source, bytes) == cuda_success_k;
-    if (hip_device_of(source) >= 0)
-        return hip_api().copy(destination, source, bytes, hip_copy_device_to_host_k) == hip_success_k;
+    gpu_drivers_t const& drivers = gpu_drivers();
+    if (cuda_device_of(drivers.cuda, source) >= 0)
+        return cuda_copy(drivers.cuda, destination, source, bytes) == cuda_success_k;
+    if (hip_device_of(drivers.hip, source) >= 0)
+        return drivers.hip.copy(destination, source, bytes, hip_copy_device_to_host_k) == hip_success_k;
     std::memcpy(destination, source, bytes);
     return true;
 }
@@ -971,15 +980,14 @@ struct dense_verbs_t {
         usearch_dense_save(&arguments);
     }
     static void load_ram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                         usearch_ram_options_t ram, geometry_t const& geometry, usearch_outcome_t* outcome) noexcept {
+                         usearch_ram_options_t ram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
         usearch_dense_load_ram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
         arguments.ram = ram;
         usearch_dense_load_ram(&arguments);
     }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                          usearch_vram_options_t vram, geometry_t const& geometry,
-                          usearch_outcome_t* outcome) noexcept {
+                          usearch_vram_options_t vram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
         usearch_dense_load_vram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
         arguments.vram = vram;
@@ -1210,15 +1218,14 @@ struct shapes_verbs_t {
         usearch_shapes_save(&arguments);
     }
     static void load_ram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                         usearch_ram_options_t ram, geometry_t const& geometry, usearch_outcome_t* outcome) noexcept {
+                         usearch_ram_options_t ram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
         usearch_shapes_load_ram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
         arguments.ram = ram;
         usearch_shapes_load_ram(&arguments);
     }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                          usearch_vram_options_t vram, geometry_t const& geometry,
-                          usearch_outcome_t* outcome) noexcept {
+                          usearch_vram_options_t vram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
         usearch_shapes_load_vram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
         arguments.vram = vram;

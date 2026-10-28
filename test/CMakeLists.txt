@@ -57,7 +57,7 @@ endfunction ()
 # compiles for the listed processors of the CDNA3 class, which CDNA3 and CDNA4 run.
 set(usearch_test_vram_shards_)
 if (USEARCH_BUILD_CUDA)
-    usearch_cuda_capabilities(usearch_test_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
+    usearch_cuda_capabilities(usearch_test_cuda_capabilities_ "${usearch_cuda_architectures_}")
     usearch_test_vram_shards(
         nvidia USEARCH_ARCH_CUDA_
         ENTRY dense/vram_nvidia.cpp

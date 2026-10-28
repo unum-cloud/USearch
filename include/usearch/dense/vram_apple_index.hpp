@@ -419,12 +419,12 @@ struct vram_apple_index {
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
         if (!dimensions_) {
             if (neighbors_allocator_.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
-            metal_context_t* const context = metal_context(device_.ordinal);
+            metal_context_t* const context = vectors_allocator_.context();
             if (!context) return {0, status_t::device_error_k};
             // The pipelines report the simdgroup width the specification carries, so they build
             // first.
             if (status_t const loaded = load_pipelines_(); failed(loaded)) return {0, loaded};
-            auto const [specs, status] = metal_device_specs_t::query(device_.ordinal);
+            auto const [specs, status] = metal_device_specs_t::query(*context, device_.ordinal);
             if (failed(status)) return {0, status};
             device_ = specs;
             counters_ = metal_allocate(*context, counters_bytes_k);
@@ -1490,7 +1490,7 @@ struct vram_apple_index {
      *  waits on the device's registry, the arena frontier's rung included; a pipeline too
      *  register-heavy to hold one threadgroup of four simdgroups refuses with @c unsupported_k. */
     status_t load_pipelines_() noexcept {
-        metal_context_t* const context = metal_context(device_.ordinal);
+        metal_context_t* const context = vectors_allocator_.context();
         if (!context) return status_t::device_error_k;
         char const* const source = metal_source<vector_dtype_, capability_>();
         vram_kernel_symbol_t symbol;
@@ -1605,7 +1605,8 @@ struct vram_apple_index {
             wave_arguments.first_id = wave_first;
             wave_arguments.end_id = wave_end;
             wave_arguments.epoch_base = arguments.epoch_base + offset;
-            metal_launch_t launch {context.stream(), pipeline_(vram_kernel_t::insert_k, candidate_slots).pipeline};
+            metal_launch_t launch {context.api(), context.stream(),
+                                   pipeline_(vram_kernel_t::insert_k, candidate_slots).pipeline};
             if (!launch) return status_t::device_error_k;
             bind_storage_(launch, wave_arguments);
             launch.bind(context.staging_, metal_staging_buffer_k, std::size_t {offset} * row_bytes());
@@ -1614,7 +1615,8 @@ struct vram_apple_index {
             bind_links(launch, wave);
             if (status_t const submitted = context.submit_(launch, blocks, threadgroup_threads_()); failed(submitted))
                 return submitted;
-            metal_launch_t back_link {context.stream(), pipeline_(vram_kernel_t::back_link_k, 0).pipeline};
+            metal_launch_t back_link {context.api(), context.stream(),
+                                      pipeline_(vram_kernel_t::back_link_k, 0).pipeline};
             if (!back_link) return status_t::device_error_k;
             wave_arguments.selection_rows = reselection_rows_();
             bind_storage_(back_link, wave_arguments);
@@ -1634,10 +1636,11 @@ struct vram_apple_index {
         metal_arguments_t arguments = arguments_();
         arguments.first_id = static_cast<u32_t>(first);
         arguments.end_id = static_cast<u32_t>(first + rows);
-        metal_context_t* const context = metal_context(device_.ordinal);
+        metal_context_t* const context = vectors_allocator_.context();
         if (!context) return status_t::device_error_k;
         std::shared_lock storage {storage_};
-        metal_launch_t launch {context->queue, pipeline_(vram_dense_kernel_t::derive_norms_k, 0).pipeline};
+        metal_launch_t launch {*context->api, context->queue,
+                               pipeline_(vram_dense_kernel_t::derive_norms_k, 0).pipeline};
         if (!launch) return status_t::device_error_k;
         launch.bind_bytes(&arguments, sizeof(arguments), metal_arguments_buffer_k);
         launch.bind(vectors_matrix_, metal_vectors_buffer_k);
@@ -1887,7 +1890,8 @@ struct vram_apple_index {
         }
         u32_t const keeps_word = keeps ? 1 : 0;
         std::shared_lock storage {storage_};
-        metal_launch_t launch {context.stream(), pipeline_(vram_kernel_t::search_k, candidate_slots).pipeline};
+        metal_launch_t launch {context.api(), context.stream(),
+                               pipeline_(vram_kernel_t::search_k, candidate_slots).pipeline};
         if (!launch) return status_t::device_error_k;
         bind_storage_(launch, arguments);
         launch.bind(context.staging_, metal_staging_buffer_k);
@@ -1967,7 +1971,8 @@ struct vram_apple_index {
         reset_counters_(counters_);
 
         std::shared_lock storage {storage_};
-        metal_launch_t launch {context.stream(), pipeline_(vram_kernel_t::refine_k, candidate_slots).pipeline};
+        metal_launch_t launch {context.api(), context.stream(),
+                               pipeline_(vram_kernel_t::refine_k, candidate_slots).pipeline};
         if (!launch) return status_t::device_error_k;
         bind_storage_(launch, arguments);
         launch.bind(context.staging_, metal_staging_buffer_k);

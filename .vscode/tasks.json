@@ -29,7 +29,7 @@
     {
       "label": "Build CUDA RelWithDebInfo",
       "detail": "Everything including CUDA, narrowed to the host GPU - the tree the language server reads",
-      "command": "cmake --preset cuda_relwithdebinfo && cmake --build --preset cuda_relwithdebinfo",
+      "command": "cmake --preset cuda && cmake --build --preset cuda",
       "args": [],
       "type": "shell",
       "group": {
@@ -40,8 +40,8 @@
     },
     {
       "label": "Test CUDA RelWithDebInfo",
-      "detail": "CTest over the cuda_relwithdebinfo tree",
-      "command": "ctest --preset cuda_relwithdebinfo",
+      "detail": "CTest over the cuda tree",
+      "command": "ctest --preset cuda",
       "args": [],
       "type": "shell",
       "group": {

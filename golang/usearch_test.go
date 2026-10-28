@@ -149,7 +149,7 @@ func ExampleDenseIndex_Deferred() {
 		log.Fatal(err)
 	}
 	defer index.Close()
-	executor, err := usearch.ExecutorForRam(nil, 0, 0)
+	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 0, 0)
 	if err != nil {
 		log.Fatal(err)
 	}

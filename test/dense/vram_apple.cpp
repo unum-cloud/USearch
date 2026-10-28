@@ -15,10 +15,10 @@ namespace unum::usearch::test::dense {
 
 std::size_t check_vram_apple(settings_t const& settings, gpu_device_t const& device) {
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    fmt::println("- Metal: device #{} {}, {}, {} compute units, {} MiB", ordinal, device.name,
-                 usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)), device.compute_units,
-                 device.memory_bytes >> 20);
-    auto [executor, spawn_status] = metal_executor_t::spawn(std::span<int const> {&ordinal, 1});
+    fmt::println("- Metal: device #{} {}, Apple{} family, {} compute units, {} MiB", ordinal, device.name,
+                 device.architecture_major, device.compute_units, device.memory_bytes >> 20);
+    auto [executor, spawn_status] = metal_executor_t::spawn(gpu_drivers().metal_contexts,
+                                                            std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println("- Metal: device #{} opens no queue", ordinal), 1;
     return check_vram_indexes(settings, executor);
 }

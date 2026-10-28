@@ -1189,7 +1189,7 @@ struct wait_capped_t {};
 
 /**
  *  @brief Portable spin-wait baseline with the same call shape as ForkUnion's hardware wait
- *      monitors, like @c fu::x86_tpause_t, @c fu::arm64_wfet_t, and @c fu::risc5_wrs_t.
+ *      monitors, like @c fu::x86_tpause_t, @c fu::arm64_wfet_t, and @c fu::riscv64_wrs_t.
  *
  *  Ignores the watched word and returns at once, so the loop re-checks it - correctness never
  *  depends on the waiter, only latency and power do. It watches an in-place word, like the row
@@ -1714,13 +1714,21 @@ enum class gpu_class_t : u32_t {
     apple_metal10_k,
 };
 
-/** One GPU as USearch numbers it - the vendor, that vendor's own ordinal and its class - with what
- *  a banner or a benchmark row reports, filled once by the vendor's listing, so no harness calls a
- *  vendor SDK. */
+/** One GPU as its vendor's driver reports it - the vendor, that vendor's own ordinal and its raw
+ *  architecture - with what a banner or a benchmark row reports, so no harness calls a vendor SDK;
+ *  the C layer maps the architecture to a class. */
 struct gpu_device_t {
     gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
     u32_t vendor_ordinal = 0;
-    gpu_class_t gpu_class = gpu_class_t::unknown_k;
+
+    /** The CUDA compute capability, the AMD @c gfx version or the newest Apple GPU family, major
+     *  then minor. */
+    u32_t architecture_major = 0;
+    u32_t architecture_minor = 0;
+
+    /** Lanes of one warp, wavefront or simdgroup, as the driver reports it; zero where only a built
+     *  pipeline reports it. */
+    u32_t warp_lanes = 0;
 
     /** Streaming multiprocessors, compute units or GPU cores. */
     u32_t compute_units = 0;

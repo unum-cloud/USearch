@@ -253,8 +253,9 @@ status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::l
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::load_kernels_(int device) noexcept {
-    auto [module, status] = cuda_module_t::load(device, kernels_type_::bytes());
+status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::load_kernels_(cuda_api_t const& api,
+                                                                                             int device) noexcept {
+    auto [module, status] = cuda_module_t::load(api, device, kernels_type_::bytes());
     if (failed(status)) return status;
     module_ = std::move(module);
     vram_kernel_symbol_t symbol;

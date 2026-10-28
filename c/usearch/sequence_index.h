@@ -415,6 +415,10 @@ typedef struct usearch_sequence_view_ram_t {
 
     /** The weights an alignment checkpoint was built with; @c NULL for the Levenshtein kinds. */
     usearch_sequence_weights_t const* weights;
+
+    /** The class to dispatch as; a view reads its shards from the checkpoint, so only
+     *  @c usearch_ram_options_t::cpu_class is read. */
+    usearch_ram_options_t ram;
 } usearch_sequence_view_ram_t;
 
 /**

@@ -456,6 +456,7 @@ struct vram_shard_core {
     using event_t = typename vendor_t::event_t;
     using executor_t = typename vendor_t::executor_t;
     using device_specs_t = typename vendor_t::device_specs_t;
+    using api_t = typename vendor_t::api_t;
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using dot_result_t = typename scalar_t::dot_result_t;
 
@@ -524,7 +525,8 @@ struct vram_shard_core {
                              neighbors_allocator_t const& neighbors_allocator = {}) noexcept
         : device_ {vectors_allocator.device()}, kernel_ {kernel}, vectors_matrix_(vectors_allocator),
           norms_column_(vectors_allocator), neighbors_matrix_(neighbors_allocator),
-          grown_((static_cast<void>(vendor_t::select(vectors_allocator.device())), event_t {})) {}
+          grown_((static_cast<void>(vendor_t::select(vectors_allocator.api(), vectors_allocator.device())),
+                  event_t {vectors_allocator.api()})) {}
     vram_shard_core(vram_shard_core const&) = delete;
     vram_shard_core& operator=(vram_shard_core const&) = delete;
 
@@ -575,6 +577,10 @@ struct vram_shard_core {
 
     /** The pinned device's identity and limits, queried once at the first @c reserve. */
     device_specs_t const& device_specs() const noexcept { return device_; }
+
+    /** The driver table every call on the pinned device goes through, the one its storage
+     *  carries. */
+    api_t const& api() const noexcept { return vectors_matrix_.api(); }
 
     /** The metric every walk scores by, fixed at construction. */
     nk_kernel_kind_t kernel() const noexcept { return kernel_; }
@@ -680,7 +686,7 @@ struct vram_shard_core {
         if (node >= size()) return status_t::config_mismatch_k;
         if (destination.size() != dimensions()) return status_t::config_mismatch_k;
         if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
-        return succeeded(vendor_t::copy(destination.byte_data(), vectors_rows_() + node * row_bytes(),
+        return succeeded(vendor_t::copy(api(), destination.byte_data(), vectors_rows_() + node * row_bytes(),
                                         packed_row_bytes(), stream))
                    ? status_t::success_k
                    : status_t::device_error_k;
@@ -753,8 +759,8 @@ struct vram_shard_core {
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
         if (!vectors_matrix_.reserved_bytes()) { // First reservation: bind the device, size the ceiling.
             // The device must be current before any mapping, since the storage lives on it.
-            if (failed(vendor_t::select(device_.ordinal))) return {0, status_t::device_error_k};
-            auto const [specs, status] = device_specs_t::query(device_.ordinal);
+            if (failed(vendor_t::select(api(), device_.ordinal))) return {0, status_t::device_error_k};
+            auto const [specs, status] = device_specs_t::query(api(), device_.ordinal);
             if (failed(status)) return {0, status};
             device_ = specs;
             // Geometry no walk can fit is refused here; a builder whose scratch shared memory
@@ -905,7 +911,8 @@ struct vram_shard_core {
         // Zeroed per call rather than per launch, so the launches of a sharded plan on one context
         // add up.
         if (context && context.device() == device_.ordinal &&
-            failed(vendor_t::fill(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream())))
+            failed(
+                vendor_t::fill(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream())))
             return {{}, status_t::device_error_k};
         if (!new_rows.rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
@@ -1226,7 +1233,7 @@ struct vram_shard_core {
                 if (!range.empty())
                     status_ = index_->kernels_.refine_pass_(*index_, context, scratch_, config, vram_kernel_t::refine_k,
                                                             range, {}, parts_, round_);
-                if (succeeded(status_)) status_ = land_counters_(scratch_, landing_.get(), 0, stream);
+                if (succeeded(status_)) status_ = index_->land_counters_(scratch_, landing_.get(), 0, stream);
                 break;
             }
             case phase_t::audit_k: status_ = queue_sweeps_(context); break;
@@ -1436,9 +1443,9 @@ struct vram_shard_core {
         stream_handle_t const stream = context.stream();
         // Zeroed once, so every pass adds up, and landed with every phase. A pageable upload stages
         // on the host at once and waits on nothing.
-        if (failed(vendor_t::fill(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream)) ||
-            (parts &&
-             failed(vendor_t::copy(plan.scratch_.part_bases, part_bases.data(), parts * sizeof(node_id_t), stream))))
+        if (failed(vendor_t::fill(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream)) ||
+            (parts && failed(vendor_t::copy(api(), plan.scratch_.part_bases, part_bases.data(),
+                                            parts * sizeof(node_id_t), stream))))
             return {std::move(plan), status_t::device_error_k};
         node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
         plan.index_ = this;
@@ -1649,7 +1656,7 @@ struct vram_shard_core {
         save_plan_t(vram_shard_core const& index, columns_t columns, typename executor_t::stream_t const& stream,
                     node_id_t visible) noexcept
             : columns(columns), stream(stream.handle), bounce(typename vendor_t::pinned_allocator_t {stream}),
-              visible(visible), index_(&index) {}
+              visible(visible), crossed_ {event_t {index.api()}, event_t {index.api()}}, index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
             : columns(other.columns), stream(other.stream), bounce(std::move(other.bounce)), visible(other.visible),
               covered(other.covered), crossed_ {std::move(other.crossed_[0]), std::move(other.crossed_[1])},
@@ -1726,7 +1733,8 @@ struct vram_shard_core {
         status_t save(step_t const& step, nk::matrix_span<node_id_t>) noexcept {
             if (!index_) return status_t::uninitialized_k;
             // Shards' steps interleave on one thread, so another shard's device may be current.
-            if (failed(vendor_t::select(index_->device_specs().ordinal))) return status_t::device_error_k;
+            if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
+                return status_t::device_error_k;
             iota_view<node_id_t> const rows = step.index_rows;
             if (rows.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
@@ -1745,13 +1753,14 @@ struct vram_shard_core {
                 byte_t* const bounce_neighbors = bounce_vectors + half_rows() * scalar_row_bytes;
                 byte_t* const bounce_norms = bounce_neighbors + half_rows() * neighbors_row_bytes;
                 std::size_t const count = bound - chunk;
-                if (failed(vendor_t::copy_2d(bounce_vectors, scalar_row_bytes,
+                if (failed(vendor_t::copy_2d(index_->api(), bounce_vectors, scalar_row_bytes,
                                              index_->vectors_rows_() + chunk * index_->row_bytes(), index_->row_bytes(),
                                              scalar_row_bytes, count, stream)) ||
                     (!columns.norms.empty() &&
-                     failed(vendor_t::copy(bounce_norms, index_->norms_column_.base() + chunk * sizeof(norms_t),
+                     failed(vendor_t::copy(index_->api(), bounce_norms,
+                                           index_->norms_column_.base() + chunk * sizeof(norms_t),
                                            count * sizeof(norms_t), stream))) ||
-                    failed(vendor_t::copy(bounce_neighbors,
+                    failed(vendor_t::copy(index_->api(), bounce_neighbors,
                                           index_->neighbors_matrix_.base() + chunk * neighbors_row_bytes,
                                           count * neighbors_row_bytes, stream)) ||
                     failed(crossed_[half].record(stream)))
@@ -1777,7 +1786,8 @@ struct vram_shard_core {
          */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
-            if (failed(vendor_t::select(index_->device_specs().ordinal))) return status_t::device_error_k;
+            if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
+                return status_t::device_error_k;
             if (status_t const landed = land_pending_(); failed(landed)) return landed;
             std::size_t const nodes = static_cast<std::size_t>(visible);
             if (fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != nodes)
@@ -1860,7 +1870,7 @@ struct vram_shard_core {
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
             return {{}, status_t::config_mismatch_k};
-        if (failed(vendor_t::select(device_.ordinal))) return {{}, status_t::device_error_k};
+        if (failed(vendor_t::select(api(), device_.ordinal))) return {{}, status_t::device_error_k};
         save_plan_t plan {*this, columns, stream, static_cast<node_id_t>(rows)};
         std::size_t const bounce_bytes = 2 * plan.half_rows() *
                                          (packed_row_bytes() + connectivity() * sizeof(node_id_t) + sizeof(norms_t));
@@ -1935,7 +1945,7 @@ struct vram_shard_core {
         load_plan_t(vram_shard_core& index, typename executor_t::stream_t const& stream, node_id_t base,
                     std::size_t rows) noexcept
             : stream(stream.handle), bounce(typename vendor_t::pinned_allocator_t {stream}), base(base), rows(rows),
-              index_(&index) {}
+              crossed_ {event_t {index.api()}, event_t {index.api()}}, index_(&index) {}
         load_plan_t(load_plan_t&& other) noexcept
             : stream(other.stream), bounce(std::move(other.bounce)), base(other.base),
               rows(std::exchange(other.rows, 0)), covered(other.covered), covered_norms(other.covered_norms),
@@ -1950,7 +1960,7 @@ struct vram_shard_core {
          *  every copy it queued, and awaiting that mark before its bounce unpins. */
         ~load_plan_t() noexcept {
             if (!index_ || !rows) return;
-            if (succeeded(vendor_t::select(index_->device_specs().ordinal)) &&
+            if (succeeded(vendor_t::select(index_->api(), index_->device_specs().ordinal)) &&
                 succeeded(index_->grown_.record(stream)) && chunks_) [[maybe_unused]]
                 status_t const drained = index_->grown_.wait();
             // Under the claim or the closed word, which every reader of the filled extent holds.
@@ -2029,7 +2039,8 @@ struct vram_shard_core {
          */
         status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
             if (!index_ || bounce.empty()) return status_t::uninitialized_k;
-            if (failed(vendor_t::select(index_->device_specs().ordinal))) return status_t::device_error_k;
+            if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
+                return status_t::device_error_k;
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
@@ -2076,11 +2087,13 @@ struct vram_shard_core {
                 compact_neighbors(landed, connectivity, static_cast<node_id_t>(into), node_id_unknown_k);
                 // The copy engine then reads the half from the last-level cache, not this core.
                 index_->prefetcher_.demote(bounce_vectors, half_bytes);
-                if (failed(vendor_t::copy_2d(index_->vectors_rows_() + into * index_->row_bytes(), index_->row_bytes(),
-                                             bounce_vectors, scalar_row_bytes, scalar_row_bytes, count, stream)) ||
-                    (normed && failed(vendor_t::copy(index_->norms_column_.base() + into * sizeof(norms_t),
-                                                     bounce_norms, count * sizeof(norms_t), stream))) ||
-                    failed(vendor_t::copy(index_->neighbors_matrix_.base() + into * neighbors_row_bytes,
+                if (failed(vendor_t::copy_2d(index_->api(), index_->vectors_rows_() + into * index_->row_bytes(),
+                                             index_->row_bytes(), bounce_vectors, scalar_row_bytes, scalar_row_bytes,
+                                             count, stream)) ||
+                    (normed &&
+                     failed(vendor_t::copy(index_->api(), index_->norms_column_.base() + into * sizeof(norms_t),
+                                           bounce_norms, count * sizeof(norms_t), stream))) ||
+                    failed(vendor_t::copy(index_->api(), index_->neighbors_matrix_.base() + into * neighbors_row_bytes,
                                           bounce_neighbors, count * neighbors_row_bytes, stream)) ||
                     failed(crossed_[half].record(stream)))
                     return index_->fail_(status_t::device_error_k);
@@ -2116,7 +2129,7 @@ struct vram_shard_core {
             vram_shard_core const& source = source_shard.core();
             if (!index_) return status_t::uninitialized_k;
             int const device = index_->device_specs().ordinal;
-            if (failed(vendor_t::select(device))) return status_t::device_error_k;
+            if (failed(vendor_t::select(index_->api(), device))) return status_t::device_error_k;
             iota_view<node_id_t> const range = step.index_rows;
             bool const normed = index_->stores_norms() && source.stores_norms();
             if (range.empty() || range.size() != step.source_rows.size() || range.first < base ||
@@ -2130,12 +2143,12 @@ struct vram_shard_core {
             std::size_t const row_bytes = index_->row_bytes();
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(node_id_t);
             std::size_t const count = range.size(), into = range.first, from = step.source_rows.first;
-            if (failed(vendor_t::copy(index_->vectors_rows_() + into * row_bytes,
+            if (failed(vendor_t::copy(index_->api(), index_->vectors_rows_() + into * row_bytes,
                                       source.vectors_rows_() + from * row_bytes, count * row_bytes, stream)) ||
-                failed(vendor_t::copy(index_->neighbors_matrix_.base() + into * neighbors_row_bytes,
+                failed(vendor_t::copy(index_->api(), index_->neighbors_matrix_.base() + into * neighbors_row_bytes,
                                       source.neighbors_matrix_.base() + from * neighbors_row_bytes,
                                       count * neighbors_row_bytes, stream)) ||
-                (normed && failed(vendor_t::copy(index_->norms_column_.base() + into * sizeof(norms_t),
+                (normed && failed(vendor_t::copy(index_->api(), index_->norms_column_.base() + into * sizeof(norms_t),
                                                  source.norms_column_.base() + from * sizeof(norms_t),
                                                  count * sizeof(norms_t), stream))))
                 return index_->fail_(status_t::device_error_k);
@@ -2161,7 +2174,8 @@ struct vram_shard_core {
          */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
-            if (failed(vendor_t::select(index_->device_specs().ordinal))) return status_t::device_error_k;
+            if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
+                return status_t::device_error_k;
             if (fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
             if (rows) {
@@ -2173,8 +2187,8 @@ struct vram_shard_core {
                     return index_->fail_(status_t::device_error_k);
                 // A fill carries the count by value, so no host word must outlive a copy; the one
                 // wait lands every step, the norms and the count before the watermark turns.
-                if (failed(
-                        vendor_t::fill_words(index_->published_rows_(), static_cast<u32_t>(base + rows), 1, stream)) ||
+                if (failed(vendor_t::fill_words(index_->api(), index_->published_rows_(),
+                                                static_cast<u32_t>(base + rows), 1, stream)) ||
                     failed(crossed_[0].record(stream)) || failed(crossed_[0].wait()))
                     return index_->fail_(status_t::device_error_k);
             }
@@ -2218,7 +2232,7 @@ struct vram_shard_core {
     expected<load_plan_t> plan_load(std::size_t rows, typename executor_t::stream_t const& stream) noexcept {
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        if (failed(vendor_t::select(device_.ordinal))) return {{}, status_t::device_error_k};
+        if (failed(vendor_t::select(api(), device_.ordinal))) return {{}, status_t::device_error_k};
         if (!rows) return {load_plan_t {*this, stream, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
         // A closed word is the caller's, who refines or absorbs around the load; an open one is
         // claimed like a batch's, so no batch lands beside it.
@@ -2290,10 +2304,10 @@ struct vram_shard_core {
         byte_t* const staging = context.ensure_staging(links_offset + links_bytes);
         if (!staging) return {{}, status_t::bad_alloc_k};
         u32_t* const link_heads = reinterpret_cast<u32_t*>(staging + links_offset);
-        if (failed(vendor_t::fill(link_heads, 0xFF, total_rows * sizeof(u32_t), stream)))
+        if (failed(vendor_t::fill(api(), link_heads, 0xFF, total_rows * sizeof(u32_t), stream)))
             return {{}, status_t::device_error_k};
         if ((import_bytes || packed_row_bytes() != row_bytes()) &&
-            failed(vendor_t::fill(staging, 0, rows * row_bytes() + import_bytes, stream)))
+            failed(vendor_t::fill(api(), staging, 0, rows * row_bytes() + import_bytes, stream)))
             return {{}, status_t::device_error_k};
         if (status_t const imported = import_rows_(staging, new_rows, staging + rows * row_bytes(), stream);
             failed(imported))
@@ -2400,8 +2414,8 @@ struct vram_shard_core {
         std::size_t const source_row_bytes = packed_bytes(rows.dtype, rows.columns);
         std::size_t const source_pitch = rows.stride ? rows.stride : source_row_bytes;
         if (rows.dtype == vector_dtype_) {
-            if (failed(vendor_t::copy_2d(staging, row_bytes(), rows.data, source_pitch, source_row_bytes, distinct,
-                                         stream)))
+            if (failed(vendor_t::copy_2d(api(), staging, row_bytes(), rows.data, source_pitch, source_row_bytes,
+                                         distinct, stream)))
                 return status_t::device_error_k;
         }
         else {
@@ -2412,8 +2426,8 @@ struct vram_shard_core {
             for (std::size_t first = 0; first < distinct; first += window_rows) {
                 std::size_t const count = min_of(window_rows, distinct - first);
                 byte_t* const landing = staging + first * row_bytes();
-                if (failed(vendor_t::copy_2d(window, window_row_bytes, rows.row(first), source_pitch, source_row_bytes,
-                                             count, stream)))
+                if (failed(vendor_t::copy_2d(api(), window, window_row_bytes, rows.row(first), source_pitch,
+                                             source_row_bytes, count, stream)))
                     return status_t::device_error_k;
                 status_t landed = status_t::success_k;
                 if (!narrows_at_unit_rms_(rows.dtype))
@@ -2432,7 +2446,7 @@ struct vram_shard_core {
             }
         }
         for (std::size_t copied = distinct; copied < rows.rows; copied *= 2)
-            if (failed(vendor_t::copy(staging + copied * row_bytes(), staging,
+            if (failed(vendor_t::copy(api(), staging + copied * row_bytes(), staging,
                                       min_of(copied, rows.rows - copied) * row_bytes(), stream)))
                 return status_t::device_error_k;
         return status_t::success_k;
@@ -2471,9 +2485,10 @@ struct vram_shard_core {
                 failed(cast))
                 return cast;
         }
-        if (failed(vendor_t::copy_2d(outputs.data, outputs.stride, exported, exported_row_bytes, exported_row_bytes,
-                                     outputs.rows, stream)) ||
-            (!carry.empty() && failed(vendor_t::copy(carry.data(), landed + values, carry.size_bytes(), stream))))
+        if (failed(vendor_t::copy_2d(api(), outputs.data, outputs.stride, exported, exported_row_bytes,
+                                     exported_row_bytes, outputs.rows, stream)) ||
+            (!carry.empty() &&
+             failed(vendor_t::copy(api(), carry.data(), landed + values, carry.size_bytes(), stream))))
             return status_t::device_error_k;
         return status_t::success_k;
     }
@@ -2596,7 +2611,7 @@ struct vram_shard_core {
             scratch.island_ids = scratch.claims + 2;
             scratch.part_bases = scratch.island_ids + rows;
         }
-        if (failed(vendor_t::fill(scratch.reconnected, 0, sizeof(u32_t), context.stream())))
+        if (failed(vendor_t::fill(api(), scratch.reconnected, 0, sizeof(u32_t), context.stream())))
             return {std::move(scratch), status_t::device_error_k};
         return {std::move(scratch), status_t::success_k};
     }
@@ -2604,12 +2619,12 @@ struct vram_shard_core {
     /** Queues the copy of @p scratch 's counters into @p landing: the levels, the count of sweep
      *  @p last_sweep, then the unreached, reconnected and claim counters, which lie back to
      *  back. */
-    static status_t land_counters_(refine_scratch_t const& scratch, audit_landing_t* landing, u32_t last_sweep,
-                                   stream_handle_t stream) noexcept {
-        return succeeded(vendor_t::copy(&landing->levels, scratch.levels, sizeof(u32_t), stream)) &&
-                       succeeded(vendor_t::copy(&landing->last_expanded, scratch.expanded + (last_sweep & 1u),
+    status_t land_counters_(refine_scratch_t const& scratch, audit_landing_t* landing, u32_t last_sweep,
+                            stream_handle_t stream) noexcept {
+        return succeeded(vendor_t::copy(api(), &landing->levels, scratch.levels, sizeof(u32_t), stream)) &&
+                       succeeded(vendor_t::copy(api(), &landing->last_expanded, scratch.expanded + (last_sweep & 1u),
                                                 sizeof(u32_t), stream)) &&
-                       succeeded(vendor_t::copy(&landing->unreached, scratch.unreached,
+                       succeeded(vendor_t::copy(api(), &landing->unreached, scratch.unreached,
                                                 sizeof(audit_landing_t) - 2 * sizeof(u32_t), stream))
                    ? status_t::success_k
                    : status_t::device_error_k;
@@ -2721,12 +2736,12 @@ struct vram_shard_core {
      *  claim word. */
     status_t grow_rows_(std::size_t rows, stream_handle_t stream) noexcept {
         if (status_t const mapped = map_rows_(rows); failed(mapped)) return mapped;
-        if (failed(vendor_t::follow(stream, grown_))) return status_t::device_error_k;
+        if (failed(vendor_t::follow(api(), stream, grown_))) return status_t::device_error_k;
         if (rows <= filled_rows_) return status_t::success_k;
         std::size_t const mapped_rows = capacity(), row_words = connectivity();
-        if (!filled_rows_ && failed(vendor_t::fill_words(published_rows_(), 0, 1, stream)))
+        if (!filled_rows_ && failed(vendor_t::fill_words(api(), published_rows_(), 0, 1, stream)))
             return status_t::device_error_k;
-        if (failed(vendor_t::fill_words(neighbors_matrix_.base() + filled_rows_ * row_words * sizeof(u32_t),
+        if (failed(vendor_t::fill_words(api(), neighbors_matrix_.base() + filled_rows_ * row_words * sizeof(u32_t),
                                         node_id_unknown_k, (mapped_rows - filled_rows_) * row_words, stream)) ||
             failed(grown_.record(stream)))
             return status_t::device_error_k;

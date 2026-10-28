@@ -372,8 +372,8 @@ struct shapes_vram_nvidia_build {
     nk_kernel_kind_t kernel = nk_kernel_unknown_k;
 
     std::unique_ptr<face_t> operator()(int device) const noexcept {
-        return std::unique_ptr<face_t> {new (std::nothrow)
-                                            face_t(kernel, cuda_virtual_memory_allocator<byte_t> {device})};
+        return std::unique_ptr<face_t> {
+            new (std::nothrow) face_t(kernel, cuda_virtual_memory_allocator<byte_t> {gpu_drivers().cuda, device})};
     }
 };
 

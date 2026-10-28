@@ -16,16 +16,16 @@ if (NOT DEFINED ENV{EMSDK})
 endif ()
 
 set(CMAKE_C_FLAGS
-    "-pthread -sMEMORY64 -msimd128 -mrelaxed-simd"
+    "-pthread --target=wasm64 -msimd128 -mrelaxed-simd"
     CACHE STRING "Flags used by the C compiler during all build types."
 )
 set(CMAKE_CXX_FLAGS
-    "-pthread -sMEMORY64 -msimd128 -mrelaxed-simd"
+    "-pthread --target=wasm64 -msimd128 -mrelaxed-simd"
     CACHE STRING "Flags used by the CXX compiler during all build types."
 )
 set(EMSCRIPTEN_SYSTEM_PROCESSOR wasm64)
 include("$ENV{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake")
 
 set(CMAKE_EXE_LINKER_FLAGS_INIT
-    "-pthread -sMEMORY64 -sPROXY_TO_PTHREAD -sALLOW_MEMORY_GROWTH -sEXIT_RUNTIME=1 -sNODE_HOST_ENV"
+    "-pthread --target=wasm64 -sPROXY_TO_PTHREAD -sALLOW_MEMORY_GROWTH -sEXIT_RUNTIME=1 -sNODE_HOST_ENV"
 )

@@ -211,8 +211,9 @@ usearch_executor_t call_executor_for(punned_basic_index<traits_type_, home_> con
     std::array<int, gpu_devices_capacity_k> devices;
     std::size_t devices_count = punned.verbs.devices(punned.variant, devices);
     if (!devices_count) devices[devices_count++] = punned.verbs.device(punned.variant);
-    auto [built, status] = punned_basic_index<traits_type_, home_>::executor_t::spawn(
-        std::span<int const> {devices.data(), devices_count});
+    using executor_t = typename punned_basic_index<traits_type_, home_>::executor_t;
+    auto [built, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
+                                             std::span<int const> {devices.data(), devices_count});
     if (failed(status)) return propagate_error(status, outcome), nullptr;
     call_executor.executor = gpu_executor_t {std::move(built)};
     return &call_executor;

@@ -5,8 +5,6 @@ floors it asserts, and the gate that skips a kernel family this machine cannot r
 name from each test module; only what pytest loads for itself lives in `conftest`.
 """
 
-from __future__ import annotations
-
 import os
 import re
 import secrets

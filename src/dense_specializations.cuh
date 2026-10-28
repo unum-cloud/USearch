@@ -303,7 +303,8 @@ struct specialized_index {
         else {
             // Init names devices and no executor yet, so a stream opened for the placement alone
             // names the device.
-            auto [executor, status] = executor_t::spawn(std::span<int const> {&placement, 1});
+            auto [executor, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
+                                                        std::span<int const> {&placement, 1});
             return failed(status) ? status : of(index).emplace(executor.stream(0));
         }
     }

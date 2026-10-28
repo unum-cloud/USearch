@@ -4,12 +4,13 @@
  *  @date July 22, 2026
  *  @brief Host-side vocabulary for driving one NVIDIA GPU - the driver, specs, streams, memory.
  *
- *  The library never links @c libcuda or the CUDA runtime: @ref unum::usearch::utilities::cuda_api
- *  opens the driver at first use and resolves the entry points USearch calls into one table, which
- *  stays empty where the driver is absent, so NVIDIA then lists no devices and the binary still
- *  loads. Kernels reach a device as fatbins compiled ahead of time and embedded in the library,
- *  loaded by @ref unum::usearch::utilities::cuda_module_t and launched by name, since NVCC's fatbin
- *  registration would link the runtime outright.
+ *  The library never links @c libcuda or the CUDA runtime:
+ *  @ref unum::usearch::utilities::cuda_api_t opens the driver and resolves the entry points
+ *  USearch calls into one table, which stays empty where the driver is absent, so NVIDIA then
+ *  lists no devices and the binary still loads. Its caller loads it once and hands it to every
+ *  executor, allocator and stream it builds. Kernels reach a device as fatbins compiled ahead of
+ *  time and embedded in the library, loaded by @ref unum::usearch::utilities::cuda_module_t and
+ *  launched by name, since NVCC's fatbin registration would link the runtime outright.
  *
  *  Plain C++ needing no CUDA SDK, hence the @c .hpp extension: the few driver types, constants and
  *  prototypes USearch calls are spelled here, copied from the driver's stable ABI, so any host
@@ -36,7 +37,7 @@
 #include <forkunion/topology.hpp> // `fu::volume_ram` - the managed storage's host-memory budget
 #include <forkunion/types.hpp>    // `fu::round_up_to_multiple`, `fu::spin_mutex_t` - the hold
 
-#include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - the driver opened at first use
+#include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - the driver opened at load
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's table of contexts
 #include "usearch/utilities/types.hpp"          // `gpu_device_t`, `gpu_devices_capacity_k`
 
@@ -66,6 +67,7 @@ using cuda_function_handle_t = struct cuda_function_opaque_t*;
 
 /** The @c CUdevice_attribute values USearch queries. */
 enum cuda_device_attribute_t : int {
+    cuda_attribute_warp_size_k = 10,
     cuda_attribute_multiprocessor_count_k = 16,
     cuda_attribute_compute_capability_major_k = 75,
     cuda_attribute_compute_capability_minor_k = 76,
@@ -180,7 +182,7 @@ inline constexpr unsigned cuda_memory_type_device_k = 2;
 #pragma endregion Driver ABI
 
 /**
- *  @brief The driver entry points USearch calls, resolved from @c libcuda on first use.
+ *  @brief The driver entry points USearch calls, resolved from @c libcuda once per process.
  *
  *  Every entry is null when the driver is absent or lacks any of them, which leaves NVIDIA with no
  *  devices; each spells the prototype of the exported symbol it is resolved by, the @c _v2 one
@@ -309,20 +311,12 @@ struct cuda_api_t {
     }
 };
 
-/** The one table every NVIDIA call goes through, filled on first use by whichever thread comes
- *  first. */
-inline cuda_api_t const& cuda_api() noexcept {
-    static cuda_api_t const api = cuda_api_t::load();
-    return api;
-}
-
 /** Makes the primary context of device @p ordinal current on the calling thread, retained once per
  *  process: the driver twin of selecting a device, which every stream, allocation and launch after
  *  it lands on. Asked on every entry, so a caller switching devices between USearch calls is
  *  rebound, and finds the last device USearch bound left current. */
-inline cuda_result_t cuda_set_device(int ordinal) noexcept {
+inline cuda_result_t cuda_set_device(cuda_api_t const& api, int ordinal) noexcept {
     static std::atomic<cuda_context_handle_t> primary_contexts[gpu_devices_capacity_k] = {};
-    cuda_api_t const& api = cuda_api();
     if (!api) return cuda_error_not_initialized_k;
     if (ordinal < 0 || static_cast<std::size_t>(ordinal) >= gpu_devices_capacity_k) return cuda_error_invalid_device_k;
     cuda_context_handle_t context = primary_contexts[ordinal].load(std::memory_order_acquire);
@@ -344,15 +338,14 @@ inline cuda_device_address_t cuda_address(void const* pointer) noexcept {
 
 /** Copies @p bytes from @p source to @p destination and waits, any direction unified addressing
  *  tells apart. */
-inline cuda_result_t cuda_copy(void* destination, void const* source, std::size_t bytes) noexcept {
-    cuda_api_t const& api = cuda_api();
+inline cuda_result_t cuda_copy(cuda_api_t const& api, void* destination, void const* source,
+                               std::size_t bytes) noexcept {
     return api ? api.copy(cuda_address(destination), cuda_address(source), bytes) : cuda_error_not_initialized_k;
 }
 
 /** The ordinal of the device whose memory holds @p pointer, or -1 for host memory, pinned or not,
  *  which unified addressing tells apart through the driver. */
-inline int cuda_device_of(void const* pointer) noexcept {
-    cuda_api_t const& api = cuda_api();
+inline int cuda_device_of(cuda_api_t const& api, void const* pointer) noexcept {
     unsigned memory_type = 0;
     int ordinal = -1;
     if (!api || !pointer ||
@@ -364,19 +357,17 @@ inline int cuda_device_of(void const* pointer) noexcept {
 }
 
 /** Queues the copy of @p bytes from @p source to @p destination on @p stream. */
-inline cuda_result_t cuda_copy_async(void* destination, void const* source, std::size_t bytes,
+inline cuda_result_t cuda_copy_async(cuda_api_t const& api, void* destination, void const* source, std::size_t bytes,
                                      cuda_stream_handle_t stream) noexcept {
-    cuda_api_t const& api = cuda_api();
     return api ? api.copy_async(cuda_address(destination), cuda_address(source), bytes, stream)
                : cuda_error_not_initialized_k;
 }
 
 /** Queues the copy of @p height rows of @p width bytes on @p stream, each row starting a pitch
  *  past the last on either side. */
-inline cuda_result_t cuda_copy_2d_async(void* destination, std::size_t destination_pitch, void const* source,
-                                        std::size_t source_pitch, std::size_t width, std::size_t height,
-                                        cuda_stream_handle_t stream) noexcept {
-    cuda_api_t const& api = cuda_api();
+inline cuda_result_t cuda_copy_2d_async(cuda_api_t const& api, void* destination, std::size_t destination_pitch,
+                                        void const* source, std::size_t source_pitch, std::size_t width,
+                                        std::size_t height, cuda_stream_handle_t stream) noexcept {
     if (!api) return cuda_error_not_initialized_k;
     cuda_copy_2d_t copy;
     copy.source_memory_type = cuda_copy_2d_t::unified_k;
@@ -391,9 +382,8 @@ inline cuda_result_t cuda_copy_2d_async(void* destination, std::size_t destinati
 }
 
 /** Queues setting @p bytes at @p destination to @p value on @p stream. */
-inline cuda_result_t cuda_fill_async(void* destination, u8_t value, std::size_t bytes,
+inline cuda_result_t cuda_fill_async(cuda_api_t const& api, void* destination, u8_t value, std::size_t bytes,
                                      cuda_stream_handle_t stream) noexcept {
-    cuda_api_t const& api = cuda_api();
     return api ? api.fill_async(cuda_address(destination), value, bytes, stream) : cuda_error_not_initialized_k;
 }
 
@@ -448,6 +438,9 @@ struct cuda_device_specs_t {
     /** Compute-capability minor version - the in-generation revision. */
     int compute_minor = 0;
 
+    /** Lanes of one warp, as the driver reports them. */
+    u32_t warp_lanes = 0;
+
     /** Total device-resident memory in bytes. */
     std::size_t vram_bytes = 0;
 
@@ -469,15 +462,15 @@ struct cuda_device_specs_t {
      *  @par Statuses:
      *  - @c device_error_k The @p ordinal is past the device listing.
      */
-    static expected<cuda_device_specs_t> query(int ordinal) noexcept {
-        cuda_api_t const& api = cuda_api();
+    static expected<cuda_device_specs_t> query(cuda_api_t const& api, int ordinal) noexcept {
         int device = 0;
         cuda_device_specs_t specs {ordinal};
-        int multiprocessors = 0, shared_memory_per_block = 0, shared_memory_per_multiprocessor = 0,
+        int multiprocessors = 0, warp_lanes = 0, shared_memory_per_block = 0, shared_memory_per_multiprocessor = 0,
             reserved_shared_memory_per_block = 0;
         if (!api || api.get_device(&device, ordinal) != cuda_success_k ||
             api.get_device_attribute(&multiprocessors, cuda_attribute_multiprocessor_count_k, device) !=
                 cuda_success_k ||
+            api.get_device_attribute(&warp_lanes, cuda_attribute_warp_size_k, device) != cuda_success_k ||
             api.get_device_attribute(&specs.compute_major, cuda_attribute_compute_capability_major_k, device) !=
                 cuda_success_k ||
             api.get_device_attribute(&specs.compute_minor, cuda_attribute_compute_capability_minor_k, device) !=
@@ -491,6 +484,7 @@ struct cuda_device_specs_t {
             api.get_device_memory(&specs.vram_bytes, device) != cuda_success_k)
             return {{ordinal}, status_t::device_error_k};
         specs.multiprocessor_count = static_cast<u32_t>(multiprocessors);
+        specs.warp_lanes = static_cast<u32_t>(warp_lanes);
         specs.shared_memory_per_block_bytes = static_cast<std::size_t>(shared_memory_per_block);
         specs.shared_memory_per_multiprocessor_bytes = static_cast<std::size_t>(shared_memory_per_multiprocessor);
         specs.reserved_shared_memory_per_block_bytes = static_cast<std::size_t>(reserved_shared_memory_per_block);
@@ -522,6 +516,7 @@ concept cuda_allocator = requires(allocator_ allocator, typename allocator_::val
     { allocator.deallocate(pointer, count) } -> std::same_as<void>;
     { allocator.stream() } -> std::convertible_to<cuda_stream_handle_t>;
     { allocator.device() } -> std::convertible_to<int>;
+    { allocator.api() } -> std::same_as<cuda_api_t const&>;
 };
 
 /** The flat storage backend contract: a reserve-once / commit-on-demand address range whose base
@@ -537,6 +532,7 @@ concept cuda_reservable_allocator = requires(allocator_ allocator, std::size_t b
     { allocator.committed_bytes() } -> std::same_as<std::size_t>;
     { allocator.release() } -> std::same_as<void>;
     { allocator.device() } -> std::convertible_to<int>;
+    { allocator.api() } -> std::same_as<cuda_api_t const&>;
 };
 
 /** Virtual-memory flat storage backend: a fixed driver-API address reservation backed by slabs
@@ -553,6 +549,7 @@ struct cuda_virtual_memory_allocator {
     /** Preferred physical slab, rounded to the driver's granularity at reservation. */
     inline static constexpr std::size_t preferred_slab_bytes_k = 128u << 20;
 
+    cuda_api_t const* api_ = nullptr;
     cuda_device_address_t base_ = 0;
     std::size_t virtual_address_bytes_ = 0;
 
@@ -567,21 +564,23 @@ struct cuda_virtual_memory_allocator {
 
     cuda_virtual_memory_allocator() = default;
 
-    /** Names the GPU the future reservation pins to - placement only, no driver call. */
-    explicit cuda_virtual_memory_allocator(int device) noexcept : device_(device) {}
+    /** Names the GPU the future reservation pins to, through @p api - placement only, no driver
+     *  call. */
+    explicit cuda_virtual_memory_allocator(cuda_api_t const& api, int device) noexcept : api_(&api), device_(device) {}
 
     /** Copies the placement only, never a live reservation. */
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator const& other) noexcept
-        : device_(other.device_), peers_(other.peers_) {}
+        : api_(other.api_), device_(other.device_), peers_(other.peers_) {}
 
     /** Takes over a live reservation, so a table of them relocates without remapping. */
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator&& other) noexcept
-        : base_(std::exchange(other.base_, 0)), virtual_address_bytes_(std::exchange(other.virtual_address_bytes_, 0)),
+        : api_(other.api_), base_(std::exchange(other.base_, 0)),
+          virtual_address_bytes_(std::exchange(other.virtual_address_bytes_, 0)),
           mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), slab_bytes_(other.slab_bytes_), device_(other.device_),
           peers_(other.peers_) {}
     template <typename other_>
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator<other_> const& other) noexcept
-        : device_(other.device_), peers_(other.peers_) {}
+        : api_(other.api_), device_(other.device_), peers_(other.peers_) {}
     cuda_virtual_memory_allocator& operator=(cuda_virtual_memory_allocator const&) = delete;
     ~cuda_virtual_memory_allocator() noexcept { release(); }
 
@@ -589,8 +588,8 @@ struct cuda_virtual_memory_allocator {
      *  construction - no physical memory yet, so the ceiling costs nothing and should be
      *  generous. */
     status_t reserve_range(std::size_t virtual_address_bytes) noexcept {
-        cuda_api_t const& api = cuda_api();
-        if (!api) return status_t::device_error_k;
+        if (!api_ || !*api_) return status_t::device_error_k;
+        cuda_api_t const& api = *api_;
         cuda_allocation_properties_t properties = allocation_properties_(device_);
         std::size_t granularity = 0;
         if (api.memory_granularity(&granularity, &properties, cuda_granularity_minimum_k) != cuda_success_k)
@@ -619,8 +618,8 @@ struct cuda_virtual_memory_allocator {
      *  - @c config_mismatch_k One of @p devices cannot reach the owner; nothing is granted.
      */
     status_t grant(std::bitset<gpu_devices_capacity_k> devices) noexcept {
-        cuda_api_t const& api = cuda_api();
-        if (!api) return status_t::device_error_k;
+        if (!api_ || !*api_) return status_t::device_error_k;
+        cuda_api_t const& api = *api_;
         devices[static_cast<std::size_t>(device_)] = false;
         if (reachable_(devices) != devices) return status_t::config_mismatch_k;
         std::bitset<gpu_devices_capacity_k> const granted = peers_ | devices;
@@ -646,7 +645,7 @@ struct cuda_virtual_memory_allocator {
         if (bytes > virtual_address_bytes_) return status_t::overflow_k;
         // A reservation exists only once `reserve_range` found the driver, so the table is complete
         // here.
-        cuda_api_t const& api = cuda_api();
+        cuda_api_t const& api = *api_;
         cuda_allocation_properties_t properties = allocation_properties_(device_);
         cuda_access_descriptor_t access[gpu_devices_capacity_k];
         std::size_t const readers = access_of_(peers_, access);
@@ -670,10 +669,11 @@ struct cuda_virtual_memory_allocator {
         return fu::standard_atomic_ref<std::size_t const>(mapped_bytes_).load(std::memory_order_acquire);
     }
     int device() const noexcept { return device_; }
+    cuda_api_t const& api() const noexcept { return *api_; }
 
     void release() noexcept {
-        if (mapped_bytes_) cuda_api().memory_unmap(base_, mapped_bytes_);
-        if (base_) cuda_api().memory_address_free(base_, virtual_address_bytes_);
+        if (mapped_bytes_) api_->memory_unmap(base_, mapped_bytes_);
+        if (base_) api_->memory_address_free(base_, virtual_address_bytes_);
         base_ = 0, virtual_address_bytes_ = 0, mapped_bytes_ = 0;
     }
 
@@ -682,9 +682,9 @@ struct cuda_virtual_memory_allocator {
     /** Those of @p devices besides the owner whose kernels and copies can reach its slabs. */
     std::bitset<gpu_devices_capacity_k> reachable_(std::bitset<gpu_devices_capacity_k> devices) const noexcept {
         std::bitset<gpu_devices_capacity_k> reachable;
-        cuda_api_t const& api = cuda_api();
         int owner = 0;
-        if (!api || api.get_device(&owner, device_) != cuda_success_k) return reachable;
+        if (!api_ || !*api_ || api_->get_device(&owner, device_) != cuda_success_k) return reachable;
+        cuda_api_t const& api = *api_;
         for (std::size_t ordinal = 0; ordinal != devices.size(); ++ordinal) {
             int peer = 0, reaches = 0;
             if (!devices[ordinal] || static_cast<int>(ordinal) == device_) continue;
@@ -727,6 +727,7 @@ struct cuda_managed_allocator {
         using other = cuda_managed_allocator<other_>;
     };
 
+    cuda_api_t const* api_ = nullptr;
     value_type* base_ = nullptr;
     std::size_t virtual_address_bytes_ = 0;
     std::size_t committed_bytes_ = 0; // ? Released by the one grower, acquired by any reader
@@ -734,23 +735,26 @@ struct cuda_managed_allocator {
 
     cuda_managed_allocator() = default;
 
-    /** Names the GPU the future reservation prefers - placement only, no driver call. */
-    explicit cuda_managed_allocator(int device) noexcept : device_(device) {}
+    /** Names the GPU the future reservation prefers, through @p api - placement only, no driver
+     *  call. */
+    explicit cuda_managed_allocator(cuda_api_t const& api, int device) noexcept : api_(&api), device_(device) {}
 
     /** Copies the placement configuration only, never a live reservation. */
-    cuda_managed_allocator(cuda_managed_allocator const& other) noexcept : device_(other.device_) {}
+    cuda_managed_allocator(cuda_managed_allocator const& other) noexcept : api_(other.api_), device_(other.device_) {}
     template <typename other_>
-    cuda_managed_allocator(cuda_managed_allocator<other_> const& other) noexcept : device_(other.device_) {}
+    cuda_managed_allocator(cuda_managed_allocator<other_> const& other) noexcept
+        : api_(other.api_), device_(other.device_) {}
     cuda_managed_allocator& operator=(cuda_managed_allocator const&) = delete;
     ~cuda_managed_allocator() noexcept { release(); }
 
     /** Reserves @p virtual_address_bytes of managed memory, advised to prefer the device named at
      *  construction and to stay reachable from the host. */
     status_t reserve_range(std::size_t virtual_address_bytes) noexcept {
-        cuda_api_t const& api = cuda_api();
         virtual_address_bytes_ = virtual_address_bytes;
         cuda_device_address_t base = 0;
-        if (!api || api.allocate_managed(&base, virtual_address_bytes, cuda_attach_global_k) != cuda_success_k)
+        if (!api_ || !*api_) return status_t::bad_alloc_k;
+        cuda_api_t const& api = *api_;
+        if (api.allocate_managed(&base, virtual_address_bytes, cuda_attach_global_k) != cuda_success_k)
             return status_t::bad_alloc_k;
         base_ = reinterpret_cast<value_type*>(static_cast<std::uintptr_t>(base));
         api.memory_advise(base, virtual_address_bytes, cuda_advise_preferred_location_k,
@@ -770,8 +774,8 @@ struct cuda_managed_allocator {
         if (bytes <= committed_bytes_) return status_t::success_k;
         // Managed pages arrive unzeroed, unlike slabs; zeroing the fresh range also commits its
         // residency.
-        if (cuda_api().fill(cuda_address(reinterpret_cast<byte_t*>(base_) + committed_bytes_), 0,
-                            bytes - committed_bytes_) != cuda_success_k)
+        if (api_->fill(cuda_address(reinterpret_cast<byte_t*>(base_) + committed_bytes_), 0,
+                       bytes - committed_bytes_) != cuda_success_k)
             return status_t::device_error_k;
         fu::standard_atomic_ref<std::size_t>(committed_bytes_).store(bytes, std::memory_order_release);
         return status_t::success_k;
@@ -783,13 +787,14 @@ struct cuda_managed_allocator {
         return fu::standard_atomic_ref<std::size_t const>(committed_bytes_).load(std::memory_order_acquire);
     }
     int device() const noexcept { return device_; }
+    cuda_api_t const& api() const noexcept { return *api_; }
 
     /** The reservation ceiling: half the host RAM, since managed reservations are real
      *  allocations; only this backend consults the topology. */
     static std::size_t budget_bytes() noexcept { return fu::volume_ram() / 2; }
 
     void release() noexcept {
-        if (base_) cuda_api().free(cuda_address(base_));
+        if (base_) api_->free(cuda_address(base_));
         base_ = nullptr, virtual_address_bytes_ = 0, committed_bytes_ = 0;
     }
 };
@@ -797,7 +802,8 @@ struct cuda_managed_allocator {
 struct cuda_landings_t;
 
 /** Stream-ordered device allocator for transient scratch, riding the executor stream it was built
- *  from; a default-built one rides none, so it only fills the deleter of an empty owner. */
+ *  from, or the null stream when built from the driver table alone; a default-built one rides
+ *  none, so it only fills the deleter of an empty owner. */
 template <typename value_type_ = byte_t>
 struct cuda_device_allocator {
     using value_type = value_type_;
@@ -809,32 +815,39 @@ struct cuda_device_allocator {
 
     cuda_device_allocator() noexcept = default;
 
+    /** Rides the null stream of the current device through @p api. */
+    explicit cuda_device_allocator(cuda_api_t const& api) noexcept : api_(&api) {}
+
     /** Rides the executor's @p stream on the device it names; a template only because that
      *  @c stream_t holds a run of this allocator, so it is declared after it. */
     template <typename stream_type_>
     explicit cuda_device_allocator(stream_type_ const& stream) noexcept
-        : stream_(stream.handle), device_(stream.device), landings_(stream.landings.get()) {}
+        : api_(stream.api), stream_(stream.handle), device_(stream.device), landings_(stream.landings.get()) {}
     template <typename other_>
     cuda_device_allocator(cuda_device_allocator<other_> const& other) noexcept
-        : stream_(other.stream()), device_(other.device()), landings_(other.landings()) {}
+        : api_(other.api_), stream_(other.stream()), device_(other.device()), landings_(other.landings()) {}
 
     value_type* allocate(std::size_t count) noexcept {
-        cuda_api_t const& api = cuda_api();
         cuda_device_address_t pointer = 0;
-        return api && api.allocate_async(&pointer, count * sizeof(value_type), stream_) == cuda_success_k
+        return api_ && *api_ && api_->allocate_async(&pointer, count * sizeof(value_type), stream_) == cuda_success_k
                    ? reinterpret_cast<value_type*>(static_cast<std::uintptr_t>(pointer))
                    : nullptr;
     }
     void deallocate(value_type* pointer, std::size_t) noexcept {
-        cuda_api().free_async(cuda_address(pointer), stream_);
+        if (pointer) api_->free_async(cuda_address(pointer), stream_);
     }
     cuda_stream_handle_t stream() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
+    cuda_api_t const& api() const noexcept { return *api_; }
 
     /** The pinned slots of the stream it rides, which a traversal context lands its counters in. */
     cuda_landings_t* landings() const noexcept { return landings_; }
 
   private:
+    template <typename>
+    friend struct cuda_device_allocator;
+
+    cuda_api_t const* api_ = nullptr;
     cuda_stream_handle_t stream_ = nullptr;
     int device_ = 0;
     cuda_landings_t* landings_ = nullptr;
@@ -864,13 +877,15 @@ struct cuda_arena_allocator {
     /** Carves from @p arena on the executor's @p stream, which names the device. */
     template <typename stream_type_>
     cuda_arena_allocator(arena_t& arena, stream_type_ const& stream) noexcept
-        : arena_(arena), stream_(stream.handle), device_(stream.device), landings_(stream.landings.get()) {}
+        : arena_(arena), api_(stream.api), stream_(stream.handle), device_(stream.device),
+          landings_(stream.landings.get()) {}
 
     /** The rebinding conversion @c std::allocator_traits performs - the identity rides
      *  along, and the run is shared rather than copied. */
     template <typename other_>
     constexpr cuda_arena_allocator(cuda_arena_allocator<other_> const& other) noexcept
-        : arena_(other.arena()), stream_(other.stream()), device_(other.device()), landings_(other.landings()) {}
+        : arena_(other.arena()), api_(&other.api()), stream_(other.stream()), device_(other.device()),
+          landings_(other.landings()) {}
 
     value_type* allocate(std::size_t count) noexcept {
         // Host-side pointer arithmetic over device bytes: the carve never touches them.
@@ -882,6 +897,7 @@ struct cuda_arena_allocator {
 
     cuda_stream_handle_t stream() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
+    cuda_api_t const& api() const noexcept { return *api_; }
 
     /** The pinned slots of the stream it rides, which a traversal context lands its counters in. */
     cuda_landings_t* landings() const noexcept { return landings_; }
@@ -892,6 +908,7 @@ struct cuda_arena_allocator {
 
   private:
     arena_t& arena_;
+    cuda_api_t const* api_ = nullptr;
     cuda_stream_handle_t stream_ = nullptr;
     int device_ = 0;
     cuda_landings_t* landings_ = nullptr;
@@ -913,40 +930,49 @@ struct cuda_pinned_allocator {
 
     cuda_pinned_allocator() noexcept = default;
 
+    /** Pins through @p api for host bounces that ride no stream. */
+    explicit cuda_pinned_allocator(cuda_api_t const& api) noexcept : api_(&api) {}
+
     /** Takes the identity of the executor's @p stream and the device it names. */
     template <typename stream_type_>
     explicit cuda_pinned_allocator(stream_type_ const& stream) noexcept
-        : stream_(stream.handle), device_(stream.device) {}
+        : api_(stream.api), stream_(stream.handle), device_(stream.device) {}
     template <typename other_>
     cuda_pinned_allocator(cuda_pinned_allocator<other_> const& other) noexcept
-        : stream_(other.stream()), device_(other.device()) {}
+        : api_(other.api_), stream_(other.stream()), device_(other.device()) {}
 
     value_type* allocate(std::size_t count) noexcept {
-        cuda_api_t const& api = cuda_api();
         void* pointer = nullptr;
-        return api && api.allocate_host(&pointer, count * sizeof(value_type), cuda_host_portable_k) == cuda_success_k
+        return api_ && *api_ &&
+                       api_->allocate_host(&pointer, count * sizeof(value_type), cuda_host_portable_k) == cuda_success_k
                    ? static_cast<value_type*>(pointer)
                    : nullptr;
     }
-    void deallocate(value_type* pointer, std::size_t) noexcept { cuda_api().free_host(pointer); }
+    void deallocate(value_type* pointer, std::size_t) noexcept {
+        if (pointer) api_->free_host(pointer);
+    }
 
     /** Page-locks @p bytes the caller owns, like a read-only file mapping, so copies from them
      *  run as DMA; @c unpin releases them before they unmap. */
-    static status_t pin(bytes_view_t bytes) noexcept {
+    static status_t pin(cuda_api_t const& api, bytes_view_t bytes) noexcept {
         if (bytes.empty()) return status_t::success_k;
-        cuda_api_t const& api = cuda_api();
         unsigned const flags = cuda_host_portable_k | cuda_host_read_only_k;
         bool const pinned = api && api.register_host(bytes.data(), bytes.size(), flags) == cuda_success_k;
         return pinned ? status_t::success_k : status_t::device_error_k;
     }
-    static void unpin(bytes_view_t bytes) noexcept {
-        if (!bytes.empty()) cuda_api().unregister_host(bytes.data());
+    static void unpin(cuda_api_t const& api, bytes_view_t bytes) noexcept {
+        if (!bytes.empty()) api.unregister_host(bytes.data());
     }
 
     cuda_stream_handle_t stream() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
+    cuda_api_t const& api() const noexcept { return *api_; }
 
   private:
+    template <typename>
+    friend struct cuda_pinned_allocator;
+
+    cuda_api_t const* api_ = nullptr;
     cuda_stream_handle_t stream_ = nullptr;
     int device_ = 0;
 };
@@ -969,6 +995,9 @@ struct cuda_landings_t {
      *  run pins twice as many. */
     inline static constexpr std::size_t slots_per_pin_k = 64;
 
+    /** Pins its slots through @p api. */
+    explicit cuda_landings_t(cuda_api_t const& api) noexcept : slots_ {cuda_pinned_allocator_t {api}} {}
+
     /** Hands out a slot, a returned one first; null when pinning more fails. */
     void* take() noexcept {
         std::lock_guard<fu::spin_mutex_t> held {guard_};
@@ -985,7 +1014,7 @@ struct cuda_landings_t {
     }
 
   private:
-    growing_arena<cuda_pinned_allocator_t> slots_ {cuda_pinned_allocator_t {}};
+    growing_arena<cuda_pinned_allocator_t> slots_;
     growing_buffer<void*> returned_ {global_allocator};
 
     /** Held across a take or a give-back, so contexts born and dying on several threads share
@@ -995,19 +1024,20 @@ struct cuda_landings_t {
 
 /** Owned non-blocking stream, born in the current context; destruction drains it first. */
 struct cuda_stream_t {
-    cuda_stream_t() noexcept {
-        if (cuda_api_t const& api = cuda_api(); api) api.stream_create(&handle_, cuda_stream_non_blocking_k);
+    explicit cuda_stream_t(cuda_api_t const& api) noexcept : api_(&api) {
+        if (api) api.stream_create(&handle_, cuda_stream_non_blocking_k);
     }
-    cuda_stream_t(cuda_stream_t&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+    cuda_stream_t(cuda_stream_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
     cuda_stream_t(cuda_stream_t const&) = delete;
     cuda_stream_t& operator=(cuda_stream_t const&) = delete;
     ~cuda_stream_t() noexcept {
-        if (handle_) cuda_api().stream_synchronize(handle_), cuda_api().stream_destroy(handle_);
+        if (handle_) api_->stream_synchronize(handle_), api_->stream_destroy(handle_);
     }
 
     operator cuda_stream_handle_t() const noexcept { return handle_; }
 
   private:
+    cuda_api_t const* api_ = nullptr;
     cuda_stream_handle_t handle_ = nullptr;
 };
 
@@ -1015,15 +1045,18 @@ struct cuda_stream_t {
  *  awaits; it blocks on sync, so a drain sleeps instead of spinning a core. Destruction never
  *  waits. */
 struct cuda_event_t {
-    cuda_event_t() noexcept {
-        if (cuda_api_t const& api = cuda_api(); api)
-            api.event_create(&handle_, cuda_event_blocking_sync_k | cuda_event_disable_timing_k);
+
+    /** An empty event, which a refused plan holds and which records nothing. */
+    cuda_event_t() noexcept = default;
+
+    explicit cuda_event_t(cuda_api_t const& api) noexcept : api_(&api) {
+        if (api) api.event_create(&handle_, cuda_event_blocking_sync_k | cuda_event_disable_timing_k);
     }
-    cuda_event_t(cuda_event_t&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+    cuda_event_t(cuda_event_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
     cuda_event_t(cuda_event_t const&) = delete;
     cuda_event_t& operator=(cuda_event_t const&) = delete;
     ~cuda_event_t() noexcept {
-        if (handle_) cuda_api().event_destroy(handle_);
+        if (handle_) api_->event_destroy(handle_);
     }
 
     operator cuda_event_handle_t() const noexcept { return handle_; }
@@ -1035,8 +1068,8 @@ struct cuda_event_t {
      *  - @c device_error_k The event was never created.
      */
     status_t record(cuda_stream_handle_t stream) noexcept {
-        return handle_ && cuda_api().event_record(handle_, stream) == cuda_success_k ? status_t::success_k
-                                                                                     : status_t::device_error_k;
+        return handle_ && api_->event_record(handle_, stream) == cuda_success_k ? status_t::success_k
+                                                                                : status_t::device_error_k;
     }
 
     /**
@@ -1047,7 +1080,7 @@ struct cuda_event_t {
      */
     status_t landed() const noexcept {
         if (!handle_) return status_t::device_error_k;
-        cuda_result_t const queried = cuda_api().event_query(handle_);
+        cuda_result_t const queried = api_->event_query(handle_);
         return queried == cuda_success_k           ? status_t::success_k
                : queried == cuda_error_not_ready_k ? status_t::deferred_k
                                                    : status_t::device_error_k;
@@ -1060,11 +1093,12 @@ struct cuda_event_t {
      *  - @c device_error_k The event was never created.
      */
     status_t wait() noexcept {
-        return handle_ && cuda_api().event_synchronize(handle_) == cuda_success_k ? status_t::success_k
-                                                                                  : status_t::device_error_k;
+        return handle_ && api_->event_synchronize(handle_) == cuda_success_k ? status_t::success_k
+                                                                             : status_t::device_error_k;
     }
 
   private:
+    cuda_api_t const* api_ = nullptr;
     cuda_event_handle_t handle_ = nullptr;
 };
 
@@ -1078,13 +1112,13 @@ struct cuda_device_arena_t {
      *  template only because that @c stream_t is declared after it. */
     template <typename stream_type_>
     explicit cuda_device_arena_t(stream_type_& stream) noexcept
-        : memory_(cuda_device_allocator_t {stream}), stream_(stream.handle), event_(&stream.event),
+        : memory_(cuda_device_allocator_t {stream}), api_(stream.api), stream_(stream.handle), event_(&stream.event),
           device_(stream.device) {}
 
     /** Carves @p count values on the arena's device, or null when it cannot grow. */
     template <typename value_type_>
     value_type_* allocate(std::size_t count) noexcept {
-        if (cuda_set_device(device_) != cuda_success_k) return nullptr;
+        if (cuda_set_device(*api_, device_) != cuda_success_k) return nullptr;
         return reinterpret_cast<value_type_*>(memory_.allocate(count * sizeof(value_type_), default_alignment_k));
     }
 
@@ -1097,8 +1131,8 @@ struct cuda_device_arena_t {
     /** Queues a copy of @p bytes of host memory at @p source to @p destination in the arena behind
      *  the call's work; @p source must stay alive until @ref wait. */
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
-        return cuda_set_device(device_) == cuda_success_k &&
-                       cuda_copy_async(destination, source, bytes, stream_) == cuda_success_k
+        return cuda_set_device(*api_, device_) == cuda_success_k &&
+                       cuda_copy_async(*api_, destination, source, bytes, stream_) == cuda_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
@@ -1106,7 +1140,7 @@ struct cuda_device_arena_t {
     /** Waits once for every upload queued so far - the end of the call holding the arena -
      *  sleeping on the stream's event. */
     status_t wait() noexcept {
-        if (cuda_set_device(device_) != cuda_success_k) return status_t::device_error_k;
+        if (cuda_set_device(*api_, device_) != cuda_success_k) return status_t::device_error_k;
         if (status_t const recorded = event_->record(stream_); failed(recorded)) return recorded;
         return event_->wait();
     }
@@ -1115,6 +1149,7 @@ struct cuda_device_arena_t {
 
   private:
     growing_arena<cuda_device_allocator_t> memory_;
+    cuda_api_t const* api_ = nullptr;
     cuda_stream_handle_t stream_ = nullptr;
     cuda_event_t* event_ = nullptr;
     int device_ = 0;
@@ -1140,6 +1175,9 @@ struct cuda_executor_t {
      *  once it drained, and the arena last, so it frees onto a live stream. */
     struct stream_t {
 
+        /** The driver table every call on this stream goes through. */
+        cuda_api_t const* api = nullptr;
+
         /** The device this stream was opened on - placement and launch target both. */
         int device = 0;
 
@@ -1157,11 +1195,11 @@ struct cuda_executor_t {
         /** The scratch a walk carves its state from, sized once by @ref reserve. */
         arena_t arena;
 
-        /** Takes @p handle, opened on @p device, and binds the arena to it; the event is born
-         *  there too, so @p device must be current. */
-        stream_t(int device, cuda_stream_t&& handle) noexcept
-            : device(device), landings(new (std::nothrow) cuda_landings_t {}), handle(std::move(handle)),
-              arena(cuda_device_allocator_t {*this}) {}
+        /** Takes @p handle, opened on @p device through @p api, and binds the arena to it; the
+         *  event is born there too, so @p device must be current. */
+        stream_t(cuda_api_t const& api, int device, cuda_stream_t&& handle) noexcept
+            : api(&api), device(device), landings(new (std::nothrow) cuda_landings_t {api}), handle(std::move(handle)),
+              event(api), arena(cuda_device_allocator_t {*this}) {}
     };
 
     cuda_executor_t() = default;
@@ -1173,6 +1211,7 @@ struct cuda_executor_t {
     /** Exchanges the stream tables; @c held_ stays, since a move with a call in flight is
      *  misuse. */
     void swap(cuda_executor_t& other) noexcept {
+        std::swap(api_, other.api_);
         std::swap(streams_, other.streams_);
         std::swap(scratch_limit_, other.scratch_limit_);
     }
@@ -1197,23 +1236,26 @@ struct cuda_executor_t {
     static expected<cuda_executor_t> acquire(growing_buffer<stream_t>&& streams) noexcept {
         if (streams.empty()) return {{}, status_t::config_mismatch_k};
         cuda_executor_t executor;
+        executor.api_ = streams[0].api;
         executor.streams_ = std::move(streams);
         return {std::move(executor), status_t::success_k};
     }
 
     /**
-     *  Opens one stream per entry of @p devices, binding each first, since a stream is born on the
-     *  current device; their scratch never grows past @p scratch_limit bytes, zero for none.
+     *  Opens one stream per entry of @p devices through @p api, binding each first, since a stream
+     *  is born on the current device; their scratch never grows past @p scratch_limit bytes, zero
+     *  for none.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The @p devices are empty.
      */
-    static expected<cuda_executor_t> spawn(std::span<int const> devices, std::size_t scratch_limit = 0) noexcept {
+    static expected<cuda_executor_t> spawn(cuda_api_t const& api, std::span<int const> devices,
+                                           std::size_t scratch_limit = 0) noexcept {
         growing_buffer<stream_t> streams {global_allocator};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
         for (int device : devices) {
-            if (cuda_set_device(device) != cuda_success_k) return {{}, status_t::device_error_k};
-            stream_t opened {device, cuda_stream_t {}};
+            if (cuda_set_device(api, device) != cuda_success_k) return {{}, status_t::device_error_k};
+            stream_t opened {api, device, cuda_stream_t {api}};
             if (!opened.landings) return {{}, status_t::bad_alloc_k};
             if (!opened.handle || !opened.event) return {{}, status_t::device_error_k};
             streams.push_back_reserved(std::move(opened));
@@ -1245,7 +1287,7 @@ struct cuda_executor_t {
      *  marking each stream with its device bound, then sleeping on each mark in turn. */
     status_t wait() noexcept {
         for (stream_t& opened : streams_)
-            if (cuda_set_device(opened.device) != cuda_success_k || failed(opened.event.record(opened.handle)))
+            if (cuda_set_device(*api_, opened.device) != cuda_success_k || failed(opened.event.record(opened.handle)))
                 return status_t::device_error_k;
         for (stream_t& opened : streams_)
             if (status_t const drained = opened.event.wait(); failed(drained)) return drained;
@@ -1268,7 +1310,11 @@ struct cuda_executor_t {
     /** Streams this executor drives, one per device. */
     std::size_t size() const noexcept { return streams_.size(); }
 
+    /** The driver table every stream here goes through. */
+    cuda_api_t const& api() const noexcept { return *api_; }
+
   private:
+    cuda_api_t const* api_ = nullptr;
 
     /** One stream per named entry, in the caller's order. */
     growing_buffer<stream_t> streams_ {global_allocator};
@@ -1306,40 +1352,46 @@ cuda_unique_ptr<typename allocator_::value_type, allocator_> cuda_make_unique(al
 struct cuda_module_t {
     cuda_module_t() noexcept = default;
     cuda_module_t(cuda_module_t&& other) noexcept
-        : handle_(std::exchange(other.handle_, nullptr)), device_(other.device_) {}
+        : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)), device_(other.device_) {}
     cuda_module_t& operator=(cuda_module_t&& other) noexcept {
-        std::swap(handle_, other.handle_), std::swap(device_, other.device_);
+        std::swap(api_, other.api_), std::swap(handle_, other.handle_), std::swap(device_, other.device_);
         return *this;
     }
     cuda_module_t(cuda_module_t const&) = delete;
     cuda_module_t& operator=(cuda_module_t const&) = delete;
     ~cuda_module_t() noexcept {
-        if (handle_ && cuda_set_device(device_) == cuda_success_k) cuda_api().module_unload(handle_);
+        if (handle_ && cuda_set_device(*api_, device_) == cuda_success_k) api_->module_unload(handle_);
     }
 
     /**
-     *  Loads @p fatbin onto device @p device, binding it first, since a module loads into the
-     *  current context; the driver picks the cubin matching the device, or JIT-compiles its PTX.
+     *  Loads @p fatbin onto device @p device through @p api, binding it first, since a module
+     *  loads into the current context; the driver picks the cubin matching the device, or
+     *  JIT-compiles its PTX.
      *
      *  @par Statuses:
      *  - @c device_error_k The @p fatbin is empty.
      */
-    static expected<cuda_module_t> load(int device, bytes_view_t fatbin) noexcept {
+    static expected<cuda_module_t> load(cuda_api_t const& api, int device, bytes_view_t fatbin) noexcept {
         cuda_module_t module;
+        module.api_ = &api;
         module.device_ = device;
-        if (fatbin.empty() || cuda_set_device(device) != cuda_success_k ||
-            cuda_api().module_load_data(&module.handle_, fatbin.data()) != cuda_success_k)
+        if (fatbin.empty() || cuda_set_device(api, device) != cuda_success_k ||
+            api.module_load_data(&module.handle_, fatbin.data()) != cuda_success_k)
             return {{}, status_t::device_error_k};
         return {std::move(module), status_t::success_k};
     }
 
+    /** The driver table the fatbin was loaded through, which launches of its kernels go through. */
+    cuda_api_t const& api() const noexcept { return *api_; }
+
     /** The kernel exported as @p name, or null when the fatbin has none. */
     cuda_function_handle_t function(char const* name) const noexcept {
         cuda_function_handle_t function = nullptr;
-        return cuda_api().module_get_function(&function, handle_, name) == cuda_success_k ? function : nullptr;
+        return handle_ && api_->module_get_function(&function, handle_, name) == cuda_success_k ? function : nullptr;
     }
 
   private:
+    cuda_api_t const* api_ = nullptr;
     cuda_module_handle_t handle_ = nullptr;
     int device_ = 0;
 };
@@ -1363,9 +1415,8 @@ struct cuda_rows_map_t {
  *  spanning @p window_bytes of one row, unswizzled, reading zeros past a row's end. Answers the
  *  zeroed record where the driver lacks the encoder or refuses the shape; the device it encodes for
  *  must be current. */
-inline cuda_rows_map_t cuda_encode_rows_map(void* first_row, u32_t row_bytes, u32_t rows_count,
+inline cuda_rows_map_t cuda_encode_rows_map(cuda_api_t const& api, void* first_row, u32_t row_bytes, u32_t rows_count,
                                             u32_t window_bytes) noexcept {
-    cuda_api_t const& api = cuda_api();
     if (!api.encode_tensor_map_tiled || !rows_count || row_bytes % 16 || window_bytes % 16) return {};
     cuda_rows_map_t map;
     u64_t const dimensions[2] = {row_bytes / 8, rows_count}, strides[1] = {row_bytes};
@@ -1393,25 +1444,26 @@ enum class cuda_overlap_t : bool { serialized_k, overlapping_k };
  *    much shared memory.
  */
 template <typename... argument_types_>
-status_t cuda_launch(cuda_function_handle_t function, u32_t blocks, u32_t threads, u32_t shared_bytes,
-                     cuda_stream_handle_t stream, cuda_overlap_t overlapping, argument_types_... arguments) noexcept {
+status_t cuda_launch(cuda_api_t const& api, cuda_function_handle_t function, u32_t blocks, u32_t threads,
+                     u32_t shared_bytes, cuda_stream_handle_t stream, cuda_overlap_t overlapping,
+                     argument_types_... arguments) noexcept {
     static_assert((std::is_trivially_copyable_v<argument_types_> && ...), "Kernels take their arguments by bytes");
     if (!function) return status_t::device_error_k;
     int granted_bytes = 0;
-    if (shared_bytes && cuda_api().function_get_attribute(&granted_bytes, cuda_function_dynamic_shared_bytes_k,
-                                                          function) != cuda_success_k)
+    if (shared_bytes &&
+        api.function_get_attribute(&granted_bytes, cuda_function_dynamic_shared_bytes_k, function) != cuda_success_k)
         return status_t::device_error_k;
     if (shared_bytes > static_cast<u32_t>(granted_bytes) &&
-        cuda_api().function_set_attribute(function, cuda_function_dynamic_shared_bytes_k,
-                                          static_cast<int>(shared_bytes)) != cuda_success_k)
+        api.function_set_attribute(function, cuda_function_dynamic_shared_bytes_k, static_cast<int>(shared_bytes)) !=
+            cuda_success_k)
         return status_t::device_error_k;
     void* addresses[] = {static_cast<void*>(&arguments)...};
     cuda_launch_attribute_t overlap {cuda_launch_programmatic_serialization_k, {1}};
     cuda_launch_config_t config;
     config.grid_x = blocks, config.block_x = threads, config.shared_bytes = shared_bytes, config.stream = stream;
     config.attributes = &overlap, config.attributes_count = overlapping == cuda_overlap_t::overlapping_k ? 1u : 0u;
-    return cuda_api().launch_kernel(&config, function, addresses, nullptr) == cuda_success_k ? status_t::success_k
-                                                                                             : status_t::device_error_k;
+    return api.launch_kernel(&config, function, addresses, nullptr) == cuda_success_k ? status_t::success_k
+                                                                                      : status_t::device_error_k;
 }
 
 static_assert(cuda_reservable_allocator<cuda_virtual_memory_allocator<byte_t>>);
@@ -1434,7 +1486,7 @@ struct cuda_traversal_context {
     /** The single-query verb's landing, grown to the walk's breadth in pinned pages: the ascending
      *  matches, then, past them, the IDs and distances the device copies back. */
     struct results_t {
-        growing_buffer<scored_node_t, cuda_pinned_allocator_t> entries_ {cuda_pinned_allocator_t {}};
+        growing_buffer<scored_node_t, cuda_pinned_allocator_t> entries_;
         std::size_t count_ = 0;
 
         scored_node_t* data() noexcept { return entries_.data(); }
@@ -1450,16 +1502,17 @@ struct cuda_traversal_context {
      *  the event is born in the current context, allocates only the fixed-size counters, and
      *  borrows their host twins from the stream's pinned landings; sized buffers wait for the first
      *  verb. */
-    cuda_traversal_context(allocator_t allocator = {}) noexcept
-        : allocator_ {(cuda_set_device(allocator.device()), allocator)}, //
+    cuda_traversal_context(allocator_t allocator) noexcept
+        : results {growing_buffer<scored_node_t, cuda_pinned_allocator_t> {cuda_pinned_allocator_t {allocator.api()}}},
+          allocator_ {(cuda_set_device(allocator.api(), allocator.device()), allocator)}, //
           telemetry_ {cuda_make_unique(telemetry_allocator_t {allocator_}, 1)},
           assigned_rows_ {cuda_make_unique(counter_allocator_t {allocator_}, cuda_claim_counters_k)},
           missed_ {cuda_make_unique(counter_allocator_t {allocator_}, 1)},
           host_counters_ {take_counters_(allocator_.landings())},
           arena_ {nullptr, cuda_deleter<allocator_t> {allocator_, 0}},
-          staging_ {nullptr, cuda_deleter<allocator_t> {allocator_, 0}} {
-        if (telemetry_) cuda_fill_async(telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream());
-        if (missed_) cuda_fill_async(missed_.get(), 0, sizeof(u32_t), stream());
+          staging_ {nullptr, cuda_deleter<allocator_t> {allocator_, 0}}, event_ {allocator_.api()} {
+        if (telemetry_) cuda_fill_async(api(), telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream());
+        if (missed_) cuda_fill_async(api(), missed_.get(), 0, sizeof(u32_t), stream());
     }
 
     cuda_traversal_context(cuda_traversal_context const&) = delete;
@@ -1472,6 +1525,7 @@ struct cuda_traversal_context {
 
     cuda_stream_handle_t stream() const noexcept { return allocator_.stream(); }
     int device() const noexcept { return allocator_.device(); }
+    cuda_api_t const& api() const noexcept { return allocator_.api(); }
 
     /** The allocator this context carves its scratch from, for a caller's own launches beside
      *  it. */
@@ -1488,7 +1542,7 @@ struct cuda_traversal_context {
      *  instead of spinning a core. Selects the context's device first, since an event records only
      *  in its own device's context. */
     status_t wait() noexcept {
-        if (cuda_set_device(device()) != cuda_success_k) return status_t::device_error_k;
+        if (cuda_set_device(api(), device()) != cuda_success_k) return status_t::device_error_k;
         if (status_t const recorded = record(); failed(recorded)) return recorded;
         return event_.wait();
     }
@@ -1503,9 +1557,9 @@ struct cuda_traversal_context {
      */
     status_t record() noexcept {
         if (!host_counters_ ||
-            cuda_copy_async(&host_counters_->telemetry, telemetry_.get(), sizeof(vram_telemetry_block_t), stream()) !=
-                cuda_success_k ||
-            cuda_copy_async(&host_counters_->missed, missed_.get(), sizeof(u32_t), stream()) != cuda_success_k)
+            cuda_copy_async(api(), &host_counters_->telemetry, telemetry_.get(), sizeof(vram_telemetry_block_t),
+                            stream()) != cuda_success_k ||
+            cuda_copy_async(api(), &host_counters_->missed, missed_.get(), sizeof(u32_t), stream()) != cuda_success_k)
             return status_t::device_error_k;
         return event_.record(stream());
     }
@@ -1522,8 +1576,8 @@ struct cuda_traversal_context {
     /** Queues on this context's stream a wait for everything @p other marked last, so work here
      *  follows work there without the host waiting; the two may sit on different devices. */
     status_t follow(cuda_traversal_context const& other) noexcept {
-        return cuda_api().stream_wait_event(stream(), other.event_, 0) == cuda_success_k ? status_t::success_k
-                                                                                         : status_t::device_error_k;
+        return api().stream_wait_event(stream(), other.event_, 0) == cuda_success_k ? status_t::success_k
+                                                                                    : status_t::device_error_k;
     }
 
     /** The telemetry of the last submission, zeroed when it was queued; read once it landed. */
@@ -1603,7 +1657,7 @@ struct cuda_traversal_context {
      */
     expected<u32_t> take_epochs(std::size_t count, std::size_t before) noexcept {
         if (arena_bytes_ != before || epoch_floor_ + count > 0xFFFFFFFEull) {
-            if (cuda_fill_async(arena_.get(), 0, arena_bytes_, stream()) != cuda_success_k) {
+            if (cuda_fill_async(api(), arena_.get(), 0, arena_bytes_, stream()) != cuda_success_k) {
                 arena_bytes_ = 0;
                 return {0, status_t::device_error_k};
             }
@@ -1638,6 +1692,7 @@ static_assert(cuda_allocator<cuda_pinned_allocator_t>);
 /** The NVIDIA types and driver calls a vendor-neutral VRAM index declares itself with and queues
  *  through; every copy tells its direction apart by unified addressing. */
 struct cuda_vendor_t {
+    using api_t = cuda_api_t;
     using stream_handle_t = cuda_stream_handle_t;
     using event_t = cuda_event_t;
     using landings_t = cuda_landings_t;
@@ -1655,32 +1710,34 @@ struct cuda_vendor_t {
      *  @par Statuses:
      *  - @c device_error_k The @p ordinal is past the device listing.
      */
-    static status_t select(int ordinal) noexcept { return verdict_(cuda_set_device(ordinal)); }
+    static status_t select(api_t const& api, int ordinal) noexcept { return verdict_(cuda_set_device(api, ordinal)); }
 
     /** Queues a copy of @p bytes from @p from to @p to on @p stream, in either direction. */
-    static status_t copy(void* to, void const* from, std::size_t bytes, stream_handle_t stream) noexcept {
-        return verdict_(cuda_copy_async(to, from, bytes, stream));
+    static status_t copy(api_t const& api, void* to, void const* from, std::size_t bytes,
+                         stream_handle_t stream) noexcept {
+        return verdict_(cuda_copy_async(api, to, from, bytes, stream));
     }
 
     /** Queues a copy of @p height rows of @p width bytes between pitched buffers on @p stream. */
-    static status_t copy_2d(void* to, std::size_t to_pitch, void const* from, std::size_t from_pitch, std::size_t width,
-                            std::size_t height, stream_handle_t stream) noexcept {
-        return verdict_(cuda_copy_2d_async(to, to_pitch, from, from_pitch, width, height, stream));
+    static status_t copy_2d(api_t const& api, void* to, std::size_t to_pitch, void const* from, std::size_t from_pitch,
+                            std::size_t width, std::size_t height, stream_handle_t stream) noexcept {
+        return verdict_(cuda_copy_2d_async(api, to, to_pitch, from, from_pitch, width, height, stream));
     }
 
     /** Queues setting @p bytes at @p to to @p value on @p stream. */
-    static status_t fill(void* to, u8_t value, std::size_t bytes, stream_handle_t stream) noexcept {
-        return verdict_(cuda_fill_async(to, value, bytes, stream));
+    static status_t fill(api_t const& api, void* to, u8_t value, std::size_t bytes, stream_handle_t stream) noexcept {
+        return verdict_(cuda_fill_async(api, to, value, bytes, stream));
     }
 
     /** Queues setting @p count 32-bit words at @p to to @p value on @p stream. */
-    static status_t fill_words(void* to, u32_t value, std::size_t count, stream_handle_t stream) noexcept {
-        return verdict_(cuda_api().fill_words_async(cuda_address(to), value, count, stream));
+    static status_t fill_words(api_t const& api, void* to, u32_t value, std::size_t count,
+                               stream_handle_t stream) noexcept {
+        return verdict_(api.fill_words_async(cuda_address(to), value, count, stream));
     }
 
     /** Queues on @p stream a wait for everything @p event marked last. */
-    static status_t follow(stream_handle_t stream, event_t const& event) noexcept {
-        return verdict_(cuda_api().stream_wait_event(stream, event, 0));
+    static status_t follow(api_t const& api, stream_handle_t stream, event_t const& event) noexcept {
+        return verdict_(api.stream_wait_event(stream, event, 0));
     }
 
   private:
@@ -1689,45 +1746,28 @@ struct cuda_vendor_t {
     }
 };
 
-/** The class whose unit carries cubins for a device of compute capability @p arch; any generation
- *  without a class of its own runs the Ampere unit, natively on 8.x and through its PTX past
- *  that. */
-constexpr gpu_class_t nvidia_class_of(cuda_arch_t arch) noexcept {
-    switch (arch / 100) {
-    case 8: return arch >= cuda_arch_ada_k ? gpu_class_t::nvidia_ada_k : gpu_class_t::nvidia_ampere_k;
-    case 9: return gpu_class_t::nvidia_hopper_k;
-    case 10: return gpu_class_t::nvidia_blackwell_k;
-    case 12: return gpu_class_t::nvidia_blackwellrtx_k;
-    default: return gpu_class_t::nvidia_ampere_k;
+/** Writes every NVIDIA device @p api reaches into @p into, in CUDA ordinal order, as the driver
+ *  reports it, and answers how many it wrote; none without a driver. */
+inline std::size_t list_nvidia_gpu_devices(cuda_api_t const& api, std::span<gpu_device_t> into) noexcept {
+    std::size_t count = 0;
+    int devices_count = 0;
+    if (!api || api.get_device_count(&devices_count) != cuda_success_k) return count;
+    for (int ordinal = 0; ordinal != devices_count && count != into.size(); ++ordinal) {
+        auto const [specs, status] = cuda_device_specs_t::query(api, ordinal);
+        if (failed(status)) continue;
+        gpu_device_t& device = into[count++];
+        device = {gpu_vendor_t::nvidia_k,
+                  static_cast<u32_t>(ordinal),
+                  static_cast<u32_t>(specs.compute_major),
+                  static_cast<u32_t>(specs.compute_minor),
+                  specs.warp_lanes,
+                  specs.multiprocessor_count,
+                  specs.vram_bytes};
+        int handle = 0;
+        if (api.get_device(&handle, ordinal) == cuda_success_k)
+            api.get_device_name(device.name, static_cast<int>(sizeof(device.name)), handle);
     }
-}
-
-/** Every NVIDIA device the driver reaches, in CUDA ordinal order, listed once per process; none
- *  without a driver. An older device than the Ampere floor is left out, since no unit runs on
- *  it. */
-inline std::span<gpu_device_t const> nvidia_gpu_devices() noexcept {
-    struct listing_t {
-        gpu_device_t devices[gpu_devices_capacity_k];
-        std::size_t count = 0;
-    };
-    static listing_t const listing = [] {
-        listing_t found;
-        cuda_api_t const& api = cuda_api();
-        int devices_count = 0;
-        if (!api || api.get_device_count(&devices_count) != cuda_success_k) return found;
-        for (int ordinal = 0; ordinal != devices_count && found.count != gpu_devices_capacity_k; ++ordinal) {
-            auto const [specs, status] = cuda_device_specs_t::query(ordinal);
-            if (failed(status) || specs.arch() < cuda_arch_ampere_k) continue;
-            gpu_device_t& device = found.devices[found.count++];
-            device = {gpu_vendor_t::nvidia_k, static_cast<u32_t>(ordinal), nvidia_class_of(specs.arch()),
-                      specs.multiprocessor_count, specs.vram_bytes};
-            int handle = 0;
-            if (api.get_device(&handle, ordinal) == cuda_success_k)
-                api.get_device_name(device.name, static_cast<int>(sizeof(device.name)), handle);
-        }
-        return found;
-    }();
-    return {listing.devices, listing.count};
+    return count;
 }
 
 } // namespace unum::usearch::utilities

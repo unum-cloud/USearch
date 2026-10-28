@@ -29,6 +29,7 @@
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfet_t` & waiter kin
 #include <forkunion/types.hpp>        // `fu::spin_mutex_t` - the ticks' lock
 #include <numkong/capabilities.h>     // `nk_capability_t`, `nk_cpu_configure_thread` - compute masks, AMX grant
+#include <stringzilla/capabilities.h> // `sz_capability_t` - the basic modalities' kit masks
 #include <numkong/vector.hpp>         // `nk::vector_view` - the rows a value lookup resolves
 
 #include "usearch/usearch.h"                 // every modality's argument structures
@@ -452,6 +453,26 @@ constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     }
 }
 
+/** Lowers one CPU class onto StringZilla's capability bits: each class spells every backend its
+ *  kits may pick, and a class adding none spells its parent's. */
+constexpr sz_capability_t stringzilla_capabilities_of(cpu_class_t cpu_class) noexcept {
+    switch (cpu_class) {
+    case cpu_class_t::serial_k: return sz_cap_serial_k;
+    case cpu_class_t::intel_haswell_k: return sz_cap_serial_k | sz_cap_haswell_k | sz_cap_westmere_k;
+    case cpu_class_t::intel_skylake_k:
+        return stringzilla_capabilities_of(cpu_class_t::intel_haswell_k) | sz_cap_skylake_k;
+    case cpu_class_t::intel_icelake_k:
+        return stringzilla_capabilities_of(cpu_class_t::intel_skylake_k) | sz_cap_icelake_k | sz_cap_goldmont_k;
+    case cpu_class_t::intel_sierra_k:
+        return stringzilla_capabilities_of(cpu_class_t::intel_haswell_k) | sz_cap_goldmont_k;
+    case cpu_class_t::aws_g2_k:
+    case cpu_class_t::apple_m2_k: return sz_cap_serial_k | sz_cap_neon_k | sz_cap_neonaes_k | sz_cap_neonsha_k;
+    case cpu_class_t::aws_g5_k:
+        return stringzilla_capabilities_of(cpu_class_t::apple_m2_k) | sz_cap_sve_k | sz_cap_sve2_k | sz_cap_sve2aes_k;
+    default: return stringzilla_capabilities_of(parent_class_of(cpu_class));
+    }
+}
+
 /** The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the monitored
  *  Arm & RISC-V classes arm TPAUSE, WFET & WRS, WebAssembly threads sleep in @c memory.atomic.wait,
  *  everything else yields - as does any class whose @c FORKUNION_TARGET_<BIT> is off in the probe
@@ -523,7 +544,7 @@ struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
 #if FORKUNION_TARGET_RISCV64_WRS
 template <>
 struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
-    using type = fu::risc5_wrs_t;
+    using type = fu::riscv64_wrs_t;
 };
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
@@ -610,7 +631,7 @@ struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     template <typename value_type_>
-    using type = fu::risc5_zacas_atomic_ref<value_type_>;
+    using type = fu::riscv64_zacas_atomic_ref<value_type_>;
 };
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
@@ -699,7 +720,7 @@ inline std::size_t machine_cache_line_bytes() noexcept {
 /** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the runtime
  *  confirms nothing about them, and a class differing by one alone earns no rung. */
 inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
-                                                       fu::capability_risc5_pause_k;
+                                                       fu::capability_riscv64_pause_k;
 
 /** Lowers one CPU class onto ForkUnion's mask - the bits the runtime must confirm before the
  *  class's waiter and atomic reference are trusted, read off the two types themselves. */
@@ -767,19 +788,6 @@ constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
     }
 }
 
-/** Whether every compute bit one CPU class lowers onto is present in @p available. */
-inline bool numkong_admits(nk_capability_t available, cpu_class_t cpu_class) noexcept {
-    nk_capability_t const wanted = numkong_capabilities_of(cpu_class);
-    return (available & wanted) == wanted;
-}
-
-/** Whether the runtime confirms every ForkUnion bit one CPU class needs. */
-template <cpu_class_t cpu_class_>
-inline bool forkunion_admits() noexcept {
-    constexpr fu::capabilities_t wanted = forkunion_capabilities_of<cpu_class_>();
-    return (fu::runtime_capabilities() & wanted) == wanted;
-}
-
 /** ForkUnion's mask for a class named at run time, read off the template per class. */
 constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
@@ -803,16 +811,6 @@ constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) no
     }
 }
 
-/** Whether @p rung runs wherever @p pinned does: its NumKong and ForkUnion masks are subsets of
- *  the pinned class's, so a pin admits exactly the rungs a machine of that class would. */
-constexpr bool cpu_class_within(cpu_class_t rung, cpu_class_t pinned) noexcept {
-    nk_capability_t const rung_compute = numkong_capabilities_of(rung),
-                          pinned_compute = numkong_capabilities_of(pinned);
-    fu::capabilities_t const rung_sync = forkunion_capabilities_of(rung),
-                             pinned_sync = forkunion_capabilities_of(pinned);
-    return (rung_compute & pinned_compute) == rung_compute && (rung_sync & pinned_sync) == rung_sync;
-}
-
 /** The C enum's class as the engines name it; @c usearch_cpu_class_unknown_k derives nothing, so
  *  it names the serial floor. */
 constexpr cpu_class_t cpu_class_of(usearch_cpu_class_t cpu_class) noexcept {
@@ -821,19 +819,39 @@ constexpr cpu_class_t cpu_class_of(usearch_cpu_class_t cpu_class) noexcept {
     return static_cast<cpu_class_t>(cpu_class);
 }
 
-/** Whether this machine runs @p pinned, the class a caller told an index to dispatch as: every
- *  NumKong bit in @p available and every ForkUnion bit the runtime confirms; no pin always runs. */
-inline bool cpu_pin_admitted(usearch_cpu_class_t pinned, nk_capability_t available) noexcept {
-    if (pinned == usearch_cpu_class_unknown_k) return true;
-    if (pinned > usearch_cpu_class_wasm64_extended_k) return false;
+/** What one handle may use: the masks this machine runs when nothing is pinned, the pinned class's
+ *  masks when it runs them. */
+struct cpu_ceiling_t {
+    nk_capability_t compute = nk_cap_serial_k;
+    fu::capabilities_t sync = fu::capabilities_unknown_k;
+};
+
+/** The ceiling of a handle pinned to @p pinned, the one caller of NumKong's and ForkUnion's
+ *  detection; @c unsupported_k when this machine lacks the pinned class's masks. */
+inline expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t pinned) noexcept {
+    cpu_ceiling_t detected;
+    if (nk_cpu_capabilities_enabled(&detected.compute) != nk_success_k) detected.compute = nk_cap_serial_k;
+    detected.sync = fu::cpu_capabilities();
+    if (pinned == usearch_cpu_class_unknown_k) return {detected, status_t::success_k};
+    if (pinned > usearch_cpu_class_wasm64_extended_k) return {detected, status_t::unsupported_k};
     cpu_class_t const pinned_class = cpu_class_of(pinned);
-    fu::capabilities_t const wanted = forkunion_capabilities_of(pinned_class);
-    return numkong_admits(available, pinned_class) && (fu::runtime_capabilities() & wanted) == wanted;
+    cpu_ceiling_t const wanted {numkong_capabilities_of(pinned_class), forkunion_capabilities_of(pinned_class)};
+    bool const runs = (detected.compute & wanted.compute) == wanted.compute &&
+                      (detected.sync & wanted.sync) == wanted.sync;
+    return {wanted, runs ? status_t::success_k : status_t::unsupported_k};
 }
 
-/** Whether a ladder may take @p rung under @p pinned: every rung when nothing is pinned. */
-constexpr bool cpu_pin_takes(usearch_cpu_class_t pinned, cpu_class_t rung) noexcept {
-    return pinned == usearch_cpu_class_unknown_k || cpu_class_within(rung, cpu_class_of(pinned));
+/** Whether @p rung fits under @p ceiling: its kits and waiters need nothing the ceiling lacks. */
+constexpr bool cpu_rung_fits(cpu_class_t rung, cpu_ceiling_t ceiling) noexcept {
+    return (numkong_capabilities_of(rung) & ~ceiling.compute) == 0 &&
+           (forkunion_capabilities_of(rung) & ~ceiling.sync) == 0;
+}
+
+/** The allow-mask a pool spawns under @p ceiling: every thread and memory facility, and only the
+ *  instruction bits the ceiling holds. */
+constexpr fu_capabilities_t forkunion_allowed_of(cpu_ceiling_t ceiling) noexcept {
+    return static_cast<fu_capabilities_t>((fu_capabilities_all_k & ~fu_capability_any_instruction_k) | ceiling.sync |
+                                          baseline_hints_k);
 }
 
 /** CPU classes newest first, the order a ladder tries them in. */
@@ -895,11 +913,12 @@ outcome_verbs_t outcome_verbs_of() noexcept {
 
 inline outcome_verbs_t const& host_outcome_verbs() noexcept {
     static outcome_verbs_t const picked = []<cpu_class_t... classes_>(cpu_ladder<classes_...>) noexcept {
+        cpu_ceiling_t const ceiling = pick_cpu_ceiling(usearch_cpu_class_unknown_k).value;
         outcome_verbs_t row = outcome_verbs_of<cpu_class_t::serial_k>();
         bool found = false;
         auto rung = [&]<cpu_class_t class_>() noexcept {
-            if constexpr (class_ != cpu_class_t::serial_k)
-                if (!found && forkunion_admits<class_>()) row = outcome_verbs_of<class_>(), found = true;
+            if (!found && cpu_class_compiled(class_) && cpu_rung_fits(class_, ceiling))
+                row = outcome_verbs_of<class_>(), found = true;
         };
         (rung.template operator()<classes_>(), ...);
         return row;
@@ -907,32 +926,79 @@ inline outcome_verbs_t const& host_outcome_verbs() noexcept {
     return picked;
 }
 
-/** Whether the dense NVMe variants compiled a unit for @p cpu_class, as
- *  @c usearch_dense_nvme_classes_ in @c src/CMakeLists.txt lists them: a storage walk shares a few
- *  counters and never waits, so the classes advancing by their waiter or reference alone take none
- *  and their parent's unit serves, and a WebAssembly module reads no storage. */
+/** Whether the dense NVMe variants compiled a unit for @p cpu_class, as their row in
+ *  @c src/CMakeLists.txt told the dispatch unit through @c USEARCH_TARGET_NVME_<CLASS>: each kept
+ *  class compiles as itself or the nearest ancestor the row lists. A storage walk shares a few
+ *  counters and never waits, so the classes advancing by their waiter or reference alone take none,
+ *  and a WebAssembly module reads no storage. */
 constexpr bool nvme_class_compiled(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
-    case cpu_class_t::aws_g5_k:
-    case cpu_class_t::alibaba_c930_k:
-    case cpu_class_t::wasm32_v128_k:
-    case cpu_class_t::wasm64_extended_k: return false;
-    default: return cpu_class_compiled(cpu_class);
+    case cpu_class_t::serial_k: return true;
+#if USEARCH_TARGET_NVME_INTEL_HASWELL
+    case cpu_class_t::intel_haswell_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_INTEL_SIERRA
+    case cpu_class_t::intel_sierra_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_INTEL_SKYLAKE
+    case cpu_class_t::intel_skylake_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_INTEL_ICELAKE
+    case cpu_class_t::intel_icelake_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_AMD_GENOA
+    case cpu_class_t::amd_genoa_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_INTEL_SAPPHIRE
+    case cpu_class_t::intel_sapphire_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_INTEL_GRANITE
+    case cpu_class_t::intel_granite_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_INTEL_DIAMOND
+    case cpu_class_t::intel_diamond_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_AWS_G2
+    case cpu_class_t::aws_g2_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_APPLE_M2
+    case cpu_class_t::apple_m2_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_APPLE_M4
+    case cpu_class_t::apple_m4_k: return true;
+#endif
+#if USEARCH_TARGET_NVME_NVIDIA_VERA
+    case cpu_class_t::nvidia_vera_k: return true;
+#endif
+    default: return false;
     }
 }
 
-/** Whether the basic modalities compiled a unit for @p cpu_class, as @c usearch_basic_cpu_classes_
- *  in @c src/CMakeLists.txt lists them: the classes where a StringZilla or NumKong kit they inline
+/** Whether the basic modalities compiled a unit for @p cpu_class, as their rows in
+ *  @c src/CMakeLists.txt told each dispatch unit through @c USEARCH_TARGET_BASIC_<CLASS>: each kept
+ *  class compiles as itself or the nearest ancestor where a StringZilla or NumKong kit they inline
  *  advances. */
 constexpr bool basic_class_compiled(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
-    case cpu_class_t::serial_k:
-    case cpu_class_t::intel_haswell_k:
-    case cpu_class_t::intel_skylake_k:
-    case cpu_class_t::aws_g2_k:
-    case cpu_class_t::apple_m2_k:
-    case cpu_class_t::alibaba_c930_k:
-    case cpu_class_t::wasm64_extended_k: return cpu_class_compiled(cpu_class);
+    case cpu_class_t::serial_k: return true;
+#if USEARCH_TARGET_BASIC_INTEL_HASWELL
+    case cpu_class_t::intel_haswell_k: return true;
+#endif
+#if USEARCH_TARGET_BASIC_INTEL_SKYLAKE
+    case cpu_class_t::intel_skylake_k: return true;
+#endif
+#if USEARCH_TARGET_BASIC_AWS_G2
+    case cpu_class_t::aws_g2_k: return true;
+#endif
+#if USEARCH_TARGET_BASIC_APPLE_M2
+    case cpu_class_t::apple_m2_k: return true;
+#endif
+#if USEARCH_TARGET_BASIC_ALIBABA_C930
+    case cpu_class_t::alibaba_c930_k: return true;
+#endif
+#if USEARCH_TARGET_BASIC_WASM64_EXTENDED
+    case cpu_class_t::wasm64_extended_k: return true;
+#endif
     default: return false;
     }
 }
@@ -997,18 +1063,97 @@ inline constexpr dense_home_t home_of = std::is_same_v<executor_type_, forkunion
                                         : std::is_same_v<executor_type_, hip_executor_t>  ? dense_home_t::vram_amd_k
                                                                                           : dense_home_t::vram_apple_k;
 
+/** The class whose unit carries cubins for an NVIDIA device of compute capability @p arch: any
+ *  generation without a class of its own runs the Ampere unit, natively on 8.x and through its PTX
+ *  past that, and one older than Ampere runs none. */
+constexpr gpu_class_t nvidia_class_of(cuda_arch_t arch) noexcept {
+    if (arch < cuda_arch_ampere_k) return gpu_class_t::unknown_k;
+    switch (arch / 100) {
+    case 8: return arch >= cuda_arch_ada_k ? gpu_class_t::nvidia_ada_k : gpu_class_t::nvidia_ampere_k;
+    case 9: return gpu_class_t::nvidia_hopper_k;
+    case 10: return gpu_class_t::nvidia_blackwell_k;
+    case 12: return gpu_class_t::nvidia_blackwellrtx_k;
+    default: return gpu_class_t::nvidia_ampere_k;
+    }
+}
+
+/** The class whose kernels run on an AMD GPU of @c gfx version @p major. @p minor: 9.4 is MI300's
+ *  @c gfx942, 9.5 is MI350's @c gfx950, and 12.5 is MI400's @c gfx1250 and @c gfx1251; any other
+ *  has no code object to load. */
+constexpr gpu_class_t amd_class_of(u32_t major, u32_t minor) noexcept {
+    if (major == 9 && minor == 4) return gpu_class_t::amd_cdna3_k;
+    if (major == 9 && minor == 5) return gpu_class_t::amd_cdna4_k;
+    if (major == 12 && minor == 5) return gpu_class_t::amd_cdna5_k;
+    return gpu_class_t::unknown_k;
+}
+
+/** The class whose unit runs on an Apple GPU of the newest family @p family: Apple7 and Apple8
+ *  share the floor, and a GPU older than Apple7 runs none. */
+constexpr gpu_class_t apple_class_of(u32_t family) noexcept {
+    if (family >= 10) return gpu_class_t::apple_metal10_k;
+    if (family == 9) return gpu_class_t::apple_metal9_k;
+    if (family >= 7) return gpu_class_t::apple_metal7_k;
+    return gpu_class_t::unknown_k;
+}
+
+/** The class whose unit runs on @p device, read off the architecture its driver reported; unknown
+ *  where no unit does. */
+constexpr gpu_class_t gpu_class_of(gpu_device_t const& device) noexcept {
+    switch (device.vendor) {
+    case gpu_vendor_t::nvidia_k:
+        return nvidia_class_of(
+            static_cast<cuda_arch_t>(device.architecture_major * 100 + device.architecture_minor * 10));
+    case gpu_vendor_t::amd_k: return amd_class_of(device.architecture_major, device.architecture_minor);
+    case gpu_vendor_t::apple_k: return apple_class_of(device.architecture_major);
+    default: return gpu_class_t::unknown_k;
+    }
+}
+
+/** The GPU side of the process, built at its first VRAM call: every vendor's driver, and the
+ *  devices some class runs on, NVIDIA first, then AMD, then Apple, a device's position here being
+ *  its USearch ordinal. */
+struct gpu_runtime_t {
+    gpu_drivers_t drivers;
+    gpu_device_t devices[3 * gpu_devices_capacity_k];
+    std::size_t devices_count = 0;
+
+    gpu_runtime_t() noexcept {
+        std::size_t const reported = list_gpu_devices(drivers, devices);
+        for (std::size_t position = 0; position != reported; ++position)
+            if (gpu_class_of(devices[position]) != gpu_class_t::unknown_k) devices[devices_count++] = devices[position];
+    }
+};
+
+/** The one runtime every VRAM call passes its drivers down from. */
+inline gpu_runtime_t& gpu_runtime() noexcept {
+    static gpu_runtime_t runtime;
+    return runtime;
+}
+
+/** Every vendor's driver, loaded at the first VRAM call. */
+inline gpu_drivers_t& gpu_drivers() noexcept { return gpu_runtime().drivers; }
+
+/** Every GPU some class runs on, as the ABI numbers them. */
+inline std::span<gpu_device_t const> gpu_devices() noexcept {
+    gpu_runtime_t const& runtime = gpu_runtime();
+    return {runtime.devices, runtime.devices_count};
+}
+
 /** Copies @p source into @p staged when it lives on an NVIDIA or AMD device, whose memory no host
  *  read reaches, and points @p source at the copy; host pages and Apple's unified memory are read
  *  in place. */
 inline status_t stage_on_host(bytes_view_t& source, growing_buffer<byte_t>& staged) noexcept {
-    int const nvidia = cuda_device_of(source.data()), amd = nvidia < 0 ? hip_device_of(source.data()) : -1;
+    gpu_drivers_t const& drivers = gpu_drivers();
+    int const nvidia = cuda_device_of(drivers.cuda, source.data()),
+              amd = nvidia < 0 ? hip_device_of(drivers.hip, source.data()) : -1;
     if (nvidia < 0 && amd < 0) return status_t::success_k;
     if (failed(staged.resize_uninitialized(source.size()))) return status_t::bad_alloc_k;
-    bool const copied = nvidia >= 0 ? cuda_set_device(nvidia) == cuda_success_k &&
-                                          cuda_copy(staged.data(), source.data(), source.size()) == cuda_success_k
-                                    : hip_set_device(amd) == hip_success_k &&
-                                          hip_api().copy(staged.data(), source.data(), source.size(),
-                                                         hip_copy_device_to_host_k) == hip_success_k;
+    bool const copied = nvidia >= 0
+                            ? cuda_set_device(drivers.cuda, nvidia) == cuda_success_k &&
+                                  cuda_copy(drivers.cuda, staged.data(), source.data(), source.size()) == cuda_success_k
+                            : hip_set_device(drivers.hip, amd) == hip_success_k &&
+                                  drivers.hip.copy(staged.data(), source.data(), source.size(),
+                                                   hip_copy_device_to_host_k) == hip_success_k;
     if (!copied) return status_t::device_error_k;
     source = to_span(staged);
     return status_t::success_k;
@@ -1117,6 +1262,17 @@ constexpr bool gpu_class_compiled(gpu_class_t gpu_class) noexcept {
     }
 }
 
+/** Whether the basic modalities compiled device code for @p gpu_class: their Ampere rung is the
+ *  vendor-wide @c nvidia unit, which CMake gates as @c USEARCH_TARGET_NVIDIA. */
+constexpr bool basic_gpu_class_compiled(gpu_class_t gpu_class) noexcept {
+    if (gpu_class != gpu_class_t::nvidia_ampere_k) return gpu_class_compiled(gpu_class);
+#if USEARCH_TARGET_NVIDIA
+    return true;
+#else
+    return false;
+#endif
+}
+
 // The device listing crosses the ABI by casts, so the C vendors and classes mirror the engine's.
 static_assert(static_cast<u32_t>(gpu_vendor_t::apple_k) == usearch_gpu_vendor_apple_k);
 static_assert(static_cast<u32_t>(gpu_class_t::apple_metal10_k) == usearch_gpu_class_apple_metal10_k);
@@ -1211,50 +1367,52 @@ struct usearch_executor_handle_t {
     std::variant<forkunion_executor_t, nvme_executor_t, gpu_executor_t> executor;
 };
 
-/** Requests AMX tile state alone, granted process-wide on Linux; more bits would rewrite FPCR. */
-inline void request_tile_state() noexcept {
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k || !(available & nk_cap_sapphireamx_k)) return;
+/** Requests AMX tile state alone when @p ceiling holds it, granted process-wide on Linux; more bits
+ *  would rewrite FPCR. */
+inline void request_tile_state(cpu_ceiling_t ceiling) noexcept {
+    if (!(ceiling.compute & nk_cap_sapphireamx_k)) return;
     [[maybe_unused]] nk_status_t const requested = nk_cpu_configure_thread(nk_cap_sapphireamx_k);
 }
 
-/** Discovers the topology and spawns @p threads over it into @p handle, answering @p handle, or
- *  null once the outcome records why not; one thread is the caller. */
+/** Discovers the topology and spawns @p threads over it into @p handle under @p ceiling, answering
+ *  @p handle, or null once the outcome records why not; one thread is the caller. */
 inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, std::size_t threads,
-                                             usearch_outcome_t* outcome) noexcept {
+                                             cpu_ceiling_t ceiling, usearch_outcome_t* outcome) noexcept {
     fu_topology_t topology = nullptr;
     if (fu_topology_new(&topology) != fu_success_k)
         return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
     handle.topology.reset(topology);
-    auto [spawned, status] = forkunion_executor_t::spawn(topology, threads);
+    auto [spawned, status] = forkunion_executor_t::spawn(topology, threads, forkunion_allowed_of(ceiling));
     if (failed(status)) return propagate_error(status, outcome), nullptr;
-    request_tile_state();
+    request_tile_state(ceiling);
     handle.executor = std::move(spawned);
     return &handle;
 }
 
-/** Discovers the topology and spawns @p threads into @p handle, each opening the engine @p config
- *  names, answering @p handle, or null once the outcome records why not. */
+/** Discovers the topology and spawns @p threads into @p handle under @p ceiling, each opening the
+ *  engine @p config names, answering @p handle, or null once the outcome records why not. */
 inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle, std::size_t threads,
-                                              io_engine_config_t const& config, usearch_outcome_t* outcome) noexcept {
+                                              io_engine_config_t const& config, cpu_ceiling_t ceiling,
+                                              usearch_outcome_t* outcome) noexcept {
     fu_topology_t topology = nullptr;
     if (fu_topology_new(&topology) != fu_success_k)
         return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
     handle.topology.reset(topology);
-    auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config);
+    auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config, forkunion_allowed_of(ceiling));
     if (failed(status))
         return propagate_error(status, outcome, "No I/O engine opened on the executor's threads"), nullptr;
-    request_tile_state();
+    request_tile_state(ceiling);
     handle.executor = std::move(spawned);
     return &handle;
 }
 
-/** The executor a null handle runs RAM work on: the calling thread, built into @p call_executor. */
+/** The executor a null handle runs RAM work on: the calling thread, built into @p call_executor
+ *  under the machine's own ceiling, since a pool of one never waits on another thread. */
 template <typename multi_type_>
     requires is_ram_index<multi_type_>
 inline usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handle_t& call_executor,
                                             usearch_outcome_t* outcome) noexcept {
-    return spawn_ram_executor(call_executor, 1, outcome);
+    return spawn_ram_executor(call_executor, 1, pick_cpu_ceiling(usearch_cpu_class_unknown_k).value, outcome);
 }
 
 /** The executor a null handle runs NVMe work on: one thread of synchronous reads. */
@@ -1265,7 +1423,7 @@ inline usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handl
     io_engine_config_t config;
     config.queue_depth = nvme_queue_depth_k;
     config.transport = io_transport_t::blocking_k;
-    return spawn_nvme_executor(call_executor, 1, config, outcome);
+    return spawn_nvme_executor(call_executor, 1, config, pick_cpu_ceiling(usearch_cpu_class_unknown_k).value, outcome);
 }
 
 /** Applies @p visitor to whichever executor @p executor holds, a GPU one included; an empty GPU

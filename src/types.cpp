@@ -15,11 +15,14 @@
  */
 #include <cstdio> // `std::snprintf`
 
+#include <array>       // `std::array` - a capability list rendered at compile time
 #include <string_view> // `std::string_view` - a name compared without a terminator
 
 #include <numkong/numkong.h>
 
 #include "usearch/types.h"
+
+#include "lib.hpp" // `cpu_ladder_t`, `numkong_capabilities_of`, `pick_cpu_ceiling`, `cpu_rung_fits`
 
 /** Rendered once on first use, so the pointer the C interface hands out stays valid. */
 static char const* rendered_version() {
@@ -44,19 +47,31 @@ static constexpr struct {
     {nk_cap_v128_k, "v128"},         {nk_cap_v128relaxed_k, "v128relaxed"},
 };
 
-/** Composes @p mask into @p rendered as a comma-separated list, once. */
-static char const* render_capabilities(char* rendered, size_t capacity, nk_capability_t mask) {
-    if (rendered[0]) return rendered;
-    char* cursor = rendered;
-    char* const sentinel = rendered + capacity - 1;
+/** A comma-separated list of kernel families, terminated. */
+using capabilities_name_t = std::array<char, 256>;
+
+/** Composes @p mask as a comma-separated list of the families above, at compile time. */
+static constexpr capabilities_name_t render_capabilities(nk_capability_t mask) noexcept {
+    capabilities_name_t rendered {};
+    std::size_t length = 0;
     for (auto const& named : capability_names_k) {
         if (!(mask & named.bit)) continue;
-        if (cursor != rendered && cursor != sentinel) *cursor++ = ',';
-        for (char const* name = named.name; *name && cursor != sentinel;) *cursor++ = *name++;
+        if (length && length + 1 < rendered.size()) rendered[length++] = ',';
+        for (char const* name = named.name; *name && length + 1 < rendered.size();) rendered[length++] = *name++;
     }
-    *cursor = '\0';
     return rendered;
 }
+
+/** The families one CPU class's kits reach. */
+template <cpu_class_t cpu_class_>
+inline constexpr capabilities_name_t cpu_class_capabilities_name =
+    render_capabilities(numkong_capabilities_of(cpu_class_));
+
+/** The families every compiled CPU class's kits reach together. */
+static constexpr capabilities_name_t compiled_capabilities_name_k =
+    []<cpu_class_t... classes_>(cpu_ladder<classes_...>) noexcept {
+        return render_capabilities(((cpu_class_compiled(classes_) ? numkong_capabilities_of(classes_) : 0) | ...));
+    }(cpu_ladder_t {});
 
 /** @brief Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
 static bool named(usearch_bytes_view_t name, char const* spelling) noexcept {
@@ -71,18 +86,18 @@ USEARCH_EXPORT void usearch_version(int* major, int* minor, int* patch) {
 
 USEARCH_EXPORT char const* usearch_version_name(void) { return rendered_version(); }
 
-USEARCH_EXPORT char const* usearch_capabilities_compiled(void) {
-    static char rendered[256] = {0};
-    nk_capability_t compiled = 0;
-    if (nk_cpu_capabilities_compiled(&compiled) != nk_success_k) compiled = 0;
-    return render_capabilities(rendered, sizeof(rendered), compiled);
-}
+USEARCH_EXPORT char const* usearch_capabilities_compiled(void) { return compiled_capabilities_name_k.data(); }
 
 USEARCH_EXPORT char const* usearch_capabilities_available(void) {
-    static char rendered[256] = {0};
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = 0;
-    return render_capabilities(rendered, sizeof(rendered), available);
+    cpu_ceiling_t const ceiling = pick_cpu_ceiling(usearch_cpu_class_unknown_k).value;
+    return []<cpu_class_t... classes_>(cpu_ladder<classes_...>, cpu_ceiling_t machine) noexcept {
+        char const* name = nullptr;
+        auto rung = [&]<cpu_class_t class_>() noexcept {
+            if (!name && cpu_rung_fits(class_, machine)) name = cpu_class_capabilities_name<class_>.data();
+        };
+        (rung.template operator()<classes_>(), ...);
+        return name;
+    }(cpu_ladder_t {}, ceiling);
 }
 
 USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status) {

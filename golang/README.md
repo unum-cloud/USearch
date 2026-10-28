@@ -149,10 +149,10 @@ An index owns rows; an executor owns the threads or device streams a verb runs o
 There is a constructor per C one, each taking every argument its own hardware has, and ending with the `deferredLimit` sizing its table of deferred calls:
 
 ```go
-usearch.ExecutorForRam(memoryDomains, threads, deferredLimit)
-usearch.ExecutorOnPool(memoryDomains, forkUnionPool, deferredLimit)  // borrows a fu_pool_t
-usearch.ExecutorForVram(devices, streams, scratchLimit, deferredLimit) // one host thread, a stream per device
-usearch.ExecutorForNvme(paths, threads, deferredLimit)                 // one submission ring per thread
+usearch.ExecutorForRam(memoryDomains, cpuClass, threads, deferredLimit)
+usearch.ExecutorOnPool(memoryDomains, cpuClass, forkUnionPool, deferredLimit)  // borrows a fu_pool_t
+usearch.ExecutorForVram(devices, gpuClass, streams, scratchLimit, deferredLimit) // one host thread, a stream per device
+usearch.ExecutorForNvme(paths, cpuClass, threads, deferredLimit)                 // one submission ring per thread
 ```
 
 Zero for any count derives it, and zero threads in `ExecutorForRam` takes 7/8 of the logical cores, since full occupancy starves the ordered publication path.

@@ -1332,13 +1332,13 @@ USEARCH_EXPORT void usearch_version(int* major, int* minor, int* patch);
 USEARCH_EXPORT char const* usearch_version_name(void);
 
 /**
- *  @brief Retrieves the hardware capabilities this binary was compiled with.
+ *  @brief Retrieves the kernel families the CPU classes this binary compiled reach.
  *  @return A comma-separated static string with capability names.
  */
 USEARCH_EXPORT char const* usearch_capabilities_compiled(void);
 
 /**
- *  @brief Retrieves the hardware capabilities the current machine offers at runtime.
+ *  @brief Retrieves the kernel families of the newest CPU class the current machine runs.
  *  @return A comma-separated static string with capability names.
  */
 USEARCH_EXPORT char const* usearch_capabilities_available(void);

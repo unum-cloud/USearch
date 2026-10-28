@@ -284,8 +284,10 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="options">The geometry and metric the index freezes.</param>
     /// <param name="memoryDomains">NUMA node IDs to place one shard on apiece; empty derives every
     /// node the process may allocate on.</param>
+    /// <param name="cpuClass">The class the index dispatches as; null derives the CPU's own.</param>
     /// <returns>The new index.</returns>
-    public static DenseIndex InitRam(DenseOptions options, ReadOnlySpan<int> memoryDomains = default)
+    public static DenseIndex InitRam(
+        DenseOptions options, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClass = null)
     {
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -303,6 +305,7 @@ public sealed unsafe class DenseIndex : IDisposable
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
+                    CpuClass = (int)(cpuClass ?? 0),
                 },
             };
             usearch_dense_init_ram(&arguments);
@@ -316,8 +319,10 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="options">The geometry and metric the index freezes.</param>
     /// <param name="devices">CUDA device ordinals to place one shard on apiece; empty derives one free
     /// device.</param>
+    /// <param name="gpuClass">The class the index dispatches as; null derives the devices' own.</param>
     /// <returns>The new index.</returns>
-    public static DenseIndex InitVram(DenseOptions options, ReadOnlySpan<int> devices = default)
+    public static DenseIndex InitVram(
+        DenseOptions options, ReadOnlySpan<int> devices = default, GPUClass? gpuClass = null)
     {
         IntPtr created = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -332,7 +337,10 @@ public sealed unsafe class DenseIndex : IDisposable
                 Dimensions = (nuint)options.Dimensions,
                 Connectivity = (nuint)options.Connectivity,
                 ValuesPerKey = (nuint)options.ValuesPerKey,
-                Vram = new NativeVramOptions { Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length },
+                Vram = new NativeVramOptions
+                {
+                    Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length, GpuClass = (int)(gpuClass ?? 0),
+                },
             };
             usearch_dense_init_vram(&arguments);
         }
@@ -351,9 +359,11 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="valuesPerKey">The upper bound on entries sharing one key, which no checkpoint
     /// records; zero derives to one.</param>
     /// <param name="executor">The workers the read fans out over; null reads on the caller's thread.</param>
+    /// <param name="cpuClass">The class the index dispatches as; null derives the CPU's own.</param>
     /// <returns>The new index.</returns>
     public static DenseIndex LoadRam(
-        string path, ReadOnlySpan<int> memoryDomains = default, ulong valuesPerKey = 0, Executor? executor = null)
+        string path, ReadOnlySpan<int> memoryDomains = default, ulong valuesPerKey = 0, Executor? executor = null,
+        CPUClass? cpuClass = null)
     {
         byte[] encoded = Paths.Encode(path);
         using Lease pool = Lease.Of(executor?.Handle, "executor");
@@ -371,6 +381,7 @@ public sealed unsafe class DenseIndex : IDisposable
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
+                    CpuClass = (int)(cpuClass ?? 0),
                 },
                 ValuesPerKey = (nuint)valuesPerKey,
             };
@@ -387,9 +398,11 @@ public sealed unsafe class DenseIndex : IDisposable
     /// count; empty derives one free device.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero derives to one.</param>
     /// <param name="executor">The workers the upload runs on; null uploads on the caller's thread.</param>
+    /// <param name="gpuClass">The class the index dispatches as; null derives the devices' own.</param>
     /// <returns>The new index.</returns>
     public static DenseIndex LoadVram(
-        string path, ReadOnlySpan<int> devices = default, ulong valuesPerKey = 0, Executor? executor = null)
+        string path, ReadOnlySpan<int> devices = default, ulong valuesPerKey = 0, Executor? executor = null,
+        GPUClass? gpuClass = null)
     {
         byte[] encoded = Paths.Encode(path);
         using Lease pool = Lease.Of(executor?.Handle, "executor");
@@ -404,7 +417,10 @@ public sealed unsafe class DenseIndex : IDisposable
                 Executor = pool.Pointer,
                 Outcome = &outcome,
                 Path = Borrow(data, encoded.Length),
-                Vram = new NativeVramOptions { Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length },
+                Vram = new NativeVramOptions
+                {
+                    Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length, GpuClass = (int)(gpuClass ?? 0),
+                },
                 ValuesPerKey = (nuint)valuesPerKey,
             };
             usearch_dense_load_vram(&arguments);
@@ -419,10 +435,11 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="memoryDomains">The NUMA nodes to place shards on; the monolith lands whole on the first.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero derives to one.</param>
     /// <param name="executor">The workers the copy fans out over; null copies on the caller's thread.</param>
+    /// <param name="cpuClass">The class the index dispatches as; null derives the CPU's own.</param>
     /// <returns>The new index.</returns>
     public static DenseIndex LoadRamBuffer(
         ReadOnlySpan<byte> buffer, ReadOnlySpan<int> memoryDomains = default, ulong valuesPerKey = 0,
-        Executor? executor = null)
+        Executor? executor = null, CPUClass? cpuClass = null)
     {
         using Lease pool = Lease.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
@@ -439,6 +456,7 @@ public sealed unsafe class DenseIndex : IDisposable
                 Ram = new NativeRamOptions
                 {
                     MemoryDomains = (IntPtr)domains, MemoryDomainsCount = (nuint)memoryDomains.Length,
+                    CpuClass = (int)(cpuClass ?? 0),
                 },
                 ValuesPerKey = (nuint)valuesPerKey,
             };
@@ -454,10 +472,11 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="devices">The devices to place shards on; the monolith lands whole on the first.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero derives to one.</param>
     /// <param name="executor">The workers the upload runs on; null uploads on the caller's thread.</param>
+    /// <param name="gpuClass">The class the index dispatches as; null derives the devices' own.</param>
     /// <returns>The new index.</returns>
     public static DenseIndex LoadVramBuffer(
         ReadOnlySpan<byte> buffer, ReadOnlySpan<int> devices = default, ulong valuesPerKey = 0,
-        Executor? executor = null)
+        Executor? executor = null, GPUClass? gpuClass = null)
     {
         using Lease pool = Lease.Of(executor?.Handle, "executor");
         IntPtr created = IntPtr.Zero;
@@ -471,7 +490,10 @@ public sealed unsafe class DenseIndex : IDisposable
                 Executor = pool.Pointer,
                 Outcome = &outcome,
                 Buffer = Borrow(source, buffer.Length),
-                Vram = new NativeVramOptions { Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length },
+                Vram = new NativeVramOptions
+                {
+                    Devices = (IntPtr)ordinals, DevicesCount = (nuint)devices.Length, GpuClass = (int)(gpuClass ?? 0),
+                },
                 ValuesPerKey = (nuint)valuesPerKey,
             };
             usearch_dense_load_vram_buffer(&arguments);
@@ -515,8 +537,10 @@ public sealed unsafe class DenseIndex : IDisposable
     /// manifest points.</param>
     /// <param name="executor">The NVMe executor whose rings read the headers; null reads on the
     /// caller's thread.</param>
+    /// <param name="cpuClass">The class the index dispatches as; null derives the CPU's own.</param>
     /// <returns>The read-only index.</returns>
-    public static DenseIndex ViewNvme(string path, ReadOnlySpan<string> paths = default, Executor? executor = null)
+    public static DenseIndex ViewNvme(
+        string path, ReadOnlySpan<string> paths = default, Executor? executor = null, CPUClass? cpuClass = null)
     {
         byte[] encoded = Paths.Encode(path);
         using Lease pool = Lease.Of(executor?.Handle, "executor");
@@ -533,7 +557,10 @@ public sealed unsafe class DenseIndex : IDisposable
                     Executor = pool.Pointer,
                     Outcome = &outcome,
                     Path = Borrow(data, encoded.Length),
-                    Nvme = new NativeNvmeOptions { Paths = (IntPtr)views, PathsCount = (nuint)paths.Length },
+                    Nvme = new NativeNvmeOptions
+                    {
+                        Paths = (IntPtr)views, PathsCount = (nuint)paths.Length, CpuClass = (int)(cpuClass ?? 0),
+                    },
                 };
                 usearch_dense_view_nvme(&arguments);
             }

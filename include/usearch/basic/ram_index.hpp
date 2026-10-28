@@ -2821,7 +2821,8 @@ struct ram_index {
                 return status_t::config_mismatch_k;
 
             // Each node takes the seat its position names, so concurrent steps never share one.
-            typename key_map_t::seats_t seats {first_seat_ + node_range.first, first_seat_ + node_range.bound};
+            typename key_map_t::seats_t seats {first_seat_ + static_cast<std::size_t>(node_range.first),
+                                               first_seat_ + static_cast<std::size_t>(node_range.bound)};
             // The plan vetted both prefix-sum columns and every ID, and reserved every row, so the
             // slices are trusted and the rows fit.
             std::size_t widest_row = 0;

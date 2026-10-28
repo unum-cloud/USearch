@@ -2648,21 +2648,23 @@ class nvme_executor {
 
     /**
      *  Spawns @p threads over @p topology, zero meaning @c forkunion_executor_t::default_threads,
-     *  then opens each engine with @p config on its own thread, every one on the transport thread
-     *  zero's engine picked.
+     *  under the ForkUnion facilities @p allowed names, then opens each engine with @p config on
+     *  its own thread, every one on the transport thread zero's engine picked.
      *
      *  @par Statuses:
      *  - @c uninitialized_k SPDK is named without a driver.
      *  - @c unsupported_k No engine at or below @p config's transport set up on a thread.
      *  - @c invalid_argument_k A zero queue depth.
      */
-    static expected<nvme_executor> spawn(fu_topology_t topology, std::size_t threads, config_t const& config) noexcept {
+    static expected<nvme_executor> spawn(fu_topology_t topology, std::size_t threads, config_t const& config,
+                                         fu_capabilities_t allowed = fu_capabilities_all_k) noexcept {
         nvme_executor executor;
         // The caller never runs a slice, so each thread index stays one OS thread, the single
         // issuer a ring wants.
         auto [threads_executor, spawn_status] = forkunion_executor_t::spawn(
             topology, threads,
-            (fu_comptime_capabilities() & fu_capability_os_threads_k) ? fu_caller_exclusive_k : fu_caller_inclusive_k);
+            (fu_comptime_capabilities() & fu_capability_os_threads_k) ? fu_caller_exclusive_k : fu_caller_inclusive_k,
+            allowed);
         executor.threads_ = std::move(threads_executor);
         if (failed(spawn_status)) return {std::move(executor), spawn_status};
         if (status_t const sized = executor.engines_.resize(executor.threads_.size()); failed(sized))

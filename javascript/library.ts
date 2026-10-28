@@ -213,6 +213,7 @@ export interface CompiledIndexConstructor {
     connectivity: number | undefined,
     valuesPerKey: number | undefined,
     memoryDomains: number[] | undefined,
+    cpuClass: string | undefined,
   ): CompiledIndex;
   initVram(
     dimensions: number,
@@ -221,33 +222,43 @@ export interface CompiledIndexConstructor {
     connectivity: number | undefined,
     valuesPerKey: number | undefined,
     devices: number[] | undefined,
+    gpuClass: string | undefined,
   ): CompiledIndex;
   loadRam(
     path: string,
     executor: CompiledExecutor | undefined,
     memoryDomains: number[] | undefined,
     valuesPerKey: number | undefined,
+    cpuClass: string | undefined,
   ): CompiledIndex;
   loadVram(
     path: string,
     executor: CompiledExecutor | undefined,
     devices: number[] | undefined,
     valuesPerKey: number | undefined,
+    gpuClass: string | undefined,
   ): CompiledIndex;
   loadRamBuffer(
     buffer: ArrayBufferView,
     executor: CompiledExecutor | undefined,
     memoryDomains: number[] | undefined,
     valuesPerKey: number | undefined,
+    cpuClass: string | undefined,
   ): CompiledIndex;
   loadVramBuffer(
     buffer: ArrayBufferView,
     executor: CompiledExecutor | undefined,
     devices: number[] | undefined,
     valuesPerKey: number | undefined,
+    gpuClass: string | undefined,
   ): CompiledIndex;
   viewRam(path: string): CompiledIndex;
-  viewNvme(path: string, executor: CompiledExecutor | undefined, paths: string[] | undefined): CompiledIndex;
+  viewNvme(
+    path: string,
+    executor: CompiledExecutor | undefined,
+    paths: string[] | undefined,
+    cpuClass: string | undefined,
+  ): CompiledIndex;
   metadataRead(path: string, executor: CompiledExecutor | undefined): CompiledMetadata;
   metadataReadBuffer(buffer: ArrayBufferView, executor: CompiledExecutor | undefined): CompiledMetadata;
 }

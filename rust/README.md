@@ -43,7 +43,7 @@ let keys = [Key::from(42u64), Key::from(43u64)];
 let slab: [f32; 8] = [0.2, 0.1, 0.2, 0.1, 0.1, 0.2, 0.1, 0.2];
 index.insert(&keys, &rows(&slab, 4)?)?;
 
-let executor = Executor::for_ram(&[], 0, 0)?;
+let executor = Executor::for_ram(&[], None, 0, 0)?;
 let mut arena = Arena::new_in(&executor)?;
 let query: [f32; 4] = [0.2, 0.1, 0.2, 0.1];
 let matches = index.on(&executor).search(&rows(&query, 4)?, 10, &mut arena)?;   // on an executor, into its arena
@@ -100,12 +100,13 @@ One executor serves any number of indexes, and its residency must match the one 
 There is a constructor per residency, each taking only what its own hardware has, and the placement lists are the ones the indexes were built with, which keeps compute and memory domains in agreement.
 
 ```rust
-let threads = Executor::for_ram(&[], 8, 0)?;                      // eight workers, where zero takes 7/8 of the cores
-let domains = Executor::for_ram(&[0, 1], 0, 0)?;                  // threads interleaved across two NUMA nodes
-let rings = Executor::for_nvme(&["/mnt/nvme0"], 4, 0)?;           // one submission ring apiece
-let streams = unsafe { Executor::for_vram(&[0, 1], &[], 0, 0)? }; // one stream per device, scratch grown as asked
-let shared = unsafe { Executor::on_pool(&[], pool, 0)? };         // borrows a ForkUnion pool's threads
-let local = Executor::default();                                  // owns nothing, runs on the calling thread
+let threads = Executor::for_ram(&[], None, 8, 0)?;                        // eight workers, where zero takes 7/8 of the cores
+let domains = Executor::for_ram(&[0, 1], None, 0, 0)?;                    // threads interleaved across two NUMA nodes
+let pinned = Executor::for_ram(&[], Some(CPUClass::IntelHaswell), 0, 0)?; // waiters and atomics of one class
+let rings = Executor::for_nvme(&["/mnt/nvme0"], None, 4, 0)?;             // one submission ring apiece
+let streams = unsafe { Executor::for_vram(&[0, 1], None, &[], 0, 0)? };   // one stream per device, scratch grown as asked
+let shared = unsafe { Executor::on_pool(&[], None, pool, 0)? };           // borrows a ForkUnion pool's threads
+let local = Executor::default();                                          // owns nothing, runs on the calling thread
 
 threads.drain(Mood::Spinning)?;                                   // waits for every call, then keeps spinning
 ```
@@ -217,7 +218,7 @@ The path extension picks the layout: a `.safegraphs` path is one monolith, and a
 ```rust
 index.on(&executor).save("index.safegraphs")?;
 let loaded = DenseIndex::load_ram("index.safegraphs")?;
-let gpu = unsafe { Executor::for_vram(&[0], &[], 0, 0)? };
+let gpu = unsafe { Executor::for_vram(&[0], None, &[], 0, 0)? };
 let placed = DenseIndex::load_vram(DenseLoadVramConfig {
     executor: Some(&gpu),
     devices: &[0],

@@ -21,9 +21,11 @@ import org.jspecify.annotations.Nullable;
 
 import cloud.unum.usearch.DenseVerbs.Request;
 import cloud.unum.usearch.Types.Arena;
+import cloud.unum.usearch.Types.CPUClass;
 import cloud.unum.usearch.Types.Call;
 import cloud.unum.usearch.Types.Deferred;
 import cloud.unum.usearch.Types.Executor;
+import cloud.unum.usearch.Types.GPUClass;
 import cloud.unum.usearch.Types.Handle;
 import cloud.unum.usearch.Types.Key;
 import cloud.unum.usearch.Types.Matches;
@@ -153,6 +155,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         private long dimensions = 0;
         private long connectivity = 0;
         private long valuesPerKey = 0;
+        private @Nullable CPUClass cpuClass = null;
+        private @Nullable GPUClass gpuClass = null;
 
         /** An angular BF16 index, with every optional field derived. */
         public DenseOptions() {}
@@ -197,6 +201,18 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
          */
         public DenseOptions valuesPerKey(long valuesPerKey) {
             this.valuesPerKey = nonNegative(valuesPerKey, "the entries per key is negative");
+            return this;
+        }
+
+        /** The class a host index dispatches as; {@code null} derives the CPU's own. */
+        public DenseOptions cpuClass(@Nullable CPUClass cpuClass) {
+            this.cpuClass = cpuClass;
+            return this;
+        }
+
+        /** The class a device index dispatches as; {@code null} derives the devices' own. */
+        public DenseOptions gpuClass(@Nullable GPUClass gpuClass) {
+            this.gpuClass = gpuClass;
             return this;
         }
 
@@ -1348,6 +1364,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         return create(INIT_RAM, null, call -> {
             options.fill(call);
             call.ordinals("ram", memoryDomains);
+            call.pinned("ram", options.cpuClass);
         });
     }
 
@@ -1363,6 +1380,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         return create(INIT_VRAM, null, call -> {
             options.fill(call);
             call.ordinals("vram", devices);
+            call.pinned("vram", options.gpuClass);
         });
     }
 
@@ -1370,10 +1388,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * Copies a checkpoint into a new index in host memory on the caller's thread, over every memory
      * domain, with unique keys.
      *
-     * @throws USearchException the statuses {@link #loadRam(String, Executor, int[], long)} names.
+     * @throws USearchException the statuses {@link #loadRam(String, Executor, int[], CPUClass, long)} names.
      */
     public static DenseIndex loadRam(String path) {
-        return loadRam(path, null, new int[0], 0);
+        return loadRam(path, null, new int[0], null, 0);
     }
 
     /**
@@ -1383,15 +1401,22 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *
      * @param executor the executor the read fans out over, or {@code null} for the caller's thread.
      * @param memoryDomains NUMA node ids to place the parts on; an empty list derives every node.
+     * @param cpuClass the class the index dispatches as, or {@code null} for the CPU's own.
      * @param valuesPerKey the upper bound on entries sharing one key, which no checkpoint records;
      *     zero derives to one.
      * @throws USearchException MALFORMED on a checkpoint that ends early, and IO when the file cannot
      *     be read.
      */
-    public static DenseIndex loadRam(String path, @Nullable Executor executor, int[] memoryDomains, long valuesPerKey) {
+    public static DenseIndex loadRam(
+            String path,
+            @Nullable Executor executor,
+            int[] memoryDomains,
+            @Nullable CPUClass cpuClass,
+            long valuesPerKey) {
         return create(LOAD_RAM, executor, call -> {
             call.path("path", path);
             call.ordinals("ram", memoryDomains);
+            call.pinned("ram", cpuClass);
             call.size("values_per_key", nonNegative(valuesPerKey, "the entries per key is negative"));
         });
     }
@@ -1400,26 +1425,29 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * Uploads a checkpoint into a new index in device memory on the default stream of one free
      * device, with unique keys.
      *
-     * @throws USearchException the statuses {@link #loadVram(String, Executor, int[], long)} names.
+     * @throws USearchException the statuses {@link #loadVram(String, Executor, int[], GPUClass, long)} names.
      */
     public static DenseIndex loadVram(String path) {
-        return loadVram(path, null, new int[0], 0);
+        return loadVram(path, null, new int[0], null, 0);
     }
 
     /**
      * Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
-     * {@link #loadRam(String, Executor, int[], long)}. Calls {@code usearch_dense_load_vram}.
+     * {@link #loadRam(String, Executor, int[], CPUClass, long)}. Calls {@code usearch_dense_load_vram}.
      *
      * @param executor the executor the upload runs on, or {@code null} for each device's default
      *     stream.
      * @param devices CUDA device ordinals to place the parts on; an empty list derives one free device.
+     * @param gpuClass the class the index dispatches as, or {@code null} for the devices' own.
      * @param valuesPerKey the upper bound on entries sharing one key; zero derives to one.
      * @throws USearchException DEVICE when no device answers, and the statuses a RAM load names.
      */
-    public static DenseIndex loadVram(String path, @Nullable Executor executor, int[] devices, long valuesPerKey) {
+    public static DenseIndex loadVram(
+            String path, @Nullable Executor executor, int[] devices, @Nullable GPUClass gpuClass, long valuesPerKey) {
         return create(LOAD_VRAM, executor, call -> {
             call.path("path", path);
             call.ordinals("vram", devices);
+            call.pinned("vram", gpuClass);
             call.size("values_per_key", nonNegative(valuesPerKey, "the entries per key is negative"));
         });
     }
@@ -1428,26 +1456,31 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * Copies a monolith from a buffer into a new index in host memory on the caller's thread, with
      * unique keys.
      *
-     * @throws USearchException the statuses {@link #loadRamBuffer(MemorySegment, Executor, int[], long)}
+     * @throws USearchException the statuses {@link #loadRamBuffer(MemorySegment, Executor, int[], CPUClass, long)}
      *     names.
      */
     public static DenseIndex loadRamBuffer(MemorySegment buffer) {
-        return loadRamBuffer(buffer, null, new int[0], 0);
+        return loadRamBuffer(buffer, null, new int[0], null, 0);
     }
 
     /**
      * Copies a monolith from a buffer into a new, mutable index in host memory, as
-     * {@link #loadRam(String, Executor, int[], long)} reads a path; the monolith lands whole on the
+     * {@link #loadRam(String, Executor, int[], CPUClass, long)} reads a path; the monolith lands whole on the
      * first shard. A native buffer is read in place, a heap one is copied first. Calls
      * {@code usearch_dense_load_ram_buffer}.
      *
      * @throws USearchException MALFORMED on a monolith that ends early.
      */
     public static DenseIndex loadRamBuffer(
-            MemorySegment buffer, @Nullable Executor executor, int[] memoryDomains, long valuesPerKey) {
+            MemorySegment buffer,
+            @Nullable Executor executor,
+            int[] memoryDomains,
+            @Nullable CPUClass cpuClass,
+            long valuesPerKey) {
         return create(LOAD_RAM_BUFFER, executor, call -> {
             call.bytes("buffer", buffer);
             call.ordinals("ram", memoryDomains);
+            call.pinned("ram", cpuClass);
             call.size("values_per_key", nonNegative(valuesPerKey, "the entries per key is negative"));
         });
     }
@@ -1457,25 +1490,30 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * free device, with unique keys.
      *
      * @throws USearchException the statuses
-     *     {@link #loadVramBuffer(MemorySegment, Executor, int[], long)} names.
+     *     {@link #loadVramBuffer(MemorySegment, Executor, int[], GPUClass, long)} names.
      */
     public static DenseIndex loadVramBuffer(MemorySegment buffer) {
-        return loadVramBuffer(buffer, null, new int[0], 0);
+        return loadVramBuffer(buffer, null, new int[0], null, 0);
     }
 
     /**
      * Copies a monolith from a buffer into a new, mutable index in device memory, as
-     * {@link #loadRamBuffer(MemorySegment, Executor, int[], long)} does in host memory. Calls
+     * {@link #loadRamBuffer(MemorySegment, Executor, int[], CPUClass, long)} does in host memory. Calls
      * {@code usearch_dense_load_vram_buffer}.
      *
      * @throws USearchException DEVICE when no device answers, and MALFORMED on a monolith that ends
      *     early.
      */
     public static DenseIndex loadVramBuffer(
-            MemorySegment buffer, @Nullable Executor executor, int[] devices, long valuesPerKey) {
+            MemorySegment buffer,
+            @Nullable Executor executor,
+            int[] devices,
+            @Nullable GPUClass gpuClass,
+            long valuesPerKey) {
         return create(LOAD_VRAM_BUFFER, executor, call -> {
             call.bytes("buffer", buffer);
             call.ordinals("vram", devices);
+            call.pinned("vram", gpuClass);
             call.size("values_per_key", nonNegative(valuesPerKey, "the entries per key is negative"));
         });
     }
@@ -1496,10 +1534,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * Serves a checkpoint in place from NVMe drives on the caller's thread, each part where its
      * manifest points.
      *
-     * @throws USearchException the statuses {@link #viewNvme(String, Executor, String[])} names.
+     * @throws USearchException the statuses {@link #viewNvme(String, Executor, String[], CPUClass)} names.
      */
     public static DenseIndex viewNvme(String path) {
-        return viewNvme(path, null, new String[0]);
+        return viewNvme(path, null, new String[0], null);
     }
 
     /**
@@ -1510,12 +1548,15 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *     thread.
      * @param paths devices or directories to serve the parts from; an empty list serves each where
      *     its manifest points.
+     * @param cpuClass the class the view dispatches as, or {@code null} for the CPU's own.
      * @throws USearchException UNSUPPORTED while NVMe checkpoints carry no keys and no shard wrapper.
      */
-    public static DenseIndex viewNvme(String path, @Nullable Executor executor, String[] paths) {
+    public static DenseIndex viewNvme(
+            String path, @Nullable Executor executor, String[] paths, @Nullable CPUClass cpuClass) {
         return create(VIEW_NVME, executor, call -> {
             call.path("path", path);
             call.paths("nvme", paths);
+            call.pinned("nvme", cpuClass);
         });
     }
 

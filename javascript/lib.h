@@ -259,6 +259,14 @@ bool usearch_js_completion_from_value(napi_env env, napi_value value, usearch_co
 /** Reads a metric kind from its canonical spelling, through the C name tables. */
 bool usearch_js_metric_from_value(napi_env env, napi_value value, char const* field, usearch_dense_metric_t* result);
 
+/** Reads a pinned CPU class from its canonical spelling through the C name tables; absent pins
+ *  none. */
+bool usearch_js_cpu_class_from_value(napi_env env, napi_value value, usearch_cpu_class_t* result);
+
+/** Reads a pinned GPU class from its canonical spelling through the C name tables; absent pins
+ *  none. */
+bool usearch_js_gpu_class_from_value(napi_env env, napi_value value, usearch_gpu_class_t* result);
+
 /** Reads a traversal from its canonical spelling, through the C name tables; absent walks. */
 bool usearch_js_traversal_from_value(napi_env env, napi_value value, char const* field, usearch_traversal_t* result);
 

@@ -8,12 +8,11 @@
  *  Metal's API is Objective-C, reached here through @c objc_msgSend cast to each call's exact
  *  prototype, so a plain C++ unit drives it, with no SDK header: the few runtime prototypes are
  *  spelled here. Nothing links Metal, Foundation or the Objective-C runtime:
- *  @ref unum::usearch::utilities::metal_api opens them at first use and resolves the few C entry
- *  points USearch calls into one table, which stays empty where any is absent, so Apple then lists
- *  no devices and the binary still loads. Kernels travel as source and compile on the device at
- *  first use, so no Metal toolchain is needed to build. Memory is unified and every buffer is
- *  shared, so the host reads and writes a matrix in place and a launch binds the same buffer by
- *  handle.
+ *  @ref unum::usearch::utilities::metal_api_t::load opens them and resolves the few C entry points
+ *  USearch calls into one table, which stays empty where any is absent, so Apple then lists no
+ *  devices and the binary still loads. Kernels travel as source and compile on the device at first
+ *  use, so no Metal toolchain is needed to build. Memory is unified and every buffer is shared, so
+ *  the host reads and writes a matrix in place and a launch binds the same buffer by handle.
  */
 #pragma once
 
@@ -113,24 +112,18 @@ struct metal_api_t {
     }
 };
 
-/** The one table every Apple call goes through, filled on first use by whichever thread is
- *  first. */
-inline metal_api_t const& metal_api() noexcept {
-    static metal_api_t const api = metal_api_t::load();
-    return api;
-}
-
-/** Sends @p selector to @p target with @p arguments, cast to the exact prototype the call has. */
+/** Sends @p selector to @p target with @p arguments through @p api, cast to the exact prototype the
+ *  call has. */
 template <typename result_type_ = void*, typename... argument_types_>
-inline result_type_ metal_send(void* target, char const* selector, argument_types_... arguments) noexcept {
-    metal_api_t const& api = metal_api();
+inline result_type_ metal_send(metal_api_t const& api, void* target, char const* selector,
+                               argument_types_... arguments) noexcept {
     using function_t = result_type_ (*)(void*, metal_selector_t, argument_types_...);
     return reinterpret_cast<function_t>(api.send)(target, api.register_selector(selector), arguments...);
 }
 
 /** An @c NSString over @p text, autoreleased. */
-inline void* metal_string(char const* text) noexcept {
-    return metal_send(reinterpret_cast<void*>(metal_api().get_class("NSString")), "stringWithUTF8String:", text);
+inline void* metal_string(metal_api_t const& api, char const* text) noexcept {
+    return metal_send(api, reinterpret_cast<void*>(api.get_class("NSString")), "stringWithUTF8String:", text);
 }
 
 /** A launch extent, laid out as @c MTLSize so it passes to Metal by value. */
@@ -138,10 +131,10 @@ struct metal_size_t {
     std::size_t width = 1, height = 1, depth = 1;
 };
 
-/** @c MTLGPUFamilyApple7, @c MTLGPUFamilyApple9 and @c MTLGPUFamilyApple10 - the families the
- *  classes map onto. */
+/** @c MTLGPUFamilyApple7 through @c MTLGPUFamilyApple10 - the families a device record names. */
 enum metal_family_t : std::size_t {
     metal_family_apple7_k = 1007,
+    metal_family_apple8_k = 1008,
     metal_family_apple9_k = 1009,
     metal_family_apple10_k = 1010,
 };
@@ -149,30 +142,27 @@ enum metal_family_t : std::size_t {
 /** @c MTLLanguageVersion3_2, the first with device-scope atomic fences. */
 inline constexpr std::size_t metal_language_version_k = (3u << 16) | 2u;
 
-/** The class whose unit runs on @p device: the newest Apple family it supports, or @c unknown_k for
- *  a GPU older than the Apple7 floor or not Apple's own. */
-inline gpu_class_t apple_class_of(void* device) noexcept {
-    auto const supports = [&](metal_family_t family) noexcept {
-        return metal_send<bool>(device, "supportsFamily:", static_cast<std::size_t>(family));
-    };
-    if (supports(metal_family_apple10_k)) return gpu_class_t::apple_metal10_k;
-    if (supports(metal_family_apple9_k)) return gpu_class_t::apple_metal9_k;
-    if (supports(metal_family_apple7_k)) return gpu_class_t::apple_metal7_k;
-    return gpu_class_t::unknown_k;
+/** The newest Apple GPU family @p device supports, as its number, such as 9 for
+ *  @c MTLGPUFamilyApple9; zero for a GPU older than Apple7 or not Apple's own. */
+inline u32_t apple_family_of(metal_api_t const& api, void* device) noexcept {
+    for (metal_family_t const family :
+         {metal_family_apple10_k, metal_family_apple9_k, metal_family_apple8_k, metal_family_apple7_k})
+        if (metal_send<bool>(api, device, "supportsFamily:", static_cast<std::size_t>(family)))
+            return static_cast<u32_t>(family - metal_family_apple7_k + 7);
+    return 0;
 }
 
 /** The GPU cores of @p device, which Metal does not report: the @c gpu-core-count its accelerator,
  *  the I/O Registry entry Metal names by @c registryID, or that entry's parents and children list;
  *  zero when none does. */
-inline u32_t apple_core_count_of(void* device) noexcept {
+inline u32_t apple_core_count_of(metal_api_t const& api, void* device) noexcept {
     constexpr u32_t main_port_k = 0;          // `kIOMainPortDefault`
     constexpr u32_t utf8_k = 0x08000100;      // `kCFStringEncodingUTF8`
     constexpr u32_t search_options_k = 1 | 2; // `kIORegistryIterateRecursively | ...Parents`
     constexpr long signed_64_bits_k = 4;      // `kCFNumberSInt64Type`
-    metal_api_t const& api = metal_api();
     // The lookup consumes the matching dictionary, so only the service is released here.
     u32_t const service = api.get_matching_service(
-        main_port_k, api.registry_entry_id_matching(metal_send<u64_t>(device, "registryID")));
+        main_port_k, api.registry_entry_id_matching(metal_send<u64_t>(api, device, "registryID")));
     if (!service) return 0;
     void* const key = api.create_string(nullptr, "gpu-core-count", utf8_k);
     void* const listed = key ? api.search_registry_property(service, "IOService", key, nullptr, search_options_k)
@@ -204,12 +194,16 @@ struct metal_pipeline_t {
     metal_pipeline_state_t state;
 };
 
-/** One listed Apple GPU's process-wide state: the device, its default queue - the twin of CUDA's
- *  null stream - its class and cores, and every pipeline built for it, guarded by one lock. */
+/** One listed Apple GPU's process-wide state: the table its calls go through, the device, its
+ *  default queue - the twin of CUDA's null stream - its family and cores, and every pipeline built
+ *  for it, guarded by one lock. */
 struct metal_context_t {
+    metal_api_t const* api = nullptr;
     void* device = nullptr;
     void* queue = nullptr;
-    gpu_class_t gpu_class = gpu_class_t::unknown_k;
+
+    /** The newest Apple GPU family the device supports, as @ref apple_family_of numbers it. */
+    u32_t family = 0;
 
     /** The GPU cores the I/O Registry lists for the device, zero when it lists none. */
     u32_t multiprocessor_count = 0;
@@ -239,35 +233,36 @@ struct metal_context_t {
             if (std::strcmp(entry.name, name) == 0) return {entry.state, status_t::success_k};
         }
         if (failed(pipelines.reserve(pipelines.size() + 1))) return {{}, status_t::bad_alloc_k};
-        metal_api_t const& api = metal_api();
+        metal_api_t const& api = *this->api;
         void* const pool = api.autorelease_pool_push();
         if (!library) {
             void* const options = metal_send(
-                metal_send(reinterpret_cast<void*>(api.get_class("MTLCompileOptions")), "alloc"), "init");
-            metal_send<void>(options, "setLanguageVersion:", metal_language_version_k);
+                api, metal_send(api, reinterpret_cast<void*>(api.get_class("MTLCompileOptions")), "alloc"), "init");
+            metal_send<void>(api, options, "setLanguageVersion:", metal_language_version_k);
             void* error = nullptr;
-            library = metal_send(device, "newLibraryWithSource:options:error:", metal_string(source), options, &error);
-            metal_send<void>(options, "release");
+            library = metal_send(api, device, "newLibraryWithSource:options:error:", metal_string(api, source), options,
+                                 &error);
+            metal_send<void>(api, options, "release");
         }
         void* pipeline = nullptr;
         if (library) {
-            void* const function = metal_send(library, "newFunctionWithName:", metal_string(name));
+            void* const function = metal_send(api, library, "newFunctionWithName:", metal_string(api, name));
             if (function) {
                 void* error = nullptr;
-                pipeline = metal_send(device, "newComputePipelineStateWithFunction:error:", function, &error);
-                metal_send<void>(function, "release");
+                pipeline = metal_send(api, device, "newComputePipelineStateWithFunction:error:", function, &error);
+                metal_send<void>(api, function, "release");
             }
         }
         api.autorelease_pool_pop(pool);
         if (!pipeline) return {{}, status_t::device_error_k};
-        u32_t const width = static_cast<u32_t>(metal_send<std::size_t>(pipeline, "threadExecutionWidth"));
+        u32_t const width = static_cast<u32_t>(metal_send<std::size_t>(api, pipeline, "threadExecutionWidth"));
         if (width != metal_simdgroup_width_k) {
-            metal_send<void>(pipeline, "release");
+            metal_send<void>(api, pipeline, "release");
             return {{}, status_t::unsupported_k};
         }
         wave_lanes = width;
         u32_t const max_threads = static_cast<u32_t>(
-            metal_send<std::size_t>(pipeline, "maxTotalThreadsPerThreadgroup"));
+            metal_send<std::size_t>(api, pipeline, "maxTotalThreadsPerThreadgroup"));
         metal_pipeline_t entry {source, {}, library, {pipeline, max_threads}};
         std::strncpy(entry.name, name, metal_pipeline_name_capacity_k - 1);
         pipelines.push_back_reserved(entry);
@@ -275,58 +270,59 @@ struct metal_context_t {
     }
 };
 
-/** Every Apple GPU of the Apple7 family or newer, in Metal's own order, opened once per process and
- *  kept for it, as Metal's own device objects are; a listed device's Apple ordinal is its position
+/** Every Apple GPU Metal lists, in Metal's own order, opened once per process by its caller and
+ *  kept for it, as Metal's own device objects are; a device's Apple ordinal is its position
  *  here. */
 struct metal_contexts_t {
     metal_context_t contexts[gpu_devices_capacity_k];
     gpu_device_t devices[gpu_devices_capacity_k];
     std::size_t count = 0;
 
-    metal_contexts_t() noexcept {
-        metal_api_t const& api = metal_api();
+    /** Opens every device @p api lists, none when the table is empty. */
+    explicit metal_contexts_t(metal_api_t const& api) noexcept {
         void* const listed = api ? api.copy_all_devices() : nullptr;
         if (!listed) return;
         void* const pool = api.autorelease_pool_push();
-        std::size_t const listed_count = metal_send<std::size_t>(listed, "count");
+        std::size_t const listed_count = metal_send<std::size_t>(api, listed, "count");
         for (std::size_t position = 0; position != listed_count && count != gpu_devices_capacity_k; ++position) {
-            void* const device = metal_send(listed, "objectAtIndex:", position);
-            gpu_class_t const gpu_class = apple_class_of(device);
-            void* const queue = gpu_class != gpu_class_t::unknown_k ? metal_send(device, "newCommandQueue") : nullptr;
+            void* const device = metal_send(api, listed, "objectAtIndex:", position);
+            void* const queue = metal_send(api, device, "newCommandQueue");
             if (!queue) continue;
             metal_context_t& context = contexts[count];
-            context.device = metal_send(device, "retain");
+            context.api = &api;
+            context.device = metal_send(api, device, "retain");
             context.queue = queue;
-            context.gpu_class = gpu_class;
-            context.multiprocessor_count = apple_core_count_of(device);
+            context.family = apple_family_of(api, device);
+            context.multiprocessor_count = apple_core_count_of(api, device);
             gpu_device_t& listing = devices[count];
-            listing = {gpu_vendor_t::apple_k, static_cast<u32_t>(count), gpu_class, context.multiprocessor_count,
-                       metal_send<u64_t>(device, "recommendedMaxWorkingSetSize")};
-            char const* const name = metal_send<char const*>(metal_send(device, "name"), "UTF8String");
+            listing = {gpu_vendor_t::apple_k,
+                       static_cast<u32_t>(count),
+                       context.family,
+                       0,
+                       0,
+                       context.multiprocessor_count,
+                       metal_send<u64_t>(api, device, "recommendedMaxWorkingSetSize")};
+            char const* const name = metal_send<char const*>(api, metal_send(api, device, "name"), "UTF8String");
             if (name) std::strncpy(listing.name, name, sizeof(listing.name) - 1);
             ++count;
         }
         api.autorelease_pool_pop(pool);
-        metal_send<void>(listed, "release");
+        metal_send<void>(api, listed, "release");
+    }
+    metal_contexts_t(metal_contexts_t const&) = delete;
+    metal_contexts_t& operator=(metal_contexts_t const&) = delete;
+
+    /** The context of the Apple GPU listed at @p device, or null past the listing. */
+    metal_context_t* context(int device) noexcept {
+        return device >= 0 && static_cast<std::size_t>(device) < count ? &contexts[device] : nullptr;
     }
 };
 
-/** The process-wide listing, opened on first use. */
-inline metal_contexts_t& metal_contexts() noexcept {
-    static metal_contexts_t contexts;
-    return contexts;
-}
-
-/** Every listed Apple GPU, as @c gpu_devices appends them after NVIDIA's and AMD's. */
-inline std::span<gpu_device_t const> apple_gpu_devices() noexcept {
-    metal_contexts_t const& all = metal_contexts();
-    return {all.devices, all.count};
-}
-
-/** The context of the Apple GPU listed at @p device, or null past the listing. */
-inline metal_context_t* metal_context(int device) noexcept {
-    metal_contexts_t& all = metal_contexts();
-    return device >= 0 && static_cast<std::size_t>(device) < all.count ? &all.contexts[device] : nullptr;
+/** Copies every Apple GPU @p contexts opened into @p into, answering how many it wrote. */
+inline std::size_t list_apple_gpu_devices(metal_contexts_t const& contexts, std::span<gpu_device_t> into) noexcept {
+    std::size_t const count = min_of(contexts.count, into.size());
+    for (std::size_t position = 0; position != count; ++position) into[position] = contexts.devices[position];
+    return count;
 }
 
 /** One Apple GPU's hardware specification - the facts the launches consult. */
@@ -339,8 +335,8 @@ struct metal_device_specs_t {
      *  currency. */
     u32_t multiprocessor_count = 0;
 
-    /** The class whose kernels run on it. */
-    gpu_class_t gpu_class = gpu_class_t::unknown_k;
+    /** The newest Apple GPU family it supports, as @ref apple_family_of numbers it. */
+    u32_t family = 0;
 
     /** Lanes per simdgroup, the @c threadExecutionWidth every pipeline built for it reports. */
     u32_t wave_lanes = 0;
@@ -360,50 +356,52 @@ struct metal_device_specs_t {
     std::size_t working_set_bytes = 0;
 
     /**
-     *  Queries Metal and the I/O Registry for @p ordinal's specification, once a pipeline built for
-     *  the device reported its simdgroup width; meaningful only on @c success_k.
+     *  Queries Metal and the I/O Registry for the specification of @p context, the device at
+     *  @p ordinal, once a pipeline built for it reported its simdgroup width; meaningful only on
+     *  @c success_k.
      *
      *  @par Statuses:
-     *  - @c device_error_k No device sits at @p ordinal, or no pipeline reported its simdgroup
-     *    width yet.
+     *  - @c device_error_k No pipeline reported the device's simdgroup width yet.
      *  - @c unsupported_k The device's registry lists no core count.
      */
-    static expected<metal_device_specs_t> query(int ordinal) noexcept {
-        metal_context_t const* const context = metal_context(ordinal);
-        if (!context || !context->wave_lanes) return {{ordinal}, status_t::device_error_k};
-        if (!context->multiprocessor_count) return {{ordinal}, status_t::unsupported_k};
-        void* const device = context->device;
-        metal_device_specs_t specs {ordinal, context->multiprocessor_count, context->gpu_class, context->wave_lanes};
+    static expected<metal_device_specs_t> query(metal_context_t const& context, int ordinal) noexcept {
+        if (!context.wave_lanes) return {{ordinal}, status_t::device_error_k};
+        if (!context.multiprocessor_count) return {{ordinal}, status_t::unsupported_k};
+        metal_api_t const& api = *context.api;
+        void* const device = context.device;
+        metal_device_specs_t specs {ordinal, context.multiprocessor_count, context.family, context.wave_lanes};
         specs.max_threads_per_block = static_cast<u32_t>(
-            metal_send<metal_size_t>(device, "maxThreadsPerThreadgroup").width);
-        specs.shared_memory_per_block_bytes = metal_send<std::size_t>(device, "maxThreadgroupMemoryLength");
-        specs.max_buffer_bytes = metal_send<std::size_t>(device, "maxBufferLength");
-        specs.working_set_bytes = static_cast<std::size_t>(metal_send<u64_t>(device, "recommendedMaxWorkingSetSize"));
+            metal_send<metal_size_t>(api, device, "maxThreadsPerThreadgroup").width);
+        specs.shared_memory_per_block_bytes = metal_send<std::size_t>(api, device, "maxThreadgroupMemoryLength");
+        specs.max_buffer_bytes = metal_send<std::size_t>(api, device, "maxBufferLength");
+        specs.working_set_bytes = static_cast<std::size_t>(
+            metal_send<u64_t>(api, device, "recommendedMaxWorkingSetSize"));
         return {specs, status_t::success_k};
     }
 };
 
-/** One shared-storage @c MTLBuffer: the handle a launch binds and the host address the same bytes
- *  sit at. Move-only, and released when it dies. */
+/** One shared-storage @c MTLBuffer: the table it is released through, the handle a launch binds
+ *  and the host address the same bytes sit at. Move-only, and released when it dies. */
 struct metal_buffer_t {
+    metal_api_t const* api = nullptr;
     void* handle = nullptr;
     byte_t* host = nullptr;
     std::size_t bytes = 0;
 
     metal_buffer_t() noexcept = default;
     metal_buffer_t(metal_buffer_t&& other) noexcept
-        : handle(std::exchange(other.handle, nullptr)), host(std::exchange(other.host, nullptr)),
+        : api(other.api), handle(std::exchange(other.handle, nullptr)), host(std::exchange(other.host, nullptr)),
           bytes(std::exchange(other.bytes, 0)) {}
     metal_buffer_t& operator=(metal_buffer_t&& other) noexcept {
         metal_buffer_t dying {std::move(*this)};
-        handle = std::exchange(other.handle, nullptr), host = std::exchange(other.host, nullptr);
+        api = other.api, handle = std::exchange(other.handle, nullptr), host = std::exchange(other.host, nullptr);
         bytes = std::exchange(other.bytes, 0);
         return *this;
     }
     metal_buffer_t(metal_buffer_t const&) = delete;
     metal_buffer_t& operator=(metal_buffer_t const&) = delete;
     ~metal_buffer_t() noexcept {
-        if (handle) metal_send<void>(handle, "release");
+        if (handle) metal_send<void>(*api, handle, "release");
     }
 
     explicit operator bool() const noexcept { return handle != nullptr; }
@@ -415,63 +413,77 @@ inline metal_buffer_t metal_allocate(metal_context_t& context, std::size_t bytes
     metal_buffer_t buffer;
     if (!bytes) return buffer;
     constexpr std::size_t shared_storage_k = 0; // `MTLResourceStorageModeShared`
-    buffer.handle = metal_send(context.device, "newBufferWithLength:options:", bytes, shared_storage_k);
+    metal_api_t const& api = *context.api;
+    buffer.api = &api;
+    buffer.handle = metal_send(api, context.device, "newBufferWithLength:options:", bytes, shared_storage_k);
     if (!buffer.handle) return buffer;
-    buffer.host = static_cast<byte_t*>(metal_send(buffer.handle, "contents"));
+    buffer.host = static_cast<byte_t*>(metal_send(api, buffer.handle, "contents"));
     buffer.bytes = bytes;
     return buffer;
 }
 
-/** The storage backend of the Apple index: shared buffers on one device, each allocation its own
- *  @c MTLBuffer, so a matrix grows by allocating a wider one and copying. */
-struct metal_shared_allocator_t {
-    metal_shared_allocator_t() noexcept = default;
-    explicit metal_shared_allocator_t(int device) noexcept : device_(device) {}
-
-    metal_buffer_t allocate(std::size_t bytes) noexcept {
-        metal_context_t* const context = metal_context(device_);
-        return context ? metal_allocate(*context, bytes) : metal_buffer_t {};
-    }
-    void deallocate(metal_buffer_t& buffer) noexcept { buffer = {}; }
-    int device() const noexcept { return device_; }
-
-  private:
-    int device_ = 0;
-};
-
 /** Owned @c id<MTLCommandQueue> on one Apple GPU, the twin of @c cuda_stream_t; null rides the
- *  device's default queue, which its @ref metal_context_t keeps, so the stream names its device.
- *  Move-only, and released when it dies. */
+ *  device's default queue, which its @ref metal_context_t keeps, so the stream names its device
+ *  and context. Move-only, and released when it dies. */
 struct metal_stream_t {
 
     /** The Apple ordinal this stream submits to. */
     int device = 0;
 
-    /** The default queue of Apple GPU 0. */
+    /** A stream on no device, which only fills the default of a context built later. */
     metal_stream_t() noexcept = default;
 
-    /** Takes @p handle, owned and opened on @p device, or rides that device's default queue when
-     *  null. */
-    explicit metal_stream_t(int device, void* handle = nullptr) noexcept : device(device), handle_(handle) {}
+    /** Takes @p handle, owned and opened on @p device, whose context is @p context, or rides that
+     *  device's default queue when null. */
+    metal_stream_t(metal_context_t& context, int device, void* handle = nullptr) noexcept
+        : device(device), context_(&context), handle_(handle) {}
     metal_stream_t(metal_stream_t&& other) noexcept
-        : device(other.device), handle_(std::exchange(other.handle_, nullptr)) {}
+        : device(other.device), context_(other.context_), handle_(std::exchange(other.handle_, nullptr)) {}
     metal_stream_t(metal_stream_t const&) = delete;
     metal_stream_t& operator=(metal_stream_t const&) = delete;
     ~metal_stream_t() noexcept {
-        if (handle_) metal_send<void>(handle_, "release");
+        if (handle_) metal_send<void>(*context_->api, handle_, "release");
     }
 
     /** Another owner of the same queue, retained, so a context holds an executor's stream without
      *  borrowing it. */
     metal_stream_t share() const noexcept {
-        return metal_stream_t {device, handle_ ? metal_send(handle_, "retain") : nullptr};
+        if (!context_) return {};
+        return metal_stream_t {*context_, device, handle_ ? metal_send(*context_->api, handle_, "retain") : nullptr};
     }
 
     /** The owned queue, or null for the device's default one. */
     void* handle() const noexcept { return handle_; }
 
+    /** The context of the stream's device, or null for a stream on no device. */
+    metal_context_t* context() const noexcept { return context_; }
+
   private:
+    metal_context_t* context_ = nullptr;
     void* handle_ = nullptr;
+};
+
+/** The storage backend of the Apple index: shared buffers on one device, each allocation its own
+ *  @c MTLBuffer, so a matrix grows by allocating a wider one and copying. */
+struct metal_shared_allocator_t {
+    metal_shared_allocator_t() noexcept = default;
+
+    /** Allocates on the device and context of @p stream. */
+    explicit metal_shared_allocator_t(metal_stream_t const& stream) noexcept
+        : context_(stream.context()), device_(stream.device) {}
+
+    metal_buffer_t allocate(std::size_t bytes) noexcept {
+        return context_ ? metal_allocate(*context_, bytes) : metal_buffer_t {};
+    }
+    void deallocate(metal_buffer_t& buffer) noexcept { buffer = {}; }
+    int device() const noexcept { return device_; }
+
+    /** The context of the allocator's device, or null for a default-built one. */
+    metal_context_t* context() const noexcept { return context_; }
+
+  private:
+    metal_context_t* context_ = nullptr;
+    int device_ = 0;
 };
 
 /** One command buffer being encoded on one queue: binds buffers and bytes, dispatches, and commits
@@ -480,39 +492,42 @@ struct metal_stream_t {
  *  Apple's event, the twin of @c cuda_event_t, since a queue runs its command buffers in commit
  *  order, so its landing means every earlier one's. */
 struct metal_launch_t {
+    metal_api_t const* api = nullptr;
     void* commands = nullptr;
     void* encoder = nullptr;
 
     /** No command buffer - one with nothing left to run. */
     metal_launch_t() noexcept = default;
 
-    /** Opens one command buffer on @p queue with a compute encoder for @p pipeline. */
-    metal_launch_t(void* queue, void* pipeline) noexcept {
-        metal_api_t const& api = metal_api();
+    /** Opens one command buffer on @p queue with a compute encoder for @p pipeline, through
+     *  @p api. */
+    metal_launch_t(metal_api_t const& api, void* queue, void* pipeline) noexcept : api(&api) {
         void* const pool = api.autorelease_pool_push();
-        commands = metal_send(queue, "commandBuffer");
-        if (commands) metal_send<void>(commands, "retain");
-        if (commands) encoder = metal_send(commands, "computeCommandEncoder");
+        commands = metal_send(api, queue, "commandBuffer");
+        if (commands) metal_send<void>(api, commands, "retain");
+        if (commands) encoder = metal_send(api, commands, "computeCommandEncoder");
         if (encoder) {
-            metal_send<void>(encoder, "retain");
-            metal_send<void>(encoder, "setComputePipelineState:", pipeline);
+            metal_send<void>(api, encoder, "retain");
+            metal_send<void>(api, encoder, "setComputePipelineState:", pipeline);
         }
         // A command buffer without its encoder is never committed, so none is kept to await.
-        else if (commands) metal_send<void>(std::exchange(commands, nullptr), "release");
+        else if (commands) metal_send<void>(api, std::exchange(commands, nullptr), "release");
         api.autorelease_pool_pop(pool);
     }
     metal_launch_t(metal_launch_t&& other) noexcept
-        : commands(std::exchange(other.commands, nullptr)), encoder(std::exchange(other.encoder, nullptr)) {}
+        : api(other.api), commands(std::exchange(other.commands, nullptr)),
+          encoder(std::exchange(other.encoder, nullptr)) {}
     metal_launch_t& operator=(metal_launch_t&& other) noexcept {
         metal_launch_t dying {std::move(*this)};
+        api = other.api;
         commands = std::exchange(other.commands, nullptr), encoder = std::exchange(other.encoder, nullptr);
         return *this;
     }
     metal_launch_t(metal_launch_t const&) = delete;
     metal_launch_t& operator=(metal_launch_t const&) = delete;
     ~metal_launch_t() noexcept {
-        if (encoder) metal_send<void>(encoder, "endEncoding"), metal_send<void>(encoder, "release");
-        if (commands) metal_send<void>(commands, "release");
+        if (encoder) metal_send<void>(*api, encoder, "endEncoding"), metal_send<void>(*api, encoder, "release");
+        if (commands) metal_send<void>(*api, commands, "release");
     }
 
     /** Whether the encoder is open, so the launch can still bind and dispatch. */
@@ -520,12 +535,12 @@ struct metal_launch_t {
 
     /** Binds @p buffer from @p offset at buffer slot @p index. */
     void bind(metal_buffer_t const& buffer, std::size_t index, std::size_t offset = 0) noexcept {
-        metal_send<void>(encoder, "setBuffer:offset:atIndex:", buffer.handle, offset, index);
+        metal_send<void>(*api, encoder, "setBuffer:offset:atIndex:", buffer.handle, offset, index);
     }
 
     /** Copies @p bytes of @p arguments into buffer slot @p index. */
     void bind_bytes(void const* arguments, std::size_t bytes, std::size_t index) noexcept {
-        metal_send<void>(encoder, "setBytes:length:atIndex:", arguments, bytes, index);
+        metal_send<void>(*api, encoder, "setBytes:length:atIndex:", arguments, bytes, index);
     }
 
     /**
@@ -536,12 +551,12 @@ struct metal_launch_t {
      */
     status_t submit(std::size_t groups, std::size_t threads) noexcept {
         if (!encoder) return status_t::device_error_k;
-        metal_send<void, metal_size_t, metal_size_t>(
-            encoder, "dispatchThreadgroups:threadsPerThreadgroup:", metal_size_t {groups}, metal_size_t {threads});
-        metal_send<void>(encoder, "endEncoding");
-        metal_send<void>(encoder, "release");
+        metal_send<void, metal_size_t, metal_size_t>(*api, encoder, "dispatchThreadgroups:threadsPerThreadgroup:",
+                                                     metal_size_t {groups}, metal_size_t {threads});
+        metal_send<void>(*api, encoder, "endEncoding");
+        metal_send<void>(*api, encoder, "release");
         encoder = nullptr;
-        metal_send<void>(commands, "commit");
+        metal_send<void>(*api, commands, "commit");
         return status_t::success_k;
     }
 
@@ -550,7 +565,7 @@ struct metal_launch_t {
     status_t landed() const noexcept {
         if (!commands || encoder) return status_t::success_k;
         constexpr std::size_t completed_k = 4, error_k = 5; // `MTLCommandBufferStatusCompleted`, `...Error`
-        std::size_t const state = metal_send<std::size_t>(commands, "status");
+        std::size_t const state = metal_send<std::size_t>(*api, commands, "status");
         return state == completed_k ? status_t::success_k
                : state == error_k   ? status_t::device_error_k
                                     : status_t::deferred_k;
@@ -558,7 +573,7 @@ struct metal_launch_t {
 
     /** Waits for the committed command buffer and answers whether the device finished it. */
     status_t wait() noexcept {
-        if (commands && !encoder) metal_send<void>(commands, "waitUntilCompleted");
+        if (commands && !encoder) metal_send<void>(*api, commands, "waitUntilCompleted");
         return landed();
     }
 };
@@ -666,22 +681,23 @@ struct metal_executor_t {
     }
 
     /**
-     *  Opens one stream per entry of @p devices, whose scratch never grows past @p scratch_limit
-     *  bytes, zero for no ceiling.
+     *  Opens one stream per entry of @p devices among @p contexts, whose scratch never grows past
+     *  @p scratch_limit bytes, zero for no ceiling.
      *
      *  @par Statuses:
      *  - @c device_error_k A device is not listed.
      *  - @c config_mismatch_k The @p devices are empty.
      */
-    static expected<metal_executor_t> spawn(std::span<int const> devices, std::size_t scratch_limit = 0) noexcept {
+    static expected<metal_executor_t> spawn(metal_contexts_t& contexts, std::span<int const> devices,
+                                            std::size_t scratch_limit = 0) noexcept {
         growing_buffer<stream_t> streams {global_allocator};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
         for (int const device : devices) {
-            metal_context_t* const context = metal_context(device);
+            metal_context_t* const context = contexts.context(device);
             if (!context) return {{}, status_t::device_error_k};
-            void* const queue = metal_send(context->device, "newCommandQueue");
+            void* const queue = metal_send(*context->api, context->device, "newCommandQueue");
             if (!queue) return {{}, status_t::device_error_k};
-            streams.push_back_reserved(stream_t {metal_stream_t {device, queue}});
+            streams.push_back_reserved(stream_t {metal_stream_t {*context, device, queue}});
         }
         auto [executor, status] = acquire(std::move(streams));
         executor.scratch_limit_ = scratch_limit;
@@ -701,7 +717,7 @@ struct metal_executor_t {
         if (streams_.empty()) return status_t::uninitialized_k;
         if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_t::bad_alloc_k;
         for (stream_t& opened : streams_) {
-            metal_context_t* const context = metal_context(opened.handle.device);
+            metal_context_t* const context = opened.handle.context();
             if (!context) return status_t::device_error_k;
             opened.arena = metal_allocate(*context, bytes_per_stream);
             if (bytes_per_stream && !opened.arena) return status_t::bad_alloc_k;
@@ -717,19 +733,19 @@ struct metal_executor_t {
      *  - @c device_error_k A stream's device is not listed.
      */
     status_t wait() noexcept {
-        metal_api_t const& api = metal_api();
         constexpr std::size_t completed_k = 4; // `MTLCommandBufferStatusCompleted`
         for (stream_t const& opened : streams_) {
             metal_stream_t const& stream = opened.handle;
-            metal_context_t* const context = metal_context(stream.device);
+            metal_context_t* const context = stream.context();
             if (!context) return status_t::device_error_k;
+            metal_api_t const& api = *context->api;
             void* const pool = api.autorelease_pool_push();
-            void* const commands = metal_send(stream.handle() ? stream.handle() : context->queue, "commandBuffer");
+            void* const commands = metal_send(api, stream.handle() ? stream.handle() : context->queue, "commandBuffer");
             std::size_t state = 0;
             if (commands) {
-                metal_send<void>(commands, "commit");
-                metal_send<void>(commands, "waitUntilCompleted");
-                state = metal_send<std::size_t>(commands, "status");
+                metal_send<void>(api, commands, "commit");
+                metal_send<void>(api, commands, "waitUntilCompleted");
+                state = metal_send<std::size_t>(api, commands, "status");
             }
             api.autorelease_pool_pop(pool);
             if (state != completed_k) return status_t::device_error_k;
@@ -818,7 +834,7 @@ struct metal_traversal_context {
 
     /** Binds the context to @p stream's device; buffers wait for the first verb. */
     metal_traversal_context(allocator_t stream = {}) noexcept
-        : stream_(std::move(stream)), context_(metal_context(stream_.device)), buffers_allocator_(stream_.device) {
+        : stream_(std::move(stream)), context_(stream_.context()), buffers_allocator_(stream_) {
         if (context_) counters_ = buffers_allocator_.allocate(metal_counter_words_k * sizeof(u32_t));
     }
     metal_traversal_context(metal_traversal_context&&) noexcept = default;
@@ -827,6 +843,9 @@ struct metal_traversal_context {
 
     int device() const noexcept { return stream_.device; }
     void* stream() const noexcept { return stream_.handle() ? stream_.handle() : context_->queue; }
+
+    /** The table every launch of this context goes through. */
+    metal_api_t const& api() const noexcept { return *context_->api; }
     explicit operator bool() const noexcept { return context_ && counters_; }
 
     /** Waits for the last command buffer this context committed - one stream's completion, the

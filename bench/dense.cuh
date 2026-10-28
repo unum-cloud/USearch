@@ -86,15 +86,15 @@ inline constexpr capability_choice<nk_capability_t> compute_choices_k[] = {
  *  by ForkUnion's instruction vocabulary; the floor is the STL yield. Every row is gated by the
  *  runtime capability mask at dispatch, since Arm's @c WFET has no compile-time feature macro. */
 inline constexpr capability_choice<fu_capabilities_t> schedule_choices_k[] = {
-#if FORKUNION_ARCH_X86_64_
+#if FORKUNION_ARCH_X8664_
     {"pause", fu_capability_x86_pause_k},
     {"tpause", fu_capability_x86_tpause_k},
 #elif FORKUNION_ARCH_ARM64_
     {"yield", fu_capability_arm64_yield_k},
     {"wfet", fu_capability_arm64_wfet_k},
 #elif FORKUNION_ARCH_RISCV64_
-    {"pause", fu_capability_risc5_pause_k},
-    {"wrs", fu_capability_risc5_wrs_k},
+    {"pause", fu_capability_riscv64_pause_k},
+    {"wrs", fu_capability_riscv64_wrs_k},
 #else
     {"standard", fu_capabilities_unknown_k},
 #endif

@@ -65,7 +65,7 @@ func sequentialKeys(count uint) []Key {
 // pool spawns the executor every fanned-out verb runs on; the engine derives none.
 func pool(t *testing.T) *Executor {
 	t.Helper()
-	executor, err := ExecutorForRam(nil, 2, 0)
+	executor, err := ExecutorForRam(nil, CPUClassUnknown, 2, 0)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}
@@ -488,25 +488,25 @@ func TestClosingTwiceIsHarmless(t *testing.T) {
 // both and never neither.
 func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 	t.Parallel()
-	memory, err := ExecutorForRam(nil, 2, 0)
+	memory, err := ExecutorForRam(nil, CPUClassUnknown, 2, 0)
 	if err != nil {
 		t.Fatalf("the RAM executor must spawn: %v", err)
 	}
 	defer memory.Close()
 
-	devices, err := ExecutorForVram(nil, nil, 0, 0)
+	devices, err := ExecutorForVram(nil, GPUClassUnknown, nil, 0, 0)
 	if (devices == nil) == (err == nil) {
 		t.Errorf("the VRAM constructor answered with %v and %v", devices, err)
 	}
 	devices.Close()
 
-	drives, err := ExecutorForNvme(nil, 2, 0)
+	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 2, 0)
 	if (drives == nil) == (err == nil) {
 		t.Errorf("the NVMe constructor answered with %v and %v", drives, err)
 	}
 	drives.Close()
 
-	if _, err := ExecutorForVram([]int32{0}, make([]unsafe.Pointer, 2), 0, 0); !errors.Is(err, StatusShapeMismatch) {
+	if _, err := ExecutorForVram([]int32{0}, GPUClassUnknown, make([]unsafe.Pointer, 2), 0, 0); !errors.Is(err, StatusShapeMismatch) {
 		t.Errorf("a stream list of the wrong length reported %v", err)
 	}
 	// The stub has no NVMe residency, so it refuses before looking for the file.
@@ -521,7 +521,7 @@ func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 func TestExecutorRefusesUseAfterClose(t *testing.T) {
 	t.Parallel()
 	index := newIndex(t, angularBF16(4), 4)
-	executor, err := ExecutorForRam(nil, 2, 0)
+	executor, err := ExecutorForRam(nil, CPUClassUnknown, 2, 0)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}
@@ -1492,7 +1492,7 @@ func TestDeferredRefusalsReachStatusAndWait(t *testing.T) {
 	index := newIndex(t, angularBF16(dimensions), count)
 	slab := seededRows(count, dimensions)
 
-	executor, err := ExecutorForRam(nil, 1, 1)
+	executor, err := ExecutorForRam(nil, CPUClassUnknown, 1, 1)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}

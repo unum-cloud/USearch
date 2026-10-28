@@ -150,23 +150,17 @@ status_t place_shards(punned_basic_index<traits_type_, home_> const& punned,
 }
 
 /** The RAM or NVMe variant of @p traits_type_ serving @p geometry on the newest rung of @p ladder
- *  the machine admits and @p pinned holds, the serial floor last: a rung needs the class's NumKong
- *  and ForkUnion features, and a class unit without a variant serving the geometry sends the walk
- *  on. */
+ *  that fits under @p ceiling, the serial floor last; a class unit without a variant serving the
+ *  geometry sends the walk on. */
 template <typename traits_type_, dense_home_t home_, cpu_class_t... classes_>
 basic_verbs<traits_type_, home_> const* pick_basic_cpu_variant(cpu_ladder<classes_...>,
                                                                typename traits_type_::geometry_t const& geometry,
-                                                               usearch_cpu_class_t pinned,
-                                                               nk_capability_t available) noexcept {
+                                                               cpu_ceiling_t ceiling) noexcept {
     basic_verbs<traits_type_, home_> const* picked = nullptr;
     auto rung = [&]<cpu_class_t class_>() noexcept {
-        if constexpr (basic_class_compiled(class_)) {
-            if (picked) return;
-            if constexpr (class_ != cpu_class_t::serial_k)
-                if (!cpu_pin_takes(pinned, class_) || !numkong_admits(available, class_) || !forkunion_admits<class_>())
-                    return;
-            picked = basic_class_tables<traits_type_, home_, class_>::find(geometry);
-        }
+        if constexpr (basic_class_compiled(class_))
+            if (!picked && cpu_rung_fits(class_, ceiling))
+                picked = basic_class_tables<traits_type_, home_, class_>::find(geometry);
     };
     (rung.template operator()<classes_>(), ...);
     return picked;
@@ -179,7 +173,7 @@ basic_verbs<traits_type_, dense_home_t::vram_nvidia_k> const* pick_basic_gpu_var
     gpu_ladder<classes_...>, typename traits_type_::geometry_t const& geometry, nk_capability_t available) noexcept {
     basic_verbs<traits_type_, dense_home_t::vram_nvidia_k> const* picked = nullptr;
     auto rung = [&]<gpu_class_t class_>() noexcept {
-        if constexpr (gpu_class_compiled(class_))
+        if constexpr (basic_gpu_class_compiled(class_))
             if (!picked && numkong_admits(available, class_))
                 picked = basic_class_tables<traits_type_, dense_home_t::vram_nvidia_k, class_>::find(geometry);
     };
@@ -201,13 +195,12 @@ handle_type_* make_basic_cpu_handle(typename handle_type_::traits_t::geometry_t&
                                     usearch_outcome_t* outcome, fill_type_&& fill) noexcept {
     using traits_t = typename handle_type_::traits_t;
     if (!traits_t::admits(geometry, arguments, outcome)) return nullptr;
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-    if (!cpu_pin_admitted(ram.cpu_class, available))
+    auto const [ceiling, pick_status] = pick_cpu_ceiling(ram.cpu_class);
+    if (failed(pick_status))
         return propagate_error(usearch_status_unsupported_k, outcome, "The CPU does not admit the pinned class"),
                nullptr;
     basic_verbs<traits_t, home_> const* const verbs = pick_basic_cpu_variant<traits_t, home_>(cpu_ladder_t {}, geometry,
-                                                                                              ram.cpu_class, available);
+                                                                                              ceiling);
     if (!verbs)
         return propagate_error(usearch_status_unsupported_k, outcome, "No compiled variant serves the geometry"),
                nullptr;
@@ -303,11 +296,11 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
     for (std::size_t shard = 1; shard < named_count(vram); ++shard) {
         gpu_device_t const* const other = basic_device_at(named_ordinal(vram, shard), outcome);
         if (!other) return nullptr;
-        if (other->gpu_class != device->gpu_class)
+        if (gpu_class_of(*other) != gpu_class_of(*device))
             return propagate_error(usearch_status_config_mismatch_k, outcome, "The devices must share one class"),
                    nullptr;
     }
-    nk_capability_t const available = gpu_pin_capabilities(device->gpu_class, vram.gpu_class);
+    nk_capability_t const available = gpu_pin_capabilities(gpu_class_of(*device), vram.gpu_class);
     if (!available)
         return propagate_error(usearch_status_unsupported_k, outcome, "The devices do not run the pinned class"),
                nullptr;
@@ -401,8 +394,10 @@ void basic_view_ram(arguments_type_* arguments) noexcept {
     auto view = [&](auto const& punned) noexcept {
         return propagate_error(punned.verbs.view(punned.variant, path, {}, nullptr), outcome);
     };
-    handle_t* const index = make_basic_cpu_handle<handle_t, dense_home_t::ram_k>(
-        geometry, *arguments, usearch_ram_options_t {}, outcome, view);
+    usearch_ram_options_t pinned {};
+    pinned.cpu_class = arguments->ram.cpu_class;
+    handle_t* const index = make_basic_cpu_handle<handle_t, dense_home_t::ram_k>(geometry, *arguments, pinned, outcome,
+                                                                                 view);
     if (index) *arguments->index = index;
 }
 

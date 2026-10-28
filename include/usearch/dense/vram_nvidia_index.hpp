@@ -6,7 +6,7 @@
  *
  *  The host face of the NVIDIA family, compiled by any C++ compiler: it fills the plain argument
  *  records of @c vram_index.hpp and launches the kernels of @c vram_nvidia_index.cuh by name
- *  through the driver it opens at first use, so it never sees a kit, a shared view or the CUDA
+ *  through the driver table its storage carries, so it never sees a kit, a shared view or the CUDA
  *  runtime. Every kernel is one instantiation of @c cuda_kernel, for the walks basic graphs share,
  *  or of @c cuda_dense_kernel, for the rest, both over five arguments - the kernel, the capability
  *  ceiling, the dtype, the register rung and the attend value lookup - so @c vram_kernel_symbol
@@ -394,13 +394,14 @@ struct vram_nvidia_kernels {
         }
         // The counters zero ahead of the imports, so a cast kernel importing the queries leads
         // straight into the walk, which may then overlap its drain.
-        if (cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != cuda_success_k ||
-            cuda_fill_async(context.assigned_rows_.get(), 0, 2 * sizeof(u32_t), stream) != cuda_success_k)
+        if (cuda_fill_async(core.api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) !=
+                cuda_success_k ||
+            cuda_fill_async(core.api(), context.assigned_rows_.get(), 0, 2 * sizeof(u32_t), stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
         // Pitched uploads: device rows pad to whole fragments, and the pad bytes must be zero for
         // the zero-tail distance identity to hold.
         if ((import_bytes || core.packed_row_bytes() != core.row_bytes()) &&
-            cuda_fill_async(staging, 0, rows_bytes + import_bytes, stream) != cuda_success_k)
+            cuda_fill_async(core.api(), staging, 0, rows_bytes + import_bytes, stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
         if (status_t const imported = core.import_rows_(staging, queries, window, stream); failed(imported))
             return {{}, imported};
@@ -424,7 +425,7 @@ struct vram_nvidia_kernels {
             byte_t* const staged_weights = staging + rows_bytes + import_bytes;
             std::size_t const weights_row_bytes = heads.weights.extent(1) * sizeof(f32_t);
             if (failed(core.import_rows_(staged_heads, heads.heads, window, stream)) ||
-                cuda_copy_2d_async(staged_weights, weights_row_bytes, heads.weights.byte_data(),
+                cuda_copy_2d_async(core.api(), staged_weights, weights_row_bytes, heads.weights.byte_data(),
                                    heads.weights.stride_bytes(0), weights_row_bytes, queries_count,
                                    stream) != cuda_success_k)
                 return {{}, status_t::device_error_k};
@@ -495,12 +496,12 @@ struct vram_nvidia_kernels {
         if (failed(launched)) return {{}, launched};
         // The landing may be wider than the count, so a multi-index can hand every shard its own
         // columns of one results matrix.
-        if (cuda_copy_2d_async(result_ids.data(), result_ids.stride_bytes(0), device_ids,
+        if (cuda_copy_2d_async(core.api(), result_ids.data(), result_ids.stride_bytes(0), device_ids,
                                config.count * sizeof(node_id_t), config.count * sizeof(node_id_t), queries_count,
                                stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
         if (wants_distances &&
-            cuda_copy_2d_async(result_distances.data(), result_distances.stride_bytes(0), device_distances,
+            cuda_copy_2d_async(core.api(), result_distances.data(), result_distances.stride_bytes(0), device_distances,
                                config.count * sizeof(distance_t), config.count * sizeof(distance_t), queries_count,
                                stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
@@ -538,12 +539,14 @@ struct vram_nvidia_kernels {
             failed(launched))
             return {{}, launched};
         if (wanted &&
-            (cuda_copy_2d_async(node_ids.data(), node_ids.stride_bytes(0), device_ids, wanted * sizeof(node_id_t),
-                                wanted * sizeof(node_id_t), rows_count, stream) != cuda_success_k ||
-             cuda_copy_2d_async(products.data(), products.stride_bytes(0), device_products, wanted * sizeof(dot_t),
-                                wanted * sizeof(dot_t), rows_count, stream) != cuda_success_k))
+            (cuda_copy_2d_async(core.api(), node_ids.data(), node_ids.stride_bytes(0), device_ids,
+                                wanted * sizeof(node_id_t), wanted * sizeof(node_id_t), rows_count,
+                                stream) != cuda_success_k ||
+             cuda_copy_2d_async(core.api(), products.data(), products.stride_bytes(0), device_products,
+                                wanted * sizeof(dot_t), wanted * sizeof(dot_t), rows_count, stream) != cuda_success_k))
             return {{}, status_t::device_error_k};
-        if (cuda_copy_async(counts.data(), device_counts, rows_count * sizeof(u32_t), stream) != cuda_success_k)
+        if (cuda_copy_async(core.api(), counts.data(), device_counts, rows_count * sizeof(u32_t), stream) !=
+            cuda_success_k)
             return {{}, status_t::device_error_k};
         return {{}, status_t::success_k};
     }
@@ -573,7 +576,7 @@ struct vram_nvidia_kernels {
                                   visible);
         if (!staged) return {nullptr, staged.status};
         staged.value.scratch_bytes_per_warp += static_cast<u32_t>(scratch_bytes);
-        if (cuda_fill_async(context.missed_.get(), 0, sizeof(u32_t), context.stream()) != cuda_success_k)
+        if (cuda_fill_async(core.api(), context.missed_.get(), 0, sizeof(u32_t), context.stream()) != cuda_success_k)
             return {nullptr, status_t::device_error_k};
         f32_t* const device_outputs = reinterpret_cast<f32_t*>(staged.value.outputs);
         if (status_t const launched = launch_attend_(
@@ -653,9 +656,11 @@ struct vram_nvidia_kernels {
         vram_refine_passes_t const passes = core.refine_passes_(context);
         if (!passes.link_heads) return status_t::bad_alloc_k;
         // Chains start empty and no row walked yet.
-        if (cuda_fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != cuda_success_k ||
-            cuda_fill_async(passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) != cuda_success_k ||
-            cuda_fill_async(passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k)
+        if (cuda_fill_async(core.api(), scratch.claims, 0, 2 * sizeof(u32_t), stream) != cuda_success_k ||
+            cuda_fill_async(core.api(), passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) !=
+                cuda_success_k ||
+            cuda_fill_async(core.api(), passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) !=
+                cuda_success_k)
             return status_t::device_error_k;
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the candidate sizes
@@ -710,7 +715,7 @@ struct vram_nvidia_kernels {
         cuda_stream_handle_t const stream = context.stream();
         // The bitsets, the levels, the sweeps' expanded counters and the unreached counter lie back
         // to back.
-        if (cuda_fill_async(scratch.reached.words, 0, (scratch.words * 3 + 4) * sizeof(u32_t), stream) !=
+        if (cuda_fill_async(core.api(), scratch.reached.words, 0, (scratch.words * 3 + 4) * sizeof(u32_t), stream) !=
             cuda_success_k)
             return status_t::device_error_k;
         if (status_t const launched = launch_audit_landmarks_(scratch.reached, scratch.frontier, rows,
@@ -736,15 +741,16 @@ struct vram_nvidia_kernels {
             vram_bitset_t const next_frontier = odd ? scratch.next_frontier : scratch.frontier;
             u32_t* const expanded = scratch.expanded + odd;
             u32_t const* const expanded_before = sweep_number == 1 ? nullptr : scratch.expanded + !odd;
-            if (cuda_fill_async(next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k ||
-                cuda_fill_async(expanded, 0, sizeof(u32_t), stream) != cuda_success_k)
+            if (cuda_fill_async(core.api(), next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) !=
+                    cuda_success_k ||
+                cuda_fill_async(core.api(), expanded, 0, sizeof(u32_t), stream) != cuda_success_k)
                 return status_t::device_error_k;
             if (status_t const launched = launch_audit_sweep_(core, scratch.reached, frontier, next_frontier, expanded,
                                                               expanded_before, scratch.levels, rows, stream);
                 failed(launched))
                 return launched;
         }
-        if (cuda_fill_async(scratch.unreached, 0, sizeof(u32_t), stream) != cuda_success_k)
+        if (cuda_fill_async(core.api(), scratch.unreached, 0, sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
         if (status_t const launched = launch_audit_islands_(scratch.reached, rows, scratch.island_ids,
                                                             scratch.unreached, stream);
@@ -763,7 +769,7 @@ struct vram_nvidia_kernels {
         cuda_stream_handle_t const stream = context.stream();
         u32_t* const in_links = core.refine_passes_(context).link_heads;
         if (!in_links) return status_t::bad_alloc_k;
-        if (cuda_fill_async(in_links, 0, rows * sizeof(u32_t), stream) != cuda_success_k)
+        if (cuda_fill_async(core.api(), in_links, 0, rows * sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
         vram_arguments_t arguments {};
         vram_graph_t& graph = arguments.graph;
@@ -818,7 +824,7 @@ struct vram_nvidia_kernels {
     /** Loads the fatbin of @p kernels_type_ onto the device and finds every kernel this dtype
      *  exports bar the attends, by the symbol @ref vram_kernel_symbol spells. */
     status_t load_kernels_(core_t& core) noexcept {
-        auto [module, status] = cuda_module_t::load(core.device_.ordinal, kernels_type_::bytes());
+        auto [module, status] = cuda_module_t::load(core.api(), core.device_.ordinal, kernels_type_::bytes());
         if (failed(status)) return status;
         module_ = std::move(module);
         vram_kernel_symbol_t symbol;
@@ -849,11 +855,10 @@ struct vram_nvidia_kernels {
     /** Launches @p function over @p blocks of the standard warp complement on @p stream, raising
      *  its dynamic-shared ceiling first when @p shared_bytes outgrow the default window, with
      *  @p rows_map beside @p arguments for a walk to gather its rows through. */
-    static status_t launch_(cuda_function_handle_t function, u32_t blocks, u32_t shared_bytes,
-                            cuda_stream_handle_t stream, vram_arguments_t const& arguments,
-                            cuda_rows_map_t const& rows_map = {}) noexcept {
+    status_t launch_(cuda_function_handle_t function, u32_t blocks, u32_t shared_bytes, cuda_stream_handle_t stream,
+                     vram_arguments_t const& arguments, cuda_rows_map_t const& rows_map = {}) const noexcept {
         return cuda_launch(
-            function, blocks, block_threads_k, shared_bytes, stream,
+            module_.api(), function, blocks, block_threads_k, shared_bytes, stream,
             cuda_overlaps_launches(capability_k) ? cuda_overlap_t::overlapping_k : cuda_overlap_t::serialized_k,
             cuda_arguments_t {arguments, rows_map});
     }
@@ -896,7 +901,7 @@ struct vram_nvidia_kernels {
                                             : core.build_scratch_bytes_per_warp(back_link_rows);
         cuda_rows_map_t const rows_map = rows_map_(core);
         auto zeroed = [&](u32_t* counters, u32_t count) noexcept {
-            return cuda_fill_async(counters, 0, count * sizeof(u32_t), stream) == cuda_success_k;
+            return cuda_fill_async(core.api(), counters, 0, count * sizeof(u32_t), stream) == cuda_success_k;
         };
         // Overlapping launches claim from three counters a wave, the insert's, the back-link's and
         // the touched count, which one fill zeroes ahead of the waves they serve, so no fill sits
@@ -1020,8 +1025,9 @@ struct vram_nvidia_kernels {
         if (!fold.arena && fold.arena_shape.scratch_bytes) return status_t::bad_alloc_k;
         fold.telemetry = context.telemetry_.get();
         fold.assigned_rows = context.assigned_rows_.get();
-        if (cuda_fill_async(fold.telemetry, 0, sizeof(vram_telemetry_block_t), context.stream()) != cuda_success_k ||
-            cuda_fill_async(fold.assigned_rows, 0, sizeof(u32_t), context.stream()) != cuda_success_k)
+        if (cuda_fill_async(core.api(), fold.telemetry, 0, sizeof(vram_telemetry_block_t), context.stream()) !=
+                cuda_success_k ||
+            cuda_fill_async(core.api(), fold.assigned_rows, 0, sizeof(u32_t), context.stream()) != cuda_success_k)
             return status_t::device_error_k;
         vram_arguments_t arguments {};
         arguments.fold = fold;
@@ -1092,7 +1098,7 @@ struct vram_nvidia_kernels {
                           distance_t* distances, u32_t count, traversal_context_t& context) noexcept {
         u32_t const blocks = divide_round_up<u32_t>(walk.queries_count, cuda_scan_tile_k);
         // The finished counts start at zero, so the last range of each block to finish merges it.
-        if (cuda_fill_async(scratch, 0, round_up_to_multiple<std::size_t>(blocks, 4) * sizeof(u32_t),
+        if (cuda_fill_async(core.api(), scratch, 0, round_up_to_multiple<std::size_t>(blocks, 4) * sizeof(u32_t),
                             context.stream()) != cuda_success_k)
             return status_t::device_error_k;
         vram_arguments_t arguments {};
@@ -1307,6 +1313,7 @@ struct vram_nvidia_index {
     std::size_t connectivity() const noexcept { return core_.connectivity(); }
     std::size_t dimensions() const noexcept { return core_.dimensions(); }
     device_specs_t const& device_specs() const noexcept { return core_.device_specs(); }
+    cuda_api_t const& api() const noexcept { return core_.api(); }
     nk_kernel_kind_t kernel() const noexcept { return core_.kernel(); }
     bool stores_norms() const noexcept { return core_.stores_norms(); }
     std::size_t row_bytes() const noexcept { return core_.row_bytes(); }

@@ -69,6 +69,10 @@ public struct DenseOptions: Sendable {
     public var connectivity: Int
     /// The bound on entries sharing one key; zero derives to one - unique keys.
     public var valuesPerKey: Int
+    /// The class a host index dispatches as; nil derives the CPU's own.
+    public var cpuClass: CPUClass?
+    /// The class a device index dispatches as; nil derives the devices' own.
+    public var gpuClass: GPUClass?
 
     /// An angular bf16 index, with every optional field derived.
     public init(
@@ -76,13 +80,17 @@ public struct DenseOptions: Sendable {
         metric: DenseMetric = .angular,
         quantization: Scalar = .bf16,
         connectivity: Int = 0,
-        valuesPerKey: Int = 0
+        valuesPerKey: Int = 0,
+        cpuClass: CPUClass? = nil,
+        gpuClass: GPUClass? = nil
     ) {
         self.dimensions = dimensions
         self.metric = metric
         self.quantization = quantization
         self.connectivity = connectivity
         self.valuesPerKey = valuesPerKey
+        self.cpuClass = cpuClass
+        self.gpuClass = gpuClass
     }
 }
 
@@ -449,6 +457,8 @@ public struct DenseLoadRamConfig {
     /// The memory domains to place the parts on, part `p` landing on shard `p` modulo their count;
     /// empty derives every node the process may allocate on.
     public var memoryDomains: [Int32]
+    /// The class to dispatch as; nil derives the CPU's own.
+    public var cpuClass: CPUClass?
     /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
     public var valuesPerKey: Int
     /// Called with shards placed.
@@ -459,12 +469,14 @@ public struct DenseLoadRamConfig {
     public init(
         executor: Executor? = nil,
         memoryDomains: [Int32] = [],
+        cpuClass: CPUClass? = nil,
         valuesPerKey: Int = 0,
         progress: Progress? = nil,
         progressSteps: Int = 0
     ) {
         self.executor = executor
         self.memoryDomains = memoryDomains
+        self.cpuClass = cpuClass
         self.valuesPerKey = valuesPerKey
         self.progress = progress
         self.progressSteps = progressSteps
@@ -478,6 +490,8 @@ public struct DenseLoadVramConfig {
     /// The devices to place the parts on, part `p` landing on device `p` modulo their count; empty
     /// derives one free device.
     public var devices: [Int32]
+    /// The class to dispatch as; nil derives the devices' own.
+    public var gpuClass: GPUClass?
     /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
     public var valuesPerKey: Int
     /// Called with shards placed.
@@ -488,12 +502,14 @@ public struct DenseLoadVramConfig {
     public init(
         executor: Executor? = nil,
         devices: [Int32] = [],
+        gpuClass: GPUClass? = nil,
         valuesPerKey: Int = 0,
         progress: Progress? = nil,
         progressSteps: Int = 0
     ) {
         self.executor = executor
         self.devices = devices
+        self.gpuClass = gpuClass
         self.valuesPerKey = valuesPerKey
         self.progress = progress
         self.progressSteps = progressSteps
@@ -506,6 +522,8 @@ public struct DenseLoadRamBufferConfig {
     public var executor: Executor?
     /// The memory domains to place shards on; the monolith lands whole on the first.
     public var memoryDomains: [Int32]
+    /// The class to dispatch as; nil derives the CPU's own.
+    public var cpuClass: CPUClass?
     /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
     public var valuesPerKey: Int
     /// Called with bytes placed.
@@ -516,12 +534,14 @@ public struct DenseLoadRamBufferConfig {
     public init(
         executor: Executor? = nil,
         memoryDomains: [Int32] = [],
+        cpuClass: CPUClass? = nil,
         valuesPerKey: Int = 0,
         progress: Progress? = nil,
         progressSteps: Int = 0
     ) {
         self.executor = executor
         self.memoryDomains = memoryDomains
+        self.cpuClass = cpuClass
         self.valuesPerKey = valuesPerKey
         self.progress = progress
         self.progressSteps = progressSteps
@@ -534,6 +554,8 @@ public struct DenseLoadVramBufferConfig {
     public var executor: Executor?
     /// The devices to place shards on; the monolith lands whole on the first.
     public var devices: [Int32]
+    /// The class to dispatch as; nil derives the devices' own.
+    public var gpuClass: GPUClass?
     /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
     public var valuesPerKey: Int
     /// Called with bytes placed.
@@ -544,12 +566,14 @@ public struct DenseLoadVramBufferConfig {
     public init(
         executor: Executor? = nil,
         devices: [Int32] = [],
+        gpuClass: GPUClass? = nil,
         valuesPerKey: Int = 0,
         progress: Progress? = nil,
         progressSteps: Int = 0
     ) {
         self.executor = executor
         self.devices = devices
+        self.gpuClass = gpuClass
         self.valuesPerKey = valuesPerKey
         self.progress = progress
         self.progressSteps = progressSteps
@@ -563,10 +587,13 @@ public struct DenseViewNvmeConfig {
     /// The devices the parts are served from - a filesystem path, a transport identifier, or a
     /// FUSE mount over object storage; empty serves each part where its manifest points.
     public var paths: [String]
+    /// The class to dispatch as; nil derives the CPU's own.
+    public var cpuClass: CPUClass?
 
-    public init(executor: Executor? = nil, paths: [String] = []) {
+    public init(executor: Executor? = nil, paths: [String] = [], cpuClass: CPUClass? = nil) {
         self.executor = executor
         self.paths = paths
+        self.cpuClass = cpuClass
     }
 }
 
@@ -754,7 +781,11 @@ public final class DenseIndex: @unchecked Sendable {
                 dimensions: options.dimensions,
                 connectivity: options.connectivity,
                 values_per_key: options.valuesPerKey,
-                ram: usearch_ram_options_t(memory_domains: domains, memory_domains_count: memoryDomains.count)
+                ram: usearch_ram_options_t(
+                    memory_domains: domains,
+                    memory_domains_count: memoryDomains.count,
+                    cpu_class: options.cpuClass?.raw ?? usearch_cpu_class_unknown_k
+                )
             )
             usearch_dense_init_ram(&arguments)
         }
@@ -775,7 +806,11 @@ public final class DenseIndex: @unchecked Sendable {
                 dimensions: options.dimensions,
                 connectivity: options.connectivity,
                 values_per_key: options.valuesPerKey,
-                vram: usearch_vram_options_t(devices: lentDevices, devices_count: devices.count)
+                vram: usearch_vram_options_t(
+                    devices: lentDevices,
+                    devices_count: devices.count,
+                    gpu_class: options.gpuClass?.raw ?? usearch_gpu_class_unknown_k
+                )
             )
             usearch_dense_init_vram(&arguments)
         }
@@ -804,7 +839,8 @@ public final class DenseIndex: @unchecked Sendable {
                     path: path,
                     ram: usearch_ram_options_t(
                         memory_domains: domains,
-                        memory_domains_count: config.memoryDomains.count
+                        memory_domains_count: config.memoryDomains.count,
+                        cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k
                     ),
                     values_per_key: config.valuesPerKey,
                     progress: progress
@@ -832,7 +868,11 @@ public final class DenseIndex: @unchecked Sendable {
                     outcome: landing.outcome,
                     completion: landing.completion,
                     path: path,
-                    vram: usearch_vram_options_t(devices: devices, devices_count: config.devices.count),
+                    vram: usearch_vram_options_t(
+                        devices: devices,
+                        devices_count: config.devices.count,
+                        gpu_class: config.gpuClass?.raw ?? usearch_gpu_class_unknown_k
+                    ),
                     values_per_key: config.valuesPerKey,
                     progress: progress
                 )
@@ -861,7 +901,8 @@ public final class DenseIndex: @unchecked Sendable {
                     buffer: usearch_bytes_view_t(bytes),
                     ram: usearch_ram_options_t(
                         memory_domains: domains,
-                        memory_domains_count: config.memoryDomains.count
+                        memory_domains_count: config.memoryDomains.count,
+                        cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k
                     ),
                     values_per_key: config.valuesPerKey,
                     progress: progress
@@ -889,7 +930,11 @@ public final class DenseIndex: @unchecked Sendable {
                     outcome: landing.outcome,
                     completion: landing.completion,
                     buffer: usearch_bytes_view_t(bytes),
-                    vram: usearch_vram_options_t(devices: devices, devices_count: config.devices.count),
+                    vram: usearch_vram_options_t(
+                        devices: devices,
+                        devices_count: config.devices.count,
+                        gpu_class: config.gpuClass?.raw ?? usearch_gpu_class_unknown_k
+                    ),
                     values_per_key: config.valuesPerKey,
                     progress: progress
                 )
@@ -922,7 +967,7 @@ public final class DenseIndex: @unchecked Sendable {
         let landing = Landing()
         let index = landing.slots(usearch_dense_index_t?.none)
         try landing.lend(path) { (path) throws(USearchError) in
-            withPaths(config.paths) { nvme in
+            withPaths(config.paths, config.cpuClass) { nvme in
                 var arguments = usearch_dense_view_nvme_t(
                     index: index,
                     executor: config.executor?.raw,

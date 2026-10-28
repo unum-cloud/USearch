@@ -16,6 +16,7 @@ env:
   ANDROID_SDK_VERSION: 21
   EMSCRIPTEN_VERSION: 6.0.9
   MINGW_VERSION: 12.2.0
+  WASI_SDK_VERSION: "34"
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
@@ -154,10 +155,119 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # Swift on Windows links the MSVC ABI, so the archive comes from `cl`, which only a developer prompt puts on the
+  # `PATH` for the Ninja generator the preset picks.
+  build_swift_windows:
+    name: Build Swift Artifact Bundle for Windows ${{ matrix.arch }}
+    needs: bump_swift_version
+    runs-on: ${{ matrix.arch == 'aarch64' && 'windows-11-arm' || 'windows-2025' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Take the Release Version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Set Up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x64' }}
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift -D CMAKE_C_COMPILER=cl -D CMAKE_CXX_COMPILER=cl -D USEARCH_SWIFT_TRIPLES=${{ matrix.arch }}-unknown-windows-msvc
+          cmake --build --preset swift
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-part-windows-${{ matrix.arch }}
+          path: build_swift/USearchC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # One archive per ABI at the Swift SDK's lowest API level, serving every level the SDK names.
+  build_swift_android:
+    name: Build Swift Artifact Bundle for Android
+    needs: bump_swift_version
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Take the Release Version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Install NDK
+        run: |
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+      - name: Build Artifact Bundle
+        run: |
+          set -euo pipefail
+          abi() {
+            local abi=$1 arch=$2
+            cmake -S . -B "build_$abi" --preset swift -D USEARCH_SWIFT_DIRECTORY="$PWD/build_swift" \
+              -D CMAKE_TOOLCHAIN_FILE="${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}/build/cmake/android.toolchain.cmake" \
+              -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-23 \
+              -D USEARCH_SWIFT_TRIPLES="$(seq -f "$arch-unknown-linux-android%g" -s ';' 23 36)"
+            cmake --build "build_$abi"
+          }
+          abi arm64-v8a aarch64
+          abi armeabi-v7a armv7
+          abi x86_64 x86_64
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-part-android
+          path: build_swift/USearchC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # Strict SIMD128, which every SIMD engine validates, as one archive serves every Swift WASI module.
+  build_swift_wasi:
+    name: Build Swift Artifact Bundle for WebAssembly WASI
+    needs: bump_swift_version
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Take the Release Version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Install WASI SDK
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "$HOME"
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" >> "$GITHUB_ENV"
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake \
+            -D USEARCH_SWIFT_TRIPLES=wasm32-unknown-wasip1
+          cmake --build --preset swift
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-part-wasi
+          path: build_swift/USearchC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
   # Each part's variants go through the same CMake script that wrote them, into one bundle.
   merge_swift_artifact_bundle:
     name: Merge Swift Artifact Bundle
-    needs: build_swift_linux
+    needs: [build_swift_linux, build_swift_windows, build_swift_android, build_swift_wasi]
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout
@@ -406,7 +516,7 @@ jobs:
       - name: Build library with MSVC for Arm64
         if: matrix.arch == 'arm64'
         run: |
-          cmake --preset windows_arm64 -B ./build_release
+          cmake --preset msvc2022_arm64 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\
@@ -888,7 +998,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-26, windows-2022]
         python-version:
-          ["312", "313", "313t", "314", "314t"]
+          ["312", "313", "314", "314t", "315", "315t"]
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v7
@@ -910,7 +1020,6 @@ jobs:
         run: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading # No-GIL 3.13t builds
           CIBW_TEST_SKIP: "*-win_arm64" # Too complex to emulate Windows ARM
       - name: Upload wheels
         uses: actions/upload-artifact@v7
@@ -1267,7 +1376,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2022]
+        os: [ubuntu-24.04, macos-15, windows-2025-vs2026]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -1302,10 +1411,10 @@ jobs:
           cp "${{ github.workspace }}/build_artifacts/libusearch_shared.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
 
       - name: Build C library for Windows
-        if: matrix.os == 'windows-2022'
+        if: matrix.os == 'windows-2025-vs2026'
         run: |
           choco install cmake
-          cmake --preset windows_x64 -B build_artifacts -D USEARCH_BUILD_TEST=0
+          cmake --preset msvc2026_x64 -B build_artifacts -D USEARCH_BUILD_TEST=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           cp "${{ github.workspace }}\build_artifacts\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"

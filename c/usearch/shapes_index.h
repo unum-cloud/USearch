@@ -420,6 +420,10 @@ typedef struct usearch_shapes_view_ram_t {
 
     /** Checkpoint path - a monolith, or a manifest naming many. */
     usearch_bytes_view_t path;
+
+    /** The class to dispatch as; a view reads its shards from the checkpoint, so only
+     *  @c usearch_ram_options_t::cpu_class is read. */
+    usearch_ram_options_t ram;
 } usearch_shapes_view_ram_t;
 
 /**

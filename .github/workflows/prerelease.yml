@@ -20,10 +20,13 @@ env:
   EMSCRIPTEN_VERSION: 6.0.9
   WASI_SDK_VERSION: "34"
   WASMTIME_VERSION: v48.0.2
+  SWIFT_VERSION: 6.4.0
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages; the Swift Android job downloads this run's
+# artifacts through `gh`, which needs `actions: read`.
 permissions:
   contents: read
+  actions: read
 
 jobs:
   versioning:
@@ -417,9 +420,146 @@ jobs:
       - name: Test Swift
         run: swift test
 
+  # Swift on Windows links the MSVC ABI, so both archives come from `cl`, which only a developer prompt puts on the
+  # `PATH` for the Ninja generator the presets pick.
+  test_swift_windows:
+    name: Swift on Windows ${{ matrix.arch }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-2025' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    env:
+      USEARCH_SWIFT_ARTIFACT: build_swift/USearchC.artifactbundle
+      NUMKONG_SWIFT_ARTIFACT: build_swift/NumKongC.artifactbundle
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Set Up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch == 'arm64' && 'arm64' || 'x64' }}
+      - name: Build NumKong Artifact Bundle
+        working-directory: numkong
+        run: |
+          cmake --preset swift -D CMAKE_C_COMPILER=cl -D CMAKE_CXX_COMPILER=cl
+          cmake --build --preset swift
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift -D CMAKE_C_COMPILER=cl -D CMAKE_CXX_COMPILER=cl -D USEARCH_SWIFT_TRIPLES=${{ matrix.arch == 'arm64' && 'aarch64' || 'x86_64' }}-unknown-windows-msvc
+          cmake --build --preset swift
+      - name: Set Up Swift
+        uses: compnerd/gha-setup-swift@v0.5.0
+        with:
+          swift-version: swift-${{ env.SWIFT_VERSION }}-release
+          swift-build: ${{ env.SWIFT_VERSION }}-RELEASE
+          build_arch: ${{ matrix.arch }}
+      - name: Test Swift
+        run: swift test
+
+  # One archive per ABI at the Swift SDK's lowest API level, serving every level the SDK names, built here because the
+  # reusable workflow below runs in a container without the NDK.
+  build_swift_android:
+    name: Build Swift Artifact Bundles for Android
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install NDK
+        run: |
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+      - name: Build Artifact Bundles
+        run: |
+          set -euo pipefail
+          toolchain="${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}/build/cmake/android.toolchain.cmake"
+          abi() {
+            local abi=$1 arch=$2
+            local triples
+            triples="$(seq -f "$arch-unknown-linux-android%g" -s ';' 23 36)"
+            (cd numkong && cmake -S . -B "build_$abi" --preset swift -D NUMKONG_SWIFT_DIRECTORY="$PWD/build_swift" \
+              -D CMAKE_TOOLCHAIN_FILE="$toolchain" -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-23 \
+              -D NUMKONG_SWIFT_TRIPLES="$triples" && cmake --build "build_$abi")
+            cmake -S . -B "build_$abi" --preset swift -D USEARCH_SWIFT_DIRECTORY="$PWD/build_swift" \
+              -D CMAKE_TOOLCHAIN_FILE="$toolchain" -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-23 \
+              -D USEARCH_SWIFT_TRIPLES="$triples"
+            cmake --build "build_$abi"
+          }
+          abi arm64-v8a aarch64
+          abi armeabi-v7a armv7
+          abi x86_64 x86_64
+      - name: Upload Artifact Bundles
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-android
+          path: |
+            build_swift/USearchC.artifactbundle
+            numkong/build_swift/NumKongC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # The reusable workflow runs in another repository, so it fetches the artifact bundles through `gh`, with the token
+  # and the `actions: read` permission this workflow grants.
+  test_swift_android:
+    name: Swift on Android
+    needs: build_swift_android
+    uses: swiftlang/github-workflows/.github/workflows/swift_package_test.yml@fa1e46cf0f07ffde2de131e9ed5bd66a488c289c # main
+    with:
+      enable_linux_checks: false
+      enable_windows_checks: false
+      enable_android_sdk_build: true
+      enable_android_sdk_checks: true
+      needs_token: true
+      linux_env_vars: |
+        USEARCH_SWIFT_ARTIFACT=build_swift/USearchC.artifactbundle
+        NUMKONG_SWIFT_ARTIFACT=build_swift/NumKongC.artifactbundle
+      android_sdk_pre_build_command: git submodule update --init --recursive && gh run download ${{ github.run_id }} --repo ${{ github.repository }} --name swift-android
+      android_sdk_versions: '["6.4"]'
+
+  # Strict SIMD128, which every SIMD engine validates, as one archive serves every Swift WASI module.
+  test_swift_wasm:
+    name: Swift on WebAssembly WASI
+    runs-on: ubuntu-26.04
+    container: swift:6.4
+    env:
+      USEARCH_SWIFT_ARTIFACT: build_swift/USearchC.artifactbundle
+      NUMKONG_SWIFT_ARTIFACT: build_swift/NumKongC.artifactbundle
+    steps:
+      - name: Install CMake and Wasmtime
+        run: |
+          apt-get update && apt-get install -y cmake ninja-build curl xz-utils
+          curl -fsSL https://wasmtime.dev/install.sh | bash -s -- --version "$WASMTIME_VERSION"
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install WASI SDK and Swift SDK for WebAssembly
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "$HOME"
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" >> "$GITHUB_ENV"
+          swift sdk install "https://download.swift.org/swift-${SWIFT_VERSION}-release/wasm-sdk/swift-${SWIFT_VERSION}-RELEASE/swift-${SWIFT_VERSION}-RELEASE_wasm.artifactbundle.tar.gz" --checksum f07b7be3c586d92d7a07051fc6d303b87ebea67eadc40640ba59d5a8b79aa86d
+      - name: Build NumKong Artifact Bundle
+        working-directory: numkong
+        run: |
+          cmake --preset swift -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -D NUMKONG_TARGET_ARCH=v128
+          cmake --build --preset swift
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake \
+            -D USEARCH_SWIFT_TRIPLES=wasm32-unknown-wasip1
+          cmake --build --preset swift
+      - name: Build Library and Tests
+        run: swift build --build-tests --swift-sdk "swift-${SWIFT_VERSION}-RELEASE_wasm"
+      - name: Test under Wasmtime
+        run: ~/.wasmtime/bin/wasmtime run -S inherit-env=y --dir / .build/debug/USearchTestsSwift-test-runner.wasm --testing-library swift-testing
+
   test_windows_x86:
-    name: Test on Windows x86
-    runs-on: windows-2022
+    name: Test on Windows x86 with Visual Studio 2026
+    runs-on: windows-2025-vs2026
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -430,10 +570,10 @@ jobs:
       - name: Build C/C++
         run: |
           choco install cmake
-          cmake --preset windows_x64
-          cmake --build --preset windows_x64
+          cmake --preset msvc2026_x64
+          cmake --build --preset msvc2026_x64
       - name: Test C and C++
-        run: ctest --preset windows_x64
+        run: ctest --preset msvc2026_x64
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
@@ -478,7 +618,7 @@ jobs:
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
-          cp "${{ github.workspace }}\build_windows_x64\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
+          cp "${{ github.workspace }}\build_msvc2026_x64\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -499,12 +639,12 @@ jobs:
       - name: Build C/C++ for Arm64
         run: |
           choco install cmake
-          cmake --preset windows_arm64
-          cmake --build --preset windows_arm64
+          cmake --preset msvc2022_arm64
+          cmake --build --preset msvc2022_arm64
 
       - name: Verify ARM64 build artifacts
         run: |
-          if (!(Test-Path "build_windows_arm64\libusearch_shared.dll")) { exit 1 }
+          if (!(Test-Path "build_msvc2022_arm64\libusearch_shared.dll")) { exit 1 }
           Write-Host "ARM64 DLL built successfully"
 
   build_docker:
@@ -528,7 +668,7 @@ jobs:
     needs: [test_ubuntu_gcc, test_ubuntu_clang]
     strategy:
       matrix:
-        python-version: ["312", "313", "313t", "314", "314t"]
+        python-version: ["312", "313", "314", "314t", "315", "315t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -554,7 +694,6 @@ jobs:
           command: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading
           CIBW_PLATFORM: linux
 
   build_wheels_macos:
@@ -563,7 +702,7 @@ jobs:
     needs: [test_macos]
     strategy:
       matrix:
-        python-version: ["312", "313", "313t", "314", "314t"]
+        python-version: ["312", "313", "314", "314t", "315", "315t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -587,7 +726,6 @@ jobs:
           command: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading
           CIBW_PLATFORM: macos
 
   build_wheels_windows:
@@ -596,7 +734,7 @@ jobs:
     needs: [test_windows_x86]
     strategy:
       matrix:
-        python-version: ["312", "313", "313t", "314", "314t"]
+        python-version: ["312", "313", "314", "314t", "315", "315t"]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -620,7 +758,6 @@ jobs:
           command: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading
           CIBW_PLATFORM: windows
 
   test_ubuntu_cross_compilation:
@@ -669,6 +806,68 @@ jobs:
       - name: Test artifacts presence
         run: |
           test -e build_library/libusearch_shared.so
+
+  # Each machine profile compiles the shared library for one CPU class and one GPU code, compile only; the Arm ones build
+  # natively on Arm runners, where the CUDA image also exists. Clang 22 compiles the host units, as Ubuntu 24.04's GCC
+  # predates Olympus, and the family codes like `100f` need CMake 3.31, where Ubuntu 24.04 ships 3.28.
+  build_machine_profile:
+    name: Compile Machine Profile ${{ matrix.preset }}
+    runs-on: ${{ contains(fromJSON('["grace_hopper", "vera_rubin"]'), matrix.preset) && 'ubuntu-24.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 90
+    container: nvidia/cuda:13.4.3-devel-ubuntu26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [xeon4_hopper, xeon6_blackwell, grace_hopper, vera_rubin]
+    steps:
+      - name: Install Toolchain
+        run: |
+          apt-get update && apt-get install -y ninja-build g++ git python3-pip curl gnupg
+          pip install --break-system-packages "cmake>=3.31"
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            > /etc/apt/sources.list.d/llvm.list
+          apt-get update && apt-get install -y clang-22 lld-22
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Compile Shared Library
+        run: |
+          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
+            -D CMAKE_CUDA_HOST_COMPILER=clang++-22
+          cmake --build --preset ${{ matrix.preset }} --parallel 2
+
+  # Compile-only: one library carries both GPU vendors' kernels and links neither runtime, since each driver opens at
+  # first use, so a machine without a GPU still loads it.
+  build_cuda_rocm_library:
+    name: Compile CUDA and ROCm Library without GPU Runtimes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    container: rocm/dev-ubuntu-26.04:latest
+    steps:
+      - name: Install Toolchain
+        run: |
+          apt-get update && apt-get install -y ninja-build git curl python3-pip binutils
+          pip install --break-system-packages "cmake>=3.31"
+          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+          dpkg -i cuda-keyring_1.1-1_all.deb
+          apt-get update && apt-get install -y cuda-minimal-build-13-4 cuda-driver-dev-13-4
+          echo "/usr/local/cuda-13.4/bin" >> "$GITHUB_PATH"
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Compile Shared Library
+        run: |
+          cmake --preset linux_cuda_rocm
+          cmake --build --preset linux_cuda_rocm --target usearch_shared --parallel 2
+      - name: Check No GPU Runtime Is Linked
+        run: |
+          readelf -d build_linux_cuda_rocm/libusearch_shared.so
+          if readelf -d build_linux_cuda_rocm/libusearch_shared.so | grep -E 'NEEDED.*(libcudart|libcuda\.|libamdhip64)'; then
+            echo "libusearch_shared.so links a GPU runtime" && exit 1
+          fi
 
   # One row per checked-in WebAssembly toolchain. A module carries one SIMD tier, width and threads choice, so each
   # row is a whole build; its C test runs under the matrix's Node for Emscripten and under Wasmtime for WASI.

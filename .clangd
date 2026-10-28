@@ -2,10 +2,10 @@
 # outside the default prefix, a differently named build tree - belong in the user
 # config at `~/.config/clangd/config.yaml`, which clangd merges on top of this.
 #
-# `cuda_relwithdebinfo` is the preset that enables CUDA, so its database is the only one covering
-# the `.cu` units: `cmake --preset cuda_relwithdebinfo && cmake --build --preset cuda_relwithdebinfo`.
+# `cuda` is the preset that enables CUDA, so its database is the only one covering
+# the `.cu` units: `cmake --preset cuda && cmake --build --preset cuda`.
 CompileFlags:
-  CompilationDatabase: build_cuda_relwithdebinfo
+  CompilationDatabase: build_cuda
 
 ---
 # nvcc command lines carry driver flags clang rejects; dropping them leaves the

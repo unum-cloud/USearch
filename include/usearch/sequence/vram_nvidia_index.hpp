@@ -141,7 +141,7 @@ struct vram_nvidia_kits {
      *  @par Statuses:
      *  - @c uninitialized_k The kind takes parameters, and none were set.
      */
-    status_t load_kernels_(int device) noexcept;
+    status_t load_kernels_(cuda_api_t const& api, int device) noexcept;
 
     cuda_function_handle_t kernel_function_(std::size_t rung, vram_kernel_t kernel, u32_t slots) const noexcept {
         return kernels_[rung][static_cast<u32_t>(kernel)][gpu_rung_index(slots)];
@@ -234,6 +234,7 @@ struct vram_nvidia_index {
     std::size_t bytes_capacity() const noexcept { return graph_.bytes_capacity(); }
     std::size_t memory_usage() const noexcept { return graph_.memory_usage(); }
     cuda_device_specs_t const& device_specs() const noexcept { return graph_.device_specs(); }
+    cuda_api_t const& api() const noexcept { return graph_.api(); }
     nk_kernel_kind_t kernel() const noexcept { return graph_.kernel(); }
     basic::vram_ragged_storage<node_id_t> storage() const noexcept { return graph_.storage(); }
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return graph_.reserve(config); }

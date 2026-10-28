@@ -6,12 +6,12 @@
  *
  *  The host face of the AMD family, compiled by any C++ compiler: it fills the plain argument
  *  records of @c vram_index.hpp and launches the kernels of @c vram_amd_index.hip by name through
- *  the HIP runtime it opens at first use, so it never sees a kit, a shared view or HIP beyond its
- *  runtime's declarations. Every kernel is one instantiation of @c amd_kernel, for the walks basic
- *  graphs share, or of @c amd_dense_kernel, for the rest, both over five arguments - the kernel,
- *  the capability ceiling, the dtype, the register rung and the attend value lookup - so
- *  @c vram_kernel_symbol spells its symbol here from those arguments alone, and one code object per
- *  class, which the face's kernels type names, carries every dtype.
+ *  the HIP runtime table its storage was placed with, so it never sees a kit, a shared view or HIP
+ *  beyond its runtime's declarations. Every kernel is one instantiation of @c amd_kernel, for the
+ *  walks basic graphs share, or of @c amd_dense_kernel, for the rest, both over five arguments -
+ *  the kernel, the capability ceiling, the dtype, the register rung and the attend value lookup -
+ *  so @c vram_kernel_symbol spells its symbol here from those arguments alone, and one code object
+ *  per class, which the face's kernels type names, carries every dtype.
  */
 #pragma once
 
@@ -302,13 +302,13 @@ struct vram_amd_kernels {
         // Pitched uploads: device rows pad to whole fragments, and the pad bytes must be zero for
         // the zero-tail distance identity to hold.
         if ((import_bytes || core.packed_row_bytes() != core.row_bytes()) &&
-            hip_api().fill_async(staging, 0, rows_bytes + import_bytes, stream) != hip_success_k)
+            core.api().fill_async(staging, 0, rows_bytes + import_bytes, stream) != hip_success_k)
             return {{}, status_t::device_error_k};
         if (status_t const imported = core.import_rows_(staging, queries, window, stream); failed(imported))
             return {{}, imported};
-        if (hip_api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) !=
+        if (core.api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) !=
                 hip_success_k ||
-            hip_api().fill_async(context.assigned_rows_.get(), 0, 2 * sizeof(u32_t), stream) != hip_success_k)
+            core.api().fill_async(context.assigned_rows_.get(), 0, 2 * sizeof(u32_t), stream) != hip_success_k)
             return {{}, status_t::device_error_k};
 
         vram_rescoring_t rescoring {};
@@ -317,9 +317,9 @@ struct vram_amd_kernels {
             byte_t* const staged_weights = staging + rows_bytes + import_bytes;
             std::size_t const weights_row_bytes = heads.weights.extent(1) * sizeof(f32_t);
             if (failed(core.import_rows_(staged_heads, heads.heads, window, stream)) ||
-                hip_api().copy_2d_async(staged_weights, weights_row_bytes, heads.weights.byte_data(),
-                                        heads.weights.stride_bytes(0), weights_row_bytes, queries_count,
-                                        hip_copy_default_k, stream) != hip_success_k)
+                core.api().copy_2d_async(staged_weights, weights_row_bytes, heads.weights.byte_data(),
+                                         heads.weights.stride_bytes(0), weights_row_bytes, queries_count,
+                                         hip_copy_default_k, stream) != hip_success_k)
                 return {{}, status_t::device_error_k};
             rescoring = {staged_heads, reinterpret_cast<f32_t const*>(staged_weights),
                          static_cast<u32_t>(heads.weights.extent(1)), core.row_fragments()};
@@ -394,14 +394,14 @@ struct vram_amd_kernels {
             return {{}, launched};
         // The landing may be wider than the count, so a multi-index can hand every shard its own
         // columns of one results matrix.
-        if (hip_api().copy_2d_async(result_ids.data(), result_ids.stride_bytes(0), device_ids,
-                                    config.count * sizeof(node_id_t), config.count * sizeof(node_id_t), queries_count,
-                                    hip_copy_default_k, stream) != hip_success_k)
+        if (core.api().copy_2d_async(result_ids.data(), result_ids.stride_bytes(0), device_ids,
+                                     config.count * sizeof(node_id_t), config.count * sizeof(node_id_t), queries_count,
+                                     hip_copy_default_k, stream) != hip_success_k)
             return {{}, status_t::device_error_k};
         if (wants_distances &&
-            hip_api().copy_2d_async(result_distances.data(), result_distances.stride_bytes(0), device_distances,
-                                    config.count * sizeof(distance_t), config.count * sizeof(distance_t), queries_count,
-                                    hip_copy_default_k, stream) != hip_success_k)
+            core.api().copy_2d_async(result_distances.data(), result_distances.stride_bytes(0), device_distances,
+                                     config.count * sizeof(distance_t), config.count * sizeof(distance_t),
+                                     queries_count, hip_copy_default_k, stream) != hip_success_k)
             return {{}, status_t::device_error_k};
         return {{config.count}, status_t::success_k};
     }
@@ -434,15 +434,15 @@ struct vram_amd_kernels {
         vram_multiply_sink_t const sink {device_ids, device_products, device_counts, static_cast<u32_t>(wanted)};
         if (status_t const launched = launch_walk_(core, staged.value, sink, stream); failed(launched))
             return {{}, launched};
-        if (wanted &&
-            (hip_api().copy_2d_async(node_ids.data(), node_ids.stride_bytes(0), device_ids, wanted * sizeof(node_id_t),
-                                     wanted * sizeof(node_id_t), rows_count, hip_copy_default_k,
-                                     stream) != hip_success_k ||
-             hip_api().copy_2d_async(products.data(), products.stride_bytes(0), device_products, wanted * sizeof(dot_t),
-                                     wanted * sizeof(dot_t), rows_count, hip_copy_default_k, stream) != hip_success_k))
+        if (wanted && (core.api().copy_2d_async(node_ids.data(), node_ids.stride_bytes(0), device_ids,
+                                                wanted * sizeof(node_id_t), wanted * sizeof(node_id_t), rows_count,
+                                                hip_copy_default_k, stream) != hip_success_k ||
+                       core.api().copy_2d_async(products.data(), products.stride_bytes(0), device_products,
+                                                wanted * sizeof(dot_t), wanted * sizeof(dot_t), rows_count,
+                                                hip_copy_default_k, stream) != hip_success_k))
             return {{}, status_t::device_error_k};
-        if (hip_api().copy_async(counts.data(), device_counts, rows_count * sizeof(u32_t), hip_copy_default_k,
-                                 stream) != hip_success_k)
+        if (core.api().copy_async(counts.data(), device_counts, rows_count * sizeof(u32_t), hip_copy_default_k,
+                                  stream) != hip_success_k)
             return {{}, status_t::device_error_k};
         return {{}, status_t::success_k};
     }
@@ -471,7 +471,7 @@ struct vram_amd_kernels {
             blocks * (outputs_bytes + rows_count * sizeof(softmax_state_t)) + exported_bytes, visible);
         if (!staged) return {nullptr, staged.status};
         staged.value.view.scratch_bytes_per_warp += static_cast<u32_t>(scratch_bytes);
-        if (hip_api().fill_async(context.missed_.get(), 0, sizeof(u32_t), context.stream()) != hip_success_k)
+        if (core.api().fill_async(context.missed_.get(), 0, sizeof(u32_t), context.stream()) != hip_success_k)
             return {nullptr, status_t::device_error_k};
         f32_t* const device_outputs = reinterpret_cast<f32_t*>(staged.value.outputs);
         if (status_t const launched = launch_attend_(
@@ -504,9 +504,9 @@ struct vram_amd_kernels {
         vram_refine_passes_t const passes = core.refine_passes_(context);
         if (!passes.link_heads) return status_t::bad_alloc_k;
         // Chains start empty and no row walked yet.
-        if (hip_api().fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != hip_success_k ||
-            hip_api().fill_async(passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) != hip_success_k ||
-            hip_api().fill_async(passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) != hip_success_k)
+        if (core.api().fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != hip_success_k ||
+            core.api().fill_async(passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) != hip_success_k ||
+            core.api().fill_async(passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) != hip_success_k)
             return status_t::device_error_k;
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the candidate sizes
@@ -565,7 +565,7 @@ struct vram_amd_kernels {
         std::size_t const seed_count = min_of<std::size_t>(core.connectivity(), rows);
         // The bitsets, the levels, the sweeps' expanded counters and the unreached counter lie back
         // to back.
-        if (hip_api().fill_async(scratch.reached.words, 0, (scratch.words * 3 + 4) * sizeof(u32_t), stream) !=
+        if (core.api().fill_async(scratch.reached.words, 0, (scratch.words * 3 + 4) * sizeof(u32_t), stream) !=
             hip_success_k)
             return status_t::device_error_k;
         vram_arguments_t seeds {};
@@ -607,16 +607,16 @@ struct vram_amd_kernels {
             sweep.graph.next_frontier = odd ? scratch.next_frontier : scratch.frontier;
             sweep.graph.counter = scratch.expanded + odd;
             sweep.graph.previous_counter = sweep_number == 1 ? nullptr : scratch.expanded + !odd;
-            if (hip_api().fill_async(sweep.graph.next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) !=
+            if (core.api().fill_async(sweep.graph.next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) !=
                     hip_success_k ||
-                hip_api().fill_async(sweep.graph.counter, 0, sizeof(u32_t), stream) != hip_success_k)
+                core.api().fill_async(sweep.graph.counter, 0, sizeof(u32_t), stream) != hip_success_k)
                 return status_t::device_error_k;
             if (status_t const launched = launch_(vram_kernel_t::reachability_sweep_k, 0, grid, 0, stream, sweep);
                 failed(launched))
                 return launched;
         }
         sweep.graph.counter = scratch.unreached;
-        if (hip_api().fill_async(scratch.unreached, 0, sizeof(u32_t), stream) != hip_success_k)
+        if (core.api().fill_async(scratch.unreached, 0, sizeof(u32_t), stream) != hip_success_k)
             return status_t::device_error_k;
         if (status_t const launched = launch_(vram_kernel_t::reachability_islands_k, 0,
                                               divide_round_up<u32_t>(static_cast<u32_t>(rows), block_threads()), 0,
@@ -636,7 +636,7 @@ struct vram_amd_kernels {
         hip_stream_handle_t const stream = context.stream();
         u32_t* const in_links = core.refine_passes_(context).link_heads;
         if (!in_links) return status_t::bad_alloc_k;
-        if (hip_api().fill_async(in_links, 0, rows * sizeof(u32_t), stream) != hip_success_k)
+        if (core.api().fill_async(in_links, 0, rows * sizeof(u32_t), stream) != hip_success_k)
             return status_t::device_error_k;
         vram_arguments_t heal {};
         heal.graph.neighbors = core.neighbor_rows_();
@@ -674,7 +674,7 @@ struct vram_amd_kernels {
     /** Loads the code object of @p kernels_type_ onto the device and finds every kernel this dtype
      *  exports bar the attends, by the symbol @ref vram_kernel_symbol spells. */
     status_t load_kernels_(core_t& core) noexcept {
-        auto [module, status] = hip_module_t::load(core.device_.ordinal, kernels_type_::bytes());
+        auto [module, status] = hip_module_t::load(core.api(), core.device_.ordinal, kernels_type_::bytes());
         if (failed(status)) return status;
         module_ = std::move(module);
         vram_kernel_symbol_t symbol;
@@ -697,13 +697,13 @@ struct vram_amd_kernels {
     /** Launches @p kernel on its @p slots rung over @p blocks of four wavefronts on @p stream. */
     status_t launch_(vram_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes, hip_stream_handle_t stream,
                      vram_arguments_t const& arguments) const noexcept {
-        return hip_launch(kernels_[static_cast<u32_t>(kernel)][gpu_rung_index(slots)], blocks, block_threads(),
-                          shared_bytes, stream, arguments);
+        return hip_launch(module_.api(), kernels_[static_cast<u32_t>(kernel)][gpu_rung_index(slots)], blocks,
+                          block_threads(), shared_bytes, stream, arguments);
     }
     status_t launch_(vram_dense_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes,
                      hip_stream_handle_t stream, vram_arguments_t const& arguments) const noexcept {
-        return hip_launch(dense_kernels_[static_cast<u32_t>(kernel)][gpu_rung_index(slots)], blocks, block_threads(),
-                          shared_bytes, stream, arguments);
+        return hip_launch(module_.api(), dense_kernels_[static_cast<u32_t>(kernel)][gpu_rung_index(slots)], blocks,
+                          block_threads(), shared_bytes, stream, arguments);
     }
 
     /** Launches the rows of @p build in waves, each queued behind the last and as wide as the IDs
@@ -725,7 +725,7 @@ struct vram_amd_kernels {
                                             ? 0u
                                             : core.build_scratch_bytes_per_warp(back_link_rows);
         auto zeroed = [&](u32_t* counter) noexcept {
-            return hip_api().fill_async(counter, 0, sizeof(u32_t), stream) == hip_success_k;
+            return core.api().fill_async(counter, 0, sizeof(u32_t), stream) == hip_success_k;
         };
         for (u32_t wave_first = build.first_id; wave_first != build.end_id;) {
             u32_t const wave_end = static_cast<u32_t>(
@@ -805,9 +805,9 @@ struct vram_amd_kernels {
         if (!fold.arena && fold.arena_shape.scratch_bytes) return status_t::bad_alloc_k;
         fold.telemetry = context.telemetry_.get();
         fold.assigned_rows = context.assigned_rows_.get();
-        if (hip_api().fill_async(fold.telemetry, 0, sizeof(vram_telemetry_block_t), context.stream()) !=
+        if (core.api().fill_async(fold.telemetry, 0, sizeof(vram_telemetry_block_t), context.stream()) !=
                 hip_success_k ||
-            hip_api().fill_async(fold.assigned_rows, 0, sizeof(u32_t), context.stream()) != hip_success_k)
+            core.api().fill_async(fold.assigned_rows, 0, sizeof(u32_t), context.stream()) != hip_success_k)
             return status_t::device_error_k;
         vram_arguments_t arguments {};
         arguments.fold = fold;
@@ -884,7 +884,7 @@ struct vram_amd_kernels {
         vram_kernel_symbol(symbol, "dense", "amd_dense_kernel", "vram_arguments_t", vram_dense_kernel_t::attend_k,
                            capability_k, vector_dtype_, slots, itanium_type<value_lookup_type_> {});
         return hip_launch(
-            module_.function(symbol.text),
+            module_.api(), module_.function(symbol.text),
             core.walk_blocks_(launch.view.queries_count, resident_blocks_(vram_dense_kernel_t::attend_k, slots)),
             block_threads(), vram_warps_per_block_k * launch.view.scratch_bytes_per_warp, context.stream(), arguments);
     }
@@ -979,6 +979,9 @@ struct vram_amd_index {
     std::size_t connectivity() const noexcept { return core_.connectivity(); }
     std::size_t dimensions() const noexcept { return core_.dimensions(); }
     device_specs_t const& device_specs() const noexcept { return core_.device_specs(); }
+
+    /** The runtime every call on this shard goes through, the one its storage was placed by. */
+    hip_api_t const& api() const noexcept { return core_.api(); }
     nk_kernel_kind_t kernel() const noexcept { return core_.kernel(); }
     bool stores_norms() const noexcept { return core_.stores_norms(); }
     std::size_t row_bytes() const noexcept { return core_.row_bytes(); }

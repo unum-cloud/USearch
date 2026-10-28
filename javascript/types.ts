@@ -344,6 +344,8 @@ export interface ExecutorForRamConfig {
   threads?: number;
   /** Deferred calls tracked at once; absent takes a default. */
   deferredLimit?: number;
+  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  cpuClass?: string;
 }
 
 /** Where the borrowed pool of a RAM executor is placed, and how many deferred calls it tracks. */
@@ -352,6 +354,8 @@ export interface ExecutorOnPoolConfig {
   memoryDomains?: number[];
   /** Deferred calls tracked at once; absent takes a default. */
   deferredLimit?: number;
+  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  cpuClass?: string;
 }
 
 /** Which devices a VRAM executor drives, and on which streams. */
@@ -364,6 +368,8 @@ export interface ExecutorForVramConfig {
   scratchLimit?: number;
   /** Deferred calls tracked at once; absent takes a default. */
   deferredLimit?: number;
+  /** The GPU class to dispatch as, as `usearch_gpu_class_name` spells it; absent dispatches as the devices. */
+  gpuClass?: string;
 }
 
 /** Where an NVMe executor submits its reads. */
@@ -374,6 +380,8 @@ export interface ExecutorForNvmeConfig {
   threads?: number;
   /** Deferred calls tracked at once; absent takes a default. */
   deferredLimit?: number;
+  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  cpuClass?: string;
 }
 
 /**

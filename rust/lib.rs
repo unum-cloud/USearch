@@ -14,7 +14,7 @@
 //! let index = DenseIndex::init_ram(&options, &[])?;
 //! index.reserve(1_000_000)?; // Optional capacity hint; inserts grow on demand
 //!
-//! let executor = Executor::for_ram(&[], 0, 0)?;
+//! let executor = Executor::for_ram(&[], None, 0, 0)?;
 //! let mut arena = Arena::new_in(&executor)?;
 //! let slab = vec![0.0f32; 768];
 //! index.on(&executor).insert([Key::from(42u64)], &rows(&slab, 768)?)?;
@@ -42,7 +42,7 @@ pub use dense_index::{
     DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith, ValueLookup,
 };
 pub use types::{
-    capabilities_available, capabilities_compiled, rows, version, Arena, Blocking, Deferred, Deferring, Distance,
-    Element, Error, Executor, Key, Matches, MatchesRow, Mood, On, Predicate, ProgressCallback, Residency, Result,
-    Scalar, Status, Traversal, Wait,
+    capabilities_available, capabilities_compiled, rows, version, Arena, Blocking, CPUClass, Deferred, Deferring,
+    Distance, Element, Error, Executor, GPUClass, Key, Matches, MatchesRow, Mood, On, Predicate, ProgressCallback,
+    Residency, Result, Scalar, Status, Traversal, Wait,
 };

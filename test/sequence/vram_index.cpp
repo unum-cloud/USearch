@@ -225,7 +225,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
 
     // The GPU index, in three batches, each over a context carved from the executor's run.
     int const device = executor.device(0);
-    vram_index_t vram_index {cuda_virtual_memory_allocator<byte_t> {device}};
+    vram_index_t vram_index {cuda_virtual_memory_allocator<byte_t> {executor.api(), device}};
     if constexpr (metric_ == usearch_sequence_metric_overlap_k)
         failures += expect_eq(vram_index.window_widths(vram_overlap_widths_k), status_t::success_k);
     if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k)
@@ -299,7 +299,8 @@ struct sequence_vram_shards_t {
                                       sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
 
     std::unique_ptr<index_t> operator()(int device) const noexcept {
-        return std::unique_ptr<index_t>(new (std::nothrow) index_t {cuda_virtual_memory_allocator<byte_t> {device}});
+        cuda_virtual_memory_allocator<byte_t> const allocator {test::gpu_drivers().cuda, device};
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t {allocator});
     }
 };
 
@@ -361,7 +362,7 @@ static std::size_t check_sequence_vram_plural(u64_t seed, cuda_executor_t& execu
         plural_matched += matched_count(found, exact[query], wanted_k);
     }
 
-    index_t single {cuda_virtual_memory_allocator<byte_t> {executor.device(0)}};
+    index_t single {cuda_virtual_memory_allocator<byte_t> {executor.api(), executor.device(0)}};
     failures += expect_eq(single.reserve({rows_k, connectivity_32_k, offsets[rows_k]}).status, status_t::success_k);
     typename index_t::insert_config_t const insert_config {expansion_k};
     failures += expect_eq(executor.reserve(max_of(single.traversal_memory_usage(rows, insert_config),
@@ -392,7 +393,8 @@ std::size_t check_sequence_vram(settings_t const& settings, gpu_device_t const& 
     if (device.vendor != gpu_vendor_t::nvidia_k) return 0;
     std::size_t failures = 0;
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto [executor, spawn_status] = cuda_executor_t::spawn(std::span<int const> {&ordinal, 1});
+    auto [executor, spawn_status] = cuda_executor_t::spawn(test::gpu_drivers().cuda,
+                                                           std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println(stderr, "- CUDA: device #{} opens no stream", ordinal), 1;
     auto const run = [&](char const* name, auto&& check) {
         if (settings.filter.selects(name)) failures += report(name, check());

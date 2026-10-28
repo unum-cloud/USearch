@@ -2,19 +2,17 @@
  *  @file include/usearch/utilities/vram_device.hpp
  *  @author Ash Vardanian
  *  @date July 22, 2026
- *  @brief The vendor-neutral face of the GPU residency: the process-wide device listing every
- *      VRAM call numbers its devices by, one executor and one arena over every vendor.
+ *  @brief The vendor-neutral face of the GPU residency: every vendor's driver, the device listing,
+ *      one executor and one arena over every vendor.
  *
- *  One binary drives NVIDIA, AMD and Apple GPUs at once, each vendor through a runtime loaded on
- *  first use and declared without its SDK, so every unit names all three: NVIDIA devices come
- *  first, then AMD, then Apple, and a device's position in the listing is its USearch ordinal. A
- *  vendor whose runtime is absent contributes no devices; one whose kernels this build lacks still
- *  lists them, and placing an index there refuses.
+ *  One binary drives NVIDIA, AMD and Apple GPUs at once, each vendor through a runtime its caller
+ *  loads once and declared without its SDK, so every unit names all three: NVIDIA devices are
+ *  listed first, then AMD, then Apple. A vendor whose runtime is absent contributes no devices.
  *
- *  Every vendor's device header provides the same surface: a vendor-prefixed @c gpu_devices, an
- *  executor with a static @c spawn over vendor ordinals, @c device, @c vendor_k and
- *  @c device_arena_t, and that arena, made from the executor's first stream, with @c allocate,
- *  @c contains, @c clear, @c upload and @c drain.
+ *  Every vendor's device header provides the same surface: a vendor-prefixed listing into a
+ *  caller's buffer, an executor with a static @c spawn over its driver and vendor ordinals,
+ *  @c device, @c vendor_k and @c device_arena_t, and that arena, made from the executor's first
+ *  stream, with @c allocate, @c contains, @c clear, @c upload and @c drain.
  */
 #pragma once
 
@@ -22,8 +20,7 @@
 #include <cstdio>  // `std::snprintf` - a kernel symbol's digits
 #include <cstring> // `std::strlen` - a name's length prefix in a kernel symbol
 
-#include <mutex>       // `std::call_once` - the listing is taken once per process
-#include <span>        // `std::span` - the listing handed out
+#include <span>        // `std::span` - the listing written
 #include <type_traits> // `std::is_enum_v`, `std::is_same_v` - a kernel symbol's arguments
 #include <variant>     // `std::variant`, `std::monostate` - one alternative per vendor
 
@@ -31,9 +28,9 @@
 
 #include "usearch/utilities/ram_buffers.hpp"        // `growing_buffer` - the ordinals an executor opens over
 #include "usearch/utilities/types.hpp"              // `gpu_device_t`
-#include "usearch/utilities/vram_amd_device.hpp"    // `amd_gpu_devices`, `hip_executor_t`
-#include "usearch/utilities/vram_apple_device.hpp"  // `apple_gpu_devices`, `metal_executor_t`
-#include "usearch/utilities/vram_nvidia_device.hpp" // `nvidia_gpu_devices`, `cuda_executor_t`
+#include "usearch/utilities/vram_amd_device.hpp"    // `list_amd_gpu_devices`, `hip_executor_t`
+#include "usearch/utilities/vram_apple_device.hpp"  // `list_apple_gpu_devices`, `metal_executor_t`
+#include "usearch/utilities/vram_nvidia_device.hpp" // `list_nvidia_gpu_devices`, `cuda_executor_t`
 
 namespace unum::usearch::utilities {
 
@@ -43,13 +40,6 @@ template <template <typename> typename selector_type_>
 using gpu_vendors_variant =
     std::variant<std::monostate, typename selector_type_<cuda_executor_t>::type,
                  typename selector_type_<hip_executor_t>::type, typename selector_type_<metal_executor_t>::type>;
-
-/** Visits each vendor's executor type in listing order until @p visitor answers true. */
-template <typename visitor_type_>
-bool for_each_gpu_vendor(visitor_type_&& visitor) noexcept {
-    return visitor(std::type_identity<cuda_executor_t> {}) || visitor(std::type_identity<hip_executor_t> {}) ||
-           visitor(std::type_identity<metal_executor_t> {});
-}
 
 template <typename executor_type_>
 struct gpu_executor_of {
@@ -64,30 +54,51 @@ struct gpu_device_arena_of {
 /** Whichever vendor's executor a VRAM call runs on, or none. */
 using gpu_executor_t = gpu_vendors_variant<gpu_executor_of>;
 
-/** Every GPU this process can drive: NVIDIA devices first, then AMD, then Apple, listed once. A
- *  vendor whose runtime fails to load contributes none. */
-inline std::span<gpu_device_t const> gpu_devices() noexcept {
-    static gpu_device_t listing[3 * gpu_devices_capacity_k];
-    static std::size_t count = 0;
-    static std::once_flag listed;
-    std::call_once(listed, [] {
-        std::span<gpu_device_t const> const vendors[] = {nvidia_gpu_devices(), amd_gpu_devices(), apple_gpu_devices()};
-        for (std::span<gpu_device_t const> vendor : vendors)
-            for (gpu_device_t const& device : vendor) listing[count++] = device;
-    });
-    return {listing, count};
+/** Every vendor's driver table and Apple's device contexts, which a caller builds once per process
+ *  and hands to every GPU call; a vendor whose runtime is absent keeps an empty table. */
+struct gpu_drivers_t {
+    cuda_api_t cuda;
+    hip_api_t hip;
+    metal_api_t metal;
+    metal_contexts_t metal_contexts;
+
+    gpu_drivers_t() noexcept
+        : cuda(cuda_api_t::load()), hip(hip_api_t::load()), metal(metal_api_t::load()), metal_contexts(metal) {}
+    gpu_drivers_t(gpu_drivers_t const&) = delete;
+    gpu_drivers_t& operator=(gpu_drivers_t const&) = delete;
+};
+
+/** The driver each vendor's executor spawns over: its runtime's table, or Apple's contexts. */
+inline cuda_api_t const& driver_of(gpu_drivers_t& drivers, std::type_identity<cuda_executor_t>) noexcept {
+    return drivers.cuda;
+}
+inline hip_api_t const& driver_of(gpu_drivers_t& drivers, std::type_identity<hip_executor_t>) noexcept {
+    return drivers.hip;
+}
+inline metal_contexts_t& driver_of(gpu_drivers_t& drivers, std::type_identity<metal_executor_t>) noexcept {
+    return drivers.metal_contexts;
+}
+
+/** Writes into @p into every device @p drivers reach, NVIDIA first, then AMD, then Apple, as each
+ *  driver reports it, and answers how many it wrote. */
+inline std::size_t list_gpu_devices(gpu_drivers_t const& drivers, std::span<gpu_device_t> into) noexcept {
+    std::size_t count = list_nvidia_gpu_devices(drivers.cuda, into);
+    count += list_amd_gpu_devices(drivers.hip, into.subspan(count));
+    count += list_apple_gpu_devices(drivers.metal_contexts, into.subspan(count));
+    return count;
 }
 
 /**
- *  Spawns the executor of the one vendor every device in @p devices belongs to, one stream per
- *  distinct device over their vendor ordinals, which every shard there shares, its scratch capped
- *  at @p scratch_limit bytes per stream, zero for no ceiling.
+ *  Spawns the executor of the one vendor every device in @p devices belongs to, over that vendor's
+ *  driver in @p drivers, one stream per distinct device over their vendor ordinals, which every
+ *  shard there shares, its scratch capped at @p scratch_limit bytes per stream, zero for no
+ *  ceiling.
  *
  *  @par Statuses:
  *  - @c device_error_k No device is named, or the build drives no executor of their vendor.
  *  - @c config_mismatch_k The @p devices span vendors.
  */
-inline expected<gpu_executor_t> spawn_gpu_executor(std::span<gpu_device_t const> devices,
+inline expected<gpu_executor_t> spawn_gpu_executor(gpu_drivers_t& drivers, std::span<gpu_device_t const> devices,
                                                    std::size_t scratch_limit = 0) noexcept {
     if (devices.empty()) return {{}, status_t::device_error_k};
     growing_buffer<int> ordinals {global_allocator};
@@ -100,13 +111,15 @@ inline expected<gpu_executor_t> spawn_gpu_executor(std::span<gpu_device_t const>
         if (!opened) ordinals.push_back_reserved(ordinal);
     }
     expected<gpu_executor_t> result {{}, status_t::device_error_k};
-    for_each_gpu_vendor([&]<typename executor_type_>(std::type_identity<executor_type_>) noexcept {
+    auto const spawn = [&]<typename executor_type_>(std::type_identity<executor_type_> vendor) noexcept {
         if (executor_type_::vendor_k != devices[0].vendor) return false;
-        auto [spawned, status] = executor_type_::spawn(to_span(ordinals), scratch_limit);
+        auto [spawned, status] = executor_type_::spawn(driver_of(drivers, vendor), to_span(ordinals), scratch_limit);
         if (succeeded(status)) result.value = std::move(spawned);
         result.status = status;
         return true;
-    });
+    };
+    spawn(std::type_identity<cuda_executor_t> {}) || spawn(std::type_identity<hip_executor_t> {}) ||
+        spawn(std::type_identity<metal_executor_t> {});
     return result;
 }
 

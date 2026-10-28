@@ -5,6 +5,7 @@
  *  @brief The dense modality's CPU composer: rolls the metric suite and the behavior cells of every
  *      CPU residency into one failure count for the suite's entry point.
  */
+#include <limits>      // `std::numeric_limits` - the scalars' witnesses
 #include <type_traits> // `std::is_move_constructible_v` - the plans' and claims' witnesses
 
 #include "usearch/dense/ram_index.hpp"
@@ -28,6 +29,9 @@ static_assert(std::is_move_constructible_v<witnessed_index_t::load_plan_t> &&
               !std::is_move_assignable_v<witnessed_index_t::load_plan_t>);
 static_assert(std::is_move_constructible_v<witnessed_index_t::capacity_claim_t> &&
               !std::is_copy_constructible_v<witnessed_index_t::capacity_claim_t>);
+
+/** The integer kits' dot results take the extremal atomics; complex scalars publish no limits. */
+static_assert(fu::atomic_integer<nk::i32_t> && !std::numeric_limits<nk::f32c_t>::is_specialized);
 
 std::size_t test::check_dense(settings_t const& settings) {
     std::size_t failures_count = 0;

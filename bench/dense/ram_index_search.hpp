@@ -42,12 +42,12 @@ namespace unum::usearch::bench::dense {
 #pragma region Pipeline
 
 /** The spin hint every core of this architecture runs, which every probed index waits with. */
-#if FORKUNION_ARCH_X86_64_
+#if FORKUNION_ARCH_X8664_
 using hint_waiter_t = fu::x86_pause_t;
 #elif FORKUNION_ARCH_ARM64_
 using hint_waiter_t = fu::arm64_yield_t;
 #elif FORKUNION_ARCH_RISCV64_
-using hint_waiter_t = fu::risc5_pause_t;
+using hint_waiter_t = fu::riscv64_pause_t;
 #else
 using hint_waiter_t = fu::standard_yield_t;
 #endif
@@ -348,9 +348,9 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
         report.islands_reconnected += pass_result.islands_reconnected;
         report.reachable_nodes = pass_result.health.reachable_nodes;
         report.sweeps = pass_result.health.sweeps;
-        report.sums.visited_members += pass_result.visited_members;
-        report.sums.computed_distances += pass_result.computed_distances;
-        report.sums.restarts += pass_result.restarts;
+        report.sums.visited_members += pass_result.telemetry.visited_members;
+        report.sums.computed_distances += pass_result.telemetry.computed_distances;
+        report.sums.restarts += pass_result.telemetry.restarts;
         progress.tick(pass + 1);
         if (!pass_result.changed_nodes) break;
     }

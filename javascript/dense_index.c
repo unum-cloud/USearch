@@ -238,21 +238,26 @@ static bool usearch_js_static_arguments(napi_env env, napi_callback_info info, s
 }
 
 /**
- *  @brief @c initRam(dimensions, metric, quantization, connectivity, valuesPerKey, memoryDomains)
- *      and @c initVram(..., devices) → an empty, mutable index.
+ *  @brief @c initRam(dimensions, metric, quantization, connectivity, valuesPerKey, memoryDomains,
+ *      cpuClass) and @c initVram(..., devices, gpuClass) → an empty, mutable index.
  *
  *  The breadth of the candidates is not here: it rides every call, which lets a recall sweep run
  *  against one immutable index with no mutation between points.
  */
 static napi_value usearch_js_index_init(napi_env env, napi_callback_info info, usearch_residency_t residency) {
-    napi_value arguments[6];
+    napi_value arguments[7];
     size_t dimensions = 0, connectivity = 0, values_per_key = 0;
     usearch_dense_metric_t metric = usearch_dense_metric_unknown_k;
     usearch_scalar_t quantization = usearch_scalar_unknown_k;
+    usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
+    usearch_gpu_class_t gpu_class = usearch_gpu_class_unknown_k;
     int32_t* ordinals = NULL;
     size_t ordinals_count = 0;
-    char const* const field = residency == usearch_residency_vram_k ? "devices" : "memoryDomains";
-    if (!usearch_js_static_arguments(env, info, 6, arguments) ||
+    bool const vram = residency == usearch_residency_vram_k;
+    char const* const field = vram ? "devices" : "memoryDomains";
+    if (!usearch_js_static_arguments(env, info, 7, arguments) ||
+        !(vram ? usearch_js_gpu_class_from_value(env, arguments[6], &gpu_class)
+               : usearch_js_cpu_class_from_value(env, arguments[6], &cpu_class)) ||
         !usearch_js_size_from_value(env, arguments[0], "dimensions", &dimensions) ||
         !usearch_js_metric_from_value(env, arguments[1], "metric", &metric) ||
         !usearch_js_scalar_from_value(env, arguments[2], "quantization", &quantization) ||
@@ -271,7 +276,7 @@ static napi_value usearch_js_index_init(napi_env env, napi_callback_info info, u
                                           .dimensions = dimensions,
                                           .connectivity = connectivity,
                                           .values_per_key = values_per_key,
-                                          .vram = {ordinals, ordinals_count}};
+                                          .vram = {ordinals, ordinals_count, 0, gpu_class}};
         usearch_dense_init_vram(&init);
     }
     else {
@@ -282,7 +287,7 @@ static napi_value usearch_js_index_init(napi_env env, napi_callback_info info, u
                                          .dimensions = dimensions,
                                          .connectivity = connectivity,
                                          .values_per_key = values_per_key,
-                                         .ram = {ordinals, ordinals_count}};
+                                         .ram = {ordinals, ordinals_count, 0, cpu_class}};
         usearch_dense_init_ram(&init);
     }
     free(ordinals);
@@ -303,12 +308,13 @@ typedef enum usearch_js_source_t {
     usearch_js_source_buffer_k,
 } usearch_js_source_t;
 
-/** @c loadRam(path, executor, memoryDomains, valuesPerKey), @c loadVram(path, executor, devices,
- *  valuesPerKey), and their @c Buffer twins taking any @c TypedArray → a new, mutable index. */
+/** @c loadRam(path, executor, memoryDomains, valuesPerKey, cpuClass), @c loadVram(path, executor,
+ *  devices, valuesPerKey, gpuClass), and their @c Buffer twins taking any @c TypedArray → a new,
+ *  mutable index. */
 static napi_value usearch_js_index_load(napi_env env, napi_callback_info info, usearch_residency_t residency,
                                         usearch_js_source_t source) {
-    napi_value arguments[4];
-    if (!usearch_js_static_arguments(env, info, 4, arguments)) return NULL;
+    napi_value arguments[5];
+    if (!usearch_js_static_arguments(env, info, 5, arguments)) return NULL;
 
     char* path = NULL;
     void* buffer = NULL;
@@ -317,6 +323,8 @@ static napi_value usearch_js_index_load(napi_env env, napi_callback_info info, u
     size_t values_per_key = 0;
     int32_t* ordinals = NULL;
     size_t ordinals_count = 0;
+    usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
+    usearch_gpu_class_t gpu_class = usearch_gpu_class_unknown_k;
     char const* const field = residency == usearch_residency_vram_k ? "devices" : "memoryDomains";
     if (source == usearch_js_source_path_k) path = usearch_js_string_from_value(env, arguments[0], "path", &bytes);
     else if (usearch_js_bytes_from_value(env, arguments[0], "buffer", &buffer, &bytes.length))
@@ -324,6 +332,8 @@ static napi_value usearch_js_index_load(napi_env env, napi_callback_info info, u
     bool const read = source == usearch_js_source_path_k ? path != NULL : bytes.data != NULL || !bytes.length;
     if (!read || !usearch_js_executor_from_value(env, arguments[1], &executor) ||
         !usearch_js_size_from_value(env, arguments[3], "valuesPerKey", &values_per_key) ||
+        !(residency == usearch_residency_vram_k ? usearch_js_gpu_class_from_value(env, arguments[4], &gpu_class)
+                                                : usearch_js_cpu_class_from_value(env, arguments[4], &cpu_class)) ||
         !usearch_js_ordinals_from_value(env, arguments[2], field, &ordinals, &ordinals_count)) {
         free(path);
         return NULL;
@@ -331,8 +341,8 @@ static napi_value usearch_js_index_load(napi_env env, napi_callback_info info, u
 
     usearch_dense_index_t handle = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
-    usearch_ram_options_t const ram = {ordinals, ordinals_count};
-    usearch_vram_options_t const vram = {ordinals, ordinals_count};
+    usearch_ram_options_t const ram = {ordinals, ordinals_count, 0, cpu_class};
+    usearch_vram_options_t const vram = {ordinals, ordinals_count, 0, gpu_class};
     if (residency == usearch_residency_vram_k && source == usearch_js_source_path_k) {
         usearch_dense_load_vram_t load = {.index = &handle,
                                           .executor = executor,
@@ -407,14 +417,16 @@ static napi_value usearch_js_index_view_ram(napi_env env, napi_callback_info inf
     return usearch_js_index_adopt(env, &outcome, handle);
 }
 
-/** @c viewNvme(path, executor, paths) → a read-only index served from NVMe drives. */
+/** @c viewNvme(path, executor, paths, cpuClass) → a read-only index served from NVMe drives. */
 static napi_value usearch_js_index_view_nvme(napi_env env, napi_callback_info info) {
-    napi_value arguments[3];
+    napi_value arguments[4];
     usearch_dense_view_nvme_t view_nvme = {0};
     usearch_js_paths_arena_t paths = {NULL, 0};
-    if (!usearch_js_static_arguments(env, info, 3, arguments)) return NULL;
+    usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
+    if (!usearch_js_static_arguments(env, info, 4, arguments)) return NULL;
     char* const path = usearch_js_string_from_value(env, arguments[0], "path", &view_nvme.path);
     if (!path || !usearch_js_executor_from_value(env, arguments[1], &view_nvme.executor) ||
+        !usearch_js_cpu_class_from_value(env, arguments[3], &cpu_class) ||
         !usearch_js_paths_from_value(env, arguments[2], "paths", &paths)) {
         free(path);
         return NULL;
@@ -424,7 +436,7 @@ static napi_value usearch_js_index_view_nvme(napi_env env, napi_callback_info in
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
     view_nvme.index = &handle;
     view_nvme.outcome = &outcome;
-    view_nvme.nvme = (usearch_nvme_options_t) {paths.views, paths.count};
+    view_nvme.nvme = (usearch_nvme_options_t) {paths.views, paths.count, cpu_class};
     usearch_dense_view_nvme(&view_nvme);
     usearch_js_paths_release(&paths);
     free(path);

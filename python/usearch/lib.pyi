@@ -234,18 +234,33 @@ class Executor:
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @classmethod
     def for_ram(
-        cls, threads: int = 0, *, memory_domains: Sequence[int] | None = None, deferred_limit: int = 0
+        cls,
+        threads: int = 0,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        deferred_limit: int = 0,
+        cpu_class: CPUClass | None = None,
     ) -> Executor:
         """Spawns host worker threads for a RAM-resident index. Calls `usearch_executor_for_ram`."""
         ...
 
     @classmethod
-    def on_pool(cls, pool: int, /, *, memory_domains: Sequence[int] | None = None, deferred_limit: int = 0) -> Executor:
+    def on_pool(
+        cls,
+        pool: int,
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        deferred_limit: int = 0,
+        cpu_class: CPUClass | None = None,
+    ) -> Executor:
         """Drives RAM-resident indexes on a thread pool the caller owns. Calls `usearch_executor_on_pool`."""
         ...
 
     @classmethod
-    def for_vram(cls, *, devices: Sequence[int] | None = None, deferred_limit: int = 0) -> Executor:
+    def for_vram(
+        cls, *, devices: Sequence[int] | None = None, deferred_limit: int = 0, gpu_class: GPUClass | None = None
+    ) -> Executor:
         """Opens one stream per device for a VRAM-resident index. Calls `usearch_executor_for_vram`."""
         ...
 
@@ -257,6 +272,7 @@ class Executor:
         paths: Sequence[_PathLike] | None = None,
         deferred_limit: int = 0,
         nvme_class: NVMeClass | None = None,
+        cpu_class: CPUClass | None = None,
     ) -> Executor:
         """Opens one submission ring per worker for an NVMe-resident index. Calls `usearch_executor_for_nvme`."""
         ...
@@ -1642,7 +1658,13 @@ class DenseIndex:
 
     @classmethod
     def view_nvme(
-        cls, path: _PathLike, /, *, paths: Sequence[_PathLike] | None = None, executor: Executor | None = None
+        cls,
+        path: _PathLike,
+        /,
+        *,
+        paths: Sequence[_PathLike] | None = None,
+        executor: Executor | None = None,
+        cpu_class: CPUClass | None = None,
     ) -> DenseIndex:
         """Serves a checkpoint in place from NVMe drives, read-only. Calls `usearch_dense_view_nvme`."""
         ...

@@ -7,42 +7,16 @@ project(
     HOMEPAGE_URL "https://github.com/unum-cloud/USearch"
 )
 
+# No target uses C++20 modules, and a Clang installed without `clang-scan-deps` would fail every C++ unit.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 # The file runs top to bottom: the options and the settings they validate, the defaults every target is created under,
-# the header-only targets, the dependencies, one `cmake/<dependency>.cmake` each, the install and export rules, the
-# wiring every compiled target shares, and the subdirectories.
+# the header-only targets, the siblings and the other dependencies, the install and export rules, the wiring every
+# compiled target shares, and the subdirectories.
 
 # Allow CMake 3.13+ to override options when using FetchContent / add_subdirectory
 if (POLICY CMP0077)
     cmake_policy(SET CMP0077 NEW)
-endif ()
-
-# Each GPU vendor is probed only to default its `USEARCH_BUILD_<VENDOR>` switch, only while the caller leaves it unset,
-# and only under Clang targeting a native host, since the WebAssembly compilers are Clang too and carry no GPU code.
-# NVIDIA needs NVCC, though `check_language` caches the host compiler it paired with, which would then outrank a
-# caller's own `CMAKE_CUDA_HOST_COMPILER`. AMD needs ROCm's own Clang as the C++ compiler, as the `rocm_*` presets name
-# it. Apple needs only an Apple silicon target, since Metal ships with macOS and its kernels compile at first use.
-include(CheckLanguage)
-set(usearch_can_build_cuda_ OFF)
-if (NOT DEFINED USEARCH_BUILD_CUDA
-    AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
-    AND NOT CMAKE_SYSTEM_NAME MATCHES "Emscripten|WASI"
-)
-    check_language(CUDA)
-    if (CMAKE_CUDA_COMPILER)
-        set(usearch_can_build_cuda_ ON)
-    endif ()
-endif ()
-set(usearch_can_build_rocm_ OFF)
-if (NOT DEFINED USEARCH_BUILD_ROCM AND CMAKE_CXX_COMPILER MATCHES "/rocm[^/]*/llvm/bin/clang")
-    set(usearch_can_build_rocm_ ON)
-endif ()
-set(usearch_can_build_metal_ OFF)
-if (NOT DEFINED USEARCH_BUILD_METAL
-    AND APPLE
-    AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64"
-    AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
-)
-    set(usearch_can_build_metal_ ON)
 endif ()
 
 # Options
@@ -59,13 +33,30 @@ option(USEARCH_BUILD_PYTHON "Compile the CPython extension; `scikit-build-core` 
 option(USEARCH_BUILD_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
 option(USEARCH_BUILD_SWIFT "Package the static library for SwiftPM, as an XCFramework or an artifact bundle" OFF)
 option(USEARCH_BUILD_TOOLS "Compile the command-line tools in tools/, and their MPI build where MPI is found" OFF)
-option(USEARCH_BUILD_CUDA "Compile the NVIDIA index variants, tests and benchmarks with NVCC"
-       ${usearch_can_build_cuda_}
-)
-option(USEARCH_BUILD_ROCM "Compile the AMD index variants and tests with ROCm's Clang" ${usearch_can_build_rocm_})
-option(USEARCH_BUILD_METAL "Compile the Apple index variants and tests over Metal" ${usearch_can_build_metal_})
+option(USEARCH_BUILD_CUDA "Compile the NVIDIA index variants, tests and benchmarks with NVCC" OFF)
+option(USEARCH_BUILD_ROCM "Compile the AMD index variants and tests with ROCm's Clang" OFF)
+option(USEARCH_BUILD_METAL "Compile the Apple index variants and tests over Metal" OFF)
 option(USEARCH_WITH_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
 option(USEARCH_WERROR "Treat compiler warnings as errors" OFF)
+
+# Seeded from the environment at the first configure, so `cargo`, `cmake-js` and `scikit-build-core` honour
+# `USEARCH_TARGET_ARCH=native`.
+set(USEARCH_TARGET_ARCH
+    "$ENV{USEARCH_TARGET_ARCH}"
+    CACHE STRING
+          "CPU the own units are tuned for: empty for the architecture floor, native, or a CPU name like graniterapids"
+)
+set(USEARCH_TARGET_CLASSES
+    ""
+    CACHE STRING "CPU classes compiled beside serial: empty for every class, a list like intel_granite, or native"
+)
+if (USEARCH_TARGET_ARCH STREQUAL "native" AND CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR "USEARCH_TARGET_ARCH=native needs the host as the target; name a CPU instead")
+endif ()
+# Only a native build asks the siblings which capabilities this host runs.
+if (USEARCH_TARGET_CLASSES STREQUAL "native" AND NOT USEARCH_TARGET_ARCH STREQUAL "native")
+    message(FATAL_ERROR "USEARCH_TARGET_CLASSES=native needs USEARCH_TARGET_ARCH=native")
+endif ()
 
 # Clang keeps a unit's host and device halves apart, through the host-only passes of its CUDA and HIP modes, where other
 # host compilers trip over mixed units.
@@ -82,25 +73,80 @@ endif ()
 
 # The library compiles one unit per GPU class, each for its own architecture alone - "80" with its PTX for every GPU
 # without a class, "89", "90a", "100f" and "120f" - and only the classes this list names, with or without "-real", so
-# "100f-real" builds the Blackwell kernels alone and "native" builds every class. The CUDA tests, benchmarks and the
-# dispatch unit compile one pass per entry, and a NumKong GPU capability turns on in them only when every entry runs it,
-# so iterate on one GPU with its family code, like "100f-real", to test that generation's kits. The "-real" entries skip
-# the PTX, which would triple the objects of builds that never meet an unknown GPU.
+# "100f-real" builds the Blackwell kernels alone. The CUDA tests, benchmarks and the dispatch unit compile one pass per
+# entry, and a NumKong GPU capability turns on in them only when every entry runs it, so iterate on one GPU with its
+# family code, like "100f-real", to test that generation's kits. The "-real" entries skip the PTX, which would triple
+# the objects of builds that never meet an unknown GPU. The kernels start at Ampere, and Turing's "75" would turn every
+# NumKong GPU capability off in the default tests.
 set(USEARCH_CUDA_ARCHITECTURES
-    "80-real;89-real;90a-real;100f-real;120f-real"
-    CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"
+    "80-real;89-real;90a-real;100f-real;120f-real;80-virtual"
+    CACHE STRING
+          "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for, or native for the visible GPUs"
 )
+
+# "native" maps each GPU `nvidia-smi` lists to the code its class needs, family suffix included, where a bare compute
+# capability would drop it.
+set(usearch_cuda_architectures_)
+if (USEARCH_BUILD_CUDA)
+    set(usearch_cuda_native_codes_
+        75-real=75-real
+        80-real=80-real
+        86-real=86-real
+        89-real=89-real
+        90-real=90a-real
+        100-real=100f-real
+        103-real=103f-real
+        110-real=110f-real
+        120-real=120f-real
+        121-real=121f-real
+    )
+    set(usearch_cuda_visible_)
+    if ("native" IN_LIST USEARCH_CUDA_ARCHITECTURES)
+        execute_process(
+            COMMAND nvidia-smi --query-gpu=compute_cap --format=csv,noheader
+            OUTPUT_VARIABLE usearch_cuda_visible_
+            ERROR_QUIET
+        )
+        separate_arguments(usearch_cuda_visible_ UNIX_COMMAND "${usearch_cuda_visible_}")
+        if (NOT usearch_cuda_visible_)
+            message(
+                FATAL_ERROR "USEARCH_CUDA_ARCHITECTURES=native found no GPU through nvidia-smi; name its code instead"
+            )
+        endif ()
+    endif ()
+    foreach (entry_ IN LISTS USEARCH_CUDA_ARCHITECTURES)
+        if (NOT entry_ STREQUAL "native")
+            list(APPEND usearch_cuda_architectures_ ${entry_})
+        endif ()
+    endforeach ()
+    foreach (visible_ IN LISTS usearch_cuda_visible_)
+        set(native_code_)
+        if (visible_ MATCHES "^([0-9]+)\\.([0-9])$")
+            set(visible_ "${CMAKE_MATCH_1}${CMAKE_MATCH_2}-real")
+            foreach (pair_ IN LISTS usearch_cuda_native_codes_)
+                if (pair_ MATCHES "^${visible_}=(.+)$")
+                    set(native_code_ ${CMAKE_MATCH_1})
+                endif ()
+            endforeach ()
+        endif ()
+        if (NOT native_code_)
+            message(FATAL_ERROR "USEARCH_CUDA_ARCHITECTURES=native has no code for the visible ${visible_} GPU; "
+                                "name its code instead"
+            )
+        endif ()
+        if (NOT native_code_ IN_LIST usearch_cuda_architectures_)
+            list(APPEND usearch_cuda_architectures_ ${native_code_})
+        endif ()
+    endforeach ()
+endif ()
 
 # Three-digit "a" & "f" entries are only understood from CMake 3.31 onward, while the CPU-only build stays on the 3.28
 # floor that stock Ubuntu 24.04 ships. The floor follows the architectures actually asked for, so a single-architecture
 # build on a distribution CMake is never refused for a capability it does not use.
-if (USEARCH_BUILD_CUDA
-    AND CMAKE_VERSION VERSION_LESS 3.31
-    AND USEARCH_CUDA_ARCHITECTURES MATCHES "1[0-9][0-9][af]"
-)
+if (CMAKE_VERSION VERSION_LESS 3.31 AND usearch_cuda_architectures_ MATCHES "1[0-9][0-9][af]")
     message(
         FATAL_ERROR
-            "USEARCH_CUDA_ARCHITECTURES \"${USEARCH_CUDA_ARCHITECTURES}\" names a three-digit \"a\" or \"f\" architecture, which needs CMake 3.31 or newer, found ${CMAKE_VERSION} - override with a single architecture or \"native\""
+            "USEARCH_CUDA_ARCHITECTURES \"${usearch_cuda_architectures_}\" names a three-digit \"a\" or \"f\" architecture, which needs CMake 3.31 or newer, found ${CMAKE_VERSION} - override with a single architecture"
     )
 endif ()
 
@@ -108,8 +154,8 @@ endif ()
 # keeps every instruction its kits use; CDNA5 drops `v_dot4_i32_i8` and `v_dot2_f32_f16`, so only its own unit runs it.
 # A class with no processor listed embeds none, and its devices refuse to load.
 set(USEARCH_ROCM_ARCHITECTURES
-    "gfx942;gfx950;gfx1250"
-    CACHE STRING "AMD processors the code objects compile for: gfx942 for CDNA3, gfx950 for CDNA4, gfx1250 for CDNA5"
+    "gfx942;gfx950;gfx1250;gfx1251"
+    CACHE STRING "AMD processors the code objects compile for: gfx942 for CDNA3, gfx950 for CDNA4, gfx125x for CDNA5"
 )
 
 # The library, its tests and benchmarks compile the first N storage dtypes of the ladder bf16, u1, i8, e4m3, f16, u8,
@@ -219,9 +265,8 @@ write_basic_package_version_file(
 )
 configure_file(cmake/config.cmake.in ${usearch_cmake_project_config_file_} @ONLY)
 
-# Dependencies, each acquired by its own `cmake/<dependency>.cmake`, and each only for the builds that compile against
-# it.
-set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
+# Dependencies: the siblings through `usearch_sibling`, the rest each acquired by its own `cmake/<dependency>.cmake`,
+# and each only for the builds that compile against it.
 include(FetchContent)
 
 if (CMAKE_HOST_SYSTEM_NAME MATCHES "Darwin")
@@ -241,9 +286,9 @@ find_package(Threads REQUIRED)
 # `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target declares, not what its link
 # interface would carry - to keep the C++20 feature requirement off the pure-C targets. Every sibling is a system
 # dependency, so its own warnings never fail a USearch build under `USEARCH_WERROR`, and builds only what a USearch
-# target links.
-function (usearch_sibling name_ link_target_ repository_ tag_)
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name_}/CMakeLists.txt")
+# target links. A defined @p override_, the sibling's `FETCHCONTENT_SOURCE_DIR_<NAME>`, outranks the submodule.
+function (usearch_sibling name_ override_ link_target_ repository_ tag_)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name_}/CMakeLists.txt" AND NOT DEFINED ${override_})
         add_subdirectory(${name_} EXCLUDE_FROM_ALL SYSTEM)
     else ()
         message(STATUS "usearch: ${name_} submodule absent, fetching ${tag_}")
@@ -274,20 +319,43 @@ function (usearch_sibling name_ link_target_ repository_ tag_)
     )
 endfunction ()
 
+# The siblings tune their own units for the CPU USearch is tuned for.
+if (USEARCH_TARGET_ARCH)
+    set(NUMKONG_TARGET_ARCH "${USEARCH_TARGET_ARCH}")
+    set(STRINGZILLA_TARGET_ARCH "${USEARCH_TARGET_ARCH}")
+    set(FORKUNION_TARGET_ARCH "${USEARCH_TARGET_ARCH}")
+endif ()
+
+# NumKong: the distance kits and tensors, header-only, as every unit inlines the kernels its CPU or GPU class runs.
+# ForkUnion: the thread pools, the memory topology, and the ISA-specific waiters and atomic references. StringZilla: the
+# string kits behind the sequence modality, from the Levenshtein steps to the overlaps. SmashTable: the Elias-Fano row
+# directories of the NVMe indexes.
 set(usearch_sibling_targets_)
-include(numkong)
-include(forkunion)
-include(stringzilla)
-include(smashtable)
-include(yyjson)
+usearch_sibling(
+    numkong FETCHCONTENT_SOURCE_DIR_NUMKONG numkong::header https://github.com/ashvardanian/NumKong
+    3faee602cdbcc3ee1ca8880594e4c1b2d38c8f91
+)
+usearch_sibling(
+    forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION forkunion::header https://github.com/ashvardanian/ForkUnion
+    12a0a2706534452830868b7e33a4697549c898d5
+)
+usearch_sibling(
+    stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA stringzilla::header https://github.com/ashvardanian/StringZilla
+    a4e9f5b0ac91481a5c30957e05d2310f3928c1d8
+)
+usearch_sibling(
+    smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE smashtable::header https://github.com/ashvardanian/SmashTable
+    e0db741da4e7b9cf6bc13aa493eff264aff3cfb8
+)
+include(cmake/yyjson.cmake)
 if (USEARCH_BUILD_TEST
     OR USEARCH_BUILD_BENCH
     OR USEARCH_BUILD_TOOLS
 )
-    include(fmt)
+    include(cmake/fmt.cmake)
 endif ()
 if (USEARCH_WITH_JEMALLOC)
-    include(jemalloc)
+    include(cmake/jemalloc.cmake)
 endif ()
 if (USEARCH_WITH_SPDK)
     find_package(PkgConfig REQUIRED)
@@ -298,7 +366,7 @@ endif ()
 # NVCC is only a device compiler here, so the toolkit is found for its paths alone, and every NVIDIA and AMD unit links
 # its device bundle through an assembler stub. Both serve every directory below, which inherits them.
 if (USEARCH_BUILD_CUDA)
-    find_package(CUDAToolkit REQUIRED)
+    find_package(CUDAToolkit 13 REQUIRED)
 endif ()
 if (USEARCH_BUILD_CUDA OR USEARCH_BUILD_ROCM)
     enable_language(ASM)
@@ -336,11 +404,49 @@ if (USEARCH_INSTALL)
     )
 endif ()
 
-# Host tuning for the tests & benches only - never the distributable libraries - and only where the host is the target
-# and the compiler has a spelling for it; elsewhere the suite runs on its serial floor and the SIMD variants report
-# themselves skipped. Apple Clang's `-march=native` advertises only a subset of the host's features - no FP16 arithmetic
-# & FML, no SME - leaving NumKong's f16 kits serial; `-mcpu=native` is the complete AArch64 knob.
-if (MSVC OR CMAKE_CROSSCOMPILING)
+# USEARCH_TARGET_ARCH sets the floor of USearch's own C and C++ units, and each class unit adds its class's flags over
+# it: empty keeps the architecture's floor, whatever a distribution compiler defaults to, `native` tunes for this host,
+# and a CPU name like `graniterapids` for that CPU, also when cross-compiling. AArch64 names CPUs through `-mcpu`, as
+# `-march` takes only architecture versions.
+set(usearch_target_arch_flags_)
+if (CMAKE_SYSTEM_NAME MATCHES "Emscripten|WASI")
+    # A WebAssembly module's one SIMD capability comes from its toolchain file.
+elseif (MSVC AND USEARCH_TARGET_ARCH STREQUAL "native")
+    # MSVC has no `/arch:native`, so it takes the `/arch:` of the widest capability this host runs.
+    foreach (capability_ IN ITEMS diamond skylake haswell neonbfdot neonsdot neonhalf)
+        if (numkong_target_${capability_}_runs AND NOT usearch_target_arch_flags_)
+            set(usearch_target_arch_flags_ ${numkong_target_${capability_}_flags})
+        endif ()
+    endforeach ()
+elseif (MSVC AND USEARCH_TARGET_ARCH)
+    message(
+        FATAL_ERROR
+            "MSVC takes USEARCH_TARGET_ARCH=native only; pass an /arch: value such as AVX2, AVX512 or AVX10.2 through "
+            "CMAKE_CXX_FLAGS instead of `${USEARCH_TARGET_ARCH}`"
+    )
+elseif (USEARCH_TARGET_ARCH AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    set(usearch_target_arch_flags_ -mcpu=${USEARCH_TARGET_ARCH})
+elseif (USEARCH_TARGET_ARCH)
+    set(usearch_target_arch_flags_ -march=${USEARCH_TARGET_ARCH})
+elseif (MSVC OR APPLE)
+    # MSVC's defaults are the floor, and on Apple `-arch` pins it per slice of a universal build.
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    set(usearch_target_arch_flags_ -march=armv8-a)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(usearch_target_arch_flags_ -march=x86-64)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    set(usearch_target_arch_flags_ -march=rv64gc)
+endif ()
+
+# Host tuning for the tests & benches only - never the distributable libraries - and only while USEARCH_TARGET_ARCH is
+# empty, the host is the target and the compiler has a spelling for it; elsewhere the suite runs on the switch's floor
+# and the SIMD variants report themselves skipped. Apple Clang's `-march=native` advertises only a subset of the host's
+# features - no FP16 arithmetic & FML, no SME - leaving NumKong's f16 kits serial; `-mcpu=native` is the complete
+# AArch64 knob.
+if (USEARCH_TARGET_ARCH
+    OR MSVC
+    OR CMAKE_CROSSCOMPILING
+)
     set(usearch_host_tuning_ "")
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
     set(usearch_host_tuning_ -mcpu=native)
@@ -444,9 +550,12 @@ function (usearch_setup_target target_)
     # Host-tuned units read the compiler; every other unit takes each sibling's compiled capabilities and instantiates
     # its kits per CPU class, never by a template's default capability, so the class units and the dispatch unit name
     # the same rungs.
-    if (arg_HOST)
+    if (arg_HOST AND usearch_host_tuning_)
         target_compile_options(${target_} PRIVATE ${usearch_host_tuning_})
     else ()
+        target_compile_options(${target_} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:${usearch_target_arch_flags_}>")
+    endif ()
+    if (NOT arg_HOST)
         target_link_libraries(
             ${target_}
             PRIVATE $<BUILD_INTERFACE:numkong::cpu_capabilities_compiled>

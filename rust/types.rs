@@ -1080,34 +1080,133 @@ impl<'arena> Matches<'arena> {
 
 // endregion: Matches
 
+// region: Classes
+
+/// The CPU families USearch ships tuned variants for: dispatch reports its pick in this
+/// vocabulary, and a RAM or NVMe placement or executor may pin one.
+///
+/// Mirrors `usearch_cpu_class_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum CPUClass {
+    /// The portable floor: no SIMD assumptions.
+    Serial = 1,
+    /// Haswell-class x86: AVX2 & FMA, the 256-bit floor.
+    IntelHaswell = 2,
+    /// Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without AVX-512.
+    IntelSierra = 3,
+    /// Skylake-class x86: the AVX-512 foundation tier.
+    IntelSkylake = 4,
+    /// Icelake-class x86: AVX-512 VNNI & VPOPCNT.
+    IntelIcelake = 5,
+    /// Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512.
+    AmdGenoa = 6,
+    /// Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 & AMX-INT8
+    /// tiles.
+    IntelSapphire = 7,
+    /// Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles.
+    IntelGranite = 8,
+    /// Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions.
+    IntelDiamond = 9,
+    /// Graviton2-class Arm - Neoverse N1, the bare NEON floor.
+    AwsG2 = 10,
+    /// Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2 class silicon.
+    AppleM2 = 11,
+    /// Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles.
+    AppleM4 = 12,
+    /// Graviton5-class Arm - Neoverse V3, Armv9.2.
+    AwsG5 = 13,
+    /// Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products.
+    NvidiaVera = 14,
+    /// Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23 vectors.
+    AlibabaC930 = 15,
+    /// WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier.
+    Wasm32V128 = 16,
+    /// WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit
+    /// addressing.
+    Wasm64Extended = 17,
+}
+
+impl fmt::Display for CPUClass {
+    /// Calls `usearch_cpu_class_name`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(usearch_cpu_class_name, *self as c_int))
+    }
+}
+
+/// The GPU families USearch ships tuned variants for, the device twin of [`CPUClass`]: a VRAM
+/// placement or executor may pin one.
+///
+/// Mirrors `usearch_gpu_class_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum GPUClass {
+    /// Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30.
+    NvidiaAmpere = 1,
+    /// Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions.
+    NvidiaAda = 2,
+    /// Hopper-class NVIDIA - H100 & H200.
+    NvidiaHopper = 3,
+    /// Blackwell-class NVIDIA - B200, B300 & GB300.
+    NvidiaBlackwell = 4,
+    /// Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark.
+    NvidiaBlackwellRtx = 5,
+    /// Rubin-class NVIDIA - the Vera-Rubin platform's device half.
+    NvidiaRubin = 6,
+    /// CDNA3 AMD - MI300X & MI325X: gfx942, FNUZ fp8.
+    AmdCdna3 = 7,
+    /// CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8.
+    AmdCdna4 = 8,
+    /// CDNA5 AMD - MI400: gfx1250.
+    AmdCdna5 = 9,
+    /// Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2.
+    AppleMetal7 = 10,
+    /// Apple9-family GPUs - M3 & M4.
+    AppleMetal9 = 11,
+    /// Apple10-family GPUs - M5.
+    AppleMetal10 = 12,
+}
+
+impl fmt::Display for GPUClass {
+    /// Calls `usearch_gpu_class_name`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(usearch_gpu_class_name, *self as c_int))
+    }
+}
+
+// endregion: Classes
+
 // region: Placements
 
-/// The memory domains a RAM placement or executor names.
-pub(crate) fn ram_options(memory_domains: &[i32]) -> usearch_ram_options_t {
+/// The memory domains a RAM placement or executor names, and the class it dispatches as.
+pub(crate) fn ram_options(memory_domains: &[i32], cpu_class: Option<CPUClass>) -> usearch_ram_options_t {
     usearch_ram_options_t {
         memory_domains: memory_domains.as_ptr(),
         memory_domains_count: memory_domains.len(),
         shard_capacity: 0,
-        cpu_class: 0,
+        cpu_class: cpu_class.map_or(0, |cpu_class| cpu_class as usearch_cpu_class_t),
     }
 }
 
-/// The devices a VRAM placement or executor names.
-pub(crate) fn vram_options(devices: &[i32]) -> usearch_vram_options_t {
+/// The devices a VRAM placement or executor names, and the class it dispatches as.
+pub(crate) fn vram_options(devices: &[i32], gpu_class: Option<GPUClass>) -> usearch_vram_options_t {
     usearch_vram_options_t {
         devices: devices.as_ptr(),
         devices_count: devices.len(),
         shard_capacity: 0,
-        gpu_class: 0,
+        gpu_class: gpu_class.map_or(0, |gpu_class| gpu_class as usearch_gpu_class_t),
     }
 }
 
-/// The paths an NVMe placement or executor names, borrowing `views`, which must outlive the call.
-pub(crate) fn nvme_options(views: &[usearch_bytes_view_t]) -> usearch_nvme_options_t {
+/// The paths an NVMe placement or executor names, borrowing `views`, which must outlive the call,
+/// and the class it dispatches as.
+pub(crate) fn nvme_options(views: &[usearch_bytes_view_t], cpu_class: Option<CPUClass>) -> usearch_nvme_options_t {
     usearch_nvme_options_t {
         paths: views.as_ptr(),
         paths_count: views.len(),
-        cpu_class: 0,
+        cpu_class: cpu_class.map_or(0, |cpu_class| cpu_class as usearch_cpu_class_t),
     }
 }
 
@@ -1439,15 +1538,22 @@ impl Executor {
     /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves
     /// the ordered publication path.
     ///
+    /// A pinned `cpu_class` narrows the threads' waiters and atomics to that class's.
+    ///
     /// Calls `usearch_executor_for_ram`.
-    pub fn for_ram(memory_domains: &[i32], threads: usize, deferred_limit: usize) -> Result<Self> {
+    pub fn for_ram(
+        memory_domains: &[i32],
+        cpu_class: Option<CPUClass>,
+        threads: usize,
+        deferred_limit: usize,
+    ) -> Result<Self> {
         let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_executor_for_ram(&mut usearch_executor_for_ram_t {
                 executor: &mut handle,
                 outcome: &mut outcome,
-                ram: ram_options(memory_domains),
+                ram: ram_options(memory_domains, cpu_class),
                 threads,
                 deferred_limit,
             })
@@ -1463,13 +1569,18 @@ impl Executor {
     ///
     /// # Safety
     /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
-    pub unsafe fn on_pool(memory_domains: &[i32], pool: *mut c_void, deferred_limit: usize) -> Result<Self> {
+    pub unsafe fn on_pool(
+        memory_domains: &[i32],
+        cpu_class: Option<CPUClass>,
+        pool: *mut c_void,
+        deferred_limit: usize,
+    ) -> Result<Self> {
         let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
         usearch_executor_on_pool(&mut usearch_executor_on_pool_t {
             executor: &mut handle,
             outcome: &mut outcome,
-            ram: ram_options(memory_domains),
+            ram: ram_options(memory_domains, cpu_class),
             pool,
             deferred_limit,
         });
@@ -1482,8 +1593,15 @@ impl Executor {
     ///
     /// Zero `threads` derives from those devices' queue capabilities.
     ///
+    /// A pinned `cpu_class` narrows the threads' waiters and atomics to that class's.
+    ///
     /// Calls `usearch_executor_for_nvme`.
-    pub fn for_nvme(paths: &[impl AsRef<Path>], threads: usize, deferred_limit: usize) -> Result<Self> {
+    pub fn for_nvme(
+        paths: &[impl AsRef<Path>],
+        cpu_class: Option<CPUClass>,
+        threads: usize,
+        deferred_limit: usize,
+    ) -> Result<Self> {
         let views = path_views(paths)?;
         let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
@@ -1491,7 +1609,7 @@ impl Executor {
             usearch_executor_for_nvme(&mut usearch_executor_for_nvme_t {
                 executor: &mut handle,
                 outcome: &mut outcome,
-                nvme: nvme_options(&views),
+                nvme: nvme_options(&views, cpu_class),
                 threads,
                 deferred_limit,
                 nvme_class: 0,
@@ -1505,7 +1623,8 @@ impl Executor {
     /// driven by the one host thread that calls the verbs - which is why this takes no thread count.
     ///
     /// `streams` is empty, or holds one CUDA stream per device in `devices` order. Zero
-    /// `scratch_limit` lets scratch grow as geometry asks.
+    /// `scratch_limit` lets scratch grow as geometry asks. A pinned `gpu_class` the devices do not
+    /// run is refused with [`Status::Unsupported`].
     ///
     /// Calls `usearch_executor_for_vram`.
     ///
@@ -1513,6 +1632,7 @@ impl Executor {
     /// Every stream must be a live CUDA stream on its device that outlives the executor.
     pub unsafe fn for_vram(
         devices: &[i32],
+        gpu_class: Option<GPUClass>,
         streams: &[*mut c_void],
         scratch_limit: usize,
         deferred_limit: usize,
@@ -1525,7 +1645,7 @@ impl Executor {
         usearch_executor_for_vram(&mut usearch_executor_for_vram_t {
             executor: &mut handle,
             outcome: &mut outcome,
-            vram: vram_options(devices),
+            vram: vram_options(devices, gpu_class),
             // The C side reads one stream per device from any non-null pointer.
             streams: match streams.is_empty() {
                 true => ptr::null(),
@@ -2034,7 +2154,7 @@ mod tests {
         assert_eq!(local.residency(), Residency::Ram);
         assert!(local.host().is_ok());
 
-        let executor = Executor::for_ram(&[], 1, 0)?;
+        let executor = Executor::for_ram(&[], None, 1, 0)?;
         let placed = Arena::new_in(&executor)?;
         drop(executor);
         assert_eq!(placed.residency(), Residency::Ram, "an arena outlives its executor");
@@ -2099,17 +2219,20 @@ mod tests {
 
     #[test]
     fn placements_marshal_as_borrowed_lists() {
-        let derived = ram_options(&[]);
+        let derived = ram_options(&[], None);
         assert_eq!(derived.memory_domains_count, 0, "an empty list derives");
+        assert_eq!(derived.cpu_class, 0, "no pin dispatches as the machine");
 
         let devices = [0, 1, 2, 3];
-        let pinned = vram_options(&devices);
+        let pinned = vram_options(&devices, Some(GPUClass::NvidiaHopper));
         assert_eq!(pinned.devices_count, 4);
         assert_eq!(unsafe { *pinned.devices.add(3) }, 3);
+        assert_eq!(pinned.gpu_class, 3, "a pin crosses as its C value");
 
         let views = path_views(&["/mnt/nvme0", "/mnt/nvme1"]).unwrap();
-        let drives = nvme_options(&views);
+        let drives = nvme_options(&views, Some(CPUClass::IntelSkylake));
         assert_eq!(drives.paths_count, 2);
+        assert_eq!(drives.cpu_class, 4);
         assert_eq!(unsafe { (*drives.paths).length }, "/mnt/nvme0".len());
     }
 

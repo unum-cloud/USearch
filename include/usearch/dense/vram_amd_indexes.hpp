@@ -89,10 +89,14 @@ struct vram_amd_indexes {
     /** One shard's page-locked ring between its two key columns: two halves of keys, each refilled
      *  only once the copy out of it landed. Sized as plans cover rows and freed with the shard. */
     struct key_staging_t {
-        growing_buffer<key_t, hip_pinned_allocator_t> keys {hip_pinned_allocator_t {}};
+        growing_buffer<key_t, hip_pinned_allocator_t> keys;
 
         /** Marks the last copy out of each half. */
         hip_event_t crossed[2];
+
+        /** Pins the ring and creates its events through @p api, on the current device. */
+        explicit key_staging_t(hip_api_t const& api) noexcept
+            : keys {hip_pinned_allocator_t {api}}, crossed {hip_event_t {api}, hip_event_t {api}} {}
 
         /** Halves filled so far, alternating between the two. */
         std::size_t chunks = 0;
@@ -207,7 +211,7 @@ struct vram_amd_indexes {
      *    flight.
      */
     status_t emplace(typename executor_t::stream_t const& stream) noexcept {
-        std::unique_ptr<index_t> shard = build_(stream.device);
+        std::unique_ptr<index_t> shard = build_(*stream.api, stream.device);
         if (!shard) return status_t::bad_alloc_k;
         return emplace(std::move(shard));
     }
@@ -227,10 +231,12 @@ struct vram_amd_indexes {
             (!shards_.empty() && (shard->dimensions() != dimensions() || shard->connectivity() != connectivity())))
             return status_t::config_mismatch_k;
         int const device = shard->device_specs().ordinal;
-        if (hip_set_device(device) != hip_success_k) return status_t::device_error_k;
+        hip_api_t const& api = shard->api();
+        if (hip_set_device(api, device) != hip_success_k) return status_t::device_error_k;
         if (status_t const placed = shards_.emplace(
-                std::move(shard), device_shard_keys_t {keys_column_t {shards_.allocator()},
-                                                       hip_virtual_memory_allocator<key_t> {device}, key_staging_t {}});
+                std::move(shard),
+                device_shard_keys_t {keys_column_t {shards_.allocator()},
+                                     hip_virtual_memory_allocator<key_t> {api, device}, key_staging_t {api}});
             failed(placed))
             return placed;
         // Every shard is still unreserved, so each maps its slabs for every device placed so far.
@@ -1768,8 +1774,8 @@ struct vram_amd_indexes {
                     // which its context marked when it queued, so following that mark orders the
                     // copy after it.
                     return succeeded(traversal.follow(*first_traversal)) &&
-                                   hip_api().copy_async(blocks + shard * block_bytes, landed.value, block_bytes,
-                                                        hip_copy_default_k, traversal.stream()) == hip_success_k
+                                   traversal.api().copy_async(blocks + shard * block_bytes, landed.value, block_bytes,
+                                                              hip_copy_default_k, traversal.stream()) == hip_success_k
                                ? status_t::success_k
                                : status_t::device_error_k;
                 };
@@ -1783,7 +1789,7 @@ struct vram_amd_indexes {
                     // shard 0's stream, which its context's event drains.
                     hip_stream_handle_t const stream = first_traversal->stream();
                     u32_t const rows = static_cast<u32_t>(taking);
-                    if (hip_set_device(first_traversal->device()) != hip_success_k ||
+                    if (hip_set_device(first_traversal->api(), first_traversal->device()) != hip_success_k ||
                         failed(shards_[0].index->launch_merge_attention_(blocks, rows, static_cast<u32_t>(dimensions),
                                                                          static_cast<u32_t>(shards), stream)) ||
                         failed(shards_[0].index->land_attended_(reinterpret_cast<f32_t*>(blocks), shards,
@@ -2308,9 +2314,9 @@ struct vram_amd_indexes {
         return devices;
     }
 
-    /** One unreserved shard placed on @p device; null when the allocation fails. */
-    std::unique_ptr<index_t> build_(int device) const noexcept {
-        typename index_t::vectors_allocator_t const allocator {device};
+    /** One unreserved shard placed on @p device through @p api; null when the allocation fails. */
+    std::unique_ptr<index_t> build_(hip_api_t const& api, int device) const noexcept {
+        typename index_t::vectors_allocator_t const allocator {api, device};
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel(), allocator, allocator));
     }
 
@@ -2336,14 +2342,15 @@ struct vram_amd_indexes {
      *  reservation fails. */
     shard_t build_shard_(shard_t const& like) const noexcept {
         int const device = like.index->device_specs().ordinal;
-        std::unique_ptr<index_t> index = hip_set_device(device) == hip_success_k ? build_(device) : nullptr;
+        hip_api_t const& api = like.index->api();
+        std::unique_ptr<index_t> index = hip_set_device(api, device) == hip_success_k ? build_(api, device) : nullptr;
         if (index) index->share_with_(devices_());
         reserve_capacity_t const geometry {0, static_cast<connectivity_t>(connectivity()), dimensions(),
                                            shards_.shard_capacity()};
         if (index && failed(index->reserve(geometry).status)) index.reset();
         return shard_t {std::move(index),
                         device_shard_keys_t {keys_column_t {shards_.allocator()},
-                                             hip_virtual_memory_allocator<key_t> {device}, key_staging_t {}}};
+                                             hip_virtual_memory_allocator<key_t> {api, device}, key_staging_t {api}}};
     }
 
     /** Covers rows below @p rows in shard @p shard 's device key column, reserving it at its first
@@ -2385,9 +2392,9 @@ struct vram_amd_indexes {
             shards_[shard].keys.host.for_each_span({first, bound}, [&](std::span<key_t> run) noexcept {
                 for (key_t const& key : run) *staged++ = key;
             });
-            if (hip_api().copy_async(device_keys + first, staging.keys.data() + half * half_keys,
-                                     (bound - first) * sizeof(key_t), hip_copy_host_to_device_k,
-                                     stream) != hip_success_k ||
+            if (shards_[shard].keys.device.api().copy_async(device_keys + first, staging.keys.data() + half * half_keys,
+                                                            (bound - first) * sizeof(key_t), hip_copy_host_to_device_k,
+                                                            stream) != hip_success_k ||
                 failed(staging.crossed[half].record(stream)))
                 return status_t::device_error_k;
         }
@@ -2505,8 +2512,8 @@ struct vram_amd_indexes {
         node_id_t const base = step.index_rows.first, rows = step.source_rows.bound;
         if (part.device_specs().ordinal != shards_[into].index->device_specs().ordinal)
             return upload_keys_(into, {base, base + rows}, plan.stream);
-        return hip_api().copy_async(shards_[into].keys.device.base() + base, donor.shards_[from].keys.device.base(),
-                                    rows * sizeof(key_t), hip_copy_device_to_device_k, plan.stream) == hip_success_k
+        return part.api().copy_async(shards_[into].keys.device.base() + base, donor.shards_[from].keys.device.base(),
+                                     rows * sizeof(key_t), hip_copy_device_to_device_k, plan.stream) == hip_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
@@ -2616,8 +2623,9 @@ struct vram_amd_indexes {
                                                 nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                                 std::span<std::size_t> counts, heads_types_ const&... heads) noexcept {
         int const first_device = shards_[0].index->device_specs().ordinal;
-        if (hip_device_of(keys.data()) != first_device || hip_device_of(distances.data()) != first_device ||
-            hip_device_of(counts.data()) != first_device)
+        hip_api_t const& api = shards_[0].index->api();
+        if (hip_device_of(api, keys.data()) != first_device || hip_device_of(api, distances.data()) != first_device ||
+            hip_device_of(api, counts.data()) != first_device)
             return {{}, status_t::deferred_k};
         std::size_t const queries_count = queries.rows, shards = fanout.shards();
         // Every caller of `search_window_` counts as many matches as the keys are wide.
@@ -2682,8 +2690,9 @@ struct vram_amd_indexes {
             // which its context marked when it queued, so following that mark orders the copy after
             // the allocation without the host waiting.
             return succeeded(traversal.follow(*first_traversal)) &&
-                           hip_api().copy_async(landings[0].get() + walked_bytes + shard * block_bytes, block,
-                                                block_bytes, hip_copy_default_k, traversal.stream()) == hip_success_k
+                           traversal.api().copy_async(landings[0].get() + walked_bytes + shard * block_bytes, block,
+                                                      block_bytes, hip_copy_default_k,
+                                                      traversal.stream()) == hip_success_k
                        ? status_t::success_k
                        : status_t::device_error_k;
         };
@@ -2694,12 +2703,12 @@ struct vram_amd_indexes {
             // The last shard landed, so every ranking did; the merge rides shard 0's stream, which
             // its context's event drains, and the counts come back for the sum.
             hip_stream_handle_t const stream = first_traversal->stream();
-            if (hip_set_device(first_traversal->device()) != hip_success_k ||
+            if (hip_set_device(first_traversal->api(), first_traversal->device()) != hip_success_k ||
                 (shards != 1 && failed(shards_[0].index->launch_merge_matches_(
                                     ranking_of(landings[0].get() + walked_bytes), block_bytes,
                                     static_cast<u32_t>(shards), merged, static_cast<u32_t>(queries_count), stream))) ||
-                hip_api().copy_async(landed_counts.data(), counts.data(), counts.size_bytes(), hip_copy_default_k,
-                                     stream) != hip_success_k ||
+                first_traversal->api().copy_async(landed_counts.data(), counts.data(), counts.size_bytes(),
+                                                  hip_copy_default_k, stream) != hip_success_k ||
                 failed(first_traversal->wait()))
                 merged_status = status_t::device_error_k;
         };

@@ -658,19 +658,110 @@ func (mood Mood) String() string {
 	return C.GoString(C.usearch_mood_name(C.usearch_mood_t(mood)))
 }
 
+// CPUClass is a CPU family USearch ships tuned variants for; a RAM or NVMe placement or executor
+// may pin one, and the zero value pins none.
+//
+// Mirrors usearch_cpu_class_t.
+type CPUClass int32
+
+const (
+	// CPUClassUnknown pins nothing, so dispatch derives the CPU's own class.
+	CPUClassUnknown CPUClass = C.usearch_cpu_class_unknown_k
+	// CPUClassSerial is the portable floor, with no SIMD assumptions.
+	CPUClassSerial CPUClass = C.usearch_cpu_class_serial_k
+	// CPUClassIntelHaswell is Haswell-class x86: AVX2 and FMA.
+	CPUClassIntelHaswell CPUClass = C.usearch_cpu_class_intel_haswell_k
+	// CPUClassIntelSierra is Sierra Forest-class x86: AVX-VNNI without AVX-512.
+	CPUClassIntelSierra CPUClass = C.usearch_cpu_class_intel_sierra_k
+	// CPUClassIntelSkylake is Skylake-class x86: the AVX-512 foundation.
+	CPUClassIntelSkylake CPUClass = C.usearch_cpu_class_intel_skylake_k
+	// CPUClassIntelIcelake is Icelake-class x86: AVX-512 VNNI and VPOPCNT.
+	CPUClassIntelIcelake CPUClass = C.usearch_cpu_class_intel_icelake_k
+	// CPUClassAmdGenoa is Genoa-class x86: native bf16 dot products over AVX-512.
+	CPUClassAmdGenoa CPUClass = C.usearch_cpu_class_amd_genoa_k
+	// CPUClassIntelSapphire is Sapphire Rapids-class x86: AVX-512 FP16 and the AMX tiles.
+	CPUClassIntelSapphire CPUClass = C.usearch_cpu_class_intel_sapphire_k
+	// CPUClassIntelGranite is Granite Rapids-class x86: the AMX-FP16 tiles.
+	CPUClassIntelGranite CPUClass = C.usearch_cpu_class_intel_granite_k
+	// CPUClassIntelDiamond is Diamond Rapids-class x86: AVX10.2's FP8 conversions.
+	CPUClassIntelDiamond CPUClass = C.usearch_cpu_class_intel_diamond_k
+	// CPUClassAwsG2 is Graviton2-class Arm: the bare NEON floor.
+	CPUClassAwsG2 CPUClass = C.usearch_cpu_class_aws_g2_k
+	// CPUClassAppleM2 is Armv8.6 NEON with dot products and bf16.
+	CPUClassAppleM2 CPUClass = C.usearch_cpu_class_apple_m2_k
+	// CPUClassAppleM4 is Apple M4-class Arm: the SME outer-product tiles.
+	CPUClassAppleM4 CPUClass = C.usearch_cpu_class_apple_m4_k
+	// CPUClassAwsG5 is Graviton5-class Arm: Armv9.2.
+	CPUClassAwsG5 CPUClass = C.usearch_cpu_class_aws_g5_k
+	// CPUClassNvidiaVera is Vera-class Arm: FP8 dot products.
+	CPUClassNvidiaVera CPUClass = C.usearch_cpu_class_nvidia_vera_k
+	// CPUClassAlibabaC930 is Alibaba C930-class RISC-V: RVA23 vectors.
+	CPUClassAlibabaC930 CPUClass = C.usearch_cpu_class_alibaba_c930_k
+	// CPUClassWasm32V128 is WebAssembly with fixed-width simd128.
+	CPUClassWasm32V128 CPUClass = C.usearch_cpu_class_wasm32_v128_k
+	// CPUClassWasm64Extended is WebAssembly with relaxed SIMD, threads and 64-bit addressing.
+	CPUClassWasm64Extended CPUClass = C.usearch_cpu_class_wasm64_extended_k
+)
+
+// String renders the class as the library spells it. Calls usearch_cpu_class_name.
+func (class CPUClass) String() string {
+	return C.GoString(C.usearch_cpu_class_name(C.usearch_cpu_class_t(class)))
+}
+
+// GPUClass is a GPU family USearch ships tuned variants for; a VRAM placement or executor may pin
+// one, and the zero value pins none.
+//
+// Mirrors usearch_gpu_class_t.
+type GPUClass int32
+
+const (
+	// GPUClassUnknown pins nothing, so dispatch derives the devices' own class.
+	GPUClassUnknown GPUClass = C.usearch_gpu_class_unknown_k
+	// GPUClassNvidiaAmpere is Ampere-class NVIDIA, and every NVIDIA GPU without a class of its own.
+	GPUClassNvidiaAmpere GPUClass = C.usearch_gpu_class_nvidia_ampere_k
+	// GPUClassNvidiaAda is Ada-class NVIDIA: the fp8 conversions.
+	GPUClassNvidiaAda GPUClass = C.usearch_gpu_class_nvidia_ada_k
+	// GPUClassNvidiaHopper is Hopper-class NVIDIA.
+	GPUClassNvidiaHopper GPUClass = C.usearch_gpu_class_nvidia_hopper_k
+	// GPUClassNvidiaBlackwell is Blackwell-class NVIDIA.
+	GPUClassNvidiaBlackwell GPUClass = C.usearch_gpu_class_nvidia_blackwell_k
+	// GPUClassNvidiaBlackwellRTX is Consumer Blackwell NVIDIA.
+	GPUClassNvidiaBlackwellRTX GPUClass = C.usearch_gpu_class_nvidia_blackwellrtx_k
+	// GPUClassNvidiaRubin is Rubin-class NVIDIA.
+	GPUClassNvidiaRubin GPUClass = C.usearch_gpu_class_nvidia_rubin_k
+	// GPUClassAmdCDNA3 is CDNA3 AMD: gfx942.
+	GPUClassAmdCDNA3 GPUClass = C.usearch_gpu_class_amd_cdna3_k
+	// GPUClassAmdCDNA4 is CDNA4 AMD: gfx950.
+	GPUClassAmdCDNA4 GPUClass = C.usearch_gpu_class_amd_cdna4_k
+	// GPUClassAmdCDNA5 is CDNA5 AMD: gfx1250.
+	GPUClassAmdCDNA5 GPUClass = C.usearch_gpu_class_amd_cdna5_k
+	// GPUClassAppleMetal7 is Apple7-family GPUs, and every Apple GPU without a class of its own.
+	GPUClassAppleMetal7 GPUClass = C.usearch_gpu_class_apple_metal7_k
+	// GPUClassAppleMetal9 is Apple9-family GPUs.
+	GPUClassAppleMetal9 GPUClass = C.usearch_gpu_class_apple_metal9_k
+	// GPUClassAppleMetal10 is Apple10-family GPUs.
+	GPUClassAppleMetal10 GPUClass = C.usearch_gpu_class_apple_metal10_k
+)
+
+// String renders the class as the library spells it. Calls usearch_gpu_class_name.
+func (class GPUClass) String() string {
+	return C.GoString(C.usearch_gpu_class_name(C.usearch_gpu_class_t(class)))
+}
+
 // ExecutorForRam spawns host workers for RAM-resident indexes, interleaved across the compute
 // domains local to memoryDomains - the same list the indexes were initialized with, which is what
 // keeps compute and memory domains in agreement. An empty list derives them from the machine.
 //
 // Zero threads takes seven eighths of the cores those domains carry, since full occupancy starves
-// the ordered publication path. Calls usearch_executor_for_ram.
-func ExecutorForRam(memoryDomains []int32, threads, deferredLimit uint) (*Executor, error) {
+// the ordered publication path. A pinned cpuClass narrows the workers' waiters and atomics to that
+// class's. Calls usearch_executor_for_ram.
+func ExecutorForRam(memoryDomains []int32, cpuClass CPUClass, threads, deferredLimit uint) (*Executor, error) {
 	lent := open[*Executor]()
 	executor := &Executor{residency: ResidencyRam}
 	C.usearch_executor_for_ram(&C.usearch_executor_for_ram_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
-		ram:            lent.ram(memoryDomains),
+		ram:            lent.ram(memoryDomains, cpuClass),
 		threads:        C.size_t(threads),
 		deferred_limit: C.size_t(deferredLimit),
 	})
@@ -681,13 +772,13 @@ func ExecutorForRam(memoryDomains []int32, threads, deferredLimit uint) (*Execut
 // ExecutorOnPool creates a RAM executor over a borrowed ForkUnion fu_pool_t, so several
 // libraries in one process share one set of threads while each keeps its own scratch. The pool
 // must outlive the executor, and keeps its lender's mood. Calls usearch_executor_on_pool.
-func ExecutorOnPool(memoryDomains []int32, pool unsafe.Pointer, deferredLimit uint) (*Executor, error) {
+func ExecutorOnPool(memoryDomains []int32, cpuClass CPUClass, pool unsafe.Pointer, deferredLimit uint) (*Executor, error) {
 	lent := open[*Executor]()
 	executor := &Executor{residency: ResidencyRam}
 	C.usearch_executor_on_pool(&C.usearch_executor_on_pool_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
-		ram:            lent.ram(memoryDomains),
+		ram:            lent.ram(memoryDomains, cpuClass),
 		pool:           pool,
 		deferred_limit: C.size_t(deferredLimit),
 	})
@@ -700,13 +791,13 @@ func ExecutorOnPool(memoryDomains []int32, pool unsafe.Pointer, deferredLimit ui
 // submission lock-free: a thread owns its queue outright.
 //
 // Zero threads derives from those devices' queue capabilities. Calls usearch_executor_for_nvme.
-func ExecutorForNvme(paths []string, threads, deferredLimit uint) (*Executor, error) {
+func ExecutorForNvme(paths []string, cpuClass CPUClass, threads, deferredLimit uint) (*Executor, error) {
 	lent := open[*Executor]()
 	executor := &Executor{residency: ResidencyNvme}
 	C.usearch_executor_for_nvme(&C.usearch_executor_for_nvme_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
-		nvme:           lent.nvme(paths),
+		nvme:           lent.nvme(paths, cpuClass),
 		threads:        C.size_t(threads),
 		deferred_limit: C.size_t(deferredLimit),
 	})
@@ -719,8 +810,11 @@ func ExecutorForNvme(paths []string, threads, deferredLimit uint) (*Executor, er
 // count.
 //
 // Streams is empty, or holds one live CUDA stream per device in devices order, each outliving the
-// executor. Zero scratchLimit lets scratch grow as geometry asks. Calls usearch_executor_for_vram.
-func ExecutorForVram(devices []int32, streams []unsafe.Pointer, scratchLimit, deferredLimit uint) (*Executor, error) {
+// executor. Zero scratchLimit lets scratch grow as geometry asks. A pinned gpuClass the devices do
+// not run is refused with StatusUnsupported. Calls usearch_executor_for_vram.
+func ExecutorForVram(
+	devices []int32, gpuClass GPUClass, streams []unsafe.Pointer, scratchLimit, deferredLimit uint,
+) (*Executor, error) {
 	// The library reads one stream per device from any non-nil pointer, so only this side sees a short list.
 	if len(streams) != 0 && len(streams) != len(devices) {
 		return nil, fail(StatusShapeMismatch, "pass no streams or one per device")
@@ -730,7 +824,7 @@ func ExecutorForVram(devices []int32, streams []unsafe.Pointer, scratchLimit, de
 	C.usearch_executor_for_vram(&C.usearch_executor_for_vram_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
-		vram:           lent.vram(devices),
+		vram:           lent.vram(devices, gpuClass),
 		streams:        lend(&lent.call, streams),
 		scratch_limit:  C.size_t(scratchLimit),
 		deferred_limit: C.size_t(deferredLimit),
@@ -1070,26 +1164,34 @@ func (call *call) ints(values []int32) (*C.int32_t, C.size_t) {
 	return (*C.int32_t)(unsafe.Pointer(lend(call, values))), C.size_t(len(values))
 }
 
-// ram lends the memory domains of a RAM placement or executor.
-func (call *call) ram(memoryDomains []int32) C.usearch_ram_options_t {
+// ram lends the memory domains of a RAM placement or executor, beside the class it dispatches as.
+func (call *call) ram(memoryDomains []int32, cpuClass CPUClass) C.usearch_ram_options_t {
 	domains, count := call.ints(memoryDomains)
-	return C.usearch_ram_options_t{memory_domains: domains, memory_domains_count: count}
+	return C.usearch_ram_options_t{
+		memory_domains:       domains,
+		memory_domains_count: count,
+		cpu_class:            C.usearch_cpu_class_t(cpuClass),
+	}
 }
 
-// vram lends the devices of a VRAM placement or executor.
-func (call *call) vram(devices []int32) C.usearch_vram_options_t {
+// vram lends the devices of a VRAM placement or executor, beside the class it dispatches as.
+func (call *call) vram(devices []int32, gpuClass GPUClass) C.usearch_vram_options_t {
 	ordinals, count := call.ints(devices)
-	return C.usearch_vram_options_t{devices: ordinals, devices_count: count}
+	return C.usearch_vram_options_t{devices: ordinals, devices_count: count, gpu_class: C.usearch_gpu_class_t(gpuClass)}
 }
 
 // nvme lends a run of device paths, each borrowed rather than copied. Go strings are not
 // null-terminated and the interface never assumes one, so the bytes cross as they are.
-func (call *call) nvme(paths []string) C.usearch_nvme_options_t {
+func (call *call) nvme(paths []string, cpuClass CPUClass) C.usearch_nvme_options_t {
 	views := make([]C.usearch_bytes_view_t, len(paths))
 	for position, path := range paths {
 		views[position] = call.text(path)
 	}
-	return C.usearch_nvme_options_t{paths: lend(call, views), paths_count: C.size_t(len(views))}
+	return C.usearch_nvme_options_t{
+		paths:       lend(call, views),
+		paths_count: C.size_t(len(views)),
+		cpu_class:   C.usearch_cpu_class_t(cpuClass),
+	}
 }
 
 // bytes lends a byte slab as the view the C interface reads, with no terminator and no copy.

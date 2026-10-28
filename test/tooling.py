@@ -4,8 +4,6 @@ Run:
     python -m pytest test/tooling.py -v
 """
 
-from __future__ import annotations
-
 import os
 import uuid
 

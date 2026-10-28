@@ -9,8 +9,6 @@ Author: Ash Vardanian
 Date: June 7, 2023
 """
 
-from __future__ import annotations
-
 from collections.abc import Callable
 from dataclasses import dataclass
 from math import ceil

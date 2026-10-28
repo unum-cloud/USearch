@@ -459,7 +459,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 int const device = index.device_specs().ordinal;
                 // Every device of the bin scores this member's vectors and norms.
                 if (status_t const granted = index.grant_(devices); failed(granted)) return granted;
-                if (failed(cuda_vendor_t::select(device))) return status_t::device_error_k;
+                if (failed(cuda_vendor_t::select(index.api(), device))) return status_t::device_error_k;
                 // The member's searches by the bin's other rows, then the fold's slices, if shared
                 // memory cannot hold them.
                 std::size_t const walk_bytes =
@@ -479,7 +479,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
 
                 std::size_t const row_words = own_rows * connectivity;
                 std::size_t const bytes = table_bytes + (3 * row_words + rows - own_rows) * sizeof(u32_t);
-                folds_.push_back_reserved(cuda_virtual_memory_allocator<byte_t> {device});
+                folds_.push_back_reserved(cuda_virtual_memory_allocator<byte_t> {index.api(), device});
                 cuda_virtual_memory_allocator<byte_t>& buffer = folds_.back();
                 if (status_t const granted = buffer.grant(devices); failed(granted)) return granted;
                 if (failed(buffer.reserve_range(bytes)) || failed(buffer.commit(bytes))) return status_t::bad_alloc_k;
@@ -527,7 +527,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 vram_index_t& index = *shard_at_(members_[bin.first + place]).index;
                 std::size_t const connectivity = index.connectivity();
                 walk_context_t& walk = walks_[bin.state + place];
-                if (failed(cuda_vendor_t::select(walk.device()))) return status_t::device_error_k;
+                if (failed(cuda_vendor_t::select(walk.api(), walk.device()))) return status_t::device_error_k;
                 if (phase_ != phase_t::cross_k) {
                     vram_fold_phase_t const phase = phase_ == phase_t::reselect_k ? vram_fold_phase_t::reselect_k
                                                                                   : vram_fold_phase_t::merge_k;
@@ -542,11 +542,11 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 vram_fold_shard_t* const fold_shards = reinterpret_cast<vram_fold_shard_t*>(bin_shards + bin.count);
                 vram_fold_shard_t const& own = fold_tables_[bin.state + place];
                 std::size_t const heads = bin_rows_(bin) - index.size();
-                if (failed(cuda_vendor_t::copy(bin_shards, &bin_tables_[bin.state],
+                if (failed(cuda_vendor_t::copy(walk.api(), bin_shards, &bin_tables_[bin.state],
                                                bin.count * sizeof(vram_bin_shard_t), walk.stream())) ||
-                    failed(cuda_vendor_t::copy(fold_shards, &fold_tables_[bin.state],
+                    failed(cuda_vendor_t::copy(walk.api(), fold_shards, &fold_tables_[bin.state],
                                                bin.count * sizeof(vram_fold_shard_t), walk.stream())) ||
-                    failed(cuda_vendor_t::fill(own.heads, 0xFF, heads * sizeof(u32_t), walk.stream())))
+                    failed(cuda_vendor_t::fill(walk.api(), own.heads, 0xFF, heads * sizeof(u32_t), walk.stream())))
                     return status_t::device_error_k;
 
                 // This member's rows search every other member on its device, landing in its picks.
@@ -557,7 +557,8 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                     vram_index_t& searched = *shard_at_(members_[bin.first + other]).index;
                     walk_context_t& searching = walks_[bin.state + other];
                     std::size_t const block = other - (other > place);
-                    if (failed(cuda_vendor_t::select(searching.device()))) return status_t::device_error_k;
+                    if (failed(cuda_vendor_t::select(searching.api(), searching.device())))
+                        return status_t::device_error_k;
                     for (std::size_t first = 0; first < rows; first += vram_indexes_t::window_rows_k) {
                         std::size_t const window = min_of(vram_indexes_t::window_rows_k, rows - first);
                         rows_view_t const queries {storage.vectors + first * row_bytes, window, index.dimensions(),
@@ -712,8 +713,9 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 if (status_t const saved = saving.finish(); failed(saved)) return saved;
                 // A folding bin's own rows replace the live ones the save staged.
                 std::size_t const state = bin.state + member - bin.first;
-                if (bin.count > 1 && (failed(cuda_vendor_t::copy(staged.neighbors.data(), bin_tables_[state].neighbors,
-                                                                 staged.neighbors.size(), walks_[state].stream())) ||
+                if (bin.count > 1 && (failed(cuda_vendor_t::copy(walks_[state].api(), staged.neighbors.data(),
+                                                                 bin_tables_[state].neighbors, staged.neighbors.size(),
+                                                                 walks_[state].stream())) ||
                                       failed(walks_[state].wait())))
                     return status_t::device_error_k;
                 offset += part_rows;

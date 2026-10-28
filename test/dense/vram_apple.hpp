@@ -18,7 +18,8 @@ namespace unum::usearch::test::dense {
  *  Apple flat matrices. */
 struct counting_metal_allocator_t {
     counting_metal_allocator_t() noexcept = default;
-    counting_metal_allocator_t(allocation_ledger_t& ledger, int device) noexcept : shared_(device), ledger_(&ledger) {}
+    counting_metal_allocator_t(allocation_ledger_t& ledger, metal_stream_t const& stream) noexcept
+        : shared_(stream), ledger_(&ledger) {}
 
     metal_buffer_t allocate(std::size_t bytes) noexcept {
         metal_buffer_t buffer = shared_.allocate(bytes);
@@ -34,6 +35,7 @@ struct counting_metal_allocator_t {
         shared_.deallocate(buffer);
     }
     int device() const noexcept { return shared_.device(); }
+    metal_context_t* context() const noexcept { return shared_.context(); }
 
   private:
     metal_shared_allocator_t shared_;
@@ -53,7 +55,7 @@ struct vram_cell<gpu_vendor_t::apple_k, dtype_, kernel_> {
 
     /** Builds the cell's index over @p ledger, on the stream's device. */
     std::unique_ptr<index_t> operator()(allocation_ledger_t& ledger) const noexcept {
-        counting_metal_allocator_t const allocator {ledger, stream.handle.device};
+        counting_metal_allocator_t const allocator {ledger, stream.handle};
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, allocator, allocator));
     }
 

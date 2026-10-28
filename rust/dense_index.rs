@@ -37,9 +37,9 @@ use crate::types::{
     usearch_gpu_class_t, usearch_key_t, usearch_keys_tape_view_t, usearch_keys_view_t, usearch_matches_tape_view_t,
     usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t, usearch_progress_t,
     usearch_ram_options_t, usearch_rows_view_t, usearch_scalar_t, usearch_traversal_t, usearch_vram_options_t,
-    values_of, vram_options, Accepts, Arena, Blocking, Callbacks, Calling, Completion, Deferring, Element, Error,
-    Executor, Exported, Handles, Key, Matches, MatchesRow, On, Predicate, ProgressCallback, Residency, Result,
-    RowsView, Scalar, Status, Traversal,
+    values_of, vram_options, Accepts, Arena, Blocking, CPUClass, Callbacks, Calling, Completion, Deferring, Element,
+    Error, Executor, Exported, GPUClass, Handles, Key, Matches, MatchesRow, On, Predicate, ProgressCallback, Residency,
+    Result, RowsView, Scalar, Status, Traversal,
 };
 
 // region: Raw Declarations
@@ -576,6 +576,10 @@ pub struct DenseOptions {
     pub connectivity: usize,
     /// Upper bound on entries sharing one key; zero derives to one - unique keys.
     pub values_per_key: usize,
+    /// The class a host index dispatches as; `None` dispatches as the machine.
+    pub cpu_class: Option<CPUClass>,
+    /// The class a device index dispatches as; `None` dispatches as the devices.
+    pub gpu_class: Option<GPUClass>,
 }
 
 impl Default for DenseOptions {
@@ -586,6 +590,8 @@ impl Default for DenseOptions {
             quantization: Scalar::BF16,
             connectivity: 0,
             values_per_key: 0,
+            cpu_class: None,
+            gpu_class: None,
         }
     }
 }
@@ -714,6 +720,8 @@ pub struct DenseLoadRamConfig<'config> {
     /// NUMA node IDs to place the parts on, part `p` landing whole on shard `p` modulo their count;
     /// empty derives every node the process may use.
     pub memory_domains: &'config [i32],
+    /// The class the index dispatches as; `None` dispatches as the machine.
+    pub cpu_class: Option<CPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
     pub values_per_key: usize,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
@@ -728,6 +736,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseL
             path: path.as_ref(),
             executor: None,
             memory_domains: &[],
+            cpu_class: None,
             values_per_key: 0,
             progress: None,
             progress_steps: 0,
@@ -747,6 +756,8 @@ pub struct DenseLoadVramConfig<'config> {
     /// CUDA device ordinals to place the parts on, part `p` landing whole on device `p` modulo
     /// their count; empty derives one free device.
     pub devices: &'config [i32],
+    /// The class the index dispatches as; `None` dispatches as the devices.
+    pub gpu_class: Option<GPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
     pub values_per_key: usize,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
@@ -761,6 +772,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseL
             path: path.as_ref(),
             executor: None,
             devices: &[],
+            gpu_class: None,
             values_per_key: 0,
             progress: None,
             progress_steps: 0,
@@ -780,6 +792,8 @@ pub struct DenseLoadRamBufferConfig<'config> {
     /// NUMA node IDs to place shards on, the monolith landing whole on the first; empty derives
     /// every node the process may use.
     pub memory_domains: &'config [i32],
+    /// The class the index dispatches as; `None` dispatches as the machine.
+    pub cpu_class: Option<CPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
     pub values_per_key: usize,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
@@ -794,6 +808,7 @@ impl<'config> From<&'config [u8]> for DenseLoadRamBufferConfig<'config> {
             buffer,
             executor: None,
             memory_domains: &[],
+            cpu_class: None,
             values_per_key: 0,
             progress: None,
             progress_steps: 0,
@@ -817,6 +832,8 @@ pub struct DenseLoadVramBufferConfig<'config> {
     /// CUDA device ordinals to place shards on, the monolith landing whole on the first; empty
     /// derives one free device.
     pub devices: &'config [i32],
+    /// The class the index dispatches as; `None` dispatches as the devices.
+    pub gpu_class: Option<GPUClass>,
     /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
     pub values_per_key: usize,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
@@ -831,6 +848,7 @@ impl<'config> From<&'config [u8]> for DenseLoadVramBufferConfig<'config> {
             buffer,
             executor: None,
             devices: &[],
+            gpu_class: None,
             values_per_key: 0,
             progress: None,
             progress_steps: 0,
@@ -853,6 +871,8 @@ pub struct DenseViewNvmeConfig<'config> {
     pub executor: Option<&'config Executor>,
     /// Devices or directories to serve the parts from; empty serves each where its manifest points.
     pub paths: &'config [&'config Path],
+    /// The class the index dispatches as; `None` dispatches as the machine.
+    pub cpu_class: Option<CPUClass>,
 }
 
 impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseViewNvmeConfig<'config> {
@@ -861,6 +881,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseV
             path: path.as_ref(),
             executor: None,
             paths: &[],
+            cpu_class: None,
         }
     }
 }
@@ -1294,7 +1315,7 @@ impl<'arena> DenseBatch<'arena> {
 /// index.insert(&keys, &rows(&slab, 4)?)?;
 ///
 /// let query: [f32; 4] = [0.2, 0.1, 0.2, 0.1];
-/// let executor = Executor::for_ram(&[], 0, 0)?;
+/// let executor = Executor::for_ram(&[], None, 0, 0)?;
 /// let mut arena = Arena::new_in(&executor)?;
 /// let matches = index.on(&executor).search(&rows(&query, 4)?, 10, &mut arena)?;
 /// for row in matches.rows()? {
@@ -1347,7 +1368,7 @@ impl DenseIndex {
     /// use usearch::*;
     ///
     /// let index = DenseIndex::init_ram(&DenseOptions { dimensions: 4, ..DenseOptions::default() }, &[])?;
-    /// let executor = Executor::for_ram(&[], 0, 0)?;
+    /// let executor = Executor::for_ram(&[], None, 0, 0)?;
     /// let mut arena = Arena::new_in(&executor)?;
     /// let query = [0.0f32; 4];
     /// let call = index.deferred(&executor).search(&rows(&query, 4)?, 10, &mut arena)?;
@@ -1360,7 +1381,7 @@ impl DenseIndex {
     /// use usearch::*;
     ///
     /// let index = DenseIndex::init_ram(&DenseOptions { dimensions: 4, ..DenseOptions::default() }, &[])?;
-    /// let executor = Executor::for_ram(&[], 0, 0)?;
+    /// let executor = Executor::for_ram(&[], None, 0, 0)?;
     /// let mut arena = Arena::new_in(&executor)?;
     /// let call = index.deferred(&executor).get::<f32>(Key::from(1u64), &mut arena)?;
     /// let rows = call.wait()?;
@@ -1409,7 +1430,7 @@ impl DenseIndex {
                 dimensions: options.dimensions,
                 connectivity: options.connectivity,
                 values_per_key: options.values_per_key,
-                ram: ram_options(memory_domains),
+                ram: ram_options(memory_domains, options.cpu_class),
             })
         };
         check(outcome).map(|()| index)
@@ -1431,7 +1452,7 @@ impl DenseIndex {
                 dimensions: options.dimensions,
                 connectivity: options.connectivity,
                 values_per_key: options.values_per_key,
-                vram: vram_options(devices),
+                vram: vram_options(devices, options.gpu_class),
             })
         };
         check(outcome).map(|()| index)
@@ -1454,7 +1475,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
-                ram: ram_options(config.memory_domains),
+                ram: ram_options(config.memory_domains, config.cpu_class),
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1480,7 +1501,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
-                vram: vram_options(config.devices),
+                vram: vram_options(config.devices, config.gpu_class),
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1505,7 +1526,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 buffer: config.buffer.into(),
-                ram: ram_options(config.memory_domains),
+                ram: ram_options(config.memory_domains, config.cpu_class),
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1530,7 +1551,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 buffer: config.buffer.into(),
-                vram: vram_options(config.devices),
+                vram: vram_options(config.devices, config.gpu_class),
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1575,7 +1596,7 @@ impl DenseIndex {
                 outcome: &mut outcome,
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
-                nvme: nvme_options(&views),
+                nvme: nvme_options(&views, config.cpu_class),
             })
         };
         check(outcome).map(|()| index)
@@ -2910,7 +2931,7 @@ mod tests {
     fn sequential_keys(count: usize) -> Vec<Key> { (0..count as u64).map(Key::from).collect() }
 
     /// One executor per test, since an executor orders the calls submitted to it.
-    fn executor() -> Executor { Executor::for_ram(&[], 0, 0).expect("the executor must spawn") }
+    fn executor() -> Executor { Executor::for_ram(&[], None, 0, 0).expect("the executor must spawn") }
 
     fn empty_index(dimensions: usize, metric: DenseMetric, quantization: Scalar) -> Result<DenseIndex> {
         let options = DenseOptions {
@@ -4327,7 +4348,7 @@ mod tests {
         let keys = sequential_keys(COUNT);
         let slab = seeded_rows(COUNT, DIMENSIONS, SEED);
 
-        let executor = Executor::for_ram(&[], THREADS, 0)?;
+        let executor = Executor::for_ram(&[], None, THREADS, 0)?;
         let receiver = index.on(&executor);
         let vectors = rows(&slab, DIMENSIONS)?;
         receiver.insert(&keys, &vectors)?;
@@ -4376,8 +4397,8 @@ mod tests {
 
         // Calls on one executor run in order, so genuinely overlapping calls need one apiece -
         // the writer's and the reader's, on two threads sharing the handle.
-        let writer = Executor::for_ram(&[], THREADS, 0)?;
-        let reader = Executor::for_ram(&[], THREADS, 0)?;
+        let writer = Executor::for_ram(&[], None, THREADS, 0)?;
+        let reader = Executor::for_ram(&[], None, THREADS, 0)?;
         let known: HashSet<Key> = keys.iter().copied().collect();
         let strangers = AtomicUsize::new(0);
 
@@ -4576,7 +4597,7 @@ mod tests {
         let slab = seeded_rows(COUNT, DIMENSIONS, SEED);
         let vectors = || Matrix::<f32>::from_slice(&slab, &[COUNT, DIMENSIONS]).unwrap();
 
-        let executor = Executor::for_ram(&[], 1, 1)?;
+        let executor = Executor::for_ram(&[], None, 1, 1)?;
         let receiver = index.deferred(&executor);
         let first = receiver.insert(sequential_keys(COUNT), vectors())?;
         let second = receiver.insert(sequential_keys(COUNT), vectors())?;

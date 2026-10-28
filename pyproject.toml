@@ -3,8 +3,8 @@
 #   - `macos` wheels for x86_64, arm64, and universal2;
 #   - `windows` wheels for AMD64, and ARM64. But not x86.
 #   - `manylinux` and `musllinux` wheels for Linux on x86_64, aarch64. But not i686, ppc64le, s390x;
-#   * for CPython versions from 3.12 to 3.14 (including free-threaded 3.13t and 3.14t).
-#   = meaning 7 platforms * 5 Python versions = 35 builds.
+#   * for CPython versions from 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
+#   = meaning 7 platforms * 6 Python versions = 42 builds.
 [build-system]
 build-backend = "scikit_build_core.build"
 requires = ["scikit-build-core>=0.10"]
@@ -40,6 +40,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Free Threading :: 3 - Stable",
   "Programming Language :: Java",
@@ -166,7 +167,7 @@ test-parallel = ["pytest-run-parallel>=0.7"]
 test-oracles = ["scipy>=1.11", "tqdm>=4.66"]
 # CuPy is the device-buffer producer, exercising `__cuda_array_interface__` against a VRAM-resident
 # index. Not an oracle - the recall reference stays SciPy's, on the host.
-test-cuda = ["cupy-cuda12x"]
+test-cuda = ["cupy-cuda13x"]
 
 [tool.ruff]
 # Code wraps at 120; prose - docstrings and comments - wraps at 100.

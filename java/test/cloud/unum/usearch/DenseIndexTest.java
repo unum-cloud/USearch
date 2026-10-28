@@ -65,7 +65,7 @@ import cloud.unum.usearch.Types.USearchException;
 public class DenseIndexTest {
 
     /** One pool most verbs here run on; the ones called on the index itself run on the calling thread. */
-    private static final Executor POOL = Executor.forRam(new int[0], 0, 0);
+    private static final Executor POOL = Executor.forRam(new int[0], null, 0, 0);
 
     @AfterAll
     public static void releasePool() {
@@ -580,14 +580,14 @@ public class DenseIndexTest {
         assertEquals(
                 2, DenseIndex.metadataReadBuffer(MemorySegment.ofArray(slab)).dimensions());
 
-        try (DenseIndex reopened = DenseIndex.loadRam(checkpoint.getAbsolutePath(), POOL, new int[0], 0)) {
+        try (DenseIndex reopened = DenseIndex.loadRam(checkpoint.getAbsolutePath(), POOL, new int[0], null, 0)) {
             assertEquals(2, reopened.describe().size());
             assertEquals(2, reopened.describe().metadata().dimensions());
         }
 
         // The monolith lives in the arena, so it outlives the index that wrote it.
         try (arena;
-                DenseIndex reopened = DenseIndex.loadRamBuffer(monolith.segment(), POOL, new int[0], 0)) {
+                DenseIndex reopened = DenseIndex.loadRamBuffer(monolith.segment(), POOL, new int[0], null, 0)) {
             assertEquals(2, reopened.describe().size());
         }
 
@@ -657,7 +657,7 @@ public class DenseIndexTest {
     /** The stand-in holds a deferred call until its wait, so the status is observable before the join. */
     @Test
     public void deferredCallsCompleteOnTheirExecutor() {
-        try (Executor pool = Executor.forRam(new int[0], 2, 4);
+        try (Executor pool = Executor.forRam(new int[0], null, 2, 4);
                 Arena arena = new Arena(pool);
                 DenseIndex index = empty(twoDimensional())) {
             index.reserve(2);
@@ -814,7 +814,7 @@ public class DenseIndexTest {
 
     @Test
     public void aClosedExecutorRefusesEveryVerb() {
-        Executor pool = Executor.forRam(new int[0], 0, 0);
+        Executor pool = Executor.forRam(new int[0], null, 0, 0);
         pool.close();
         pool.close();
         assertThrows(IllegalStateException.class, () -> pool.drain(Mood.PARKED));
@@ -823,11 +823,11 @@ public class DenseIndexTest {
         }
         assertEquals(
                 Status.INVALID_ARGUMENT,
-                assertThrows(USearchException.class, () -> Executor.forRam(new int[0], -1, 0))
+                assertThrows(USearchException.class, () -> Executor.forRam(new int[0], null, -1, 0))
                         .status());
         assertEquals(
                 Status.SHAPE_MISMATCH,
-                assertThrows(USearchException.class, () -> Executor.forVram(new int[] {0}, new MemorySegment[2], 0, 0))
+                assertThrows(USearchException.class, () -> Executor.forVram(new int[] {0}, null, new MemorySegment[2], 0, 0))
                         .status());
     }
 

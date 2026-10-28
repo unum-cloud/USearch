@@ -417,7 +417,7 @@ struct shared_library_t {
     void* handle = nullptr;
 
     /** Opens the library at @p path, or answers the empty one. */
-    static shared_library_t open(char const* path) noexcept {
+    static shared_library_t open([[maybe_unused]] char const* path) noexcept {
 #if USEARCH_OS_WINDOWS_
         return {reinterpret_cast<void*>(LoadLibraryA(path))};
 #elif USEARCH_OS_WASI_
@@ -429,7 +429,7 @@ struct shared_library_t {
 
     /** Points @p entry at the symbol exported as @p name, answering whether there is one. */
     template <typename function_type_>
-    bool resolve(char const* name, function_type_& entry) const noexcept {
+    bool resolve([[maybe_unused]] char const* name, function_type_& entry) const noexcept {
         if (!handle) return false;
 #if USEARCH_OS_WINDOWS_
         entry = reinterpret_cast<function_type_>(GetProcAddress(static_cast<HMODULE>(handle), name));

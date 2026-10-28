@@ -672,11 +672,12 @@ std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>
 
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
           typename kernels_type_>
-status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::load_kernels_(int device) noexcept {
+status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::load_kernels_(cuda_api_t const& api,
+                                                                                             int device) noexcept {
     bool const parametrized = metric_ == usearch_sequence_metric_overlap_k ||
                               metric_ == usearch_sequence_metric_needleman_wunsch_k;
     if (parametrized && host_parameters_.empty()) return status_t::uninitialized_k;
-    auto [module, status] = cuda_module_t::load(device, kernels_type_::bytes());
+    auto [module, status] = cuda_module_t::load(api, device, kernels_type_::bytes());
     if (failed(status)) return status;
     module_ = std::move(module);
     vram_kernel_symbol_t symbol;
@@ -691,9 +692,9 @@ status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::l
             if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
         }
     if (host_parameters_.empty()) return status_t::success_k;
-    device_parameters_ = cuda_make_unique(cuda_device_allocator<u32_t> {}, host_parameters_.size());
+    device_parameters_ = cuda_make_unique(cuda_device_allocator<u32_t> {api}, host_parameters_.size());
     if (!device_parameters_) return status_t::bad_alloc_k;
-    if (cuda_copy(device_parameters_.get(), host_parameters_.data(), host_parameters_.size() * sizeof(u32_t)) !=
+    if (cuda_copy(api, device_parameters_.get(), host_parameters_.data(), host_parameters_.size() * sizeof(u32_t)) !=
         cuda_success_k)
         return status_t::device_error_k;
     return status_t::success_k;

@@ -31,11 +31,13 @@ bytes_view_t dense_amd_code_object_t::bytes() noexcept {
 
 std::size_t check_vram_amd(settings_t const& settings, gpu_device_t const& device) {
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    if (hip_set_device(ordinal) != hip_success_k) return fmt::println("- ROCm: device #{} does not answer", ordinal), 1;
-    fmt::println("- ROCm: device #{} {}, {}, {} compute units, {} MiB", ordinal, device.name,
-                 usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)), device.compute_units,
+    hip_api_t const& api = gpu_drivers().hip;
+    if (hip_set_device(api, ordinal) != hip_success_k)
+        return fmt::println("- ROCm: device #{} does not answer", ordinal), 1;
+    fmt::println("- ROCm: device #{} {}, gfx {}.{}, {}-lane waves, {} compute units, {} MiB", ordinal, device.name,
+                 device.architecture_major, device.architecture_minor, device.warp_lanes, device.compute_units,
                  device.memory_bytes >> 20);
-    auto [executor, spawn_status] = hip_executor_t::spawn(std::span<int const> {&ordinal, 1});
+    auto [executor, spawn_status] = hip_executor_t::spawn(api, std::span<int const> {&ordinal, 1});
     if (failed(spawn_status)) return fmt::println("- ROCm: device #{} opens no stream", ordinal), 1;
     return check_vram_indexes(settings, executor);
 }

@@ -354,7 +354,7 @@ static std::size_t check_positions_radius(u64_t seed) {
                 failures += expect_eq(complete.count, expected);
                 failures += expect(complete.candidates_count >= complete.count);
                 for (std::size_t position = 0; position != complete.count; ++position)
-                    failures += expect(context.results[position].distance <= radius * radius);
+                    failures += expect(context.results[position].distance <= static_cast<u64_t>(radius * radius));
                 radius_result_t const plain = within(index, query, radius, radius_margin_t::none_k, widest_row, metric,
                                                      context);
                 failures += expect(bool(plain));

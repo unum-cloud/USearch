@@ -23,9 +23,10 @@ namespace unum::usearch::test::dense {
  *  copy failed. Apple's unified memory is the host's own. */
 template <gpu_vendor_t vendor_>
 bool dense_download(void* destination, void const* source, std::size_t bytes) noexcept {
-    if constexpr (vendor_ == gpu_vendor_t::nvidia_k) return cuda_copy(destination, source, bytes) == cuda_success_k;
+    if constexpr (vendor_ == gpu_vendor_t::nvidia_k)
+        return cuda_copy(test::gpu_drivers().cuda, destination, source, bytes) == cuda_success_k;
     else if constexpr (vendor_ == gpu_vendor_t::amd_k)
-        return hip_api().copy(destination, source, bytes, hip_copy_device_to_host_k) == hip_success_k;
+        return test::gpu_drivers().hip.copy(destination, source, bytes, hip_copy_device_to_host_k) == hip_success_k;
     else return std::memcpy(destination, source, bytes), true;
 }
 
@@ -552,12 +553,22 @@ struct us::test::dense_indexes_executor<indexes_type_> {
 
     explicit dense_indexes_executor(executor_t const& placement) noexcept {
         int const device = placement.device(0);
-        auto [executor, spawn_status] = executor_t::spawn(std::span<int const> {&device, 1});
+        auto [executor, spawn_status] = spawn_(std::span<int const> {&device, 1});
         status = spawn_status;
         this->executor = std::move(executor);
     }
     dense_indexes_executor(dense_indexes_executor const&) = delete;
     dense_indexes_executor& operator=(dense_indexes_executor const&) = delete;
+
+    /** Opens @p devices through the vendor's driver table the harness loaded. */
+    static us::utilities::expected<executor_t> spawn_(std::span<int const> devices) noexcept {
+        us::utilities::gpu_drivers_t& drivers = us::test::gpu_drivers();
+        if constexpr (executor_t::vendor_k == us::utilities::gpu_vendor_t::nvidia_k)
+            return executor_t::spawn(drivers.cuda, devices);
+        else if constexpr (executor_t::vendor_k == us::utilities::gpu_vendor_t::amd_k)
+            return executor_t::spawn(drivers.hip, devices);
+        else return executor_t::spawn(drivers.metal_contexts, devices);
+    }
 
     /** Places the shards one sharded scenario drives: one VRAM shard on the device of
      *  @p placement; each further call places one more beside it. */
