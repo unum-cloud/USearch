@@ -114,7 +114,6 @@ jobs:
           rustup update nightly
           rustup default nightly
           rustup component add clippy
-          rustc -vV
       - name: Lint Rust
         run: cargo clippy --all-targets -- -D warnings
       - name: Build Rust
@@ -154,14 +153,13 @@ jobs:
         working-directory: ${{ github.workspace }}/csharp
 
         # GoLang
-        # With `LD_DEBUG=all` we detect the addresses of the libraries that are loaded
       - name: Test GoLang
         run: |
           sudo cp ${{ github.workspace }}/build_relwithdebinfo/libusearch_shared.so /usr/lib/libusearch_shared.so
           for root in c include cpp; do sudo cp -r ${{ github.workspace }}/$root/usearch /usr/include/; done
           test -z "$(gofmt -l .)"
           go vet ./...
-          LD_DEBUG=all go test -race -v ./...
+          go test -race -v ./...
         working-directory: ${{ github.workspace }}/golang/
 
   test_ubuntu_debug:
@@ -275,7 +273,6 @@ jobs:
         run: |
           rustup update nightly
           rustup default nightly
-          rustc -vV
       - name: Build Rust
         run: cargo build
       - name: Test Rust
@@ -307,8 +304,6 @@ jobs:
         # C/C++
       - name: Build C/C++
         run: |
-          brew update
-          brew reinstall cmake
           # Apple's linker is fast already; the preset's `lld` stands in for GNU `ld` on Linux
           cmake --preset relwithdebinfo -D USEARCH_BUILD_SHARED=1 -D CMAKE_EXE_LINKER_FLAGS= -D CMAKE_SHARED_LINKER_FLAGS=
           cmake --build --preset relwithdebinfo
@@ -347,7 +342,6 @@ jobs:
         run: |
           rustup update nightly
           rustup default nightly
-          rustc -vV
       - name: Build Rust
         run: cargo build
       - name: Test Rust
@@ -569,7 +563,6 @@ jobs:
         # C/C++
       - name: Build C/C++
         run: |
-          choco install cmake
           cmake --preset msvc2026_x64
           cmake --build --preset msvc2026_x64
       - name: Test C and C++
@@ -604,7 +597,6 @@ jobs:
         run: |
           rustup update nightly
           rustup default nightly
-          rustc -vV
       - name: Build Rust
         run: cargo build
       - name: Test Rust
@@ -638,7 +630,6 @@ jobs:
         # C/C++
       - name: Build C/C++ for Arm64
         run: |
-          choco install cmake
           cmake --preset msvc2022_arm64
           cmake --build --preset msvc2022_arm64
 
@@ -663,11 +654,12 @@ jobs:
           push: false
 
   build_wheels_linux:
-    name: Build Python Wheels for Linux cp${{ matrix.python-version }}
-    runs-on: ubuntu-26.04
+    name: Build Python Wheels for ${{ matrix.os }} cp${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
     needs: [test_ubuntu_gcc, test_ubuntu_clang]
     strategy:
       matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm]
         python-version: ["312", "313", "314", "314t", "315", "315t"]
     steps:
       - name: Checkout
@@ -676,8 +668,6 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - name: Setup QEMU
-        uses: docker/setup-qemu-action@v4
       - name: Install cibuildwheel
         uses: nick-fields/retry@v4
         with:
@@ -695,6 +685,7 @@ jobs:
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
           CIBW_PLATFORM: linux
+          CIBW_ARCHS_LINUX: native
 
   build_wheels_macos:
     name: Build Python Wheels for macOS cp${{ matrix.python-version }}
@@ -844,15 +835,20 @@ jobs:
     name: Compile CUDA and ROCm Library without GPU Runtimes
     runs-on: ubuntu-26.04
     timeout-minutes: 90
-    container: rocm/dev-ubuntu-26.04:latest
+    container: rocm/dev-ubuntu-26.04:10.0.0-full
     steps:
+      # ROCm 10's Clang is LLVM 23, under which NVCC 13.4's front end rejects libstdc++'s `<atomic>`, so NVCC hosts
+      # on Clang 22.
       - name: Install Toolchain
         run: |
-          apt-get update && apt-get install -y ninja-build git curl python3-pip binutils
+          apt-get update && apt-get install -y ninja-build git curl gnupg python3-pip binutils
           pip install --break-system-packages "cmake>=3.31"
           curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
           dpkg -i cuda-keyring_1.1-1_all.deb
-          apt-get update && apt-get install -y cuda-minimal-build-13-4 cuda-driver-dev-13-4
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            > /etc/apt/sources.list.d/llvm.list
+          apt-get update && apt-get install -y clang-22 cuda-minimal-build-13-4 cuda-driver-dev-13-4
           echo "/usr/local/cuda-13.4/bin" >> "$GITHUB_PATH"
       - name: Checkout
         uses: actions/checkout@v7
@@ -860,7 +856,7 @@ jobs:
           submodules: recursive
       - name: Compile Shared Library
         run: |
-          cmake --preset linux_cuda_rocm
+          cmake --preset linux_cuda_rocm -D CMAKE_CUDA_HOST_COMPILER=clang++-22
           cmake --build --preset linux_cuda_rocm --target usearch_shared --parallel 2
       - name: Check No GPU Runtime Is Linked
         run: |
@@ -954,7 +950,6 @@ jobs:
           rustup update nightly
           rustup default nightly
           rustup target add ${{ matrix.target }}
-          rustc -vV
 
       - name: Set up Rust Env
         run: |

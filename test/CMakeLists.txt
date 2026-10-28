@@ -56,7 +56,7 @@ endfunction ()
 # One row per vendor: NVIDIA's cells run the class of the newest generation the listed architectures name, and AMD
 # compiles for the listed processors of the CDNA3 class, which CDNA3 and CDNA4 run.
 set(usearch_test_vram_shards_)
-if (USEARCH_BUILD_CUDA)
+if (USEARCH_CUDA_ARCH)
     usearch_cuda_capabilities(usearch_test_cuda_capabilities_ "${usearch_cuda_architectures_}")
     usearch_test_vram_shards(
         nvidia USEARCH_ARCH_CUDA_
@@ -65,7 +65,7 @@ if (USEARCH_BUILD_CUDA)
         DEFINITIONS ${usearch_test_cuda_capabilities_}
     )
 endif ()
-if (USEARCH_BUILD_ROCM)
+if (USEARCH_ROCM_ARCH)
     usearch_rocm_codes(usearch_test_rocm_codes_ gfx942 gfx950)
     usearch_test_vram_shards(
         amd USEARCH_ARCH_ROCM_
@@ -75,7 +75,7 @@ if (USEARCH_BUILD_ROCM)
         CODES ${usearch_test_rocm_codes_}
     )
 endif ()
-if (USEARCH_BUILD_METAL)
+if (USEARCH_METAL_ARCH)
     usearch_test_vram_shards(apple USEARCH_ARCH_METAL_ ENTRY dense/vram_apple.cpp)
 endif ()
 

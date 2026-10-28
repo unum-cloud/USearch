@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 /// Every CMake option this crate sets, so an implementation is the subset it switches on and
 /// nothing is left to whatever CMake would otherwise detect on the host.
-const KNOWN_OPTIONS: &[&str] = &["USEARCH_BUILD_STUB", "USEARCH_BUILD_CUDA"];
+const KNOWN_OPTIONS: &[&str] = &["USEARCH_BUILD_STUB"];
 
 /// One implementation of the C interface, and what CMake must be told to produce it.
 #[derive(Clone, Copy)]
@@ -53,7 +53,6 @@ const ENGINE: Implementation = Implementation {
 /// The engine with its CUDA backends compiled in.
 const ENGINE_CUDA: Implementation = Implementation {
     feature: "cuda",
-    options: &["USEARCH_BUILD_CUDA"],
     ..ENGINE
 };
 
@@ -168,20 +167,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             .cxxflag("-fno-exceptions");
     }
 
-    // The architecture list is CUDA's alone, and says nothing unless its kernels are compiled. Every GPU
-    // build compiles its host side with Clang, so an unset `CXX` takes `clang++` rather than the default.
-    if chosen.options.contains(&"USEARCH_BUILD_CUDA") {
+    // The CUDA code is the release set, or the one the environment names, like `USEARCH_CUDA_ARCH=100f`,
+    // and empty without the feature, never left to the host. Every GPU build compiles its host side with
+    // Clang, so an unset `CXX` takes `clang++` rather than the default.
+    println!("cargo:rerun-if-env-changed=USEARCH_CUDA_ARCH");
+    let cuda_arch = match chosen.feature == ENGINE_CUDA.feature {
+        true => env::var("USEARCH_CUDA_ARCH").unwrap_or_else(|_| "all".into()),
+        false => String::new(),
+    };
+    if !cuda_arch.is_empty() {
         println!("cargo:rerun-if-env-changed=CXX");
         if env::var_os("CXX").is_none() {
             engine
                 .define("CMAKE_C_COMPILER", "clang")
                 .define("CMAKE_CXX_COMPILER", "clang++");
         }
-        println!("cargo:rerun-if-env-changed=USEARCH_CUDA_ARCHITECTURES");
-        if let Ok(architectures) = env::var("USEARCH_CUDA_ARCHITECTURES") {
-            engine.define("USEARCH_CUDA_ARCHITECTURES", architectures);
-        }
     }
+    engine.define("USEARCH_CUDA_ARCH", cuda_arch);
 
     // `build_target` stops short of installing, so the archive sits where the generator left it:
     // directly under the target's own directory, or one config deeper on the multi-config ones.

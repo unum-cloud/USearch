@@ -96,7 +96,7 @@ USEARCH_EXPORT char const* usearch_capabilities_available(void) {
             if (!name && cpu_rung_fits(class_, machine)) name = cpu_class_capabilities_name<class_>.data();
         };
         (rung.template operator()<classes_>(), ...);
-        return name;
+        return name ? name : "";
     }(cpu_ladder_t {}, ceiling);
 }
 
@@ -228,12 +228,13 @@ USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class)
     case usearch_cpu_class_alibaba_c930_k: return "alibaba-c930";
     case usearch_cpu_class_wasm32_v128_k: return "wasm32-v128";
     case usearch_cpu_class_wasm64_extended_k: return "wasm64-extended";
+    case usearch_cpu_class_monoversioned_k: return "monoversioned";
     default: return "unknown";
     }
 }
 
 USEARCH_EXPORT usearch_cpu_class_t usearch_cpu_class_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_wasm64_extended_k; ++code) {
+    for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_monoversioned_k; ++code) {
         usearch_cpu_class_t const cpu_class = static_cast<usearch_cpu_class_t>(code);
         if (named(name, usearch_cpu_class_name(cpu_class))) return cpu_class;
     }

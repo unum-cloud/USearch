@@ -511,7 +511,7 @@ jobs:
           xcopy /E /I .\c\usearch pkg\usearch
           xcopy /E /I .\include\usearch pkg\usearch
           xcopy /E /I .\cpp\usearch pkg\usearch
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
+          tar -cf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
 
       - name: Build library with MSVC for Arm64
         if: matrix.arch == 'arm64'
@@ -523,7 +523,7 @@ jobs:
           xcopy /E /I .\c\usearch pkg\usearch
           xcopy /E /I .\include\usearch pkg\usearch
           xcopy /E /I .\cpp\usearch pkg\usearch
-          tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
+          tar -cf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
 
       - name: Upload native library for Java
         uses: actions/upload-artifact@v7
@@ -996,7 +996,7 @@ jobs:
     needs: versioning
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-26, windows-2022]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, windows-2022]
         python-version:
           ["312", "313", "314", "314t", "315", "315t"]
     steps:
@@ -1004,22 +1004,17 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: "main"
-      - name: Setup Docker
-        if: matrix.os == 'ubuntu-24.04'
-        uses: docker/setup-docker-action@v5
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Setup QEMU
-        if: matrix.os == 'ubuntu-24.04' # We only need QEMU for Linux builds
-        uses: docker/setup-qemu-action@v4
       - name: Install cibuildwheel
         run: python -m pip install cibuildwheel
       - name: Build wheels
         run: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_ARCHS_LINUX: native
           CIBW_TEST_SKIP: "*-win_arm64" # Too complex to emulate Windows ARM
       - name: Upload wheels
         uses: actions/upload-artifact@v7
@@ -1283,7 +1278,7 @@ jobs:
 
           # Just warn if count seems low, don't fail the build
           if [ "$lib_count" -lt 5 ]; then
-            echo "WARNING: Found fewer native libraries than expected ($lib_count)"
+            echo "::warning::Found fewer native libraries than expected ($lib_count)"
           fi
       - name: Sign and publish fat JAR
         run: gradle signLibraryPublication publish
@@ -1403,8 +1398,6 @@ jobs:
       - name: Build C library for MacOS
         if: matrix.os == 'macos-15'
         run: |
-          brew update
-          brew reinstall cmake
           cmake --preset library -B build_artifacts
           cmake --build build_artifacts
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
@@ -1413,7 +1406,6 @@ jobs:
       - name: Build C library for Windows
         if: matrix.os == 'windows-2025-vs2026'
         run: |
-          choco install cmake
           cmake --preset msvc2026_x64 -B build_artifacts -D USEARCH_BUILD_TEST=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
@@ -1506,7 +1498,7 @@ jobs:
       - name: Build Docs
         run: cd docs && doxygen conf.dox && sphinx-build -M html . ../build/docs -W
       - name: Compress Docs
-        run: tar -czvf docs.tar.gz build/docs/html/
+        run: tar -czf docs.tar.gz build/docs/html/
       - name: Upload docs to release
         uses: xresloader/upload-to-github-release@v1
         env:

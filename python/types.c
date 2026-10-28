@@ -185,7 +185,7 @@ usearch_py_enum_t usearch_py_residency = {"Residency", usearch_residency_ram_k, 
                                           spell_residency, NULL};
 usearch_py_enum_t usearch_py_traversal = {"Traversal", usearch_traversal_walk_k, usearch_traversal_scan_k,
                                           spell_traversal, NULL};
-usearch_py_enum_t usearch_py_cpu_class = {"CPUClass", usearch_cpu_class_serial_k, usearch_cpu_class_wasm64_extended_k,
+usearch_py_enum_t usearch_py_cpu_class = {"CPUClass", usearch_cpu_class_serial_k, usearch_cpu_class_monoversioned_k,
                                           spell_cpu_class, NULL};
 usearch_py_enum_t usearch_py_gpu_class = {"GPUClass", usearch_gpu_class_nvidia_ampere_k,
                                           usearch_gpu_class_apple_metal10_k, spell_gpu_class, NULL};

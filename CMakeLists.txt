@@ -33,22 +33,34 @@ option(USEARCH_BUILD_PYTHON "Compile the CPython extension; `scikit-build-core` 
 option(USEARCH_BUILD_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
 option(USEARCH_BUILD_SWIFT "Package the static library for SwiftPM, as an XCFramework or an artifact bundle" OFF)
 option(USEARCH_BUILD_TOOLS "Compile the command-line tools in tools/, and their MPI build where MPI is found" OFF)
-option(USEARCH_BUILD_CUDA "Compile the NVIDIA index variants, tests and benchmarks with NVCC" OFF)
-option(USEARCH_BUILD_ROCM "Compile the AMD index variants and tests with ROCm's Clang" OFF)
-option(USEARCH_BUILD_METAL "Compile the Apple index variants and tests over Metal" OFF)
+set(USEARCH_CUDA_ARCH
+    ""
+    CACHE STRING "NVIDIA code the index variants, tests and benchmarks build for: empty, all, native or one like 100f"
+)
+set(USEARCH_ROCM_ARCH
+    ""
+    CACHE STRING "AMD processor the index variants and tests build for: empty, all, native or one like gfx942"
+)
+set(USEARCH_METAL_ARCH
+    ""
+    CACHE STRING "Apple GPU family the index variants and tests serve: empty, all or one like apple9"
+)
 option(USEARCH_WITH_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
 option(USEARCH_WERROR "Treat compiler warnings as errors" OFF)
 
 # Seeded from the environment at the first configure, so `cargo`, `cmake-js` and `scikit-build-core` honour
-# `USEARCH_TARGET_ARCH=native`.
-set(USEARCH_TARGET_ARCH
-    "$ENV{USEARCH_TARGET_ARCH}"
+# `USEARCH_MARCH=native` and `USEARCH_MULTIVERSIONED=OFF`.
+set(USEARCH_MARCH
+    "$ENV{USEARCH_MARCH}"
     CACHE STRING
-          "CPU the own units are tuned for: empty for the architecture floor, native, or a CPU name like graniterapids"
+          "The `-march` floor: empty for the architecture floor, an ISA level, native, or a CPU like graniterapids"
 )
-set(USEARCH_TARGET_CLASSES
-    ""
-    CACHE STRING "CPU classes compiled beside serial: empty for every class, a list like intel_granite, or native"
+set(usearch_multiversioned_ ON)
+if (DEFINED ENV{USEARCH_MULTIVERSIONED})
+    set(usearch_multiversioned_ "$ENV{USEARCH_MULTIVERSIONED}")
+endif ()
+option(USEARCH_MULTIVERSIONED "Compile every CPU class above the floor, or one monoversioned class for USEARCH_MARCH"
+       ${usearch_multiversioned_}
 )
 
 # The library, its tests and benchmarks compile the first N storage dtypes of the ladder bf16, u1, i8, e4m3, f16, u8,

@@ -1126,6 +1126,9 @@ pub enum CPUClass {
     /// WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit
     /// addressing.
     Wasm64Extended = 17,
+    /// The one class of a monoversioned build, with every capability its floor implies or its
+    /// preset vouches for.
+    Monoversioned = 18,
 }
 
 impl fmt::Display for CPUClass {

@@ -936,6 +936,8 @@ public enum CPUClass : int
     Wasm32V128 = 16,
     /// <summary>WebAssembly with relaxed SIMD, threads and 64-bit addressing.</summary>
     Wasm64Extended = 17,
+    /// <summary>The one class of a monoversioned build.</summary>
+    Monoversioned = 18,
 }
 
 /// <summary>A GPU family USearch ships tuned variants for, which a VRAM placement or executor may pin.</summary>

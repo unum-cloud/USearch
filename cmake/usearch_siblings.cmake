@@ -41,12 +41,12 @@ function (usearch_sibling name_ override_ link_target_ repository_ tag_)
     )
 endfunction ()
 
-# The siblings tune their own units for the CPU USearch is tuned for.
-if (USEARCH_TARGET_ARCH)
-    set(NUMKONG_TARGET_ARCH "${USEARCH_TARGET_ARCH}")
-    set(STRINGZILLA_TARGET_ARCH "${USEARCH_TARGET_ARCH}")
-    set(FORKUNION_TARGET_ARCH "${USEARCH_TARGET_ARCH}")
-endif ()
+# The siblings build for the floor, the build kind and the GPU codes USearch builds for.
+foreach (sibling_ IN ITEMS NUMKONG STRINGZILLA FORKUNION SMASHTABLE)
+    foreach (switch_ IN ITEMS MARCH MULTIVERSIONED CUDA_ARCH ROCM_ARCH METAL_ARCH)
+        set(${sibling_}_${switch_} "${USEARCH_${switch_}}")
+    endforeach ()
+endforeach ()
 
 # NumKong: the distance kits and tensors, header-only, as every unit inlines the kernels its CPU or GPU class runs.
 # ForkUnion: the thread pools, the memory topology, and the ISA-specific waiters and atomic references. StringZilla: the
@@ -55,17 +55,17 @@ endif ()
 set(usearch_sibling_targets_)
 usearch_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG numkong::header https://github.com/ashvardanian/NumKong
-    3fecca8d625ccc89ba2605e195e621e48446c795
+    5d67bd8aafa28867b2d73694f24496c274721397
 )
 usearch_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION forkunion::header https://github.com/ashvardanian/ForkUnion
-    0b9296ebe0dc3886f4f850f0dc97d6ce382ac909
+    5fac4b88fcd2f611db41055da2b20e1e765449a2
 )
 usearch_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA stringzilla::header https://github.com/ashvardanian/StringZilla
-    53fb6a67b188561ffcab506ee3d03901716b1b49
+    a43a398cecd159f6c383843756540b898a45bee7
 )
 usearch_sibling(
     smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE smashtable::header https://github.com/ashvardanian/SmashTable
-    e45080c7ea61a5a9c7fc90ac8b9595b49b341574
+    fe3d32edb4685b925e62a427ef6ebdf74b311af9
 )

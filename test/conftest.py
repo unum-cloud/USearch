@@ -24,8 +24,7 @@ def pytest_report_header() -> list[str]:
     """
     return [
         f"- Platform: {platform.platform()}",
-        f"- Python: {platform.python_version()}",
-        f"- USearch: {usearch.version()} from {usearch.DenseIndex.__module__}",
+        f"- USearch: {usearch.version()} from {usearch.lib.__file__}",
         f"- Capabilities compiled: {usearch.capabilities_compiled()}",
         f"- Capabilities available: {usearch.capabilities_available()}",
         f"- Seed: {SETTINGS.seed}",

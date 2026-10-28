@@ -1633,8 +1633,8 @@ enum class cpu_class_t : u32_t {
      *  @c BMOPA among them, without plain SVE. */
     apple_m4_k,
 
-    /** Graviton5-class Arm - Neoverse V3, Armv9.2: the @c apple_m2_k bundle with
-     *  @c FEAT_WFxT guaranteed, so waits monitor instead of spinning. */
+    /** Graviton5-class Arm - Neoverse V3, Armv9.2: the @c apple_m2_k bundle with waits that
+     *  monitor through @c WFE instead of spinning; no build compiles it yet. */
     aws_g5_k,
 
     /** Vera-class Arm - NVIDIA's Armv9.2+ cores with @c FEAT_FP8 dot products. */
@@ -1651,6 +1651,10 @@ enum class cpu_class_t : u32_t {
     /** WebAssembly with relaxed SIMD, a shared memory for Web Worker pools and 64-bit addressing,
      *  bundled because every engine that ships one ships the other two. */
     wasm64_extended_k,
+
+    /** The one class of a monoversioned build: every capability @c USEARCH_MARCH implies or a
+     *  preset vouches for, as the libraries compiled them. */
+    monoversioned_k,
 };
 
 /** The GPU vendors USearch drives, each through a runtime loaded on first use, so one binary

@@ -21,7 +21,7 @@ target_include_directories(
     usearch_bench_dense_ram_index_search PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools
 )
 target_link_libraries(
-    usearch_bench_dense_ram_index_search PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static
+    usearch_bench_dense_ram_index_search PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header
                                                  ${USEARCH_PUNNED_LIBRARIES}
 )
 

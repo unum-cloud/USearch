@@ -1913,7 +1913,7 @@ inline std::vector<usearch_scalar_t> compiled_scalars(usearch_residency_t reside
 /** The CPU classes the library accepts as pins on this machine, from the portable floor up. */
 inline std::vector<usearch_cpu_class_t> admitted_classes() {
     std::vector<usearch_cpu_class_t> classes;
-    for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_wasm64_extended_k; ++code) {
+    for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_monoversioned_k; ++code) {
         usearch_cpu_class_t const cpu_class = static_cast<usearch_cpu_class_t>(code);
         if (dense_opens(usearch_residency_ram_k, usearch_scalar_bf16_k, cpu_class)) classes.push_back(cpu_class);
     }

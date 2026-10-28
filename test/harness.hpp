@@ -186,10 +186,10 @@ inline machine_t probe_machine() noexcept {
 }
 
 /** Prints the version line, then the capabilities as "- Compiled for:" and "- This machine:". */
-inline void print(machine_t const& machine) {
-    fmt::println("USearch {}", machine.version);
-    fmt::println("- Compiled for: {}", machine.compiled);
-    fmt::println("- This machine: {}", machine.available);
+inline void print(machine_t const& machine, std::FILE* stream = stdout) {
+    fmt::println(stream, "USearch {}", machine.version);
+    fmt::println(stream, "- Compiled for: {}", machine.compiled);
+    fmt::println(stream, "- This machine: {}", machine.available);
 }
 
 /** The 64-bit FNV-1a hash of @p text, folding stream names into @ref stream_key. */

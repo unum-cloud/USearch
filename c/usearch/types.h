@@ -519,7 +519,7 @@ typedef enum usearch_cpu_class_t {
     /** Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles. */
     usearch_cpu_class_apple_m4_k,
 
-    /** Graviton5-class Arm - Neoverse V3, Armv9.2: monitored waits guaranteed. */
+    /** Graviton5-class Arm - Neoverse V3, Armv9.2: monitored waits; no build compiles it yet. */
     usearch_cpu_class_aws_g5_k,
 
     /** Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
@@ -535,6 +535,10 @@ typedef enum usearch_cpu_class_t {
     /** WebAssembly with relaxed SIMD, shared memory for real thread pools, and the 64-bit
      *  addressing that alone lets one module's memory pass 4 GB. */
     usearch_cpu_class_wasm64_extended_k,
+
+    /** The one class of a monoversioned build: every capability its floor implies or its preset
+     *  vouches for, as the kernel libraries compiled them. */
+    usearch_cpu_class_monoversioned_k,
 } usearch_cpu_class_t;
 
 /** The GPU families USearch ships tuned variants for, the device twin of
@@ -1339,7 +1343,8 @@ USEARCH_EXPORT char const* usearch_capabilities_compiled(void);
 
 /**
  *  @brief Retrieves the kernel families of the newest CPU class the current machine runs.
- *  @return A comma-separated static string with capability names.
+ *  @return A comma-separated static string with capability names, empty where the machine runs
+ *      no class this build compiled, as a monoversioned build on an older CPU.
  */
 USEARCH_EXPORT char const* usearch_capabilities_available(void);
 

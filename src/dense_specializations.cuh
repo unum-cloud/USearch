@@ -765,13 +765,13 @@ struct specialized_index {
  *  ForkUnion mask does; on NVMe where its kit alone differs, as a storage walk shares a few
  *  counters and never waits, so its parent's reference serves; on a device always, since each
  *  class's unit alone carries kernels for its generation. The serial floor always compiles its
- *  variants, and a variant a class drops is its parent's, which the ladder reaches on the next
- *  rung.
+ *  variants, and so does the monoversioned class, which has no parent; elsewhere a variant a class
+ *  drops is its parent's, which the ladder reaches on the next rung.
  */
 template <dense_home_t home_, nk_dtype_t dtype_, auto class_>
 static consteval bool variant_advances() noexcept {
     if constexpr (home_ == dense_home_t::ram_k || home_ == dense_home_t::nvme_k) {
-        if constexpr (class_ == cpu_class_t::serial_k) return true;
+        if constexpr (class_ == cpu_class_t::serial_k || class_ == cpu_class_t::monoversioned_k) return true;
         else {
             constexpr cpu_class_t parent_k = parent_class_of(class_);
             bool const kits_differ = !std::is_same_v<quads_kit_of<dtype_, class_>, quads_kit_of<dtype_, parent_k>> ||

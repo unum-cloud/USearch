@@ -25,12 +25,12 @@ A ground truth is computed for the whole file, so `--first-vector` or `--max-bas
 
 ### Building
 
-Every number below comes from a Release build: the `release` preset for CPU runs, and `cuda_release` for GPU ones, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
+Every number below comes from a Release build: the `release` preset for CPU runs, and `cuda_release` for GPU ones, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCH=100f` on a B200 or B300.
 The library compiles the first `USEARCH_DENSE_DTYPES` stored dtypes, so these presets measure `bf16`, `u1`, `i8` and `e4m3` alone; add `-DUSEARCH_DENSE_DTYPES=11` to measure the rest.
 
 ```sh
 cmake --preset release && cmake --build --preset release --target usearch_bench_dense_index_search usearch_bench_dense_index_algebra usearch_bench_dense_ram_index_search usearch_bench_dense_ram_metric
-cmake --preset cuda_release -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_cuda_release --target usearch_bench_dense_index_search usearch_bench_dense_index_algebra
+cmake --preset cuda_release -DUSEARCH_CUDA_ARCH=100f && cmake --build build_cuda_release --target usearch_bench_dense_index_search usearch_bench_dense_index_algebra
 ```
 
 Every binary lands at the top of its build tree.

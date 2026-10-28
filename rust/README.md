@@ -17,7 +17,7 @@ That build compiles the four most common dense storage types, `bf16`, `u1x8`, `i
 
 Two features swap the implementation of the C interface the crate links, and naming both is refused:
 
-- `cuda` compiles the CUDA backends in and needs a toolkit at build time, with `USEARCH_CUDA_ARCHITECTURES` choosing the GPU architectures.
+- `cuda` compiles the CUDA backends in and needs a toolkit at build time, with `USEARCH_CUDA_ARCH` choosing the GPU code, the release set `all` by default.
 - `stub` links a brute-force stand-in that answers the same verbs over the standard library alone, with exact search, seconds to build and no submodules, for testing a caller and never for shipping.
 
 A WASI build reads the SDK from `WASI_SDK_PATH` and needs `-C target-feature=+simd128`.

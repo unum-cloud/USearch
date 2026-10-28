@@ -90,6 +90,9 @@ int main(int argc, char** argv) {
     settings_t const settings = read_settings(argc, argv, "usearch_test");
     print(probe_machine());
     print(settings);
+    // ctest hides passing output, so the job summary is where a green run shows what it covered
+    if (char const* summary_path = std::getenv("GITHUB_STEP_SUMMARY"))
+        if (std::FILE* summary = std::fopen(summary_path, "a")) print(probe_machine(), summary), std::fclose(summary);
     std::size_t failures_count = 0;
 
     if (settings.filter.selects("safegraphs_format"))

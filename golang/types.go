@@ -701,6 +701,8 @@ const (
 	CPUClassWasm32V128 CPUClass = C.usearch_cpu_class_wasm32_v128_k
 	// CPUClassWasm64Extended is WebAssembly with relaxed SIMD, threads and 64-bit addressing.
 	CPUClassWasm64Extended CPUClass = C.usearch_cpu_class_wasm64_extended_k
+	// CPUClassMonoversioned is the one class of a monoversioned build.
+	CPUClassMonoversioned CPUClass = C.usearch_cpu_class_monoversioned_k
 )
 
 // String renders the class as the library spells it. Calls usearch_cpu_class_name.

@@ -40,7 +40,8 @@ using basic::traversal_telemetry_t;
 
 /** The SmashTable row kit one CPU class pairs for the scans its NVMe directories run: picked here
  *  per class, never by a unit's own flags, so every class unit spells one index type with one kit
- *  - the serial floor, as is any class whose @c SMASHTABLE_TARGET_<KIT> is off. */
+ *  - the serial floor, as is any class whose @c SMASHTABLE_TARGET_<KIT> is off. The monoversioned
+ *  class alone has one unit per modality, so it takes the newest kit its flags compile. */
 template <cpu_class_t cpu_class_>
 struct row_kit_for_cpu_class {
     using type = st::serial_row_kit_t;
@@ -121,6 +122,12 @@ struct row_kit_for_cpu_class<cpu_class_t::wasm32_v128_k> {
 template <>
 struct row_kit_for_cpu_class<cpu_class_t::wasm64_extended_k> {
     using type = st::v128_row_kit_t;
+};
+#endif
+#if USEARCH_TARGET_MONOVERSIONED
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::monoversioned_k> {
+    using type = st::native_row_kit_t;
 };
 #endif
 

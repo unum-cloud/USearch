@@ -61,9 +61,10 @@ A `usearch_progress_t` with a handler slices a batch into its `steps`, ten unles
 1. `with_variant` maps the quantization onto a NumKong dtype, and the metric onto a kernel kind: the numeric dtypes speak inner, angular and euclidean, while the bit-packed `u1x8` speaks inner, hamming and jaccard.
    A dtype the build's `USEARCH_DENSE_DTYPES` left out of `dense_dtypes_t` answers `usearch_status_unsupported_k`.
 2. `make_index` picks the class for the residency:
-   - RAM walks `cpu_ladder_t` newest first, asking each compiled rung whose NumKong and ForkUnion capabilities the machine reports for its variant of the dtype, and ending on the serial floor.
+   - RAM walks `cpu_ladder_t` newest first, asking each compiled rung whose NumKong, StringZilla and ForkUnion capabilities the machine reports for its variant of the dtype, and ending on the serial floor.
+     A monoversioned build's ladder holds its one `monoversioned` class, whose masks are the ones the libraries compiled.
      On x86 it reads `intel_diamond` → `intel_granite` → `intel_sapphire` → `amd_genoa` → `intel_icelake` → `intel_skylake` → `intel_sierra` → `intel_haswell`, on Arm `nvidia_vera` → `apple_m4` → `aws_g5` → `apple_m2` → `aws_g2`, then `alibaba_c930` on RISC-V and `wasm64_extended` → `wasm32_v128` on WebAssembly.
-   - A class pinned in `usearch_ram_options_t::cpu_class` admits every rung whose NumKong and ForkUnion masks are subsets of its own, so pinning a class behaves as deriving on a machine of it.
+   - A class pinned in `usearch_ram_options_t::cpu_class` admits every rung whose NumKong, StringZilla and ForkUnion masks are subsets of its own, so pinning a class behaves as deriving on a machine of it.
    - NVMe walks the same ladder over the classes that compiled an NVMe unit; a storage walk shares a few counters and never waits, so a class advancing only by its waiter or reference compiles no NVMe unit and its parent serves.
    - VRAM reads the named USearch ordinals off the process device listing and takes the class every device shares, `nvidia-ampere` through `apple-metal10`; mixed vendors refuse with `config_mismatch_k`, mixed generations with `device_k`.
 
@@ -79,7 +80,8 @@ Each class unit compiles its variants with the class's own flags into a table of
 
 - `usearch_dense_ram_variants` collects the CPU class units.
   `src/CMakeLists.txt` restates the lineage row for row: `usearch_dense_ram_variant(<class> <CLASS> OVER <parent> <kits>...)` unions the parent's flags with those of every delta kit that compiled, and the unit exists only when its parent does and some delta compiled, which the dispatch units read as `USEARCH_TARGET_<CLASS>`, the one gate of that class's variants in every list and ladder.
-- `usearch_dense_nvme_variants` reuses those flags for the classes whose kits a storage walk tells apart, so `aws_g5`, `alibaba_c930` and the WebAssembly classes take none.
+- `usearch_dense_nvme_variants` reuses those flags for the classes whose kits a storage walk tells apart, so `alibaba_c930` and the WebAssembly classes take none.
+- A monoversioned build compiles `<modality>/<residency>_variants_monoversioned.cpp` alone in each CPU row, with the flags of every capability the libraries enabled.
 - `usearch_dense_vram_variants_nvidia_<class>` embeds one NVIDIA class's fatbin per dtype, each compiled by NVCC device-only from `dense/vram_kernels_nvidia_<dtype>.cu` for the class's own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
   The class unit `dense/vram_variants_nvidia_<class>.cpp` holds the host variants, finding each dtype's fatbin in the table `dense_nvidia_<class>_bundles` CMake writes in `dense_dtypes_t` order, and the device units include `dense_kernels.cuh` rather than the specializations, whose CPU metrics would bring NumKong's own kernels into every pass.
   Nothing links `libcuda` or the CUDA runtime: `cuda_api_t::load` opens the driver through entry points it declares itself, once per process at the first VRAM call, and Clang's host-only pass builds the variants.

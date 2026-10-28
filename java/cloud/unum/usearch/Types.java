@@ -499,7 +499,9 @@ public final class Types {
         /** WebAssembly with fixed-width simd128. */
         WASM32_V128(16),
         /** WebAssembly with relaxed SIMD, threads and 64-bit addressing. */
-        WASM64_EXTENDED(17);
+        WASM64_EXTENDED(17),
+        /** The one class of a monoversioned build. */
+        MONOVERSIONED(18);
 
         private final int code;
 

@@ -88,8 +88,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_SHARED": "ON",
-        "USEARCH_BUILD_CUDA": "OFF"
+        "USEARCH_BUILD_SHARED": "ON"
       }
     },
     {
@@ -104,11 +103,10 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
-        "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xptxas -O0 -DNDEBUG",
+        "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xcicc -O0 -Xptxas -O0 -DNDEBUG",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "ON",
         "USEARCH_BUILD_SHARED": "ON",
-        "USEARCH_BUILD_CUDA": "OFF",
         "USEARCH_WERROR": "ON"
       }
     },
@@ -116,11 +114,10 @@
       "name": "cuda_check",
       "inherits": "check",
       "displayName": "CUDA Check - fastest compile cycle with the `.cu` units",
-      "description": "Same as `check`, plus the `.cu` units, with `ptxas` at `-O0` too, since optimizing each class unit's kernels is what dominates their build.",
+      "description": "Same as `check`, plus the `.cu` units, with `cicc` and `ptxas` at `-O0` too, since optimizing each class unit's kernels is what dominates their build.",
       "cacheVariables": {
         "CMAKE_CUDA_HOST_COMPILER": "clang++",
-        "USEARCH_BUILD_CUDA": "ON",
-        "USEARCH_CUDA_ARCHITECTURES": "native"
+        "USEARCH_CUDA_ARCH": "native"
       }
     },
     {
@@ -133,8 +130,7 @@
       "description": "Optimized, with full DWARF for stepping through the suites.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_CUDA": "OFF"
+        "USEARCH_BUILD_TEST": "ON"
       }
     },
     {
@@ -149,8 +145,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "ON",
-        "USEARCH_BUILD_SHARED": "ON",
-        "USEARCH_BUILD_CUDA": "OFF"
+        "USEARCH_BUILD_SHARED": "ON"
       }
     },
     {
@@ -166,8 +161,7 @@
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
         "USEARCH_BUILD_BENCH": "ON",
-        "USEARCH_BUILD_SHARED": "ON",
-        "USEARCH_BUILD_CUDA": "OFF"
+        "USEARCH_BUILD_SHARED": "ON"
       }
     },
     {
@@ -182,8 +176,7 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
-        "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_CUDA": "OFF"
+        "USEARCH_BUILD_TEST": "ON"
       }
     },
     {
@@ -203,8 +196,7 @@
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "ON",
         "USEARCH_BUILD_SHARED": "ON",
-        "USEARCH_BUILD_CUDA": "ON",
-        "USEARCH_CUDA_ARCHITECTURES": "native"
+        "USEARCH_CUDA_ARCH": "native"
       }
     },
     {
@@ -223,7 +215,7 @@
       "description": "Same targets as `cuda`, at Release and emitting every architecture rather than the host GPU - what shipping artifacts and cross-machine runs need.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "USEARCH_CUDA_ARCHITECTURES": "80-real;89-real;90a-real;100f-real;120f-real;80-virtual"
+        "USEARCH_CUDA_ARCH": "all"
       }
     },
     {
@@ -234,16 +226,14 @@
         "linux",
         "clang"
       ],
-      "description": "The C library for one machine: its CPU floor, only the CPU classes it runs, and its one GPU code. Compile only.",
+      "description": "One machine: its CPU floor, every kernel-library capability spelled as 1 or 0, and its one GPU code.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CUDA_HOST_COMPILER": "clang++",
         "USEARCH_BUILD_TEST": "OFF",
         "USEARCH_BUILD_BENCH": "OFF",
         "USEARCH_BUILD_SHARED": "ON",
-        "USEARCH_BUILD_CUDA": "ON",
-        "NUMKONG_PROFILE_CAPABILITIES": "ON",
-        "STRINGZILLA_PROFILE_CAPABILITIES": "ON"
+        "USEARCH_MULTIVERSIONED": "OFF"
       }
     },
     {
@@ -251,14 +241,30 @@
       "inherits": "machine",
       "displayName": "Xeon 4 with Hopper - compile only",
       "cacheVariables": {
-        "USEARCH_TARGET_ARCH": "sapphirerapids",
-        "USEARCH_TARGET_CLASSES": "intel_sapphire",
-        "USEARCH_CUDA_ARCHITECTURES": "90a-real",
-        "NUMKONG_TARGET_SIERRA": "0",
-        "NUMKONG_TARGET_TURIN": "0",
-        "NUMKONG_TARGET_DIAMOND": "0",
+        "USEARCH_MARCH": "sapphirerapids",
+        "USEARCH_CUDA_ARCH": "90a",
+        "NUMKONG_TARGET_HASWELL": "1",
+        "NUMKONG_TARGET_SKYLAKE": "1",
+        "NUMKONG_TARGET_ICELAKE": "1",
+        "NUMKONG_TARGET_GENOA": "1",
+        "NUMKONG_TARGET_SAPPHIRE": "1",
+        "NUMKONG_TARGET_SAPPHIREAMX": "1",
         "NUMKONG_TARGET_GRANITEAMX": "0",
-        "NUMKONG_TARGET_DIAMONDAMX": "0"
+        "NUMKONG_TARGET_DIAMOND": "0",
+        "NUMKONG_TARGET_DIAMONDAMX": "0",
+        "NUMKONG_TARGET_TURIN": "0",
+        "NUMKONG_TARGET_ALDER": "1",
+        "NUMKONG_TARGET_SIERRA": "0",
+        "STRINGZILLA_TARGET_WESTMERE": "1",
+        "STRINGZILLA_TARGET_GOLDMONT": "1",
+        "STRINGZILLA_TARGET_HASWELL": "1",
+        "STRINGZILLA_TARGET_SKYLAKE": "1",
+        "STRINGZILLA_TARGET_ICELAKE": "1",
+        "FORKUNION_TARGET_X86_PAUSE": "1",
+        "FORKUNION_TARGET_X86_TPAUSE": "1",
+        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X86_RAOINT": "0"
       }
     },
     {
@@ -266,42 +272,134 @@
       "inherits": "machine",
       "displayName": "Xeon 6 with Blackwell - compile only",
       "cacheVariables": {
-        "USEARCH_TARGET_ARCH": "graniterapids",
-        "USEARCH_TARGET_CLASSES": "intel_granite",
-        "USEARCH_CUDA_ARCHITECTURES": "100f-real",
-        "NUMKONG_TARGET_SIERRA": "0",
-        "NUMKONG_TARGET_TURIN": "0",
+        "USEARCH_MARCH": "graniterapids",
+        "USEARCH_CUDA_ARCH": "100f",
+        "NUMKONG_TARGET_HASWELL": "1",
+        "NUMKONG_TARGET_SKYLAKE": "1",
+        "NUMKONG_TARGET_ICELAKE": "1",
+        "NUMKONG_TARGET_GENOA": "1",
+        "NUMKONG_TARGET_SAPPHIRE": "1",
+        "NUMKONG_TARGET_SAPPHIREAMX": "1",
+        "NUMKONG_TARGET_GRANITEAMX": "1",
         "NUMKONG_TARGET_DIAMOND": "0",
-        "NUMKONG_TARGET_DIAMONDAMX": "0"
+        "NUMKONG_TARGET_DIAMONDAMX": "0",
+        "NUMKONG_TARGET_TURIN": "0",
+        "NUMKONG_TARGET_ALDER": "1",
+        "NUMKONG_TARGET_SIERRA": "0",
+        "STRINGZILLA_TARGET_WESTMERE": "1",
+        "STRINGZILLA_TARGET_GOLDMONT": "1",
+        "STRINGZILLA_TARGET_HASWELL": "1",
+        "STRINGZILLA_TARGET_SKYLAKE": "1",
+        "STRINGZILLA_TARGET_ICELAKE": "1",
+        "FORKUNION_TARGET_X86_PAUSE": "1",
+        "FORKUNION_TARGET_X86_TPAUSE": "1",
+        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X86_RAOINT": "0"
       }
     },
     {
       "name": "grace_hopper",
       "inherits": "machine",
       "displayName": "Grace with Hopper - compile only",
-      "description": "Neoverse V2 runs `apple_m2` in full, while `aws_g5` needs WFET.",
+      "description": "Grace's 128-bit SVE gains nothing over NEON, so every SVE capability is off.",
       "cacheVariables": {
-        "USEARCH_TARGET_ARCH": "neoverse-v2",
-        "USEARCH_TARGET_CLASSES": "apple_m2",
-        "USEARCH_CUDA_ARCHITECTURES": "90a-real",
+        "USEARCH_MARCH": "grace",
+        "USEARCH_CUDA_ARCH": "90a",
+        "NUMKONG_TARGET_NEON": "1",
+        "NUMKONG_TARGET_NEONHALF": "1",
+        "NUMKONG_TARGET_NEONSDOT": "1",
+        "NUMKONG_TARGET_NEONBFDOT": "1",
+        "NUMKONG_TARGET_NEONFHM": "1",
+        "NUMKONG_TARGET_SVE": "0",
+        "NUMKONG_TARGET_SVEHALF": "0",
+        "NUMKONG_TARGET_SVEBFDOT": "0",
+        "NUMKONG_TARGET_SVESDOT": "0",
+        "NUMKONG_TARGET_SVE2": "0",
         "NUMKONG_TARGET_NEONFP8": "0",
         "NUMKONG_TARGET_SME": "0",
         "NUMKONG_TARGET_SMEF64": "0",
-        "NUMKONG_TARGET_SMEBI32": "0"
+        "NUMKONG_TARGET_SMEBI32": "0",
+        "STRINGZILLA_TARGET_NEON": "1",
+        "STRINGZILLA_TARGET_NEONAES": "1",
+        "STRINGZILLA_TARGET_NEONSHA": "1",
+        "STRINGZILLA_TARGET_SVE": "0",
+        "STRINGZILLA_TARGET_SVE2": "0",
+        "STRINGZILLA_TARGET_SVE2AES": "0",
+        "FORKUNION_TARGET_ARM64_YIELD": "1",
+        "FORKUNION_TARGET_ARM64_WFET": "0",
+        "FORKUNION_TARGET_ARM64_DC_CVAC": "1",
+        "FORKUNION_TARGET_ARM64_PRFM": "1",
+        "FORKUNION_TARGET_ARM64_LSE": "1",
+        "FORKUNION_TARGET_ARM64_RCPC": "1"
       }
     },
     {
       "name": "vera_rubin",
       "inherits": "machine",
       "displayName": "Vera with Rubin - compile only",
-      "description": "Olympus cores need Clang 22 or GCC 15, and CUDA 13.4 names no Rubin code, so it compiles 100f.",
+      "description": "Olympus cores need Clang 22 or GCC 15 and CUDA 13.4 names no Rubin code, so it compiles 100f; WFET is on, as no compiler macro reports it, and SVE off, as on Grace.",
       "cacheVariables": {
-        "USEARCH_TARGET_ARCH": "olympus",
-        "USEARCH_TARGET_CLASSES": "nvidia_vera",
-        "USEARCH_CUDA_ARCHITECTURES": "100f-real",
+        "USEARCH_MARCH": "olympus",
+        "USEARCH_CUDA_ARCH": "100f",
+        "NUMKONG_TARGET_NEON": "1",
+        "NUMKONG_TARGET_NEONHALF": "1",
+        "NUMKONG_TARGET_NEONSDOT": "1",
+        "NUMKONG_TARGET_NEONBFDOT": "1",
+        "NUMKONG_TARGET_NEONFHM": "1",
+        "NUMKONG_TARGET_SVE": "0",
+        "NUMKONG_TARGET_SVEHALF": "0",
+        "NUMKONG_TARGET_SVEBFDOT": "0",
+        "NUMKONG_TARGET_SVESDOT": "0",
+        "NUMKONG_TARGET_SVE2": "0",
+        "NUMKONG_TARGET_NEONFP8": "1",
         "NUMKONG_TARGET_SME": "0",
         "NUMKONG_TARGET_SMEF64": "0",
-        "NUMKONG_TARGET_SMEBI32": "0"
+        "NUMKONG_TARGET_SMEBI32": "0",
+        "STRINGZILLA_TARGET_NEON": "1",
+        "STRINGZILLA_TARGET_NEONAES": "1",
+        "STRINGZILLA_TARGET_NEONSHA": "1",
+        "STRINGZILLA_TARGET_SVE": "0",
+        "STRINGZILLA_TARGET_SVE2": "0",
+        "STRINGZILLA_TARGET_SVE2AES": "0",
+        "FORKUNION_TARGET_ARM64_YIELD": "1",
+        "FORKUNION_TARGET_ARM64_WFET": "1",
+        "FORKUNION_TARGET_ARM64_DC_CVAC": "1",
+        "FORKUNION_TARGET_ARM64_PRFM": "1",
+        "FORKUNION_TARGET_ARM64_LSE": "1",
+        "FORKUNION_TARGET_ARM64_RCPC": "1"
+      }
+    },
+    {
+      "name": "venice_mi450",
+      "inherits": "machine",
+      "displayName": "EPYC Venice with MI450 - compile only",
+      "description": "Clang 22 names no Zen 6 core, so it compiles at znver5 and spells the rows GCC 16's znver6 implies; gfx1250 covers MI450X and MI455X.",
+      "cacheVariables": {
+        "USEARCH_MARCH": "znver5",
+        "USEARCH_ROCM_ARCH": "gfx1250",
+        "NUMKONG_TARGET_HASWELL": "1",
+        "NUMKONG_TARGET_SKYLAKE": "1",
+        "NUMKONG_TARGET_ICELAKE": "1",
+        "NUMKONG_TARGET_GENOA": "1",
+        "NUMKONG_TARGET_SAPPHIRE": "1",
+        "NUMKONG_TARGET_SAPPHIREAMX": "0",
+        "NUMKONG_TARGET_GRANITEAMX": "0",
+        "NUMKONG_TARGET_DIAMOND": "0",
+        "NUMKONG_TARGET_DIAMONDAMX": "0",
+        "NUMKONG_TARGET_TURIN": "1",
+        "NUMKONG_TARGET_ALDER": "1",
+        "NUMKONG_TARGET_SIERRA": "1",
+        "STRINGZILLA_TARGET_WESTMERE": "1",
+        "STRINGZILLA_TARGET_GOLDMONT": "1",
+        "STRINGZILLA_TARGET_HASWELL": "1",
+        "STRINGZILLA_TARGET_SKYLAKE": "1",
+        "STRINGZILLA_TARGET_ICELAKE": "1",
+        "FORKUNION_TARGET_X86_PAUSE": "1",
+        "FORKUNION_TARGET_X86_TPAUSE": "0",
+        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X86_RAOINT": "0"
       }
     },
     {
@@ -317,9 +415,7 @@
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_SHARED": "ON",
-        "USEARCH_BUILD_CUDA": "OFF",
-        "USEARCH_BUILD_ROCM": "ON",
-        "USEARCH_ROCM_ARCHITECTURES": "gfx942"
+        "USEARCH_ROCM_ARCH": "gfx942"
       }
     },
     {
@@ -329,7 +425,7 @@
       "description": "Same targets as `rocm`, at Release and embedding code objects for every AMD class - what shipping artifacts need.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "USEARCH_ROCM_ARCHITECTURES": "gfx942;gfx950;gfx1250;gfx1251"
+        "USEARCH_ROCM_ARCH": "all"
       }
     },
     {
@@ -343,10 +439,8 @@
       "cacheVariables": {
         "CMAKE_C_COMPILER": "/opt/rocm/llvm/bin/clang",
         "CMAKE_CXX_COMPILER": "/opt/rocm/llvm/bin/clang++",
-        "USEARCH_BUILD_CUDA": "ON",
-        "USEARCH_BUILD_ROCM": "ON",
-        "USEARCH_CUDA_ARCHITECTURES": "80-real",
-        "USEARCH_ROCM_ARCHITECTURES": "gfx942"
+        "USEARCH_CUDA_ARCH": "80",
+        "USEARCH_ROCM_ARCH": "gfx942"
       }
     },
     {
@@ -362,7 +456,7 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_SHARED": "ON",
-        "USEARCH_BUILD_METAL": "ON"
+        "USEARCH_METAL_ARCH": "all"
       }
     },
     {
@@ -384,9 +478,6 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "USEARCH_BUILD_SWIFT": "ON",
-        "USEARCH_BUILD_CUDA": "OFF",
-        "USEARCH_BUILD_ROCM": "OFF",
-        "USEARCH_BUILD_METAL": "OFF",
         "USEARCH_DENSE_DTYPES": "11",
         "USEARCH_SWIFT_SDK": "macosx",
         "CMAKE_OSX_ARCHITECTURES": "arm64",
@@ -427,7 +518,7 @@
       ],
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-emscripten.cmake",
       "cacheVariables": {
-        "USEARCH_TARGET_ARCH": "v128",
+        "USEARCH_MARCH": "v128",
         "CMAKE_CROSSCOMPILING_EMULATOR": "node"
       }
     },
@@ -439,7 +530,7 @@
       ],
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm64-emscripten.cmake",
       "cacheVariables": {
-        "USEARCH_TARGET_ARCH": "v128relaxed",
+        "USEARCH_MARCH": "v128relaxed",
         "CMAKE_CROSSCOMPILING_EMULATOR": "node"
       }
     },
@@ -451,7 +542,7 @@
       ],
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi.cmake",
       "cacheVariables": {
-        "USEARCH_TARGET_ARCH": "v128"
+        "USEARCH_MARCH": "v128"
       }
     },
     {

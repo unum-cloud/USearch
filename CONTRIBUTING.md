@@ -93,7 +93,7 @@ The development ones build with LLVM through Ninja and link with `lld`; `tsan` u
 `check` compiles every suite at `-O0` with warnings as errors.
 The rest match CI: `library` for the C library alone, `linux_arm64`, `android_arm64`, `android_armv7`, the three WASM toolchains, and `msvc2026_x64` / `msvc2022_arm64`.
 Three of them are about GPUs: `cuda` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `cuda_release` emits a fat binary spanning every architecture through both Blackwell lines; `rocm` and `metal` do the same for AMD and Apple.
-`xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` compile the C library for one machine alone: its CPU floor through `USEARCH_TARGET_ARCH`, serial plus the one CPU class it runs through `USEARCH_TARGET_CLASSES`, and its one GPU code.
+`xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` compile the C library for one machine alone: its CPU through `USEARCH_MARCH` in a monoversioned build, `USEARCH_MULTIVERSIONED=OFF`, and its one GPU code through `USEARCH_CUDA_ARCH`.
 `cuda_trace` adds `-ftime-trace`, dropping a profile beside every object for when a translation unit starts dominating the build.
 Machine-specific overrides - a different compiler, `ccache`, a CUDA toolkit outside the default prefix - belong in an untracked `CMakeUserPresets.json` beside it:
 
@@ -125,18 +125,26 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_BUILD_SHARED` - build and install the shared and static C libraries by default; without it they build only for a target that links them
   - `USEARCH_BUILD_STUB` - a brute-force stand-in answering the same verbs over the standard library alone, for isolating a binding from the engine while bisecting one.
     It carries the same library names in a `stub/` subdirectory, so pointing a binding at it is a search path rather than a different link line.
-  - `USEARCH_BUILD_CUDA`, `USEARCH_BUILD_ROCM`, `USEARCH_BUILD_METAL` - build the NVIDIA, AMD or Apple variants and suites, each off unless a preset or `-D` switches it on
+  - `USEARCH_CUDA_ARCH`, `USEARCH_ROCM_ARCH`, `USEARCH_METAL_ARCH` - build the NVIDIA, AMD or Apple variants and suites for the codes they name below, each empty and off unless a preset or `-D` names one
   - `USEARCH_DENSE_DTYPES` - how many dense storage dtypes the library, tests and benchmarks compile, from the front of bf16, u1, i8, e4m3, f16, u8, e5m2, i4, u4, e3m2, e2m3, `4` by default and `11` wherever a prebuilt package comes from: the `library`, `wasm` and `msvc2026_x64` presets, `pyproject.toml`, the npm scripts, `build.gradle`, `pixi.toml` and the per-binding recipes below. Binding suites skip the kinds a narrower build refuses.
     The C interface refuses a dtype the build left out with `usearch_status_unsupported_k`; the Rust crate builds from source and keeps the default four.
 - Which CPUs to target:
-  - `USEARCH_TARGET_ARCH` - the CPU USearch's own units are tuned for, seeded from the environment variable of the same name: empty for the architecture's floor, `native` for this host, or a CPU name like `graniterapids` or `neoverse-v2`, also when cross-compiling. Every class unit adds its class's flags over it, the tests and benchmarks drop their host tuning for it, and NumKong, StringZilla and ForkUnion take the same value.
-  - `USEARCH_TARGET_CLASSES` - the CPU classes compiled beside `serial`: empty for every class the toolchain compiles, a list like `intel_granite`, or `native` for every class this host runs in full, which needs `USEARCH_TARGET_ARCH=native`. The basic modalities and the NVMe variants compile each kept class's nearest ancestor they carry, like `intel_skylake` for `intel_granite`.
+  - `USEARCH_MARCH` - the floor of USearch's own units, seeded from the environment variable of the same name: empty for the architecture's floor, an ISA level like `x86-64-v3`, `native` for this host, or a CPU name like `graniterapids` or `neoverse-v2`, also when cross-compiling.
+    Every class unit adds its class's flags over it, the tests and benchmarks drop their host tuning for it, and NumKong, StringZilla, ForkUnion and SmashTable take the same value.
+  - `USEARCH_MULTIVERSIONED` - the build kind, `ON` by default and seeded from the environment too: a multiversioned build compiles every CPU class the toolchain compiles above the floor, picked at runtime, and with `OFF` a monoversioned build compiles one `monoversioned` class and no named class, `serial` included.
+    The monoversioned class carries every capability NumKong, StringZilla and ForkUnion enabled: what the floor implies, plus what `-D <LIB>_TARGET_<CAP>=1` vouches for where no compiler macro reports it, like `FORKUNION_TARGET_ARM64_WFET=1` on Vera.
+    Each modality and residency compiles one unit for it, and a handle pinned below it, or run on a CPU lacking it, gets `usearch_status_unsupported_k`.
+    `-D USEARCH_MARCH=native -D USEARCH_MULTIVERSIONED=OFF` is the native build, and the siblings take the same build kind.
 - Which GPUs to target:
-  - `USEARCH_CUDA_ARCHITECTURES` - the architectures the CUDA tests and benchmarks compile for and the GPU classes the library builds, `75-real;80-real;89-real;90a-real;100f-real;120f-real;80-virtual` by default, as in every sibling: Turing, which no class claims, the Ampere floor, Ada, then Hopper, architecture-specific, both Blackwell lines, family-specific so they carry the fp6 and fp4 conversions, and the Ampere PTX. A class builds only when one of its codes is listed, `100`, `100a`, `100f`, `103a` or `103f` for datacenter Blackwell, so `100f-real` compiles the Blackwell kernels alone, and `native` maps each GPU `nvidia-smi` lists to its family code, like `100f-real` on a B200 or B300.
-    The `-real` suffix skips the PTX, which triples the test objects; the `cuda_release` preset keeps it.
-    The library itself ignores the list and compiles one unit per GPU class, each for its own code alone - `80` with its PTX for every GPU outside the other classes, `89`, `90a`, `100f`, which B300 runs as well, and `120f` - and picks the unit by the device's generation at runtime.
+  - `USEARCH_CUDA_ARCH` - the NVIDIA code the library, tests and benchmarks compile for: `all` for the release set, `native` for each GPU `nvidia-smi` lists, mapped to its family code like `100f` on a B200 or B300, or one code like `90a`.
+    A GPU class exists only when a code names it, `100`, `100a`, `100f`, `103a` or `103f` for datacenter Blackwell, so `100f` compiles the Blackwell kernels and the vendor-wide `nvidia` unit alone.
+    The release set compiles each class at the lowest code its kernels need, as PTX alone where a plain code suffices, so every later GPU runs it, and never below CUDA 13's Turing floor: `compute_80` for the vendor-wide unit, whose sequence, shapes, geospatial and basic kernels carry NumKong's Ampere `bf16x2` casts, and for Ampere's `mma.sync`, `compute_89` for Ada's FP8, `compute_90` for Hopper, which issues no `wgmma`, and `compute_120` for the RTX line.
+    Datacenter Blackwell's `tcgen05` needs a family code, so its class carries the `100f` cubin instead.
+    A native or named code compiles as SASS alone, with no PTX.
     NVCC compiles only device code, into fatbins the binaries embed; nothing links `libcuda` or the CUDA runtime, as the library opens the driver at first use.
-    A NumKong GPU tier turns on in those targets only when every listed architecture runs it, so the default list, with Turing in it, exercises none of them; iterate on one GPU with its family code, like `100f-real`, to test that generation's kits.
+    A NumKong GPU tier turns on in the CUDA tests only when every code runs it, so the release set exercises the Ampere one; iterate on one GPU with its family code, like `100f`, to test that generation's kits.
+  - `USEARCH_ROCM_ARCH` - the AMD processor: `all` for gfx942, gfx950, gfx1250 and gfx1251, `native` for those `rocm_agent_enumerator` lists, or one like `gfx942`; each class embeds a code object per resolved processor it runs on, and a class with none does not exist.
+  - `USEARCH_METAL_ARCH` - the Apple family: `all` for the `apple7`, `apple9` and `apple10` classes, or one of them, as Metal compiles the kernels on the device.
 - Which other dependencies to use:
   - `USEARCH_WITH_JEMALLOC` - use Jemalloc for memory management
 - How strict to be:
