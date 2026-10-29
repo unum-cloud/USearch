@@ -14,6 +14,7 @@
 #define __cpp_exceptions 1
 #endif
 
+#include <chrono> // `std::chrono::steady_clock`
 #include <limits> // `std::numeric_limits`
 #include <thread> // `std::thread`
 
@@ -51,21 +52,35 @@ using dense_clustering_result_t = typename index_dense_t::clustering_result_t;
 using progress_func_t = std::function<bool(std::size_t /*processed*/, std::size_t /*total*/)>;
 
 struct progress_t {
-    inline progress_t(std::nullptr_t = nullptr) : func_(&dummy_progress) {}
-    inline progress_t(progress_func_t const& func) : func_(func ? func : &dummy_progress) {}
+    inline progress_t(std::nullptr_t = nullptr) {}
+    inline progress_t(progress_func_t const& func) : func_(func) {}
     // The callback may be invoked from a worker thread while the main thread
     // has released the GIL around a long-running C++ call. `gil_scoped_acquire`
     // is reference-counted and a no-op when the GIL is already held, so this
     // is safe in every context.
     inline bool operator()(std::size_t processed, std::size_t total) const noexcept {
+        if (!func_)
+            return true;
         py::gil_scoped_acquire acquire;
         return func_(processed, total);
     }
 
-  private:
-    static inline bool dummy_progress(std::size_t /*processed*/, std::size_t /*total*/) { return true; }
+    // Called only by the reporter thread, with the GIL released. Keep Python
+    // callbacks at their original frequency, but poll signals at most every
+    // 100 ms without a callback, avoiding a GIL hand-off for every item.
+    inline bool with_signals(std::size_t processed, std::size_t total) {
+        if (!func_ && clock_t::now() < next_signal_check_)
+            return true;
+        py::gil_scoped_acquire acquire;
+        if (!func_)
+            next_signal_check_ = clock_t::now() + std::chrono::milliseconds(100);
+        return PyErr_CheckSignals() == 0 && (*this)(processed, total);
+    }
 
+  private:
+    using clock_t = std::chrono::steady_clock;
     progress_func_t func_;
+    clock_t::time_point next_signal_check_ = clock_t::now() + std::chrono::milliseconds(100);
 };
 
 struct dense_index_py_t : public index_dense_t {
@@ -227,8 +242,7 @@ static void add_typed_to_index(                                            //
             // We don't want to check for signals from multiple threads
             ++processed;
             if (thread_idx == 0) {
-                py::gil_scoped_acquire acquire;
-                if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), vectors_count)) {
+                if (!progress_.with_signals(processed.load(), vectors_count)) {
                     atomic_error.store("Operation has been terminated");
                     return false;
                 }
@@ -236,6 +250,9 @@ static void add_typed_to_index(                                            //
             return true;
         });
     }
+
+    if (PyErr_Occurred() || PyErr_CheckSignals() != 0)
+        throw py::error_already_set();
 
     // At the end report the latest numbers, because the reporter thread may be finished earlier
     progress_(processed.load(), vectors_count);
@@ -352,8 +369,7 @@ static void search_typed(                                   //
             // We don't want to check for signals from multiple threads
             ++processed;
             if (thread_idx == 0) {
-                py::gil_scoped_acquire acquire;
-                if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), vectors_count)) {
+                if (!progress_.with_signals(processed.load(), vectors_count)) {
                     atomic_error.store("Operation has been terminated");
                     return false;
                 }
@@ -361,6 +377,9 @@ static void search_typed(                                   //
             return true;
         });
     }
+
+    if (PyErr_Occurred() || PyErr_CheckSignals() != 0)
+        throw py::error_already_set();
 
     // At the end report the latest numbers, because the reporter thread may be finished earlier
     progress_(processed.load(), vectors_count);
@@ -440,8 +459,7 @@ static void search_typed(                                       //
                 // We don't want to check for signals from multiple threads
                 ++processed;
                 if (thread_idx == 0) {
-                    py::gil_scoped_acquire acquire;
-                    if (PyErr_CheckSignals() != 0 || !progress_(processed.load(), indexes.shards_.size())) {
+                    if (!progress_.with_signals(processed.load(), indexes.shards_.size())) {
                         atomic_error.store("Operation has been terminated");
                         return false;
                     }
@@ -450,6 +468,9 @@ static void search_typed(                                       //
             return true;
         });
     }
+
+    if (PyErr_Occurred() || PyErr_CheckSignals() != 0)
+        throw py::error_already_set();
 
     // At the end report the latest numbers, because the reporter thread may be finished earlier
     progress_(processed.load(), indexes.shards_.size());
@@ -611,11 +632,12 @@ static py::tuple search_many_brute_force(       //
         offsets_and_distances = search(                  //
             dataset_data, dataset_count, dataset_stride, //
             queries_data, queries_count, queries_stride, //
-            wanted, metric, executor, [&](std::size_t passed, std::size_t total) {
-                py::gil_scoped_acquire acquire;
-                return PyErr_CheckSignals() == 0 && progress(passed, total);
-            });
+            wanted, metric, executor,
+            [&](std::size_t passed, std::size_t total) { return progress.with_signals(passed, total); });
     }
+
+    if (PyErr_Occurred() || PyErr_CheckSignals() != 0)
+        throw py::error_already_set();
 
     if (!offsets_and_distances)
         throw std::bad_alloc();
